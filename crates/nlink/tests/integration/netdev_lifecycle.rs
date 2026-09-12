@@ -59,9 +59,13 @@ async fn netdev_lifecycle_joins_uevents_with_rtnetlink() -> Result<()> {
     // streams, which take the connection lock for their lifetime.
     let ctl = ns.connection()?;
     ctl.add_link(VethLink::new("lcvet0", "lcvet1")).await?;
+    // A kind that sets DEVTYPE=, to pin what the uevent side really
+    // carries (#328): devtype yes, driver no.
+    ctl.add_link(nlink::netlink::link::BridgeLink::new("lcbr0")).await?;
 
     let mut added = Vec::new();
     let mut attributed = Vec::new();
+    let mut bridge_devtype: Option<Option<String>> = None;
     let deadline = tokio::time::Instant::now() + SETTLE;
 
     while tokio::time::Instant::now() < deadline {
@@ -75,6 +79,10 @@ async fn netdev_lifecycle_joins_uevents_with_rtnetlink() -> Result<()> {
                 let Some(name) = info.name().map(str::to_string) else {
                     continue;
                 };
+                if name == "lcbr0" && info.is_fully_attributed() {
+                    bridge_devtype = Some(info.devtype().map(str::to_string));
+                    assert!(info.driver().is_none(), "no DRIVER= on a bridge either");
+                }
                 if !name.starts_with("lcvet") {
                     continue;
                 }
@@ -90,15 +98,31 @@ async fn netdev_lifecycle_joins_uevents_with_rtnetlink() -> Result<()> {
                         info.devpath()
                     );
                     assert!(info.ifindex() > 0);
+                    // What the kernel really sends for a net device:
+                    // no DRIVER= (the driver binds to the bus parent,
+                    // and a veth has none), no DEVTYPE= (veth does not
+                    // set one). The recipe claimed DRIVER= until #328.
+                    assert!(
+                        info.driver().is_none(),
+                        "net uevents carry no DRIVER=; got {:?}",
+                        info.driver()
+                    );
+                    assert!(info.devtype().is_none(), "veth sets no DEVTYPE=");
                     attributed.push(name);
                 }
             }
             _ => {}
         }
-        if attributed.len() == 2 {
+        if attributed.len() == 2 && bridge_devtype.is_some() {
             break;
         }
     }
+
+    assert_eq!(
+        bridge_devtype,
+        Some(Some("bridge".to_string())),
+        "DEVTYPE=bridge is what the uevent side does carry"
+    );
 
     added.sort();
     assert_eq!(

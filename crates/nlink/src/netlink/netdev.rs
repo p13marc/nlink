@@ -6,11 +6,24 @@
 //!
 //! * **rtnetlink** (`RTM_NEWLINK` / `RTM_DELLINK`) knows the ifindex,
 //!   the flags, the MTU, the master, the kind — everything in the
-//!   `IFLA_*` namespace. It knows nothing about the driver bind, the
-//!   PCI or USB parent, or the sysfs path.
-//! * **uevents** know the driver, the devpath, the bus parent, and the
-//!   `add`/`bind`/`unbind`/`remove` lifecycle. They carry no link
-//!   attributes at all.
+//!   `IFLA_*` namespace. It knows nothing about the sysfs path or the
+//!   bus parent.
+//! * **uevents** know the devpath (and through it the bus parent), the
+//!   `DEVTYPE=` for kinds that set one, the `SEQNUM=`, and the
+//!   `add`/`move`/`remove` lifecycle. They carry no link attributes at
+//!   all.
+//!
+//! What net uevents do **not** carry is the driver. `DRIVER=` is a
+//! general uevent key, but `dev_uevent()` adds it only for a device
+//! that has a driver bound, and a net-class device never does — the
+//! driver binds to the *bus* device (PCI, virtio, USB) underneath it.
+//! That device's uevents are `SUBSYSTEM=pci`/`virtio`/…, go only to
+//! the initial network namespace, and carry no `IFINDEX=`, so there is
+//! no key to join them on. Measured across veth, dummy, bridge, vlan
+//! and a virtio NIC: `DRIVER=` never appeared (#328). The recipe table
+//! and this module said otherwise until 0.27; [`NetdevInfo::driver`]
+//! is kept for a kernel or driver that does emit it, and is `None` in
+//! practice.
 //!
 //! What makes the join tractable is that net-subsystem uevents carry
 //! `IFINDEX=` and `INTERFACE=`: the two sources share a primary key.
@@ -43,7 +56,10 @@
 //! [`NetdevEvent::DriverBound`] / [`NetdevEvent::DriverUnbound`]
 //! without requiring an rtnetlink partner. Read them as annotations of
 //! a device's driver state, never as statements about whether the
-//! device exists.
+//! device exists — and expect not to see them: `KOBJ_BIND`/`KOBJ_UNBIND`
+//! fire on the bus device that binds the driver, which is not the net
+//! device and carries no `IFINDEX=`, so a `subsystem("net")` stream
+//! has no bind to join (#328).
 //!
 //! ## 2. ifindex reuse is handled by name cross-check, not by trust
 //!
@@ -128,8 +144,15 @@ pub struct NetdevAnnotation {
     /// detect an annotation left over from a recycled ifindex.
     pub interface: Option<String>,
     /// `DRIVER=` — the bound driver, when the kernel names one.
+    ///
+    /// **It does not, for a net device.** The driver binds to the bus
+    /// parent, whose uevents carry no `IFINDEX=`; the net-class uevent
+    /// has no driver to name. `None` on every real device measured
+    /// (#328). Kept for a kernel or driver that does emit it.
     pub driver: Option<String>,
-    /// `DEVTYPE=` — e.g. `bridge`, `vlan`, `veth`.
+    /// `DEVTYPE=` — set by kinds that call `SET_NETDEV_DEVTYPE`:
+    /// `bridge`, `vlan`, `bond`, `wlan`, … Absent for veth and dummy,
+    /// which do not.
     pub devtype: Option<String>,
     /// `SEQNUM=` — monotonic within the uevent stream, which makes it
     /// useful for ordering annotations against each other. It says
@@ -185,9 +208,19 @@ impl NetdevInfo {
         self.annotation.as_ref()
     }
 
-    /// Bound driver, from the uevent side.
+    /// Bound driver, from the uevent side — which is `None` for every
+    /// real net device, because net uevents carry no `DRIVER=` (the
+    /// driver is bound to the bus parent; see
+    /// [`NetdevAnnotation::driver`]). The bound driver of a physical
+    /// NIC is reachable through ethtool, not through this join (#328).
     pub fn driver(&self) -> Option<&str> {
         self.annotation.as_ref()?.driver.as_deref()
+    }
+
+    /// `DEVTYPE=`, from the uevent side: `bridge`, `vlan`, `bond`, …
+    /// for kinds that set one; `None` for veth and dummy.
+    pub fn devtype(&self) -> Option<&str> {
+        self.annotation.as_ref()?.devtype.as_deref()
     }
 
     /// Sysfs devpath, from the uevent side. A string; see decision 3.
@@ -230,13 +263,20 @@ pub enum NetdevEvent {
     /// A driver bound to the device. Uevent-only: rtnetlink has no
     /// equivalent, so this can arrive for an ifindex no `Added` has
     /// been emitted for.
+    ///
+    /// In practice it does not arrive at all: the kernel emits
+    /// `KOBJ_BIND` on the bus device that binds the driver, which has
+    /// no `IFINDEX=` and is not in the `net` subsystem. This variant
+    /// fires only if a `net` uevent with `ACTION=bind` and an
+    /// `IFINDEX=` ever shows up (#328).
     DriverBound {
         /// Kernel ifindex from `IFINDEX=`.
         ifindex: u32,
         /// The uevent's view of the device.
         annotation: NetdevAnnotation,
     },
-    /// A driver unbound from the device. Uevent-only, as above.
+    /// A driver unbound from the device. Uevent-only, and in practice
+    /// unreachable, as [`DriverBound`](Self::DriverBound).
     DriverUnbound {
         /// Kernel ifindex from `IFINDEX=`.
         ifindex: u32,
@@ -301,7 +341,7 @@ impl NetdevEvent {
 /// while let Some(event) = lifecycle.next().await {
 ///     match event? {
 ///         NetdevEvent::Added(info) => {
-///             println!("{} ({:?}) driver={:?}", info.ifindex(), info.name(), info.driver());
+///             println!("{} ({:?}) devpath={:?}", info.ifindex(), info.name(), info.devpath());
 ///         }
 ///         other => println!("{other:?}"),
 ///     }
@@ -620,6 +660,10 @@ mod tests {
         env.insert("SUBSYSTEM".to_string(), "net".to_string());
         env.insert("IFINDEX".to_string(), ifindex.to_string());
         env.insert("INTERFACE".to_string(), interface.to_string());
+        // Synthetic. A real net uevent never carries `DRIVER=` (#328);
+        // these tests exercise the join and the annotation plumbing,
+        // and use the key because it is the one field rtnetlink cannot
+        // supply, so its presence proves the uevent half was joined.
         if let Some(driver) = driver {
             env.insert("DRIVER".to_string(), driver.to_string());
         }

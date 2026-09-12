@@ -164,6 +164,14 @@ impl NetlinkSocket {
         }
     }
 
+    /// [`new_in_namespace`](Self::new_in_namespace) taking an I/O-safe
+    /// borrowed fd — a [`NamespaceFd`](super::namespace::NamespaceFd), a
+    /// `File`, anything `AsFd` — so the fd provably outlives the call
+    /// (#186). The `RawFd` form stays for callers that already hold one.
+    pub fn new_in_namespace_fd(protocol: Protocol, ns_fd: impl std::os::fd::AsFd) -> Result<Self> {
+        Self::new_in_namespace(protocol, ns_fd.as_fd().as_raw_fd())
+    }
+
     /// Create a netlink socket that operates in a network namespace specified by path.
     ///
     /// This is a convenience method that opens the namespace file and calls

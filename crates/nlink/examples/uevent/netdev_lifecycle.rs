@@ -79,10 +79,11 @@ async fn main() -> nlink::Result<()> {
                 info.devpath(),
             ),
             NetdevEvent::Changed(info) => println!(
-                "CHANGED  {:>3} {} driver={:?} attributed={}",
+                "CHANGED  {:>3} {} devtype={:?} devpath={:?} attributed={}",
                 info.ifindex(),
                 info.name().unwrap_or("?"),
-                info.driver(),
+                info.devtype(),
+                info.devpath(),
                 info.is_fully_attributed(),
             ),
             // No rtnetlink counterpart exists for these, so they can
