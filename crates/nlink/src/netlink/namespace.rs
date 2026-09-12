@@ -1398,7 +1398,35 @@ fn prepare_etc_binds(ns_name: &str) -> Result<Vec<(std::ffi::CString, std::ffi::
 /// If `/etc/netns/<ns_name>/` does not exist, the mount overlay step is skipped
 /// and behavior is identical to [`spawn`].
 ///
-/// Requires `CAP_SYS_ADMIN` (for `unshare(CLONE_NEWNS)`).
+/// # What is fatal, and what is not
+///
+/// Requires `CAP_SYS_ADMIN` (for `unshare(CLONE_NEWNS)`) — necessary, not
+/// sufficient: a container runtime's seccomp/AppArmor profile, or the
+/// kernel's own rules for mounting sysfs in a user namespace, can refuse
+/// individual steps to a root process that holds it. The rule the child
+/// follows is: **never run with no `/sys`, never refuse to run over a
+/// merely stale one.**
+///
+/// - `setns`, `unshare(CLONE_NEWNS)`, the `MS_SLAVE` remount of `/` and
+///   every `/etc/netns/<ns>/*` bind mount are fatal — the spawn fails
+///   with the step's errno. An overlay the caller set up and did not
+///   get is an error, not a degradation.
+/// - The `/sys` remount is best effort in one precise case. `/sys` is
+///   detached with `umount2(MNT_DETACH)` and a fresh sysfs mounted for
+///   the target netns, copying the read-only / `nosuid` / `nodev` /
+///   `noexec` flags of the `/sys` that was there (the kernel refuses a
+///   less restrictive sysfs than the one it sees, which is what made
+///   this fail with `EPERM` in Docker and Podman, where `/sys` is
+///   `ro,nosuid,nodev,noexec` — #334). If the detach failed and the
+///   mount then fails too, the host's `/sys` is still in place: the
+///   child runs on with a stale `/sys/class/net` (what plain [`spawn`]
+///   gives) and the bind mounts proceed. If the detach *succeeded* and
+///   the mount fails, the child would have no `/sys` at all, which is
+///   worse than a stale one for anything that enumerates interfaces
+///   through sysfs (#282); that case stays fatal.
+///
+/// The netlink-driven parts of nlink never read `/sys`; the remount is
+/// for the child's own benefit (`ip link` and friends).
 ///
 /// # Example
 ///
@@ -1436,6 +1464,36 @@ pub fn spawn_output_with_etc(
     cmd.stderr(std::process::Stdio::piped());
     let child = spawn_with_etc(ns_name, cmd)?;
     child.wait_with_output().map_err(Error::Io)
+}
+
+/// The `mount(2)` flags a replacement sysfs must carry so the kernel
+/// accepts it next to the `/sys` already visible.
+///
+/// `fs/namespace.c: mount_too_revealing()` refuses to mount proc or
+/// sysfs in a mount namespace where an instance is already fully
+/// visible unless the new mount is at least as restrictive on every
+/// locked flag: read-only, `nosuid`, `nodev`, `noexec`. Container
+/// runtimes mount `/sys` with all four, so a bare `mount(sysfs)` there
+/// is `EPERM` even for root with `CAP_SYS_ADMIN`. `ip netns exec`
+/// copies only `ST_RDONLY`; this copies all four (#334).
+///
+/// Input is `statfs(2)`'s `f_flags` (the `ST_*` bits), output the
+/// `MS_*` bits for `mount(2)`.
+fn sysfs_mount_flags(st_flags: libc::c_ulong) -> libc::c_ulong {
+    let mut flags = 0;
+    if st_flags & libc::ST_RDONLY != 0 {
+        flags |= libc::MS_RDONLY;
+    }
+    if st_flags & libc::ST_NOSUID != 0 {
+        flags |= libc::MS_NOSUID;
+    }
+    if st_flags & libc::ST_NODEV != 0 {
+        flags |= libc::MS_NODEV;
+    }
+    if st_flags & libc::ST_NOEXEC != 0 {
+        flags |= libc::MS_NOEXEC;
+    }
+    flags
 }
 
 /// Spawn a process in a namespace specified by path with `/etc/netns/` file overlays.
@@ -1513,19 +1571,42 @@ pub fn spawn_path_with_etc<P: AsRef<Path>>(
             //    takes the topmost mount, so mounting the replacement
             //    first and unmounting after would just remove the
             //    replacement. That leaves the window between the two
-            //    calls, and the only safe thing to do if the second one
-            //    fails is to refuse to exec: this returns the error,
-            //    which aborts the spawn rather than handing the caller a
-            //    child whose /sys is gone. `ip netns exec` does the
-            //    same.
-            libc::umount2(c_sys.as_ptr(), libc::MNT_DETACH);
+            //    calls. If the detach succeeded and the mount fails,
+            //    the only safe thing to do is refuse to exec: returning
+            //    the error aborts the spawn rather than handing the
+            //    caller a child whose /sys is gone.
+            //
+            //    Inside a container the detach itself is what fails —
+            //    /sys is a read-only bind the runtime does not let go
+            //    of — and then a plain `mount(sysfs)` fails too, with
+            //    EPERM: the kernel's `mount_too_revealing` refuses a
+            //    sysfs less restrictive than the one already visible,
+            //    and Docker/Podman mount /sys `ro,nosuid,nodev,noexec`.
+            //    `ip netns exec` handles this by statvfs'ing /sys and
+            //    passing MS_RDONLY; this copies every lock-relevant
+            //    flag (`statfs64`, because glibc's `statvfs` reads
+            //    /proc/mounts — not async-signal-safe here). And if the
+            //    mount still fails after a *failed* detach, the host's
+            //    /sys is still there: stale, but present, exactly what
+            //    plain `spawn` gives — so the exec proceeds and the
+            //    /etc binds still apply (#334). The rule: never no
+            //    /sys (#282), never refuse over a stale one.
+            let detached = libc::umount2(c_sys.as_ptr(), libc::MNT_DETACH) == 0;
+            let mut flags: libc::c_ulong = 0;
+            if !detached {
+                let mut st: libc::statfs64 = std::mem::zeroed();
+                if libc::statfs64(c_sys.as_ptr(), &mut st) == 0 {
+                    flags = sysfs_mount_flags(st.f_flags as libc::c_ulong);
+                }
+            }
             if libc::mount(
                 ns_name_c.as_ptr(),
                 c_sys.as_ptr(),
                 c_sysfs.as_ptr(),
-                0,
+                flags,
                 std::ptr::null(),
             ) != 0
+                && detached
             {
                 return Err(std::io::Error::last_os_error());
             }
@@ -1570,6 +1651,22 @@ pub fn spawn_output_path_with_etc<P: AsRef<Path>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #334 — the replacement sysfs copies every flag the kernel locks
+    /// (`mount_too_revealing`), not just read-only.
+    #[test]
+    fn sysfs_mount_flags_mirror_every_locked_flag() {
+        assert_eq!(sysfs_mount_flags(0), 0, "a plain rw /sys needs no flags");
+        assert_eq!(sysfs_mount_flags(libc::ST_RDONLY), libc::MS_RDONLY);
+        let container = libc::ST_RDONLY | libc::ST_NOSUID | libc::ST_NODEV | libc::ST_NOEXEC;
+        assert_eq!(
+            sysfs_mount_flags(container),
+            libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+            "Docker/Podman mount /sys ro,nosuid,nodev,noexec"
+        );
+        // Unrelated statfs bits (relatime, etc.) are not mount flags here.
+        assert_eq!(sysfs_mount_flags(libc::ST_RELATIME), 0);
+    }
 
     #[test]
     fn test_netns_run_dir() {
