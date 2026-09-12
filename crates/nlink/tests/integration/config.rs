@@ -1,11 +1,15 @@
 //! Integration tests for declarative network configuration.
 
+use std::time::Duration;
+
 use nlink::{
     Result,
     netlink::{
         config::{ApplyOptions, DeclaredLinkType, LinkState, NetworkConfig},
         link::DummyLink,
+        tc_options::QdiscOptions,
     },
+    util::{Percent, Rate},
 };
 
 use crate::common::TestNamespace;
@@ -388,9 +392,68 @@ async fn test_config_apply_qdisc() -> Result<()> {
     let result = config.apply(&conn).await?;
     assert!(result.is_success());
 
-    // Verify qdisc was added
+    // Verify qdisc was added, with the delay that was declared.
     let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
-    let netem = qdiscs.iter().find(|q| q.kind() == Some("netem"));
-    assert!(netem.is_some());
+    let netem = qdiscs
+        .iter()
+        .find(|q| q.kind() == Some("netem"))
+        .expect("netem qdisc installed");
+    let Some(QdiscOptions::Netem(opts)) = netem.options() else {
+        panic!("netem options parse");
+    };
+    assert_eq!(opts.delay(), Some(Duration::from_millis(50)));
+    Ok(())
+}
+
+/// #332 — the declarative netem can now say `rate` and sub-millisecond
+/// delay/jitter, and what the kernel installs is what was declared:
+/// the readback goes through the parsed `QdiscOptions::Netem`, not a
+/// kind check.
+#[tokio::test]
+async fn declarative_netem_rate_and_sub_ms_jitter_reach_the_kernel() -> Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "sch_netem");
+
+    let ns = TestNamespace::new("config-netem-rate")?;
+    let conn = ns.connection()?;
+    conn.add_link(DummyLink::new("dummy0")).await?;
+    conn.set_link_up("dummy0").await?;
+
+    let config = NetworkConfig::new().qdisc("dummy0", |q| {
+        q.netem()
+            .delay(Duration::from_micros(1_500))
+            .jitter(Duration::from_micros(250))
+            .rate(Rate::mbit(100))
+            .reorder_pct(Percent::new(3.0))
+            .reorder_correlation_pct(Percent::new(50.0))
+            .gap(5)
+    });
+    let result = config.apply(&conn).await?;
+    assert!(result.is_success(), "{result:?}");
+
+    let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
+    let netem = qdiscs
+        .iter()
+        .find(|q| q.kind() == Some("netem"))
+        .expect("netem qdisc installed");
+    let Some(QdiscOptions::Netem(opts)) = netem.options() else {
+        panic!("netem options parse");
+    };
+    assert_eq!(opts.delay(), Some(Duration::from_micros(1_500)));
+    assert_eq!(opts.jitter(), Some(Duration::from_micros(250)));
+    assert_eq!(
+        opts.rate_bps(),
+        Some(Rate::mbit(100).as_bytes_per_sec()),
+        "netem rate is bytes/sec"
+    );
+    assert_eq!(opts.gap(), Some(5));
+    assert_eq!(
+        opts.reorder().map(|p| Percent::new(p).as_kernel_probability()),
+        Some(Percent::new(3.0).as_kernel_probability())
+    );
+    assert_eq!(
+        opts.reorder_correlation().map(|p| Percent::new(p).as_kernel_probability()),
+        Some(Percent::new(50.0).as_kernel_probability())
+    );
     Ok(())
 }
