@@ -121,6 +121,32 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`spawn_*_with_etc` failed with `EPERM` inside containers whenever
+  `/etc/netns/<ns>/` existed (#334).** The sysfs remount was fatal
+  (#282 made it so, correctly: a child with *no* `/sys` is worse than
+  one with a stale `/sys`), and inside Docker/Podman it always failed —
+  `/sys` there is a read-only `nosuid,nodev,noexec` bind the runtime
+  will not let go of, and the kernel's `mount_too_revealing` refuses a
+  fresh sysfs that is less restrictive than the one already visible.
+  So the moment a caller added a per-namespace `hosts` file, every
+  exec in that namespace stopped working, while plain `spawn` kept
+  working. Seven of nlink-lab's integration tests failed this way on
+  its CI runner.
+
+  Two changes. The replacement sysfs now copies the read-only /
+  `nosuid` / `nodev` / `noexec` flags of the `/sys` it is replacing
+  (`ip netns exec` copies read-only alone; the kernel locks all four).
+  And the rule for the remount is now stated and followed: **never
+  run with no `/sys`, never refuse to run over a merely stale one.**
+  If the detach failed and the mount fails too, the host's `/sys` is
+  still in place, so the exec proceeds and the `/etc` binds still
+  apply; if the detach succeeded and the mount fails, the child would
+  have no `/sys`, and that stays fatal. Bind-mount failures stay
+  fatal. The `spawn_with_etc` rustdoc now lists which steps are fatal
+  — it said "requires `CAP_SYS_ADMIN`", which is necessary and not
+  sufficient. The flag mirroring is unit-tested; a real container
+  refusal cannot be reproduced in this suite.
+
 - **`PlugConfig::new().build()` could not install a plug qdisc (#327).**
   With no limit set, `write_options` wrote nothing — but the connection
   opened and closed the `TCA_OPTIONS` nest unconditionally, so the kernel
