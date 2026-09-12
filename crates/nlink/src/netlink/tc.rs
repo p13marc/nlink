@@ -69,6 +69,27 @@ pub trait QdiscConfig: Send + Sync {
     /// Write the qdisc options to a message builder.
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()>;
 
+    /// Whether the request should carry a `TCA_OPTIONS` attribute at all.
+    ///
+    /// The kernel distinguishes an **absent** `TCA_OPTIONS` (`opt == NULL`
+    /// in the qdisc's `init`) from a **present but empty** one, and the two
+    /// are not interchangeable — the answer differs per kind. `plug_init`
+    /// takes `opt == NULL` as "use the device's `txqueuelen × MTU`" and
+    /// rejects an empty nest with `EINVAL`, because the nest is shorter
+    /// than `struct tc_plug_qopt`. `drr_change_class` and
+    /// `qfq_change_class` go the other way: they refuse `NULL` and read
+    /// their defaults from an empty nest. So this is per-config and
+    /// opt-in, not a blanket "skip empty nests" (#327).
+    ///
+    /// Default `true`: the nest is always written, and
+    /// [`write_options`](Self::write_options) decides what goes in it.
+    /// Return `false` when the kernel must see no `TCA_OPTIONS` — the
+    /// connection then skips the nest entirely and never calls
+    /// `write_options` for that request.
+    fn has_options(&self) -> bool {
+        true
+    }
+
     /// Get the default handle for this qdisc type, if any.
     fn default_handle(&self) -> Option<u32> {
         None
@@ -5678,6 +5699,16 @@ impl QdiscConfig for CakeConfig {
 #[derive(Debug, Clone)]
 pub struct PlugConfig {
     /// Initial limit in bytes.
+    ///
+    /// `None` leaves the choice to the kernel: `plug_init` sizes the
+    /// buffer as the device's `txqueuelen × MTU` when the request carries
+    /// no `TCA_OPTIONS` at all — which is what `None` sends (#327). That
+    /// is the `tc qdisc add ... plug` default.
+    ///
+    /// **`limit(0)` is not "kernel default"; it is a blackhole.**
+    /// `plug_enqueue` admits a packet only while `backlog + len <= limit`,
+    /// so a zero limit drops every packet while the qdisc looks installed
+    /// and healthy (measured: 3 pings, `0b 0p` backlog, 4 dropped).
     pub limit: Option<u32>,
 }
 
@@ -5766,6 +5797,14 @@ impl QdiscConfig for PlugAction {
 impl QdiscConfig for PlugConfig {
     fn kind(&self) -> &'static str {
         "plug"
+    }
+
+    /// No limit, no `TCA_OPTIONS`. An empty nest is not the same thing:
+    /// `plug_init` checks `nla_len(opt) < sizeof(struct tc_plug_qopt)`
+    /// and returns `EINVAL`, so `PlugConfig::new().build()` could not
+    /// install a plug at all until the nest was omitted (#327).
+    fn has_options(&self) -> bool {
+        self.limit.is_some()
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -7743,9 +7782,11 @@ impl Connection<Route> {
         builder.append(&tcmsg);
         builder.append_attr_str(TcaAttr::Kind as u16, config.kind());
 
-        let options_token = builder.nest_start(TcaAttr::Options as u16);
-        config.write_options(&mut builder)?;
-        builder.nest_end(options_token);
+        if config.has_options() {
+            let options_token = builder.nest_start(TcaAttr::Options as u16);
+            config.write_options(&mut builder)?;
+            builder.nest_end(options_token);
+        }
 
         self.send_ack(builder)
             .await
@@ -7922,9 +7963,11 @@ impl Connection<Route> {
         builder.append(&tcmsg);
         builder.append_attr_str(TcaAttr::Kind as u16, config.kind());
 
-        let options_token = builder.nest_start(TcaAttr::Options as u16);
-        config.write_options(&mut builder)?;
-        builder.nest_end(options_token);
+        if config.has_options() {
+            let options_token = builder.nest_start(TcaAttr::Options as u16);
+            config.write_options(&mut builder)?;
+            builder.nest_end(options_token);
+        }
 
         self.send_ack(builder)
             .await
@@ -8014,9 +8057,11 @@ impl Connection<Route> {
         builder.append(&tcmsg);
         builder.append_attr_str(TcaAttr::Kind as u16, &kind);
 
-        let options_token = builder.nest_start(TcaAttr::Options as u16);
-        config.write_options(&mut builder)?;
-        builder.nest_end(options_token);
+        if config.has_options() {
+            let options_token = builder.nest_start(TcaAttr::Options as u16);
+            config.write_options(&mut builder)?;
+            builder.nest_end(options_token);
+        }
 
         self.send_ack(builder).await.map_err(|e| {
             if e.is_not_found() {
@@ -8885,6 +8930,35 @@ mod tests {
 
         assert_eq!(config.limit, Some(10000));
         assert_eq!(config.kind(), "plug");
+    }
+
+    /// `PlugConfig::new()` must send **no** `TCA_OPTIONS`, not an empty
+    /// one: `plug_init` takes the absent nest as "kernel default limit"
+    /// and refuses an empty nest as shorter than `tc_plug_qopt` (#327).
+    /// With a limit, the nest carries exactly the 8-byte struct.
+    #[test]
+    fn plug_without_limit_sends_no_options_at_all() {
+        use crate::netlink::types::tc::qdisc::plug::TcPlugQopt;
+
+        let bare = PlugConfig::new().build();
+        assert!(!bare.has_options(), "no limit → no TCA_OPTIONS nest");
+        let mut b = MessageBuilder::new(0, 0);
+        let header = b.len();
+        bare.write_options(&mut b).unwrap();
+        assert_eq!(b.len(), header, "nothing to write without a limit");
+
+        let limited = PlugConfig::new().limit(65536).build();
+        assert!(limited.has_options());
+        let mut b = MessageBuilder::new(0, 0);
+        limited.write_options(&mut b).unwrap();
+        assert_eq!(b.len() - header, TcPlugQopt::SIZE);
+        assert_eq!(TcPlugQopt::SIZE, 8);
+
+        // Every other qdisc keeps the nest — the default is not
+        // "skip empty nests", which would break kinds that read their
+        // defaults from one.
+        assert!(NetemConfig::new().build().has_options());
+        assert!(IngressConfig::new().has_options());
     }
 
     #[test]

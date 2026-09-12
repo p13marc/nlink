@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`PlugConfig::new().build()` could not install a plug qdisc (#327).**
+  With no limit set, `write_options` wrote nothing — but the connection
+  opened and closed the `TCA_OPTIONS` nest unconditionally, so the kernel
+  received an *empty* nest rather than *no* nest. `plug_init` treats those
+  differently: absent means "size the buffer as `txqueuelen × MTU`", empty
+  means `nla_len(opt) < sizeof(tc_plug_qopt)` and `EINVAL`. So the form
+  the type's own `new()` produces, and `nlink-tc qdisc add ... plug` with
+  no arguments, failed every time, and there was no spelling at all for
+  the kernel's default limit. `limit(0)` is not that spelling — it is a
+  blackhole (`plug_enqueue` admits nothing past a zero limit), which the
+  field's doc now says.
+
+  `QdiscConfig` gains `has_options()` (default `true`); a config that
+  returns `false` sends no `TCA_OPTIONS`. It is opt-in rather than a
+  blanket "skip empty nests" because the kernel disagrees with itself per
+  kind: `drr` and `qfq` classes refuse a missing nest and read their
+  defaults from an empty one. `PlugConfig` returns `false` when `limit`
+  is `None`; nothing else changes on the wire. The check that was
+  missing: a live test installs the no-limit plug as a netem leaf, sends
+  traffic into it and asserts the packets are held (backlog > 0, drops
+  == 0) — the property that separates the default from the blackhole.
+
 ## [0.26.0] - 2026-09-10
 
 ### Added
