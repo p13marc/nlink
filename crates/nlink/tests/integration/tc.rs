@@ -10,8 +10,8 @@ use nlink::{
         filter::{FlowerFilter, MatchallFilter, U32Filter},
         link::{DummyLink, IfbLink},
         tc::{
-            FqCodelConfig, HtbClassConfig, HtbQdiscConfig, IngressConfig, NetemConfig, PrioConfig,
-            SfqConfig, TbfConfig,
+            FqCodelConfig, HtbClassConfig, HtbQdiscConfig, IngressConfig, NetemConfig, PlugConfig,
+            PrioConfig, SfqConfig, TbfConfig,
         },
     },
 };
@@ -54,6 +54,84 @@ async fn test_add_netem_qdisc() -> Result<()> {
     let netem = qdiscs.iter().find(|q| q.kind() == Some("netem"));
     assert!(netem.is_some(), "netem qdisc should exist");
 
+    Ok(())
+}
+
+/// `PlugConfig::new().build()` — no limit — could not install a plug at
+/// all: the request carried an empty `TCA_OPTIONS` nest, and `plug_init`
+/// refuses one shorter than `tc_plug_qopt` with `EINVAL`. The form the
+/// kernel wants for "use the device default" is *no* `TCA_OPTIONS`
+/// (#327). This installs the plug as the leaf of a netem, the shape the
+/// issue reproduced with, then sends traffic through it and checks the
+/// property that distinguishes a working plug from a `limit(0)`
+/// blackhole: packets are **held**, not dropped.
+#[tokio::test]
+async fn plug_without_limit_installs_and_buffers() -> Result<()> {
+    require_root!();
+    nlink::require_modules!("sch_netem", "sch_plug", "veth");
+
+    let left = TestNamespace::new("plug_l")?;
+    let right = TestNamespace::new("plug_r")?;
+    left.connect_to(&right, "veth0", "veth1")?;
+    left.add_addr("veth0", "10.27.0.1/24")?;
+    left.link_up("veth0")?;
+    right.add_addr("veth1", "10.27.0.2/24")?;
+    right.link_up("veth1")?;
+
+    let conn = left.connection()?;
+    let ifindex = conn
+        .get_link_by_name("veth0")
+        .await?
+        .expect("veth0 exists")
+        .ifindex();
+
+    conn.add_qdisc_by_index_full(
+        ifindex,
+        TcHandle::ROOT,
+        Some(TcHandle::major_only(1)),
+        NetemConfig::new().build(),
+    )
+    .await?;
+    let parent = TcHandle::new(1, 1);
+
+    // The form that returned EINVAL.
+    conn.add_qdisc_by_index_full(ifindex, parent, None, PlugConfig::new().build())
+        .await
+        .expect("PlugConfig::new().build() must install (no TCA_OPTIONS → kernel default limit)");
+
+    // Ping into the plug: nothing comes back (that is the point of a
+    // plug), so let ping time out and look at the qdisc instead.
+    left.exec_ignore("ping", &["-c", "3", "-i", "0.2", "-W", "1", "10.27.0.2"]);
+
+    let qdiscs = conn.get_qdiscs_by_index(ifindex).await?;
+    let plug = qdiscs
+        .iter()
+        .find(|q| q.kind() == Some("plug"))
+        .expect("plug qdisc is installed");
+    let stats = plug.stats_queue().expect("plug reports queue stats");
+    assert!(
+        stats.backlog > 0 && stats.qlen > 0,
+        "a plug with the kernel-default limit must hold packets; \
+         backlog {}b {}p — a zero limit would show 0b 0p and drops instead",
+        stats.backlog,
+        stats.qlen
+    );
+    assert_eq!(
+        stats.drops, 0,
+        "a plug with the kernel-default limit dropped {} packets — that is \
+         the `limit 0` blackhole, not the default",
+        stats.drops
+    );
+
+    // An explicit limit keeps working: replace with one and the qdisc
+    // still stands.
+    conn.replace_qdisc_by_index_full(ifindex, parent, None, PlugConfig::new().limit(65536).build())
+        .await?;
+    let qdiscs = conn.get_qdiscs_by_index(ifindex).await?;
+    assert!(qdiscs.iter().any(|q| q.kind() == Some("plug")));
+
+    // Let the buffered packets out so the namespace tears down cleanly.
+    conn.plug_release_indefinite(ifindex, parent).await.ok();
     Ok(())
 }
 

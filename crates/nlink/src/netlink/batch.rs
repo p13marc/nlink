@@ -245,6 +245,10 @@ impl<'a> Batch<'a> {
         builder.append(&tcmsg);
         builder.append_attr_str(TcaAttr::Kind as u16, config.kind());
 
+        if !config.has_options() {
+            self.push(builder);
+            return self;
+        }
         let options_token = builder.nest_start(TcaAttr::Options as u16);
         match config.write_options(&mut builder) {
             Ok(()) => {
