@@ -675,7 +675,7 @@ println!("{} pending change(s)", diff.change_count());
 let report = stack.apply().await?;                 // host netns
 let report = stack.apply_in(NamespaceSpec::Pid(container_pid)).await?;
 assert!(stack.apply().await?.is_noop());           // converged
-# use nlink::netlink::config::ApplyOptions;
+use nlink::netlink::config::ApplyOptions;
 let report = stack                                 // reconcile: purge what left the config
     .apply_in_with(NamespaceSpec::Named("lab"), ApplyOptions::default().with_purge(true))
     .await?;
