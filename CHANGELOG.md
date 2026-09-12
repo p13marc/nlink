@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **`WireguardConfig::ensure_devices` brings every declared link up
+  (#329).** It created the links and returned; `add_link` creates a
+  link administratively down, and the kernel refuses a route whose
+  nexthop device is down (`ENETDOWN`, "Device for nexthop is not up").
+  So the documented sequence — `ensure_devices`, then a `NetworkConfig`
+  that addresses the tunnel and routes via the peer's tunnel address,
+  then `apply` — failed at the second step for every route via the
+  tunnel, and downstream (nlink-lab) grew its own `set_link_up` loop to
+  get past it. The recipe said `ensure_devices` replaced the manual
+  `add_link` + `set_link_up` pair; it replaced half of it.
+
+  Every declared device is now raised on every call — desired state,
+  not create-time state — so a device downed by hand comes back up on
+  the next reconcile. The return value (names created) is unchanged.
+  The live test now asserts the link is up, adds a route via the tunnel
+  address, and re-raises a downed device.
+
 ### Fixed
 
 - **`PlugConfig::new().build()` could not install a plug qdisc (#327).**

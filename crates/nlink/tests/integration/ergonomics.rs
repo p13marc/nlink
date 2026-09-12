@@ -136,6 +136,31 @@ async fn wireguard_diff_reports_missing_device_and_ensure_creates_it() -> nlink:
     assert_eq!(created, vec!["wg-boot0".to_string()]);
     assert!(cfg.ensure_devices(&conn).await?.is_empty());
 
+    // …and leaves it UP (#329): the documented follow-on is a
+    // NetworkConfig that routes via the tunnel, and the kernel refuses
+    // a nexthop on a down device with ENETDOWN.
+    let link = conn
+        .get_link_by_name("wg-boot0")
+        .await?
+        .expect("wg-boot0 exists after ensure_devices");
+    assert!(link.is_up(), "ensure_devices must bring the link up");
+    ns.add_addr("wg-boot0", "10.100.0.1/24")?;
+    conn.add_route(
+        nlink::netlink::route::Ipv4Route::new("10.2.0.0", 24)
+            .gateway(std::net::Ipv4Addr::new(10, 100, 0, 2)),
+    )
+    .await
+    .expect("a route via the tunnel address must not fail with ENETDOWN");
+
+    // A device someone downed by hand comes back up on the next call:
+    // desired state, not create-time state.
+    conn.set_link_down("wg-boot0").await?;
+    assert!(cfg.ensure_devices(&conn).await?.is_empty());
+    assert!(
+        conn.get_link_by_name("wg-boot0").await?.unwrap().is_up(),
+        "ensure_devices must re-raise a declared device that was downed"
+    );
+
     // Now the config applies cleanly end-to-end.
     let report = cfg.apply(&wg).await?;
     assert!(report.total_writes() >= 1, "apply configured the fresh device");
