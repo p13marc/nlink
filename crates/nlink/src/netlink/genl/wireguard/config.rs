@@ -276,14 +276,27 @@ impl WireguardConfig {
         Ok(diff)
     }
 
-    /// Create any declared WireGuard links that don't exist yet
-    /// (bootstrap for [`diff`](Self::diff)'s `devices_to_add`).
+    /// Create any declared WireGuard links that don't exist yet and
+    /// bring every declared link **up** (bootstrap for
+    /// [`diff`](Self::diff)'s `devices_to_add`).
     ///
     /// Link creation is an rtnetlink operation, so this takes a
     /// `Connection<Route>` — pass one bound to the **same network
     /// namespace** as the WireGuard connection you'll `apply` with.
     /// Returns the names of the links it created. Idempotent:
-    /// already-existing links are skipped.
+    /// already-existing links are skipped, and a link that is already
+    /// up stays up.
+    ///
+    /// The documented sequence is `ensure_devices` → `NetworkConfig::apply`
+    /// (tunnel addresses, routes via the peer's tunnel address) →
+    /// [`apply`](Self::apply). `add_link` creates a link administratively
+    /// down, and the kernel refuses a route whose nexthop device is down
+    /// (`ENETDOWN`, "Device for nexthop is not up") — so until 0.27 that
+    /// sequence failed at step two for every route via the tunnel, and
+    /// every caller had to add its own `set_link_up` loop (#329). A
+    /// WireGuard link is useless down; this is desired state, so **all**
+    /// declared devices are brought up on every call, not just the ones
+    /// this call created.
     pub async fn ensure_devices(
         &self,
         route: &Connection<crate::netlink::Route>,
@@ -298,6 +311,7 @@ impl WireguardConfig {
                 Err(e) if e.is_already_exists() => {}
                 Err(e) => return Err(e),
             }
+            route.set_link_up(declared.ifname.as_str()).await?;
         }
         Ok(created)
     }

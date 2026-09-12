@@ -469,8 +469,10 @@ import via `from_wg_quick`). Since 0.24 (#169) a declared-but-absent
 device no longer fails the diff — it lands in
 `WireguardConfigDiff::devices_to_add`, and
 `WireguardConfig::ensure_devices(&route_conn)` creates the missing
-links idempotently (link creation is an rtnetlink operation, so it
-takes a same-namespace `Connection<Route>`). The
+links idempotently and brings every declared link up (link creation
+is an rtnetlink operation, so it takes a same-namespace
+`Connection<Route>`; a WireGuard link is useless down, and a route via
+the tunnel is `ENETDOWN` until it is up — #329). The
 `facade::apply::wireguard*` helpers wire both together, so a bare
 `WireguardConfig` applies end-to-end:
 
