@@ -201,6 +201,53 @@ async fn test_spawn_with_etc_hosts() -> Result<()> {
     Ok(())
 }
 
+/// #331 — `NamespaceSpec::Path` pointing into `/var/run/netns` has a
+/// name, so it gets the overlay; `Pid` has none and does not, and
+/// `etc_overlay_name` says so up front.
+#[tokio::test]
+async fn namespace_spec_path_gets_the_etc_overlay_and_pid_does_not() -> Result<()> {
+    require_root!();
+    use nlink::netlink::namespace::{NETNS_RUN_DIR, NamespaceSpec};
+
+    let ns = TestNamespace::new("spawn-etc-spec")?;
+    setup_etc_netns(ns.name(), &[("hosts", "127.0.0.1 spec-host.lab\n")]);
+
+    let run_path = PathBuf::from(NETNS_RUN_DIR).join(ns.name());
+    let by_path = NamespaceSpec::Path(&run_path);
+    assert_eq!(by_path.etc_overlay_name(), Some(ns.name()));
+    let mut cmd = Command::new("cat");
+    cmd.arg("/etc/hosts");
+    let out = by_path.spawn_output_with_etc(cmd);
+    let seen_by_path = out.map(|o| String::from_utf8_lossy(&o.stdout).to_string());
+
+    // A long-lived process in the namespace to name by pid.
+    let mut sleeper = Command::new("sleep");
+    sleeper.arg("30");
+    let mut child = namespace::spawn(ns.name(), sleeper)?;
+    let by_pid = NamespaceSpec::Pid(child.id());
+    assert_eq!(by_pid.etc_overlay_name(), None);
+    let mut cmd = Command::new("cat");
+    cmd.arg("/etc/hosts");
+    let out = by_pid.spawn_output_with_etc(cmd);
+    let seen_by_pid = out.map(|o| String::from_utf8_lossy(&o.stdout).to_string());
+    let _ = child.kill();
+    let _ = child.wait();
+
+    cleanup_etc_netns(ns.name());
+
+    let seen_by_path = seen_by_path?;
+    assert!(
+        seen_by_path.contains("spec-host.lab"),
+        "Path spec under {NETNS_RUN_DIR} must apply the overlay; got: {seen_by_path}"
+    );
+    let seen_by_pid = seen_by_pid?;
+    assert!(
+        !seen_by_pid.contains("spec-host.lab"),
+        "Pid spec has no name and therefore no overlay; got: {seen_by_pid}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_spawn_with_etc_no_dir() -> Result<()> {
     require_root!();
