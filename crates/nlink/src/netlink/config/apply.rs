@@ -56,18 +56,10 @@ use crate::netlink::{
 /// longer allowed by downstream code. Mirrors `ReconcileOptions`
 /// (Plan 163).
 ///
-/// **Plan 205 (0.19) breaking change**: the `purge` flag and
-/// `with_purge(bool)` builder were removed because the feature
-/// was non-functional in 0.18 (silent no-op — the `*_to_remove`
-/// collections were never populated by the diff phase). Code
-/// that called `.with_purge(true)` thinking removal would
-/// happen needs to switch to the imperative API
-/// (`Connection::del_link` / `del_address` / `del_route` /
-/// `del_qdisc`) to delete kernel resources, since
-/// `NetworkConfig` no longer offers a purge knob. A full
-/// re-wired purge with a kernel-managed-resource exclusion
-/// list (IPv6 link-local, multicast, `lo`, link-local prefix
-/// routes) is queued for 0.20.
+/// `purge` was removed in 0.19 (Plan 205) because the 0.18 version
+/// was a silent no-op, and re-wired in 0.23 with the scope
+/// [`DiffOptions::purge`] documents. The removal note outlived the
+/// removal by four releases (#335).
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct ApplyOptions {
@@ -77,11 +69,16 @@ pub struct ApplyOptions {
     pub continue_on_error: bool,
     /// Remove kernel resources not declared in the config (full
     /// reconcile). Scoped conservatively — see [`DiffOptions::purge`].
-    /// Only global-scope addresses on managed interfaces and
-    /// `static`/`boot` main-table routes are eligible; kernel-managed
-    /// resources (link-local, loopback, RA/DHCP routes, links, qdiscs)
-    /// are never touched. Off by default.
+    /// Addresses: global scope, on interfaces the config declares an
+    /// address on. Routes: `static`/`boot` protocol, in the tables
+    /// the config owns (main, every table a declared route names, and
+    /// [`Self::purge_tables`]). Kernel-managed resources (link-local,
+    /// loopback, RA/DHCP routes, links, qdiscs) are never touched.
+    /// Off by default.
     pub purge: bool,
+    /// Extra route tables to purge from — see
+    /// [`DiffOptions::purge_tables`]. Ignored unless `purge` is on.
+    pub purge_tables: Vec<u32>,
 }
 
 impl ApplyOptions {
@@ -110,6 +107,13 @@ impl ApplyOptions {
     /// [`DiffOptions::purge`] for the exact safety scope.
     pub fn with_purge(mut self, on: bool) -> Self {
         self.purge = on;
+        self
+    }
+
+    /// Add route tables to the purge scope. See
+    /// [`DiffOptions::purge_tables`].
+    pub fn with_purge_tables(mut self, tables: impl IntoIterator<Item = u32>) -> Self {
+        self.purge_tables.extend(tables);
         self
     }
 }
@@ -180,7 +184,9 @@ pub async fn apply_config(
     conn: &Connection<Route>,
     options: ApplyOptions,
 ) -> Result<ApplyResult> {
-    let diff_opts = DiffOptions::default().purge(options.purge);
+    let diff_opts = DiffOptions::default()
+        .purge(options.purge)
+        .purge_tables(options.purge_tables.iter().copied());
     let diff = compute_diff_with_options(config, conn, &diff_opts).await?;
     apply_diff(&diff, conn, options).await
 }
@@ -396,12 +402,20 @@ pub async fn apply_diff(
             result.changes_made += 1;
         } else {
             match del_route(conn, route).await {
-                Ok(()) => {
+                Ok(true) => {
                     result.summary.push(format!(
                         "Removed route {}/{}",
                         route.destination, route.prefix_len
                     ));
                     result.changes_made += 1;
+                }
+                // Gone between diff and apply — the state we wanted.
+                // Not a change we made, and not an error (#335).
+                Ok(false) => {
+                    result.summary.push(format!(
+                        "Route {}/{} already absent",
+                        route.destination, route.prefix_len
+                    ));
                 }
                 Err(e) => {
                     if options.continue_on_error {
@@ -797,7 +811,9 @@ async fn del_address(conn: &Connection<Route>, addr: &DeclaredAddress) -> Result
         .await
 }
 
-async fn del_route(conn: &Connection<Route>, route: &DeclaredRoute) -> Result<()> {
+/// `Ok(true)` when the route was deleted, `Ok(false)` when the kernel
+/// no longer had it.
+async fn del_route(conn: &Connection<Route>, route: &DeclaredRoute) -> Result<bool> {
     // The kernel matches a route delete on its key (dst, prefix,
     // table) plus any specified attributes. We replay the same
     // gateway/dev/metric/table the diff recorded so the delete is
@@ -817,7 +833,7 @@ async fn del_route(conn: &Connection<Route>, route: &DeclaredRoute) -> Result<()
             if let Some(table) = route.table {
                 config = config.table(table);
             }
-            conn.del_route(config).await
+            conn.del_route_if_exists(config).await
         }
         IpAddr::V6(dst) => {
             let mut config = Ipv6Route::from_addr(dst, route.prefix_len);
@@ -833,7 +849,7 @@ async fn del_route(conn: &Connection<Route>, route: &DeclaredRoute) -> Result<()
             if let Some(table) = route.table {
                 config = config.table(table);
             }
-            conn.del_route(config).await
+            conn.del_route_if_exists(config).await
         }
     }
 }

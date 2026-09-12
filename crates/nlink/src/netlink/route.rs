@@ -1534,6 +1534,37 @@ impl Connection<Route> {
             .map_err(|e| e.with_context("del_route"))
     }
 
+    /// Delete a route if it exists. `Ok(true)` if the kernel removed
+    /// it, `Ok(false)` if there was nothing to remove (`ESRCH` /
+    /// `ENOENT`).
+    ///
+    /// The table-aware, full-key sibling of
+    /// [`Self::del_route_v4_if_exists`] / [`Self::del_route_v6_if_exists`],
+    /// which take a bare destination and so can only name a main-table
+    /// route. Pass the same gateway / device / metric / table the route
+    /// was added with; newer kernels answer `ESRCH` to a partial key,
+    /// and that is then reported as "absent" (#335).
+    ///
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// use nlink::netlink::route::Ipv4Route;
+    /// let gone = conn
+    ///     .del_route_if_exists(Ipv4Route::new("10.2.0.0", 24).dev("eth1").table(100))
+    ///     .await?;
+    /// # let _ = gone;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_route_if_exists"))]
+    pub async fn del_route_if_exists<R: RouteConfig>(&self, config: R) -> Result<bool> {
+        match self.del_route(config).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.is_not_found() || e.errno() == Some(libc::ESRCH) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Delete an IPv4 route by destination.
     ///
     /// # Example

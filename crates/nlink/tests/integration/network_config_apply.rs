@@ -502,3 +502,148 @@ async fn purge_removes_static_route_keeps_connected_route() -> Result<()> {
     })
     .await
 }
+
+/// #333 / #335 — a route declared into a non-main table (VRF-style)
+/// is added by apply, and when it leaves the declaration a purging
+/// apply removes it. Before the fix purge walked table 254 only, so
+/// the declared table was a one-way street. A table the config never
+/// mentions stays untouched, and `purge_tables` reaches a table the
+/// config has just stopped declaring into.
+#[tokio::test]
+async fn purge_reaches_the_tables_the_config_declares_into() -> Result<()> {
+    nlink::require_root!();
+
+    with_timeout(async {
+        use std::net::{IpAddr, Ipv4Addr};
+
+        use nlink::netlink::config::ApplyOptions;
+        use nlink::netlink::link::DummyLink;
+        use nlink::netlink::route::Ipv4Route;
+
+        let ns = TestNamespace::new("purge-table")?;
+        let conn = conn_in_ns(&ns)?;
+        conn.add_link(DummyLink::new("eth0")).await?;
+        conn.set_link_up("eth0").await?;
+
+        // Somebody else's table: must never be touched.
+        conn.add_route(Ipv4Route::from_addr(Ipv4Addr::new(10, 200, 0, 0), 24).dev("eth0").table(200))
+            .await?;
+
+        let in_table = |routes: &[nlink::RouteMessage], a: Ipv4Addr, table: u32| {
+            routes
+                .iter()
+                .any(|r| r.destination() == Some(&IpAddr::V4(a)) && r.table_id() == table)
+        };
+
+        // Declare two routes into table 100; both land.
+        let cfg = NetworkConfig::new()
+            .link("eth0", |b| b.dummy())
+            .route("10.1.0.0/24", |r| r.dev("eth0").table(100))
+            .expect("valid CIDR")
+            .route("10.2.0.0/24", |r| r.dev("eth0").table(100))
+            .expect("valid CIDR");
+        let _ = cfg.apply_with_options(&conn, ApplyOptions::default().with_purge(true)).await?;
+        let routes = conn.get_routes().await?;
+        assert!(in_table(&routes, Ipv4Addr::new(10, 1, 0, 0), 100));
+        assert!(in_table(&routes, Ipv4Addr::new(10, 2, 0, 0), 100));
+
+        // Drop 10.2.0.0/24 from the declaration: a purging apply
+        // removes it, keeps its sibling, leaves table 200 alone.
+        let cfg = NetworkConfig::new()
+            .link("eth0", |b| b.dummy())
+            .route("10.1.0.0/24", |r| r.dev("eth0").table(100))
+            .expect("valid CIDR");
+        let diff = cfg
+            .diff_with_options(&conn, DiffOptions::default().purge(true))
+            .await?;
+        assert_eq!(
+            diff.routes_to_remove.len(),
+            1,
+            "exactly the dropped table-100 route; got {:?}",
+            diff.routes_to_remove
+        );
+        let result = cfg
+            .apply_with_options(&conn, ApplyOptions::default().with_purge(true))
+            .await?;
+        assert_eq!(result.changes_made, 1, "{result:?}");
+        let routes = conn.get_routes().await?;
+        assert!(!in_table(&routes, Ipv4Addr::new(10, 2, 0, 0), 100), "dropped route purged");
+        assert!(in_table(&routes, Ipv4Addr::new(10, 1, 0, 0), 100), "declared route kept");
+        assert!(in_table(&routes, Ipv4Addr::new(10, 200, 0, 0), 200), "unowned table untouched");
+
+        // Drop the last table-100 route: without purge_tables the
+        // table falls out of scope and the leftover stays…
+        let cfg = NetworkConfig::new().link("eth0", |b| b.dummy());
+        let _ = cfg.apply_with_options(&conn, ApplyOptions::default().with_purge(true)).await?;
+        let routes = conn.get_routes().await?;
+        assert!(
+            in_table(&routes, Ipv4Addr::new(10, 1, 0, 0), 100),
+            "a table the config no longer mentions is out of scope"
+        );
+        // …and with it, the caller who owns table 100 gets it emptied.
+        let result = cfg
+            .apply_with_options(
+                &conn,
+                ApplyOptions::default().with_purge(true).with_purge_tables([100]),
+            )
+            .await?;
+        assert_eq!(result.changes_made, 1, "{result:?}");
+        let routes = conn.get_routes().await?;
+        assert!(!in_table(&routes, Ipv4Addr::new(10, 1, 0, 0), 100));
+        assert!(in_table(&routes, Ipv4Addr::new(10, 200, 0, 0), 200), "still untouched");
+
+        // Idempotent.
+        let again = cfg
+            .apply_with_options(
+                &conn,
+                ApplyOptions::default().with_purge(true).with_purge_tables([100]),
+            )
+            .await?;
+        assert_eq!(again.changes_made, 0, "{again:?}");
+        Ok(())
+    })
+    .await
+}
+
+/// #335 — a purge whose route vanished between diff and apply is not
+/// an error: the goal state is reached, the apply reports it as
+/// already absent and counts no change.
+#[tokio::test]
+async fn purge_tolerates_a_route_removed_between_diff_and_apply() -> Result<()> {
+    nlink::require_root!();
+
+    with_timeout(async {
+        use std::net::Ipv4Addr;
+
+        use nlink::netlink::link::DummyLink;
+        use nlink::netlink::route::Ipv4Route;
+
+        let ns = TestNamespace::new("purge-race")?;
+        let conn = conn_in_ns(&ns)?;
+        conn.add_link(DummyLink::new("eth0")).await?;
+        conn.set_link_up("eth0").await?;
+        let stale = Ipv4Route::from_addr(Ipv4Addr::new(10, 9, 0, 0), 24).dev("eth0");
+        conn.add_route(stale.clone()).await?;
+
+        let cfg = NetworkConfig::new().link("eth0", |b| b.dummy());
+        let diff = cfg
+            .diff_with_options(&conn, DiffOptions::default().purge(true))
+            .await?;
+        assert_eq!(diff.routes_to_remove.len(), 1);
+
+        // Someone else removes it first.
+        assert!(conn.del_route_if_exists(stale.clone()).await?);
+        assert!(!conn.del_route_if_exists(stale).await?, "second delete reports absent");
+
+        let result = diff.apply(&conn, Default::default()).await?;
+        assert_eq!(result.changes_made, 0, "{result:?}");
+        assert!(result.errors.is_empty(), "{result:?}");
+        assert!(
+            result.summary.iter().any(|l| l.contains("already absent")),
+            "{:?}",
+            result.summary
+        );
+        Ok(())
+    })
+    .await
+}
