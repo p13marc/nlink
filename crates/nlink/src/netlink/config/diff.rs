@@ -20,7 +20,7 @@ use crate::netlink::{
     messages::{AddressMessage, LinkMessage, RouteMessage, TcMessage},
     protocol::Route,
     tc::{
-        ClsactConfig, FqCodelConfig, HtbQdiscConfig, IngressConfig, NetemConfig, PrioConfig,
+        ClsactConfig, FqCodelConfig, HtbQdiscConfig, IngressConfig, PrioConfig,
         QdiscConfig, SfqConfig, TbfConfig,
     },
     types::{addr::Scope, route::RouteProtocol, route::RouteType},
@@ -959,53 +959,17 @@ fn qdisc_params_match(declared: &DeclaredQdiscType, existing_opts: Option<&[u8]>
 }
 
 /// Render the `TCA_OPTIONS` payload bytes for a declared qdisc type.
-/// Mirrors the typed-config construction in `apply.rs::add_qdisc` —
-/// kept in sync by being the exact same `match`.
+/// Mirrors the typed-config construction in `apply.rs::add_qdisc`;
+/// netem goes through the one shared lowering,
+/// `DeclaredQdiscType::netem_config` (#332).
 fn declared_options_bytes(t: &DeclaredQdiscType) -> Vec<u8> {
     let mut builder = MessageBuilder::new(0, 0);
     let start = builder.len();
     let write_result: Result<()> = match t {
-        DeclaredQdiscType::Netem {
-            delay_us,
-            jitter_us,
-            loss_percent,
-            limit,
-            duplicate_percent,
-            corrupt_percent,
-            reorder_percent,
-            loss_correlation,
-            delay_correlation,
-        } => {
-            let mut cfg = NetemConfig::new();
-            if let Some(d) = delay_us {
-                cfg = cfg.delay(Duration::from_micros(*d as u64));
-            }
-            if let Some(j) = jitter_us {
-                cfg = cfg.jitter(Duration::from_micros(*j as u64));
-            }
-            if let Some(l) = loss_percent {
-                cfg = cfg.loss(crate::util::Percent::new(*l));
-            }
-            if let Some(lim) = limit {
-                cfg = cfg.limit(*lim);
-            }
-            if let Some(d) = duplicate_percent {
-                cfg = cfg.duplicate(crate::util::Percent::new(*d));
-            }
-            if let Some(c) = corrupt_percent {
-                cfg = cfg.corrupt(crate::util::Percent::new(*c));
-            }
-            if let Some(r) = reorder_percent {
-                cfg = cfg.reorder(crate::util::Percent::new(*r));
-            }
-            if let Some(corr) = loss_correlation {
-                cfg = cfg.loss_correlation(crate::util::Percent::new(*corr));
-            }
-            if let Some(corr) = delay_correlation {
-                cfg = cfg.delay_correlation(crate::util::Percent::new(*corr));
-            }
-            cfg.build().write_options(&mut builder)
-        }
+        DeclaredQdiscType::Netem { .. } => t
+            .netem_config()
+            .expect("matched the Netem arm")
+            .write_options(&mut builder),
         DeclaredQdiscType::Htb { default_class } => {
             HtbQdiscConfig::new()
                 .default_class(*default_class)
@@ -1249,6 +1213,11 @@ mod tests {
             reorder_percent: None,
             loss_correlation: None,
             delay_correlation: None,
+            rate_bps: None,
+            duplicate_correlation: None,
+            corrupt_correlation: None,
+            reorder_correlation: None,
+            gap: None,
         };
         assert_eq!(declared_options_bytes(&cfg), declared_options_bytes(&cfg));
     }
@@ -1265,6 +1234,11 @@ mod tests {
             reorder_percent: None,
             loss_correlation: None,
             delay_correlation: None,
+            rate_bps: None,
+            duplicate_correlation: None,
+            corrupt_correlation: None,
+            reorder_correlation: None,
+            gap: None,
         };
         let b = DeclaredQdiscType::Netem {
             delay_us: Some(200_000),
@@ -1276,6 +1250,11 @@ mod tests {
             reorder_percent: None,
             loss_correlation: None,
             delay_correlation: None,
+            rate_bps: None,
+            duplicate_correlation: None,
+            corrupt_correlation: None,
+            reorder_correlation: None,
+            gap: None,
         };
         assert_ne!(declared_options_bytes(&a), declared_options_bytes(&b));
     }

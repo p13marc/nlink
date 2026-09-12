@@ -20,7 +20,7 @@ use crate::netlink::{
     protocol::Route,
     route::{Ipv4Route, Ipv6Route},
     tc::{
-        ClsactConfig, FqCodelConfig, HtbQdiscConfig, IngressConfig, NetemConfig, PrioConfig,
+        ClsactConfig, FqCodelConfig, HtbQdiscConfig, IngressConfig, PrioConfig,
         SfqConfig, TbfConfig,
     },
 };
@@ -856,46 +856,9 @@ async fn del_route(conn: &Connection<Route>, route: &DeclaredRoute) -> Result<bo
 
 async fn add_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Result<()> {
     match &qdisc.qdisc_type {
-        DeclaredQdiscType::Netem {
-            delay_us,
-            jitter_us,
-            loss_percent,
-            limit,
-            duplicate_percent,
-            corrupt_percent,
-            reorder_percent,
-            loss_correlation,
-            delay_correlation,
-        } => {
-            let mut config = NetemConfig::new();
-            if let Some(delay) = delay_us {
-                config = config.delay(Duration::from_micros(*delay as u64));
-            }
-            if let Some(jitter) = jitter_us {
-                config = config.jitter(Duration::from_micros(*jitter as u64));
-            }
-            if let Some(loss) = loss_percent {
-                config = config.loss(crate::util::Percent::new(*loss));
-            }
-            if let Some(lim) = limit {
-                config = config.limit(*lim);
-            }
-            if let Some(d) = duplicate_percent {
-                config = config.duplicate(crate::util::Percent::new(*d));
-            }
-            if let Some(c) = corrupt_percent {
-                config = config.corrupt(crate::util::Percent::new(*c));
-            }
-            if let Some(r) = reorder_percent {
-                config = config.reorder(crate::util::Percent::new(*r));
-            }
-            if let Some(corr) = loss_correlation {
-                config = config.loss_correlation(crate::util::Percent::new(*corr));
-            }
-            if let Some(corr) = delay_correlation {
-                config = config.delay_correlation(crate::util::Percent::new(*corr));
-            }
-            conn.add_qdisc(&qdisc.dev, config.build()).await
+        DeclaredQdiscType::Netem { .. } => {
+            let config = qdisc.qdisc_type.netem_config().expect("matched the Netem arm");
+            conn.add_qdisc(&qdisc.dev, config).await
         }
         DeclaredQdiscType::Htb { default_class } => {
             let config = HtbQdiscConfig::new().default_class(*default_class);
@@ -995,46 +958,9 @@ async fn replace_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Resul
 
     // Atomic replace via NLM_F_REPLACE on RTM_NEWQDISC.
     match &qdisc.qdisc_type {
-        DeclaredQdiscType::Netem {
-            delay_us,
-            jitter_us,
-            loss_percent,
-            limit,
-            duplicate_percent,
-            corrupt_percent,
-            reorder_percent,
-            loss_correlation,
-            delay_correlation,
-        } => {
-            let mut cfg = NetemConfig::new();
-            if let Some(d) = delay_us {
-                cfg = cfg.delay(Duration::from_micros(*d as u64));
-            }
-            if let Some(j) = jitter_us {
-                cfg = cfg.jitter(Duration::from_micros(*j as u64));
-            }
-            if let Some(l) = loss_percent {
-                cfg = cfg.loss(crate::util::Percent::new(*l));
-            }
-            if let Some(lim) = limit {
-                cfg = cfg.limit(*lim);
-            }
-            if let Some(d) = duplicate_percent {
-                cfg = cfg.duplicate(crate::util::Percent::new(*d));
-            }
-            if let Some(c) = corrupt_percent {
-                cfg = cfg.corrupt(crate::util::Percent::new(*c));
-            }
-            if let Some(r) = reorder_percent {
-                cfg = cfg.reorder(crate::util::Percent::new(*r));
-            }
-            if let Some(corr) = loss_correlation {
-                cfg = cfg.loss_correlation(crate::util::Percent::new(*corr));
-            }
-            if let Some(corr) = delay_correlation {
-                cfg = cfg.delay_correlation(crate::util::Percent::new(*corr));
-            }
-            conn.replace_qdisc(&qdisc.dev, cfg.build()).await
+        DeclaredQdiscType::Netem { .. } => {
+            let cfg = qdisc.qdisc_type.netem_config().expect("matched the Netem arm");
+            conn.replace_qdisc(&qdisc.dev, cfg).await
         }
         DeclaredQdiscType::Htb { default_class } => {
             let cfg = HtbQdiscConfig::new().default_class(*default_class);

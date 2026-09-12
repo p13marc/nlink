@@ -6,6 +6,35 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Declarative netem reaches parity with `NetemConfig` (#332).**
+  `QdiscBuilder::netem` exposed `delay_ms`/`jitter_ms` and the
+  percentages but no `rate`, no microsecond jitter, and three of the
+  four correlations were missing — including `reorder_correlation_pct`,
+  which the `reorder_pct` doc had named since 0.21 and which did not
+  exist. An impairment written as `rate 100mbit jitter 250us` therefore
+  could not be declared, so downstream kept netem on an imperative
+  side path outside the `NetworkConfig` diff/idempotency/purge
+  treatment its addresses and routes get.
+
+  New on `QdiscBuilder`: `rate(Rate)`, `delay(Duration)`,
+  `jitter(Duration)`, `jitter_us`, `reorder_correlation_pct`,
+  `duplicate_correlation_pct`, `corrupt_correlation_pct`, `gap`. The
+  `Netem` variant gains the matching fields (`rate_bps` — bytes per
+  second, tc(8)'s `bps`, like `Tbf::rate_bps`; the three correlations;
+  `gap`), all optional, so a JSON document written before them still
+  reads. `delay_ms` / `jitter_ms` now saturate instead of wrapping
+  above 4 294 967 ms.
+
+  The declarative → imperative lowering was three hand-copied `match`
+  arms (add, replace, and the diff's options renderer) that every new
+  field had to reach; it is one function now
+  (`DeclaredQdiscType::netem_config`), and a unit test asserts a fully
+  specified declaration lowers to the `NetemConfig` built by hand. The
+  live test reads the installed qdisc back through the parsed
+  `QdiscOptions::Netem` and checks rate, 250 µs jitter, gap and the
+  reorder correlation — the existing declarative-qdisc test only
+  checked that *a* netem existed.
+
 - **`DiffOptions::purge_tables` / `ApplyOptions::with_purge_tables`,
   and `Connection<Route>::del_route_if_exists<R: RouteConfig>`
   (#333, #335).** The first names extra route tables a purge may

@@ -1,6 +1,7 @@
 //! Core types for declarative network configuration.
 
 use std::net::IpAddr;
+use std::time::Duration;
 
 pub use crate::netlink::link::{
     AdSelect as BondAdSelect, LacpRate as BondLacpRate, NetkitMode, NetkitPolicy, NetkitScrub,
@@ -1410,6 +1411,85 @@ pub enum QdiscParent {
 }
 
 impl DeclaredQdiscType {
+    /// Lower a `Netem` declaration to the imperative [`NetemConfig`].
+    /// `None` for every other variant.
+    ///
+    /// The one place the declarative → imperative netem mapping lives.
+    /// It used to be three hand-copied `match` arms (`add_qdisc`,
+    /// `replace_qdisc`, the diff's options renderer) that a new field
+    /// had to reach all of; `rate` and the correlations arrived here
+    /// once (#332).
+    pub(crate) fn netem_config(&self) -> Option<crate::netlink::tc::NetemConfig> {
+        use crate::netlink::tc::NetemConfig;
+        use crate::util::{Percent, Rate};
+
+        let DeclaredQdiscType::Netem {
+            delay_us,
+            jitter_us,
+            loss_percent,
+            limit,
+            duplicate_percent,
+            corrupt_percent,
+            reorder_percent,
+            loss_correlation,
+            delay_correlation,
+            rate_bps,
+            duplicate_correlation,
+            corrupt_correlation,
+            reorder_correlation,
+            gap,
+        } = self
+        else {
+            return None;
+        };
+        let mut cfg = NetemConfig::new();
+        if let Some(d) = delay_us {
+            cfg = cfg.delay(Duration::from_micros(u64::from(*d)));
+        }
+        if let Some(j) = jitter_us {
+            cfg = cfg.jitter(Duration::from_micros(u64::from(*j)));
+        }
+        if let Some(l) = loss_percent {
+            cfg = cfg.loss(Percent::new(*l));
+        }
+        if let Some(lim) = limit {
+            cfg = cfg.limit(*lim);
+        }
+        if let Some(d) = duplicate_percent {
+            cfg = cfg.duplicate(Percent::new(*d));
+        }
+        if let Some(c) = corrupt_percent {
+            cfg = cfg.corrupt(Percent::new(*c));
+        }
+        if let Some(r) = reorder_percent {
+            cfg = cfg.reorder(Percent::new(*r));
+        }
+        if let Some(corr) = loss_correlation {
+            cfg = cfg.loss_correlation(Percent::new(*corr));
+        }
+        if let Some(corr) = delay_correlation {
+            cfg = cfg.delay_correlation(Percent::new(*corr));
+        }
+        if let Some(bps) = rate_bps {
+            cfg = cfg.rate(Rate::bytes_per_sec(*bps));
+        }
+        if let Some(corr) = duplicate_correlation {
+            cfg = cfg.duplicate_correlation(Percent::new(*corr));
+        }
+        if let Some(corr) = corrupt_correlation {
+            cfg = cfg.corrupt_correlation(Percent::new(*corr));
+        }
+        if let Some(corr) = reorder_correlation {
+            cfg = cfg.reorder_correlation(Percent::new(*corr));
+        }
+        if let Some(g) = gap {
+            cfg = cfg.gap(*g);
+        }
+        Some(cfg.build())
+    }
+}
+
+impl DeclaredQdiscType {
     /// The parent slot this kind must occupy, overriding whatever the
     /// declaration says.
     ///
@@ -1458,6 +1538,19 @@ pub enum DeclaredQdiscType {
         /// Delay-correlation between adjacent packets
         /// (netem `delay <t> <jitter> <corr>%`).
         delay_correlation: Option<f64>,
+        /// Rate limit in **bytes** per second (netem `rate`; tc(8)'s
+        /// `bps` unit, as [`Tbf::rate_bps`](Self::Tbf)). Set through
+        /// [`QdiscBuilder::rate`], which takes a typed
+        /// [`Rate`](crate::util::Rate). Added in 0.27 (#332).
+        rate_bps: Option<u64>,
+        /// Duplicate-correlation (netem `duplicate <p>% <corr>%`).
+        duplicate_correlation: Option<f64>,
+        /// Corrupt-correlation (netem `corrupt <p>% <corr>%`).
+        corrupt_correlation: Option<f64>,
+        /// Reorder-correlation (netem `reorder <p>% <corr>%`).
+        reorder_correlation: Option<f64>,
+        /// Reorder gap in packets (netem `gap`).
+        gap: Option<u32>,
     },
     /// Hierarchical Token Bucket.
     Htb { default_class: u32 },
@@ -1469,6 +1562,7 @@ pub enum DeclaredQdiscType {
     },
     /// Token Bucket Filter.
     Tbf {
+        /// Rate in **bytes** per second — tc(8)'s `bps`, not bits.
         rate_bps: u64,
         burst_bytes: u32,
         limit_bytes: Option<u32>,
@@ -1529,14 +1623,19 @@ impl QdiscBuilder {
             reorder_percent: None,
             loss_correlation: None,
             delay_correlation: None,
+            rate_bps: None,
+            duplicate_correlation: None,
+            corrupt_correlation: None,
+            reorder_correlation: None,
+            gap: None,
         });
         self
     }
 
-    /// Set netem delay in milliseconds.
+    /// Set netem delay in milliseconds. Saturates at `u32::MAX` µs.
     pub fn delay_ms(mut self, ms: u32) -> Self {
         if let Some(DeclaredQdiscType::Netem { delay_us, .. }) = &mut self.qdisc_type {
-            *delay_us = Some(ms * 1000);
+            *delay_us = Some(ms.saturating_mul(1000));
         }
         self
     }
@@ -1549,10 +1648,53 @@ impl QdiscBuilder {
         self
     }
 
-    /// Set netem jitter in milliseconds.
+    /// Set netem delay as a [`Duration`] — the same type
+    /// `NetemConfig::delay` takes, so sub-millisecond values need no
+    /// unit arithmetic (#332). Saturates at `u32::MAX` µs.
+    pub fn delay(self, delay: Duration) -> Self {
+        self.delay_us(delay.as_micros().min(u32::MAX as u128) as u32)
+    }
+
+    /// Set netem jitter in milliseconds. Saturates at `u32::MAX` µs.
     pub fn jitter_ms(mut self, ms: u32) -> Self {
         if let Some(DeclaredQdiscType::Netem { jitter_us, .. }) = &mut self.qdisc_type {
-            *jitter_us = Some(ms * 1000);
+            *jitter_us = Some(ms.saturating_mul(1000));
+        }
+        self
+    }
+
+    /// Set netem jitter in microseconds (#332).
+    pub fn jitter_us(mut self, us: u32) -> Self {
+        if let Some(DeclaredQdiscType::Netem { jitter_us, .. }) = &mut self.qdisc_type {
+            *jitter_us = Some(us);
+        }
+        self
+    }
+
+    /// Set netem jitter as a [`Duration`] (#332). Saturates at
+    /// `u32::MAX` µs.
+    pub fn jitter(self, jitter: Duration) -> Self {
+        self.jitter_us(jitter.as_micros().min(u32::MAX as u128) as u32)
+    }
+
+    /// Set the netem rate limit (netem `rate`), typed (#332).
+    ///
+    /// Stored as bytes per second, the kernel's unit and the one
+    /// `NetemConfig::rate` writes — so `Rate::mbit(100)` here and
+    /// there install the same shaper.
+    pub fn rate(mut self, rate: crate::util::Rate) -> Self {
+        if let Some(DeclaredQdiscType::Netem { rate_bps, .. }) = &mut self.qdisc_type {
+            *rate_bps = Some(rate.as_bytes_per_sec());
+        }
+        self
+    }
+
+    /// Set the netem reorder gap in packets (netem `gap`). Only
+    /// meaningful with [`Self::reorder_pct`]; `NetemConfig` forces a
+    /// gap of 1 when reorder is set and no gap is given.
+    pub fn gap(mut self, packets: u32) -> Self {
+        if let Some(DeclaredQdiscType::Netem { gap, .. }) = &mut self.qdisc_type {
+            *gap = Some(packets);
         }
         self
     }
@@ -1644,6 +1786,38 @@ impl QdiscBuilder {
             &mut self.qdisc_type
         {
             *delay_correlation = Some(percent.as_percent());
+        }
+        self
+    }
+
+    /// Set netem reorder correlation — the second argument of
+    /// `NetemConfig::reorder`. The doc on [`Self::reorder_pct`] has
+    /// named this setter since 0.21; it exists as of 0.27 (#332).
+    pub fn reorder_correlation_pct(mut self, percent: crate::util::Percent) -> Self {
+        if let Some(DeclaredQdiscType::Netem { reorder_correlation, .. }) =
+            &mut self.qdisc_type
+        {
+            *reorder_correlation = Some(percent.as_percent());
+        }
+        self
+    }
+
+    /// Set netem duplicate correlation (`NetemConfig::duplicate_correlation`).
+    pub fn duplicate_correlation_pct(mut self, percent: crate::util::Percent) -> Self {
+        if let Some(DeclaredQdiscType::Netem { duplicate_correlation, .. }) =
+            &mut self.qdisc_type
+        {
+            *duplicate_correlation = Some(percent.as_percent());
+        }
+        self
+    }
+
+    /// Set netem corrupt correlation (`NetemConfig::corrupt_correlation`).
+    pub fn corrupt_correlation_pct(mut self, percent: crate::util::Percent) -> Self {
+        if let Some(DeclaredQdiscType::Netem { corrupt_correlation, .. }) =
+            &mut self.qdisc_type
+        {
+            *corrupt_correlation = Some(percent.as_percent());
         }
         self
     }
@@ -2220,6 +2394,105 @@ mod plan_228_tests {
         assert_eq!(dup, Some(100.0));
         assert_eq!(cor, Some(0.0));
     }
+
+    // ---- #332 — rate, Duration-typed delay/jitter, the missing correlations ----
+
+    fn netem_of(q: &DeclaredQdisc) -> &DeclaredQdiscType {
+        assert!(matches!(q.qdisc_type, DeclaredQdiscType::Netem { .. }));
+        &q.qdisc_type
+    }
+
+    #[test]
+    fn rate_is_stored_in_bytes_per_second_like_netem_config() {
+        use crate::util::Rate;
+        let q = QdiscBuilder::new("eth0").netem().rate(Rate::mbit(100)).build();
+        let DeclaredQdiscType::Netem { rate_bps, .. } = netem_of(&q) else { unreachable!() };
+        assert_eq!(*rate_bps, Some(12_500_000), "100 Mbit/s is 12.5 MB/s");
+        // …and the lowering hands NetemConfig the same Rate back.
+        let cfg = q.qdisc_type.netem_config().unwrap();
+        assert_eq!(cfg.rate, Some(Rate::mbit(100)));
+    }
+
+    #[test]
+    fn duration_setters_keep_sub_millisecond_precision() {
+        let q = QdiscBuilder::new("eth0")
+            .netem()
+            .delay(Duration::from_micros(1_500))
+            .jitter(Duration::from_micros(250))
+            .build();
+        let DeclaredQdiscType::Netem { delay_us, jitter_us, .. } = netem_of(&q) else {
+            unreachable!()
+        };
+        assert_eq!((*delay_us, *jitter_us), (Some(1_500), Some(250)));
+        let cfg = q.qdisc_type.netem_config().unwrap();
+        assert_eq!(cfg.delay, Some(Duration::from_micros(1_500)));
+        assert_eq!(cfg.jitter, Some(Duration::from_micros(250)));
+
+        // jitter_us is the µs sibling delay_us always had.
+        let q = QdiscBuilder::new("eth0").netem().jitter_us(250).build();
+        let DeclaredQdiscType::Netem { jitter_us, .. } = netem_of(&q) else { unreachable!() };
+        assert_eq!(*jitter_us, Some(250));
+    }
+
+    #[test]
+    fn millisecond_setters_saturate_instead_of_wrapping() {
+        // 4_294_968 ms × 1000 wrapped to 1000 µs before; now u32::MAX.
+        let q = QdiscBuilder::new("eth0")
+            .netem()
+            .delay_ms(u32::MAX)
+            .jitter_ms(u32::MAX)
+            .delay(Duration::from_secs(1 << 40))
+            .build();
+        let DeclaredQdiscType::Netem { delay_us, jitter_us, .. } = netem_of(&q) else {
+            unreachable!()
+        };
+        assert_eq!((*delay_us, *jitter_us), (Some(u32::MAX), Some(u32::MAX)));
+    }
+
+    #[test]
+    fn every_netem_config_knob_has_a_declarative_setter() {
+        use crate::netlink::tc::NetemConfig;
+        use crate::util::Rate;
+        // The declarative form now expresses everything NetemConfig
+        // does; the lowering of a fully-specified declaration equals
+        // the imperative config built by hand.
+        let q = QdiscBuilder::new("eth0")
+            .netem()
+            .delay(Duration::from_millis(20))
+            .jitter(Duration::from_micros(250))
+            .delay_correlation_pct(Percent::new(25.0))
+            .loss_pct(Percent::new(1.0))
+            .loss_correlation_pct(Percent::new(10.0))
+            .duplicate_pct(Percent::new(0.5))
+            .duplicate_correlation_pct(Percent::new(5.0))
+            .corrupt_pct(Percent::new(0.1))
+            .corrupt_correlation_pct(Percent::new(2.0))
+            .reorder_pct(Percent::new(3.0))
+            .reorder_correlation_pct(Percent::new(50.0))
+            .gap(5)
+            .rate(Rate::mbit(100))
+            .limit(2000)
+            .build();
+        let lowered = q.qdisc_type.netem_config().unwrap();
+        let by_hand = NetemConfig::new()
+            .delay(Duration::from_millis(20))
+            .jitter(Duration::from_micros(250))
+            .delay_correlation(Percent::new(25.0))
+            .loss(Percent::new(1.0))
+            .loss_correlation(Percent::new(10.0))
+            .duplicate(Percent::new(0.5))
+            .duplicate_correlation(Percent::new(5.0))
+            .corrupt(Percent::new(0.1))
+            .corrupt_correlation(Percent::new(2.0))
+            .reorder(Percent::new(3.0))
+            .reorder_correlation(Percent::new(50.0))
+            .gap(5)
+            .rate(Rate::mbit(100))
+            .limit(2000)
+            .build();
+        assert_eq!(format!("{lowered:?}"), format!("{by_hand:?}"));
+        assert!(QdiscBuilder::new("eth0").htb().build().qdisc_type.netem_config().is_none());
+    }
 }
 
 #[cfg(all(test, feature = "serde"))]
@@ -2258,6 +2531,34 @@ mod serde_roundtrip_tests {
             .expect("blackhole")
             .qdisc("eth0", |q| q.netem().delay_ms(100));
         assert_roundtrips(&cfg);
+    }
+
+    /// #332 — the new netem fields survive the trip, and a document
+    /// written before they existed (no `rate_bps`, no correlations)
+    /// still reads.
+    #[test]
+    fn netem_rate_and_correlations_roundtrip_and_are_optional() {
+        use crate::util::{Percent, Rate};
+        let cfg = NetworkConfig::new().qdisc("eth0", |q| {
+            q.netem()
+                .delay(Duration::from_micros(1_500))
+                .jitter(Duration::from_micros(250))
+                .rate(Rate::mbit(100))
+                .reorder_pct(Percent::new(3.0))
+                .reorder_correlation_pct(Percent::new(50.0))
+                .gap(5)
+        });
+        assert_roundtrips(&cfg);
+        let json = cfg.to_json_string().unwrap();
+        assert!(json.contains(r#""rate_bps":12500000"#), "{json}");
+
+        let old = r#"{"qdiscs":[{"dev":"eth0","qdisc-type":{"netem":{"delay_us":100000}}}]}"#;
+        let back = NetworkConfig::from_json_str(old).unwrap();
+        let DeclaredQdiscType::Netem { rate_bps, gap, delay_us, .. } = &back.qdiscs()[0].qdisc_type
+        else {
+            panic!("netem");
+        };
+        assert_eq!((*rate_bps, *gap, *delay_us), (None, None, Some(100_000)));
     }
 
     #[test]
