@@ -211,10 +211,16 @@ impl<'a> NamespaceSpec<'a> {
                 let parent = path.parent()?;
                 let run_dir = Path::new(NETNS_RUN_DIR);
                 // `/var/run` is a symlink to `/run` on every modern
-                // distribution; accept either spelling.
+                // distribution; accept either spelling. Only a
+                // canonicalization that *succeeded* on both sides
+                // counts — when neither directory exists yet (no
+                // namespace has been created on this host), two
+                // failures must not compare equal.
                 let is_run_dir = parent == run_dir
-                    || std::fs::canonicalize(parent).ok()
-                        == std::fs::canonicalize(run_dir).ok();
+                    || matches!(
+                        (std::fs::canonicalize(parent), std::fs::canonicalize(run_dir)),
+                        (Ok(a), Ok(b)) if a == b
+                    );
                 if !is_run_dir {
                     return None;
                 }
@@ -1705,6 +1711,11 @@ mod tests {
         assert_eq!(NamespaceSpec::Path(&run).etc_overlay_name(), Some("lab"));
         let elsewhere = PathBuf::from("/tmp/netns/lab");
         assert_eq!(NamespaceSpec::Path(&elsewhere).etc_overlay_name(), None);
+        // Neither directory exists: two failed canonicalizations are
+        // not "the same directory". (This is the case on a fresh CI
+        // container before any namespace has been created.)
+        let nowhere = PathBuf::from("/nonexistent-nlink-test/netns/lab");
+        assert_eq!(NamespaceSpec::Path(&nowhere).etc_overlay_name(), None);
         let procfs = PathBuf::from("/proc/1/ns/net");
         assert_eq!(NamespaceSpec::Path(&procfs).etc_overlay_name(), None);
         assert_eq!(NamespaceSpec::Pid(1).etc_overlay_name(), None);
