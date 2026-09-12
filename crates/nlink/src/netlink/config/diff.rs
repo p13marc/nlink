@@ -49,13 +49,29 @@ pub struct DiffOptions {
     /// - **Addresses**: only `global`-scope addresses on interfaces
     ///   the config declares addresses on. IPv6 link-local,
     ///   loopback, and any non-global scope are excluded.
-    /// - **Routes**: only `static`/`boot` protocol routes in the
-    ///   main table. Kernel, RA, DHCP and redirect routes are
-    ///   excluded.
+    /// - **Routes**: only `static`/`boot` protocol routes, and only
+    ///   in the tables the config **owns**: the main table (254),
+    ///   every table some declared route names via
+    ///   `RouteBuilder::table`, and any listed in
+    ///   [`Self::purge_tables`]. Kernel, RA, DHCP and redirect
+    ///   routes are excluded, and so is every table the config never
+    ///   mentions — `local`, `default`, and a VRF table nobody
+    ///   declared into. Until 0.27 the fence was the main table
+    ///   alone, so a route declared into a VRF table could be added
+    ///   and updated but never removed by reconcile (#333, #335).
     /// - **Links and qdiscs are never purged** — deleting
     ///   interfaces is too destructive to infer; use the imperative
     ///   `Connection::del_link` / `del_qdisc` for those.
     pub purge: bool,
+
+    /// Extra route tables to purge `static`/`boot` routes from, on
+    /// top of main and the tables the config declares into. For a
+    /// caller that owns a table but declares nothing into it *this*
+    /// run (the last VRF route left the config) — without it, the
+    /// table drops out of scope the moment it is empty in the
+    /// declaration and its leftovers stay. Ignored unless
+    /// [`Self::purge`] is on.
+    pub purge_tables: Vec<u32>,
 }
 
 impl DiffOptions {
@@ -64,6 +80,22 @@ impl DiffOptions {
     pub fn purge(mut self, on: bool) -> Self {
         self.purge = on;
         self
+    }
+
+    /// Add route tables to the purge scope. See [`Self::purge_tables`].
+    pub fn purge_tables(mut self, tables: impl IntoIterator<Item = u32>) -> Self {
+        self.purge_tables.extend(tables);
+        self
+    }
+
+    /// The route tables a purge with these options touches, given
+    /// the config: main, every table a declared route names, and
+    /// [`Self::purge_tables`].
+    pub(crate) fn purge_table_scope(&self, config: &NetworkConfig) -> HashSet<u32> {
+        let mut scope: HashSet<u32> = HashSet::from([254]);
+        scope.extend(config.routes.iter().filter_map(|r| r.table));
+        scope.extend(self.purge_tables.iter().copied());
+        scope
     }
 }
 
@@ -406,7 +438,7 @@ pub async fn compute_diff_with_options(
     diff_addresses(config, &current_addresses, &ifindex_to_name, opts.purge, &mut diff);
 
     // Diff routes
-    diff_routes(config, &current_routes, &ifindex_to_name, opts.purge, &mut diff);
+    diff_routes(config, &current_routes, &ifindex_to_name, opts, &mut diff);
 
     // Diff qdiscs
     diff_qdiscs(config, &current_qdiscs, &ifindex_to_name, &mut diff);
@@ -682,9 +714,10 @@ fn diff_routes(
     config: &NetworkConfig,
     current: &[RouteMessage],
     ifindex_to_name: &HashMap<u32, &str>,
-    purge: bool,
+    opts: &DiffOptions,
     diff: &mut ConfigDiff,
 ) {
+    let purge = opts.purge;
     // Plan 207d H3 — compare the FULL route identity (dst, prefix,
     // table, gateway, oif, metric) when deciding "no change",
     // not just (dst, prefix, table). Pre-0.19 a gateway/dev/metric
@@ -798,7 +831,11 @@ fn diff_routes(
 
     // Purge: remove admin/user routes the kernel has but the config
     // doesn't declare. Heavily fenced for safety:
-    //   - main table only (254) — leaves local/default/policy tables,
+    //   - only the tables the config owns: main (254), every table a
+    //     declared route names, and `opts.purge_tables` — leaves
+    //     local/default and any VRF table nobody declared into
+    //     (#333, #335: main-only made a declared VRF route a one-way
+    //     street — added and updated, never removed),
     //   - `static`/`boot` protocol only — never kernel-derived,
     //     RA, DHCP or redirect routes (those are dynamic / auto),
     //   - same route-type filter as the add path (unicast +
@@ -811,9 +848,10 @@ fn diff_routes(
         .iter()
         .map(|r| (r.destination, r.prefix_len, r.table.unwrap_or(254)))
         .collect();
+    let tables = opts.purge_table_scope(config);
 
     for r in current {
-        if r.table_id() != 254 {
+        if !tables.contains(&r.table_id()) {
             continue;
         }
         if !matches!(r.protocol(), RouteProtocol::Static | RouteProtocol::Boot) {
@@ -1419,6 +1457,119 @@ mod tests {
         assert!(!DiffOptions::default().purge);
         assert!(DiffOptions::default().purge(true).purge);
         assert!(!DiffOptions::default().purge(true).purge(false).purge);
+    }
+
+    // ---- #333 / #335 — purge scope beyond the main table ----
+
+    /// A kernel `static` unicast route in `table`, as the dump reports it.
+    fn kernel_static_route(dst: &str, plen: u8, table: u32) -> RouteMessage {
+        crate::netlink::messages::RouteMessageBuilder::new()
+            .destination(dst.parse().unwrap(), plen)
+            .table(table)
+            .protocol(RouteProtocol::Static)
+            .route_type(RouteType::Unicast)
+            .build()
+    }
+
+    fn purge_routes(config: &NetworkConfig, current: &[RouteMessage], opts: DiffOptions) -> Vec<(String, u32)> {
+        let mut diff = ConfigDiff::default();
+        diff_routes(config, current, &HashMap::new(), &opts, &mut diff);
+        diff.routes_to_remove
+            .iter()
+            .map(|r| (format!("{}/{}", r.destination, r.prefix_len), r.table.unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn purge_scope_is_main_plus_declared_plus_listed_tables() {
+        let config = NetworkConfig::new()
+            .route("10.1.0.0/24", |r| r.table(100))
+            .unwrap();
+        let opts = DiffOptions::default().purge(true);
+        assert_eq!(
+            opts.purge_table_scope(&config),
+            HashSet::from([254, 100]),
+            "main plus the table a declared route names"
+        );
+        let opts = DiffOptions::default().purge(true).purge_tables([200, 201]);
+        assert_eq!(opts.purge_table_scope(&config), HashSet::from([254, 100, 200, 201]));
+        assert_eq!(
+            DiffOptions::default().purge_table_scope(&NetworkConfig::new()),
+            HashSet::from([254]),
+            "a config with no routes owns main and nothing else"
+        );
+    }
+
+    #[test]
+    fn purge_removes_an_undeclared_route_from_a_declared_table() {
+        // Table 100 is owned: the config declares 10.1.0.0/24 into it.
+        // 10.2.0.0/24 in the same table left the declaration → purged.
+        let config = NetworkConfig::new()
+            .route("10.1.0.0/24", |r| r.table(100))
+            .unwrap();
+        let current = [
+            kernel_static_route("10.1.0.0", 24, 100),
+            kernel_static_route("10.2.0.0", 24, 100),
+        ];
+        let removed = purge_routes(&config, &current, DiffOptions::default().purge(true));
+        assert_eq!(removed, vec![("10.2.0.0/24".to_string(), 100)]);
+    }
+
+    #[test]
+    fn purge_leaves_tables_the_config_never_mentions_alone() {
+        // Table 100 is not owned by a config that only declares into
+        // main — its routes are somebody else's.
+        let config = NetworkConfig::new().route("10.1.0.0/24", |r| r).unwrap();
+        let current = [
+            kernel_static_route("10.1.0.0", 24, 254),
+            kernel_static_route("10.9.0.0", 24, 254),
+            kernel_static_route("10.2.0.0", 24, 100),
+        ];
+        let removed = purge_routes(&config, &current, DiffOptions::default().purge(true));
+        assert_eq!(
+            removed,
+            vec![("10.9.0.0/24".to_string(), 254)],
+            "only the undeclared main-table route; table 100 is out of scope"
+        );
+    }
+
+    #[test]
+    fn purge_tables_reaches_a_table_with_no_declared_route_left() {
+        // The last VRF route left the declaration; the caller still
+        // owns the table and says so.
+        let config = NetworkConfig::new();
+        let current = [kernel_static_route("10.2.0.0", 24, 100)];
+        assert!(
+            purge_routes(&config, &current, DiffOptions::default().purge(true)).is_empty(),
+            "without purge_tables the now-unmentioned table is left alone"
+        );
+        let removed = purge_routes(
+            &config,
+            &current,
+            DiffOptions::default().purge(true).purge_tables([100]),
+        );
+        assert_eq!(removed, vec![("10.2.0.0/24".to_string(), 100)]);
+    }
+
+    #[test]
+    fn purge_never_touches_local_or_kernel_protocol_routes_in_scope() {
+        let config = NetworkConfig::new()
+            .route("10.1.0.0/24", |r| r.table(100))
+            .unwrap();
+        let kernel_proto = crate::netlink::messages::RouteMessageBuilder::new()
+            .destination("10.3.0.0".parse().unwrap(), 24)
+            .table(100)
+            .protocol(RouteProtocol::Kernel)
+            .route_type(RouteType::Unicast)
+            .build();
+        let local = crate::netlink::messages::RouteMessageBuilder::new()
+            .destination("10.1.0.1".parse().unwrap(), 32)
+            .table(255)
+            .protocol(RouteProtocol::Kernel)
+            .route_type(RouteType::Local)
+            .build();
+        let removed = purge_routes(&config, &[kernel_proto, local], DiffOptions::default().purge(true));
+        assert!(removed.is_empty(), "got {removed:?}");
     }
 
     #[test]

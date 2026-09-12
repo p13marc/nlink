@@ -6,6 +6,17 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`DiffOptions::purge_tables` / `ApplyOptions::with_purge_tables`,
+  and `Connection<Route>::del_route_if_exists<R: RouteConfig>`
+  (#333, #335).** The first names extra route tables a purge may
+  clean — for the caller who owns a VRF table but has just stopped
+  declaring into it, which is exactly when the leftovers need
+  removing. The second is the table-aware, full-key sibling of
+  `del_route_v4_if_exists` / `del_route_v6_if_exists`, which take a
+  bare destination and can only name a main-table route; it reports
+  `ESRCH`/`ENOENT` as `Ok(false)` so replaying a `DeclaredRoute` does
+  not mean matching errno by hand.
+
 - **`Stack::apply_in_with(ns, ApplyOptions)` / `diff_in_with(ns,
   DiffOptions)`, plus `apply_with` / `diff_with` for the default
   namespace, and `facade::apply::{network_in_with,
@@ -18,6 +29,28 @@ All notable changes to this project will be documented in this file.
   plain forms are unchanged and use the defaults.
 
 ### Changed
+
+- **Purge reaches every table the config declares into, not just
+  main (#333, #335).** `DeclaredRouteBuilder::table` (0.26) let a
+  `NetworkConfig` declare routes into a VRF table, and the add/modify
+  diff keyed on `(dst, prefix, table)` correctly — but the purge loop
+  began with `if r.table_id() != 254 { continue }`, so a declared
+  VRF route that left the config stayed in the kernel until the
+  namespace died. Reconcile converged in one direction. The scope is
+  now main ∪ every table some declared route names ∪
+  `purge_tables`; tables the config never mentions (`local`,
+  `default`, somebody else's VRF) stay out of reach, which is the
+  safety fence the docs promised. The `static`/`boot` and route-type
+  fences are unchanged.
+
+  Also: a purge whose route vanished between diff and apply no longer
+  fails the apply. The issue text assumed the private `del_route`
+  helper already swallowed `ESRCH`; it did not — the error propagated
+  and, without `continue_on_error`, aborted the remaining removals.
+  It now goes through `del_route_if_exists` and reports the route as
+  already absent, counting no change. And the `ApplyOptions` rustdoc
+  no longer says `with_purge` "was removed in 0.19" four releases
+  after it came back.
 
 - **`Stack` bootstraps WireGuard links before the network layer
   (#330).** `apply_in` ran `NetworkConfig` first and `WireguardConfig`
