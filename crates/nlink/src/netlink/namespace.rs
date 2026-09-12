@@ -37,7 +37,10 @@
 
 use std::{
     fs::File,
-    os::unix::{ffi::OsStrExt, io::{AsRawFd, RawFd}},
+    os::{
+        fd::{AsFd, BorrowedFd},
+        unix::{ffi::OsStrExt, io::{AsRawFd, RawFd}},
+    },
     path::{Path, PathBuf},
 };
 
@@ -482,6 +485,16 @@ impl NamespaceFd {
 impl AsRawFd for NamespaceFd {
     fn as_raw_fd(&self) -> RawFd {
         self.file.as_raw_fd()
+    }
+}
+
+/// I/O-safe borrow of the namespace fd (#186). Pass to
+/// [`NetlinkSocket::new_in_namespace_fd`] or
+/// [`Connection::new_in_namespace_fd`] instead of the `RawFd` form, and
+/// the borrow checker keeps the fd alive for the call.
+impl AsFd for NamespaceFd {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.file.as_fd()
     }
 }
 
@@ -1104,7 +1117,14 @@ where
 
 /// List all named network namespaces.
 ///
-/// Returns the names of namespaces in `/var/run/netns/`.
+/// Returns the names of every entry in `/var/run/netns/` — including a
+/// **stale marker**: `ip netns add` creates the file and bind-mounts the
+/// namespace over it, and after a crash or a `umount` the empty file can
+/// remain with no namespace behind it. [`list_live`] filters those out
+/// through [`is_namespace_path`]. Names are `to_string_lossy`'d, so a
+/// non-UTF-8 name comes back mangled (the `Vec<String>` API predates the
+/// concern; use `std::fs::read_dir` on [`NETNS_RUN_DIR`] if the bytes
+/// matter).
 ///
 /// # Example
 ///
@@ -1140,6 +1160,20 @@ pub fn list() -> Result<Vec<String>> {
     }
 
     names.sort();
+    Ok(names)
+}
+
+/// [`list`], keeping only names with a live namespace behind them
+/// (#186).
+///
+/// A directory entry under [`NETNS_RUN_DIR`] is a namespace only while
+/// an `nsfs` mount sits on it; an unmounted marker file is what
+/// [`is_namespace_path`] rejects and what [`connection_for`] on that
+/// name would fail on with `EINVAL` from `setns`. Same ordering and
+/// `to_string_lossy` caveat as [`list`].
+pub fn list_live() -> Result<Vec<String>> {
+    let mut names = list()?;
+    names.retain(|name| is_namespace_path(PathBuf::from(NETNS_RUN_DIR).join(name)));
     Ok(names)
 }
 
@@ -1427,12 +1461,7 @@ fn prepare_etc_binds(ns_name: &str) -> Result<Vec<(std::ffi::CString, std::ffi::
             continue;
         }
 
-        let src_c = std::ffi::CString::new(src.as_os_str().as_encoded_bytes())
-            .map_err(|_| Error::InvalidMessage("null byte in path".into()))?;
-        let dst_c = std::ffi::CString::new(dst.as_os_str().as_encoded_bytes())
-            .map_err(|_| Error::InvalidMessage("null byte in path".into()))?;
-
-        binds.push((src_c, dst_c));
+        binds.push((path_to_cstring(&src)?, path_to_cstring(&dst)?));
     }
 
     Ok(binds)
@@ -1447,7 +1476,14 @@ fn prepare_etc_binds(ns_name: &str) -> Result<Vec<(std::ffi::CString, std::ffi::
 /// This mirrors the behavior of `ip netns exec <name> <cmd>`.
 ///
 /// If `/etc/netns/<ns_name>/` does not exist, the mount overlay step is skipped
-/// and behavior is identical to [`spawn`].
+/// and behavior is identical to [`spawn`] — including the child seeing the
+/// **host's** `/sys/class/net`. That is a deliberate divergence from
+/// `ip netns exec`, which always unshares and remounts `/sys` (#186): with
+/// nothing to overlay, a mount namespace buys the child only a sysfs view
+/// that nlink itself never reads, at the price of `CAP_SYS_ADMIN` and the
+/// container caveats below. A caller that wants the remount without an
+/// overlay can create an empty `/etc/netns/<ns>/` directory with one file
+/// in it that also exists in `/etc`.
 ///
 /// # What is fatal, and what is not
 ///
@@ -1702,6 +1738,16 @@ pub fn spawn_output_path_with_etc<P: AsRef<Path>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #186 — `NamespaceFd` borrows as an I/O-safe fd, the same fd the
+    /// raw accessor reports.
+    #[test]
+    fn namespace_fd_is_io_safe() {
+        let Ok(fd) = open_path("/proc/self/ns/net") else {
+            return; // no /proc (sandbox); nothing to check
+        };
+        assert_eq!(fd.as_fd().as_raw_fd(), fd.as_raw_fd());
+    }
 
     /// #331 — which specs can carry an `/etc/netns/<name>/` overlay.
     #[test]
