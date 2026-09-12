@@ -4,7 +4,33 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`Stack::apply_in_with(ns, ApplyOptions)` / `diff_in_with(ns,
+  DiffOptions)`, plus `apply_with` / `diff_with` for the default
+  namespace, and `facade::apply::{network_in_with,
+  wireguard_devices_in}` / `facade::diff::network_in_with` (#330).**
+  `facade::apply::network_in` called `cfg.apply(&conn)` with no way to
+  pass options, so a `Stack` could never purge — a reconcile-style
+  consumer that wanted undeclared addresses and routes removed had to
+  re-implement the three-call orchestration (nlink-lab did, ~120
+  lines). The new forms carry the options to the network layer; the
+  plain forms are unchanged and use the defaults.
+
 ### Changed
+
+- **`Stack` bootstraps WireGuard links before the network layer
+  (#330).** `apply_in` ran `NetworkConfig` first and `WireguardConfig`
+  — with its `ensure_devices` — last, so any network layer that put an
+  address on `wg0` or routed via a peer's tunnel address failed on a
+  link that did not exist yet. The order is now: declared WireGuard
+  links created and brought up (idempotent; the one mutation that
+  precedes the pre-flight diff, and it creates nothing the stack does
+  not declare) → pre-flight diff → network → nftables → WireGuard keys
+  and peers. A stack without a WireGuard layer is unaffected. The live
+  test declares an address on the tunnel and a route via the peer's
+  tunnel address, applies, re-applies as a no-op, drops the route and
+  purges it.
 
 - **`WireguardConfig::ensure_devices` brings every declared link up
   (#329).** It created the links and returned; `add_link` creates a

@@ -6,12 +6,23 @@
 //! calls in the right order. Apply order is the natural
 //! dependency direction:
 //!
+//! 0. **WireGuard links** (`WireguardConfig::ensure_devices`):
+//!    every declared `wgN` is created and brought up first, so
+//!    the network layer can address the tunnel and route via a
+//!    peer's tunnel address. Idempotent; a stack without a
+//!    WireGuard layer skips it (#330).
 //! 1. **RTNETLINK** (`NetworkConfig`): links, addresses,
 //!    routes, qdiscs — everything else references interfaces.
 //! 2. **nftables** (`NftablesConfig`): firewall rules can
 //!    reference interfaces from step 1.
-//! 3. **WireGuard** (`WireguardConfig`): VPN peers route
-//!    through links + filter through rules from steps 1 + 2.
+//! 3. **WireGuard** (`WireguardConfig`): keys and peers on the
+//!    links from step 0, routed through step 1, filtered by
+//!    step 2.
+//!
+//! The network layer takes [`ApplyOptions`] through
+//! [`Stack::apply_in_with`] (purge, dry-run, continue-on-error)
+//! and [`DiffOptions`] through [`Stack::diff_in_with`]; the
+//! plain `apply*`/`diff*` forms use the defaults.
 //!
 //! Each layer is optional; `Stack` skips layers that aren't
 //! set, so callers can use Stack as their one-stop
@@ -25,7 +36,9 @@
 //! the ovpn UAPI is still maturing).
 
 use crate::Result;
-use crate::netlink::config::{ApplyResult as NetworkApplyResult, ConfigDiff, NetworkConfig};
+use crate::netlink::config::{
+    ApplyOptions, ApplyResult as NetworkApplyResult, ConfigDiff, DiffOptions, NetworkConfig,
+};
 use crate::netlink::genl::wireguard::{
     WireguardApplyResult, WireguardConfig, WireguardConfigDiff,
 };
@@ -94,6 +107,11 @@ impl Stack {
         self.apply_in(NamespaceSpec::Default).await
     }
 
+    /// [`Self::apply`] with [`ApplyOptions`] for the network layer.
+    pub async fn apply_with(&self, opts: ApplyOptions) -> Result<StackApplyReport> {
+        self.apply_in_with(NamespaceSpec::Default, opts).await
+    }
+
     /// Apply every set layer in dependency order to a named
     /// namespace. See [`Self::apply`] for the pre-flight
     /// validation semantics.
@@ -106,13 +124,44 @@ impl Stack {
     /// process's namespace by PID (container support, #169). See
     /// [`Self::apply`] for the pre-flight validation semantics.
     pub async fn apply_in(&self, ns: NamespaceSpec<'_>) -> Result<StackApplyReport> {
+        self.apply_in_with(ns, ApplyOptions::default()).await
+    }
+
+    /// [`Self::apply_in`] with [`ApplyOptions`] for the network layer.
+    ///
+    /// A reconcile-style consumer needs `ApplyOptions::with_purge(true)`
+    /// to remove addresses and routes that left the declaration; the
+    /// stack could not pass it through before 0.27, so anyone wanting
+    /// purge had to re-implement the three-call orchestration
+    /// themselves (#330).
+    ///
+    /// **Order.** Declared WireGuard links are created and brought up
+    /// *before* the pre-flight diff and the network layer, because the
+    /// network layer routinely addresses the tunnel (`10.100.0.1/24 on
+    /// wg0`) and routes via a peer's tunnel address — both of which
+    /// need `wg0` to exist and be up. That bootstrap is the one kernel
+    /// mutation that precedes pre-flight validation; it is idempotent
+    /// and creates nothing the stack does not declare. Keys and peers
+    /// go on last, as before.
+    pub async fn apply_in_with(
+        &self,
+        ns: NamespaceSpec<'_>,
+        opts: ApplyOptions,
+    ) -> Result<StackApplyReport> {
+        // Step 0: the links the network layer is about to address.
+        if let Some(cfg) = &self.wireguard {
+            apply::wireguard_devices_in(ns.clone(), cfg).await?;
+        }
+
         // Pre-flight: validate every layer's diff succeeds
-        // before any kernel mutation.
-        let _validation = self.diff_in(ns.clone()).await?;
+        // before any further kernel mutation.
+        let _validation = self
+            .diff_in_with(ns.clone(), DiffOptions::default().purge(opts.purge))
+            .await?;
 
         let mut report = StackApplyReport::default();
         if let Some(cfg) = &self.network {
-            report.network = Some(apply::network_in(ns.clone(), cfg).await?);
+            report.network = Some(apply::network_in_with(ns.clone(), cfg, opts).await?);
         }
         if let Some(cfg) = &self.nftables {
             report.nftables_change_count = Some(apply::nftables_in(ns.clone(), cfg).await?);
@@ -129,6 +178,11 @@ impl Stack {
         self.diff_in(NamespaceSpec::Default).await
     }
 
+    /// [`Self::diff`] with [`DiffOptions`] for the network layer.
+    pub async fn diff_with(&self, opts: DiffOptions) -> Result<StackDiff> {
+        self.diff_in_with(NamespaceSpec::Default, opts).await
+    }
+
     /// Diff every set layer against a named namespace.
     pub async fn diff_in_namespace(&self, ns: &str) -> Result<StackDiff> {
         self.diff_in(NamespaceSpec::Named(ns)).await
@@ -138,9 +192,16 @@ impl Stack {
     /// named, path-referenced, or a process's namespace by PID
     /// (container support, #169).
     pub async fn diff_in(&self, ns: NamespaceSpec<'_>) -> Result<StackDiff> {
+        self.diff_in_with(ns, DiffOptions::default()).await
+    }
+
+    /// [`Self::diff_in`] with [`DiffOptions`] for the network layer —
+    /// `DiffOptions::default().purge(true)` shows the `-` lines a
+    /// purging [`Self::apply_in_with`] would delete.
+    pub async fn diff_in_with(&self, ns: NamespaceSpec<'_>, opts: DiffOptions) -> Result<StackDiff> {
         let mut out = StackDiff::default();
         if let Some(cfg) = &self.network {
-            out.network = Some(diff::network_in(ns.clone(), cfg).await?);
+            out.network = Some(diff::network_in_with(ns.clone(), cfg, opts).await?);
         }
         if let Some(cfg) = &self.nftables {
             out.nftables = Some(diff::nftables_in(ns.clone(), cfg).await?);
