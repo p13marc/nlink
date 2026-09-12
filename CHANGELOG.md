@@ -138,6 +138,30 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`NetdevInfo::driver()` is `None` for every real device, and the
+  docs said otherwise (#328).** The netdev-lifecycle recipe's table
+  had `driver | ✗ | ✅ (DRIVER=)`, the module docs said "uevents know
+  the driver", and five unit tests asserted `driver() == Some("veth")`
+  — against uevents they had synthesised themselves. The `net`
+  subsystem never emits `DRIVER=`: `dev_uevent()` adds it only for a
+  device with a driver bound, and a net-class device has none — the
+  driver binds to the bus parent (PCI, virtio, USB), whose uevents are
+  in another subsystem, go only to the initial netns, and carry no
+  `IFINDEX=` to join on. Measured across veth, dummy, bridge, vlan and
+  a virtio NIC. `DriverBound`/`DriverUnbound` have the same problem:
+  `KOBJ_BIND` fires on the bus device, so a `subsystem("net")` stream
+  never sees one.
+
+  The live test never looked at `driver()`, which is how the claim
+  survived; it now asserts `driver().is_none()` on a real veth and
+  `devtype() == Some("bridge")` on a real bridge — `DEVTYPE=`,
+  `DEVPATH=` and `SEQNUM=` are the fields the uevent side really
+  carries, and the table now says so. `NetdevInfo::devtype()` is new;
+  `driver()` and the two variants stay, documented as reachable only
+  by a kernel or driver that does emit the key. The unit tests keep
+  their synthetic `DRIVER=` as a marker that the uevent half was
+  joined, labelled as such.
+
 - **`NamespaceSpec::{spawn,spawn_output}_with_etc` silently dropped
   the `/etc/netns` overlay for `Path` (#331).** The doc said "falls
   back to regular `spawn_path` (no overlay)" for `Path` and `Pid`,

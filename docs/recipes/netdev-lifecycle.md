@@ -2,16 +2,21 @@
 
 How to get one typed stream — and one watch-cache — describing
 network devices with *both* their rtnetlink attributes and their
-driver/sysfs context.
+sysfs context (devpath, devtype).
 
 ## When to use this
 
 - You are writing a CNI plugin, a NIC inventory agent, a
   multi-tenant network manager, or anything that wants to answer
-  "which driver is behind ifindex 7?" without shelling out.
-- You need to react to a driver binding or unbinding, which
-  rtnetlink cannot tell you about at all.
+  "where in sysfs is ifindex 7, and what bus is it on?" without
+  shelling out or reading `/sys` from the wrong namespace.
 - You want a cache of devices that stays fresh without polling.
+
+What this does **not** answer is "which driver?". Net uevents carry
+no `DRIVER=` — the driver is bound to the bus parent (PCI, virtio,
+USB), whose uevents have no `IFINDEX=` to join on and go only to the
+initial namespace. Until 0.27 the table below said otherwise (#328).
+For a physical NIC's driver, ask ethtool.
 
 If you only need link attributes, use `Connection<Route>` and
 `RtnetlinkGroup::Link` directly — this recipe adds a second socket
@@ -27,9 +32,11 @@ Two sockets, two partial views:
 | ifindex | ✅ | ✅ (`IFINDEX=`) |
 | name | ✅ | ✅ (`INTERFACE=`) |
 | MTU, flags, master, kind | ✅ | ✗ |
-| driver | ✗ | ✅ (`DRIVER=`) |
 | sysfs devpath, bus parent | ✗ | ✅ (`DEVPATH=`) |
-| driver bind / unbind | ✗ | ✅ |
+| devtype (`bridge`, `vlan`, `bond`, …) | ✗ | ✅ (`DEVTYPE=`, for kinds that set one; not veth/dummy) |
+| stream ordering | ✗ | ✅ (`SEQNUM=`) |
+| driver | ✗ | ✗ — `DRIVER=` is never emitted for a net device |
+| driver bind / unbind | ✗ | ✗ — fires on the bus device, no `IFINDEX=` |
 | dump to resync from | ✅ | ✗ |
 
 Nothing orders the two against each other. Either can arrive
@@ -96,7 +103,10 @@ never come.
 `DriverBound` / `DriverUnbound` are the exception: they have no
 rtnetlink counterpart, so they can arrive for an ifindex that no
 `Added` was emitted for. Read them as statements about a driver,
-never about whether the device exists.
+never about whether the device exists — and do not wait for them:
+the kernel emits `bind`/`unbind` on the bus device, which is not in
+the `net` subsystem and carries no `IFINDEX=`, so in practice they
+never fire (#328).
 
 ### ifindex reuse is handled, but you should know how
 
