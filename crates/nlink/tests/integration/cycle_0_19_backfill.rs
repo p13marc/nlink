@@ -258,6 +258,72 @@ async fn plan_200_stack_apply_network_only_layer() -> Result<()> {
     .await
 }
 
+/// #330 — a stack whose network layer addresses the tunnel and routes
+/// via a peer's tunnel address. Before the fix the WireGuard links were
+/// created *after* the network layer (and left down), so this failed
+/// with "no such device" / ENETDOWN; and `ApplyOptions` could not reach
+/// the network layer at all, so a route that left the declaration was
+/// never purged.
+#[tokio::test]
+async fn stack_bootstraps_wireguard_links_before_the_network_layer_and_takes_options() -> Result<()>
+{
+    nlink::require_root!();
+    nlink::require_modules!("wireguard");
+    with_timeout(async {
+        use nlink::netlink::config::ApplyOptions;
+        use nlink::netlink::genl::wireguard::WireguardConfig;
+        use nlink::netlink::namespace::NamespaceSpec;
+
+        let ns = TestNamespace::new("p330-stack")?;
+        let wg = WireguardConfig::new().device("wgs0", |d| d.listen_port(51998));
+        let network = NetworkConfig::new()
+            .address("wgs0", "10.100.0.1/24")
+            .unwrap()
+            .route("10.2.0.0/24", |r| r.via("10.100.0.2"))
+            .unwrap();
+        let stack = nlink::facade::Stack::new().network(network).wireguard(wg.clone());
+
+        let report = stack
+            .apply_in_with(NamespaceSpec::Named(ns.name()), ApplyOptions::default())
+            .await?;
+        assert!(
+            report.network.as_ref().is_some_and(|r| r.changes_made == 2),
+            "address + route via the tunnel must both apply; got {report:?}"
+        );
+
+        let conn = ns.connection()?;
+        let routes = conn.get_routes().await?;
+        assert!(
+            routes.iter().any(|r| r.gateway().map(|g| g.to_string()) == Some("10.100.0.2".into())),
+            "route via the tunnel address must exist"
+        );
+
+        // Second apply is a no-op — the bootstrap is idempotent.
+        let again = stack
+            .apply_in_with(NamespaceSpec::Named(ns.name()), ApplyOptions::default())
+            .await?;
+        assert!(again.is_noop(), "re-apply must be a no-op; got {again:?}");
+
+        // Drop the route from the declaration; a purging apply removes it.
+        let network = NetworkConfig::new().address("wgs0", "10.100.0.1/24").unwrap();
+        let stack = nlink::facade::Stack::new().network(network).wireguard(wg);
+        let purged = stack
+            .apply_in_with(
+                NamespaceSpec::Named(ns.name()),
+                ApplyOptions::default().with_purge(true),
+            )
+            .await?;
+        assert!(!purged.is_noop(), "the purge removes the undeclared route");
+        let routes = conn.get_routes().await?;
+        assert!(
+            !routes.iter().any(|r| r.gateway().map(|g| g.to_string()) == Some("10.100.0.2".into())),
+            "route via the tunnel address must be purged"
+        );
+        Ok(())
+    })
+    .await
+}
+
 // =============================================================================
 // Plan 196 — declarative WireguardConfig
 // =============================================================================

@@ -647,13 +647,19 @@ want to inspect or merge it rather than emit text.
 ### The Stack facade — all three layers in one bundle
 
 `nlink::facade::Stack` bundles `NetworkConfig` + `NftablesConfig` +
-`WireguardConfig` and applies them in dependency order (links →
-firewall → VPN), with a pre-flight `diff()` across every set layer
-before the first mutation. Since 0.24 (#169): `apply_in` / `diff_in`
-take a `NamespaceSpec` (named / path / PID — container support),
+`WireguardConfig` and applies them in dependency order (WireGuard
+links → network → firewall → WireGuard keys/peers), with a pre-flight
+`diff()` across every set layer before the network layer mutates
+anything. Since 0.24 (#169): `apply_in` / `diff_in` take a
+`NamespaceSpec` (named / path / PID — container support),
 `StackDiff::change_count()` / `StackApplyReport::change_count()`
 aggregate the per-layer counts, and a declared-but-absent WireGuard
-device is created automatically.
+device is created automatically. The links are bootstrapped (created
+and brought up) *first*, so the network layer can address the tunnel
+and route via a peer's tunnel address (#330). `apply_in_with` /
+`diff_in_with` carry `ApplyOptions` / `DiffOptions` to the network
+layer — `ApplyOptions::default().with_purge(true)` is how a reconcile
+removes addresses and routes that left the declaration.
 
 ```rust
 use nlink::facade::Stack;
@@ -669,6 +675,10 @@ println!("{} pending change(s)", diff.change_count());
 let report = stack.apply().await?;                 // host netns
 let report = stack.apply_in(NamespaceSpec::Pid(container_pid)).await?;
 assert!(stack.apply().await?.is_noop());           // converged
+use nlink::netlink::config::ApplyOptions;
+let report = stack                                 // reconcile: purge what left the config
+    .apply_in_with(NamespaceSpec::Named("lab"), ApplyOptions::default().with_purge(true))
+    .await?;
 ```
 
 Runnable demo: `cargo run -p nlink --example config_stack`

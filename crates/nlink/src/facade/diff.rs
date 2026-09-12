@@ -8,7 +8,7 @@
 //! general `_in(NamespaceSpec)` which also covers path- and
 //! PID-referenced namespaces (containers).
 
-use crate::netlink::config::{ConfigDiff, NetworkConfig};
+use crate::netlink::config::{ConfigDiff, DiffOptions, NetworkConfig};
 use crate::netlink::genl::wireguard::{WireguardConfig, WireguardConfigDiff};
 use crate::netlink::namespace::NamespaceSpec;
 use crate::netlink::nftables::config::{NftablesConfig, NftablesDiff};
@@ -33,8 +33,18 @@ pub async fn network_in_namespace(ns: &str, cfg: &NetworkConfig) -> Result<Confi
 /// Diff a network config against any namespace specification
 /// (named, path, or PID — container support, #169).
 pub async fn network_in(ns: NamespaceSpec<'_>, cfg: &NetworkConfig) -> Result<ConfigDiff> {
+    network_in_with(ns, cfg, DiffOptions::default()).await
+}
+
+/// [`network_in`] with [`DiffOptions`] — `purge(true)` includes the
+/// removals a purging apply would perform (#330).
+pub async fn network_in_with(
+    ns: NamespaceSpec<'_>,
+    cfg: &NetworkConfig,
+    opts: DiffOptions,
+) -> Result<ConfigDiff> {
     let conn: Connection<Route> = ns.connection()?;
-    cfg.diff(&conn).await
+    cfg.diff_with_options(&conn, opts).await
 }
 
 // =============================================================================

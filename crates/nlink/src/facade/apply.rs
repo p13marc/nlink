@@ -11,7 +11,7 @@
 //! general `_in(NamespaceSpec)` which also covers path- and
 //! PID-referenced namespaces (containers).
 
-use crate::netlink::config::{ApplyResult, NetworkConfig};
+use crate::netlink::config::{ApplyOptions, ApplyResult, NetworkConfig};
 use crate::netlink::genl::wireguard::WireguardConfig;
 use crate::netlink::namespace::NamespaceSpec;
 use crate::netlink::nftables::config::NftablesConfig;
@@ -44,8 +44,18 @@ pub async fn network_in_namespace(ns: &str, cfg: &NetworkConfig) -> Result<Apply
 /// Apply a network config inside any namespace specification
 /// (named, path, or PID — container support, #169).
 pub async fn network_in(ns: NamespaceSpec<'_>, cfg: &NetworkConfig) -> Result<ApplyResult> {
+    network_in_with(ns, cfg, ApplyOptions::default()).await
+}
+
+/// [`network_in`] with [`ApplyOptions`] — purge, dry-run,
+/// continue-on-error (#330).
+pub async fn network_in_with(
+    ns: NamespaceSpec<'_>,
+    cfg: &NetworkConfig,
+    opts: ApplyOptions,
+) -> Result<ApplyResult> {
     let conn: Connection<Route> = ns.connection()?;
-    cfg.apply(&conn).await
+    cfg.apply_with_options(&conn, opts).await
 }
 
 // =============================================================================
@@ -116,8 +126,17 @@ pub async fn wireguard_in(
     ns: NamespaceSpec<'_>,
     cfg: &WireguardConfig,
 ) -> Result<crate::netlink::genl::wireguard::WireguardApplyResult> {
-    let route: Connection<Route> = ns.connection()?;
-    cfg.ensure_devices(&route).await?;
+    wireguard_devices_in(ns.clone(), cfg).await?;
     let conn: Connection<Wireguard> = ns.connection_async().await?;
     cfg.apply(&conn).await
+}
+
+/// Only the link half of [`wireguard_in`]: create every declared
+/// WireGuard link that is missing and bring every declared link up,
+/// through a Route connection in the namespace. Returns the names
+/// created. This is what a `NetworkConfig` that addresses the tunnel
+/// needs to run *before* it — [`Stack`](super::Stack) does so (#330).
+pub async fn wireguard_devices_in(ns: NamespaceSpec<'_>, cfg: &WireguardConfig) -> Result<Vec<String>> {
+    let route: Connection<Route> = ns.connection()?;
+    cfg.ensure_devices(&route).await
 }
