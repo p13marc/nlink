@@ -121,6 +121,22 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`NamespaceSpec::{spawn,spawn_output}_with_etc` silently dropped
+  the `/etc/netns` overlay for `Path` (#331).** The doc said "falls
+  back to regular `spawn_path` (no overlay)" for `Path` and `Pid`,
+  while `spawn_path_with_etc` existed and did the right thing given a
+  name. A caller that switched a node from `Named` to `Path` lost
+  `/etc/netns/<ns>/hosts` resolution with no error. `Path` now gets
+  the overlay whenever the path is an entry of `NETNS_RUN_DIR` (its
+  file name is the `ip netns` name the overlay directory is keyed by;
+  `/var/run` and `/run` spellings both count). A path elsewhere and
+  `Pid` (`/proc/<pid>/ns/net`) have no name and therefore no overlay
+  to apply — that is now stated as such, not as a fallback, and the
+  new `NamespaceSpec::etc_overlay_name()` tells a caller which case a
+  spec is in before it spawns. Live test: a `Path` spec sees the
+  overlaid `hosts`, a `Pid` spec for a process in the same namespace
+  does not.
+
 - **`spawn_*_with_etc` failed with `EPERM` inside containers whenever
   `/etc/netns/<ns>/` existed (#334).** The sysfs remount was fatal
   (#282 made it so, correctly: a child with *no* `/sys` is worse than

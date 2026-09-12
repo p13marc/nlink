@@ -192,10 +192,49 @@ impl<'a> NamespaceSpec<'a> {
         }
     }
 
+    /// The name under which this namespace can have an `/etc/netns/<name>/`
+    /// overlay, if it has one at all.
+    ///
+    /// The overlay directory is keyed by the **name** `ip netns` gave the
+    /// namespace, so only a namespace with a name can have one:
+    /// [`Named`](Self::Named) always, and [`Path`](Self::Path) when the
+    /// path is an entry of [`NETNS_RUN_DIR`] (its file name is the
+    /// namespace name). A path anywhere else, and
+    /// [`Pid`](Self::Pid) — `/proc/<pid>/ns/net` — name nothing, and
+    /// `None` here is why [`spawn_with_etc`](Self::spawn_with_etc)
+    /// applies no overlay for them (#331). Ask this before switching a
+    /// caller from `Named` to `Pid` and wondering where `hosts` went.
+    pub fn etc_overlay_name(&self) -> Option<&'a str> {
+        match self {
+            NamespaceSpec::Named(name) => Some(name),
+            NamespaceSpec::Path(path) => {
+                let parent = path.parent()?;
+                let run_dir = Path::new(NETNS_RUN_DIR);
+                // `/var/run` is a symlink to `/run` on every modern
+                // distribution; accept either spelling.
+                let is_run_dir = parent == run_dir
+                    || std::fs::canonicalize(parent).ok()
+                        == std::fs::canonicalize(run_dir).ok();
+                if !is_run_dir {
+                    return None;
+                }
+                path.file_name()?.to_str()
+            }
+            NamespaceSpec::Default | NamespaceSpec::Pid(_) => None,
+        }
+    }
+
     /// Spawn a process with `/etc/netns/` file overlays.
     ///
-    /// See [`spawn_with_etc`] for details. For [`NamespaceSpec::Path`] and
-    /// [`NamespaceSpec::Pid`], falls back to regular [`spawn_path`] (no overlay).
+    /// See [`spawn_with_etc`] for details. The overlay is applied for
+    /// every spec that has a name — [`Named`](Self::Named), and
+    /// [`Path`](Self::Path) when the path is an entry of
+    /// [`NETNS_RUN_DIR`] — and there is none to apply for a path
+    /// elsewhere or a [`Pid`](Self::Pid): the overlay directory is keyed
+    /// by the `ip netns` name, and those have none. Until 0.27 `Path`
+    /// never got the overlay either, silently (#331);
+    /// [`etc_overlay_name`](Self::etc_overlay_name) says which case a
+    /// spec is in.
     pub fn spawn_with_etc(&self, cmd: std::process::Command) -> Result<std::process::Child> {
         match self {
             NamespaceSpec::Default => {
@@ -203,7 +242,10 @@ impl<'a> NamespaceSpec<'a> {
                 cmd.spawn().map_err(Error::Io)
             }
             NamespaceSpec::Named(name) => spawn_with_etc(name, cmd),
-            NamespaceSpec::Path(path) => spawn_path(path, cmd),
+            NamespaceSpec::Path(path) => match self.etc_overlay_name() {
+                Some(name) => spawn_path_with_etc(path, name, cmd),
+                None => spawn_path(path, cmd),
+            },
             NamespaceSpec::Pid(pid) => {
                 let path = format!("/proc/{}/ns/net", pid);
                 spawn_path(&path, cmd)
@@ -213,8 +255,8 @@ impl<'a> NamespaceSpec<'a> {
 
     /// Spawn a process and collect its output with `/etc/netns/` file overlays.
     ///
-    /// See [`spawn_with_etc`] for details. For [`NamespaceSpec::Path`] and
-    /// [`NamespaceSpec::Pid`], falls back to regular [`spawn_output_path`] (no overlay).
+    /// See [`spawn_with_etc`](Self::spawn_with_etc) for which specs get
+    /// the overlay.
     pub fn spawn_output_with_etc(
         &self,
         cmd: std::process::Command,
@@ -228,7 +270,10 @@ impl<'a> NamespaceSpec<'a> {
                 child.wait_with_output().map_err(Error::Io)
             }
             NamespaceSpec::Named(name) => spawn_output_with_etc(name, cmd),
-            NamespaceSpec::Path(path) => spawn_output_path(path, cmd),
+            NamespaceSpec::Path(path) => match self.etc_overlay_name() {
+                Some(name) => spawn_output_path_with_etc(path, name, cmd),
+                None => spawn_output_path(path, cmd),
+            },
             NamespaceSpec::Pid(pid) => {
                 let path = format!("/proc/{}/ns/net", pid);
                 spawn_output_path(&path, cmd)
@@ -1651,6 +1696,20 @@ pub fn spawn_output_path_with_etc<P: AsRef<Path>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #331 — which specs can carry an `/etc/netns/<name>/` overlay.
+    #[test]
+    fn etc_overlay_name_follows_the_ip_netns_name() {
+        assert_eq!(NamespaceSpec::Named("lab").etc_overlay_name(), Some("lab"));
+        let run = PathBuf::from(NETNS_RUN_DIR).join("lab");
+        assert_eq!(NamespaceSpec::Path(&run).etc_overlay_name(), Some("lab"));
+        let elsewhere = PathBuf::from("/tmp/netns/lab");
+        assert_eq!(NamespaceSpec::Path(&elsewhere).etc_overlay_name(), None);
+        let procfs = PathBuf::from("/proc/1/ns/net");
+        assert_eq!(NamespaceSpec::Path(&procfs).etc_overlay_name(), None);
+        assert_eq!(NamespaceSpec::Pid(1).etc_overlay_name(), None);
+        assert_eq!(NamespaceSpec::Default.etc_overlay_name(), None);
+    }
 
     /// #334 — the replacement sysfs copies every flag the kernel locks
     /// (`mount_too_revealing`), not just read-only.
