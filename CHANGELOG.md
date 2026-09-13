@@ -138,6 +138,22 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **A stale `ip netns` marker is `NamespaceNotFound`, not an `EINVAL`
+  out of `setns` (#348).** `ip netns add` bind-mounts an nsfs inode over
+  an empty file; after a crash or a bare `umount` the file stays. The
+  by-name `spawn` / `spawn_with_etc` gated on `Path::exists()`, which
+  the leftover passes, and `connection_for`, `connection_for_async`,
+  `open`, `enter` and the sysctl helpers did not gate at all — so the
+  failure surfaced from `setns(2)` inside `pre_exec` as "Invalid
+  argument", which nothing downstream recognises as "the namespace is
+  gone". Every by-name entry point now resolves through one check on
+  `is_namespace_path` (the `statfs` nsfs test that `list_live` uses),
+  returns the typed `Error::NamespaceNotFound` that `is_not_found()`
+  matches, and logs the stale marker at `warn` since it is usually a
+  bug the operator wants to see. `nlink-ip netns pids` / `set` gate the
+  same way. Root test: a plain file under `/var/run/netns` is
+  `is_not_found()` from all eight entry points.
+
 - **`NetdevInfo::driver()` is `None` for every real device, and the
   docs said otherwise (#328).** The netdev-lifecycle recipe's table
   had `driver | ✗ | ✅ (DRIVER=)`, the module docs said "uevents know

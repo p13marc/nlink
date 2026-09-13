@@ -350,7 +350,8 @@ fn identify_namespace(pid: &str) -> Result<()> {
 
 /// List PIDs in a network namespace.
 fn list_pids_in_namespace(name: &str) -> Result<()> {
-    if !namespace::exists(name) {
+    // A stale marker file is not a namespace (#348).
+    if !namespace::is_namespace(name) {
         return Err(nlink::netlink::Error::NamespaceNotFound {
             name: name.to_string(),
         });
@@ -464,7 +465,8 @@ fn monitor_namespaces() -> Result<()> {
 
 /// Set the namespace ID for a network namespace (`RTM_NEWNSID`).
 async fn set_namespace_id(name: &str, nsid: &str) -> Result<()> {
-    if !namespace::exists(name) {
+    // A stale marker file is not a namespace (#348).
+    if !namespace::is_namespace(name) {
         return Err(nlink::netlink::Error::NamespaceNotFound {
             name: name.to_string(),
         });

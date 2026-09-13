@@ -299,6 +299,12 @@ pub const NETNS_RUN_DIR: &str = "/var/run/netns";
 /// Named namespaces are those created via `ip netns add <name>` and stored
 /// in `/var/run/netns/`.
 ///
+/// # Errors
+///
+/// [`Error::NamespaceNotFound`] (matched by `is_not_found()`) unless
+/// `/var/run/netns/<name>` is a live namespace — a stale marker with no
+/// mount behind it counts as not found (#348).
+///
 /// # Example
 ///
 /// ```no_run
@@ -314,7 +320,7 @@ pub const NETNS_RUN_DIR: &str = "/var/run/netns";
 /// # }
 /// ```
 pub fn connection_for<P: ProtocolState + Default + SyncConstructible>(name: &str) -> Result<Connection<P>> {
-    let path = PathBuf::from(NETNS_RUN_DIR).join(name);
+    let path = live_named_path(name)?;
     connection_for_path(&path)
 }
 
@@ -372,6 +378,12 @@ pub fn connection_for_pid<P: ProtocolState + Default + SyncConstructible>(pid: u
 /// that need async family ID resolution after socket creation. The socket is created
 /// in the target namespace, then the GENL family is resolved through that socket.
 ///
+/// # Errors
+///
+/// [`Error::NamespaceNotFound`] (matched by `is_not_found()`) unless
+/// `/var/run/netns/<name>` is a live namespace — a stale marker with no
+/// mount behind it counts as not found (#348).
+///
 /// # Example
 ///
 /// ```no_run
@@ -384,7 +396,7 @@ pub fn connection_for_pid<P: ProtocolState + Default + SyncConstructible>(pid: u
 /// # }
 /// ```
 pub async fn connection_for_async<P: AsyncProtocolInit + AsyncConstructible>(name: &str) -> Result<Connection<P>> {
-    let path = PathBuf::from(NETNS_RUN_DIR).join(name);
+    let path = live_named_path(name)?;
     connection_for_path_async(&path).await
 }
 
@@ -412,6 +424,12 @@ pub async fn connection_for_pid_async<P: AsyncProtocolInit + AsyncConstructible>
 /// The returned `NamespaceFd` keeps the file open and can be used with
 /// [`Connection::new_in_namespace`] or [`enter`].
 ///
+/// # Errors
+///
+/// [`Error::NamespaceNotFound`] (matched by `is_not_found()`) unless
+/// `/var/run/netns/<name>` is a live namespace — a stale marker with no
+/// mount behind it counts as not found (#348).
+///
 /// # Example
 ///
 /// ```no_run
@@ -426,7 +444,7 @@ pub async fn connection_for_pid_async<P: AsyncProtocolInit + AsyncConstructible>
 /// # }
 /// ```
 pub fn open(name: &str) -> Result<NamespaceFd> {
-    let path = PathBuf::from(NETNS_RUN_DIR).join(name);
+    let path = live_named_path(name)?;
     open_path(&path)
 }
 
@@ -517,6 +535,12 @@ impl AsFd for NamespaceFd {
 /// should follow the dedicated-worker-thread pattern instead (see
 /// [`get_sysctl`] and `NetlinkSocket::new_in_namespace`, #185).
 ///
+/// # Errors
+///
+/// [`Error::NamespaceNotFound`] (matched by `is_not_found()`) unless
+/// `/var/run/netns/<name>` is a live namespace — a stale marker with no
+/// mount behind it counts as not found (#348).
+///
 /// # Example
 ///
 /// ```no_run
@@ -531,7 +555,7 @@ impl AsFd for NamespaceFd {
 /// # }
 /// ```
 pub fn enter(name: &str) -> Result<NamespaceGuard> {
-    let path = PathBuf::from(NETNS_RUN_DIR).join(name);
+    let path = live_named_path(name)?;
     enter_path(&path)
 }
 
@@ -713,6 +737,42 @@ pub fn is_namespace_path<P: AsRef<Path>>(path: P) -> bool {
 /// checks it is a live netns.
 pub fn is_namespace(name: &str) -> bool {
     is_namespace_path(PathBuf::from(NETNS_RUN_DIR).join(name))
+}
+
+/// Resolve `ip netns` name → path, refusing anything that is not a live
+/// namespace.
+///
+/// Every by-name entry point (`spawn*`, `connection_for*`, `open`, `enter`,
+/// the sysctl helpers) funnels through here so that a **stale marker** —
+/// the empty file `ip netns add` leaves behind once its nsfs bind-mount is
+/// gone, after a crash or a bare `umount` — is `Error::NamespaceNotFound`,
+/// the variant `is_not_found()` matches and callers reconcile on. Gating on
+/// `Path::exists()` let the marker through, and the failure then surfaced
+/// from `setns(2)` as an `EINVAL` nothing downstream recognised as "the
+/// namespace is gone" (#348). The stale case is also logged at `warn`,
+/// because a marker with no mount behind it is usually a bug the operator
+/// wants to know about.
+pub(crate) fn live_named_path(ns_name: &str) -> Result<PathBuf> {
+    live_path_in(Path::new(NETNS_RUN_DIR), ns_name)
+}
+
+/// [`live_named_path`] over an explicit run directory, so the stale-marker
+/// classification is testable without root.
+fn live_path_in(run_dir: &Path, ns_name: &str) -> Result<PathBuf> {
+    let path = run_dir.join(ns_name);
+    if is_namespace_path(&path) {
+        return Ok(path);
+    }
+    if path.exists() {
+        tracing::warn!(
+            namespace = ns_name,
+            path = %path.display(),
+            "stale ip-netns marker: file present but no namespace mounted over it"
+        );
+    }
+    Err(Error::NamespaceNotFound {
+        name: ns_name.to_string(),
+    })
 }
 
 /// Create a named network namespace.
@@ -1220,6 +1280,12 @@ where
 /// Reads the value from `/proc/sys/` on a dedicated worker thread entered
 /// into the namespace; the calling thread's namespace is untouched (#185).
 ///
+/// # Errors
+///
+/// [`Error::NamespaceNotFound`] (matched by `is_not_found()`) unless
+/// `/var/run/netns/<name>` is a live namespace — a stale marker with no
+/// mount behind it counts as not found (#348).
+///
 /// # Example
 ///
 /// ```no_run
@@ -1232,7 +1298,7 @@ where
 /// # }
 /// ```
 pub fn get_sysctl(ns_name: &str, key: &str) -> Result<String> {
-    get_sysctl_path(PathBuf::from(NETNS_RUN_DIR).join(ns_name), key)
+    get_sysctl_path(live_named_path(ns_name)?, key)
 }
 
 /// Set a sysctl value inside a named namespace.
@@ -1240,6 +1306,12 @@ pub fn get_sysctl(ns_name: &str, key: &str) -> Result<String> {
 /// Writes the value to `/proc/sys/` on a dedicated worker thread entered
 /// into the namespace; the calling thread's namespace is untouched (#185).
 /// Requires root or `CAP_SYS_ADMIN`.
+///
+/// # Errors
+///
+/// [`Error::NamespaceNotFound`] (matched by `is_not_found()`) unless
+/// `/var/run/netns/<name>` is a live namespace — a stale marker with no
+/// mount behind it counts as not found (#348).
 ///
 /// # Example
 ///
@@ -1252,7 +1324,7 @@ pub fn get_sysctl(ns_name: &str, key: &str) -> Result<String> {
 /// # }
 /// ```
 pub fn set_sysctl(ns_name: &str, key: &str, value: &str) -> Result<()> {
-    set_sysctl_path(PathBuf::from(NETNS_RUN_DIR).join(ns_name), key, value)
+    set_sysctl_path(live_named_path(ns_name)?, key, value)
 }
 
 /// Set multiple sysctl values inside a named namespace.
@@ -1260,6 +1332,12 @@ pub fn set_sysctl(ns_name: &str, key: &str, value: &str) -> Result<()> {
 /// Enters the namespace once (on a dedicated worker thread) and applies all
 /// entries. If any entry fails, returns the error immediately without
 /// applying remaining entries.
+///
+/// # Errors
+///
+/// [`Error::NamespaceNotFound`] (matched by `is_not_found()`) unless
+/// `/var/run/netns/<name>` is a live namespace — a stale marker with no
+/// mount behind it counts as not found (#348).
 ///
 /// # Example
 ///
@@ -1275,7 +1353,7 @@ pub fn set_sysctl(ns_name: &str, key: &str, value: &str) -> Result<()> {
 /// # }
 /// ```
 pub fn set_sysctls(ns_name: &str, entries: &[(&str, &str)]) -> Result<()> {
-    set_sysctls_path(PathBuf::from(NETNS_RUN_DIR).join(ns_name), entries)
+    set_sysctls_path(live_named_path(ns_name)?, entries)
 }
 
 /// Read a sysctl value inside a namespace specified by path.
@@ -1324,6 +1402,12 @@ pub fn set_sysctls_path<P: AsRef<Path>>(path: P, entries: &[(&str, &str)]) -> Re
 /// Uses `pre_exec` + `setns()` to switch the child process into the target
 /// namespace between `fork()` and `exec()`. The parent process is unaffected.
 ///
+/// # Errors
+///
+/// [`Error::NamespaceNotFound`] (matched by `is_not_found()`) unless
+/// `/var/run/netns/<name>` is a live namespace — a stale marker with no
+/// mount behind it counts as not found (#348).
+///
 /// # Example
 ///
 /// ```no_run
@@ -1339,12 +1423,7 @@ pub fn set_sysctls_path<P: AsRef<Path>>(path: P, entries: &[(&str, &str)]) -> Re
 /// # }
 /// ```
 pub fn spawn(ns_name: &str, cmd: std::process::Command) -> Result<std::process::Child> {
-    let path = PathBuf::from(NETNS_RUN_DIR).join(ns_name);
-    if !path.exists() {
-        return Err(Error::NamespaceNotFound {
-            name: ns_name.to_string(),
-        });
-    }
+    let path = live_named_path(ns_name)?;
     spawn_path(&path, cmd)
 }
 
@@ -1515,6 +1594,12 @@ fn prepare_etc_binds(ns_name: &str) -> Result<Vec<(std::ffi::CString, std::ffi::
 /// The netlink-driven parts of nlink never read `/sys`; the remount is
 /// for the child's own benefit (`ip link` and friends).
 ///
+/// # Errors
+///
+/// [`Error::NamespaceNotFound`] (matched by `is_not_found()`) unless
+/// `/var/run/netns/<name>` is a live namespace — a stale marker with no
+/// mount behind it counts as not found (#348).
+///
 /// # Example
 ///
 /// ```no_run
@@ -1531,12 +1616,7 @@ fn prepare_etc_binds(ns_name: &str) -> Result<Vec<(std::ffi::CString, std::ffi::
 /// # }
 /// ```
 pub fn spawn_with_etc(ns_name: &str, cmd: std::process::Command) -> Result<std::process::Child> {
-    let path = PathBuf::from(NETNS_RUN_DIR).join(ns_name);
-    if !path.exists() {
-        return Err(Error::NamespaceNotFound {
-            name: ns_name.to_string(),
-        });
-    }
+    let path = live_named_path(ns_name)?;
     spawn_path_with_etc(&path, ns_name, cmd)
 }
 
@@ -1886,6 +1966,33 @@ mod tests {
     #[test]
     fn is_namespace_false_for_nonexistent_name() {
         assert!(!is_namespace("definitely_does_not_exist_12345"));
+    }
+
+    /// #348 — a stale `ip netns` marker (plain file, no nsfs mount over
+    /// it) resolves to `NamespaceNotFound`, not to a path that `setns`
+    /// will later refuse with EINVAL.
+    #[test]
+    fn live_path_in_rejects_a_plain_file_marker() {
+        let dir = std::env::temp_dir().join(format!("nlink-stale-marker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("stale"), b"").unwrap();
+        let stale = live_path_in(&dir, "stale");
+        let missing = live_path_in(&dir, "missing");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let err = stale.expect_err("a plain file is not a namespace");
+        assert!(err.is_not_found(), "got unclassifiable error: {err}");
+        assert!(matches!(&err, Error::NamespaceNotFound { name } if name == "stale"));
+        let err = missing.expect_err("an absent marker is not a namespace");
+        assert!(err.is_not_found(), "got unclassifiable error: {err}");
+    }
+
+    /// The resolver accepts a real nsfs path: `/proc/self/ns` is the one
+    /// run directory every process has.
+    #[test]
+    fn live_path_in_accepts_the_callers_own_net_namespace() {
+        let path = live_path_in(Path::new("/proc/self/ns"), "net").expect("own netns is live");
+        assert_eq!(path, PathBuf::from("/proc/self/ns/net"));
     }
 
     // #184 — missing-namespace opens must classify via is_not_found(),
