@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+> Upgrading from 0.26.0? See
+> [`docs/migration_guide/0.26.0-to-0.27.0.md`](docs/migration_guide/0.26.0-to-0.27.0.md).
+> Two compile breaks, and four behaviour changes with no compiler error —
+> one of which lets a purge remove routes 0.26.0 left alone.
+
 ### Added
 
 - **`NetworkConfig::apply_reconcile_with_options` — purge + retry in one
