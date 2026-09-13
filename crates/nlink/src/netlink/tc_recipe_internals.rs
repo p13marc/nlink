@@ -200,6 +200,23 @@ pub(crate) fn netem_matches(desired: &NetemConfig, live: &TcMessage) -> bool {
     if !percent_matches(desired.reorder, live_opts.reorder()) {
         return false;
     }
+    // The correlations too — the declarative form has carried them since
+    // #332, and a changed correlation is a changed qdisc (#346).
+    if !percent_matches(desired.delay_correlation, live_opts.delay_correlation()) {
+        return false;
+    }
+    if !percent_matches(desired.loss_correlation, live_opts.loss_correlation()) {
+        return false;
+    }
+    if !percent_matches(desired.duplicate_correlation, live_opts.duplicate_correlation()) {
+        return false;
+    }
+    if !percent_matches(desired.corrupt_correlation, live_opts.corrupt_correlation()) {
+        return false;
+    }
+    if !percent_matches(desired.reorder_correlation, live_opts.reorder_correlation()) {
+        return false;
+    }
 
     // Reorder gap. NetemConfig::write_options forces gap=1 when
     // reorder is set with no explicit gap — match that quirk.

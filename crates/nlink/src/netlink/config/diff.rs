@@ -7,7 +7,6 @@ use std::{
     net::IpAddr,
 };
 
-use std::time::Duration;
 
 use super::types::{
     DeclaredAddress, DeclaredLink, DeclaredLinkType, DeclaredQdisc, DeclaredQdiscType,
@@ -20,8 +19,7 @@ use crate::netlink::{
     messages::{AddressMessage, LinkMessage, RouteMessage, TcMessage},
     protocol::Route,
     tc::{
-        ClsactConfig, FqCodelConfig, HtbQdiscConfig, IngressConfig, PrioConfig,
-        QdiscConfig, SfqConfig,
+        ClsactConfig, IngressConfig, QdiscConfig,
     },
     types::{addr::Scope, route::RouteProtocol, route::RouteType},
 };
@@ -927,7 +925,7 @@ fn diff_qdiscs(
             if existing_kind != desired_kind {
                 // Different type, need to replace.
                 diff.qdiscs_to_replace.push(declared.clone());
-            } else if !qdisc_params_match(&declared.qdisc_type, existing.raw_options()) {
+            } else if !qdisc_params_match(&declared.qdisc_type, existing) {
                 // Same kind, different parameters — replace.
                 diff.qdiscs_to_replace.push(declared.clone());
             }
@@ -938,30 +936,91 @@ fn diff_qdiscs(
     }
 }
 
-/// Compare a declared qdisc's parameters against the kernel's reported
-/// `TCA_OPTIONS` blob.
+/// Decide whether the live qdisc already *is* the declared one.
 ///
-/// Renders the declared config through `QdiscConfig::write_options` into a
-/// scratch buffer, then byte-compares against the kernel's blob. Returns
-/// `true` if they match exactly.
+/// Compares field by field, through the parsed [`QdiscOptions`] the
+/// kernel reports, wherever nlink has a parser for the kind — netem via
+/// `tc_recipe_internals::netem_matches` (the same gate `PerPeerImpairer`
+/// uses to leave a leaf alone), and tbf / htb / fq_codel / sfq / prio
+/// here. The comparison is in the kernel's own units and quantisation:
+/// probabilities through `Percent::as_kernel_probability`, codel times
+/// through `codel_round_trip_us` (a 20 ms target reads back as 19999 µs).
 ///
-/// **Known limitation**: the kernel may add attributes (defaults, optional
-/// counters, padding) that the declared side doesn't write. Those cases
-/// surface as "differs" → harmless re-apply via `qdiscs_to_replace`. The
-/// alternative (per-field parse-and-compare) needs per-kind parsers that
-/// don't exist in nlink yet; that's tracked as a 0.17 polish item. Until
-/// then, prefer false-positive churn over the silent-no-op bug this
-/// replaces.
-fn qdisc_params_match(declared: &DeclaredQdiscType, existing_opts: Option<&[u8]>) -> bool {
-    let declared_bytes = declared_options_bytes(declared);
-    let existing_bytes = existing_opts.unwrap_or(&[]);
-    declared_bytes.as_slice() == existing_bytes
+/// This used to byte-compare the declared config's rendered
+/// `TCA_OPTIONS` against the kernel's blob. The kernel does not echo what
+/// it was sent: netem always reports `CORR`/`RATE`/`ECN`/`LATENCY64`/
+/// `JITTER64`, rounds latency to ticks and orders attributes its own way;
+/// fq_codel echoes every field with its defaults filled in. So an
+/// unchanged declaration was "different" on every `diff()`, landed in
+/// `qdiscs_to_replace`, and each `apply()` replaced the qdisc — resetting
+/// its statistics, disturbing traffic, and reporting `changes_made >= 1`
+/// forever, which broke the "second apply converges" property everything
+/// else in `NetworkConfig` has (#346).
+///
+/// Kinds without a parser, or a live qdisc that carries no options, fall
+/// back to the byte compare, so nothing that matched before stops
+/// matching now.
+///
+/// [`QdiscOptions`]: crate::netlink::tc_options::QdiscOptions
+fn qdisc_params_match(declared: &DeclaredQdiscType, existing: &TcMessage) -> bool {
+    use crate::netlink::tc_options::QdiscOptions;
+    use crate::netlink::tc_recipe_internals::{codel_round_trip_us, netem_matches};
+
+    match (declared, existing.options()) {
+        (DeclaredQdiscType::Netem { .. }, _) => {
+            let cfg = declared.netem_config().expect("matched the Netem arm");
+            netem_matches(&cfg, existing)
+        }
+        (DeclaredQdiscType::Tbf { .. }, Some(QdiscOptions::Tbf(live))) => {
+            let cfg = declared.tbf_config().expect("matched the Tbf arm");
+            // The kernel echoes the byte-valued TCA_TBF_BURST, so burst is
+            // exact; rate is `tc_ratespec.rate` (or RATE64), limit is
+            // `tc_tbf_qopt.limit`.
+            live.rate == cfg.rate.as_bytes_per_sec()
+                && live.burst == cfg.burst.as_u32_saturating()
+                && live.limit == cfg.limit.as_u32_saturating()
+        }
+        (DeclaredQdiscType::Htb { .. }, Some(QdiscOptions::Htb(live))) => {
+            let cfg = declared.htb_config().expect("matched the Htb arm");
+            live.default_class == cfg.default_class && live.rate2quantum == cfg.r2q
+        }
+        (
+            DeclaredQdiscType::FqCodel {
+                limit,
+                target_us,
+                interval_us,
+            },
+            Some(QdiscOptions::FqCodel(live)),
+        ) => {
+            // Only the fields the declaration sets are written; the kernel
+            // chooses the rest, so only those are compared.
+            limit.is_none_or(|l| live.limit == l)
+                && target_us.is_none_or(|t| codel_round_trip_us(t) == live.target_us)
+                && interval_us.is_none_or(|i| codel_round_trip_us(i) == live.interval_us)
+        }
+        (DeclaredQdiscType::Sfq { perturb_secs }, Some(QdiscOptions::Sfq(live))) => {
+            perturb_secs.is_none_or(|p| live.perturb_period == p as i32)
+        }
+        (DeclaredQdiscType::Prio { .. }, Some(QdiscOptions::Prio(live))) => {
+            let cfg = declared.prio_config().expect("matched the Prio arm");
+            live.bands == cfg.bands && live.priomap == cfg.priomap
+        }
+        // Same kind (the caller checked) and no options either way.
+        (DeclaredQdiscType::Ingress | DeclaredQdiscType::Clsact, _) => true,
+        // No parser for this kind, or no options reported: the old byte
+        // compare, which errs towards "differs".
+        (_, _) => {
+            declared_options_bytes(declared).as_slice() == existing.raw_options().unwrap_or(&[])
+        }
+    }
 }
 
 /// Render the `TCA_OPTIONS` payload bytes for a declared qdisc type.
-/// Mirrors the typed-config construction in `apply.rs::add_qdisc`;
-/// netem and tbf go through the one shared lowering each,
-/// `DeclaredQdiscType::{netem_config, tbf_config}` (#332, #349).
+/// Every kind goes through its one shared lowering on
+/// `DeclaredQdiscType` (`netem_config`, `tbf_config`, …), the same ones
+/// `apply.rs::add_qdisc` installs from (#332, #349, #346). Used by
+/// [`qdisc_params_match`] only as the fallback for kinds it cannot
+/// compare field by field.
 fn declared_options_bytes(t: &DeclaredQdiscType) -> Vec<u8> {
     let mut builder = MessageBuilder::new(0, 0);
     let start = builder.len();
@@ -970,46 +1029,26 @@ fn declared_options_bytes(t: &DeclaredQdiscType) -> Vec<u8> {
             .netem_config()
             .expect("matched the Netem arm")
             .write_options(&mut builder),
-        DeclaredQdiscType::Htb { default_class } => {
-            HtbQdiscConfig::new()
-                .default_class(*default_class)
-                .write_options(&mut builder)
-        }
-        DeclaredQdiscType::FqCodel {
-            limit,
-            target_us,
-            interval_us,
-        } => {
-            let mut cfg = FqCodelConfig::new();
-            if let Some(lim) = limit {
-                cfg = cfg.limit(*lim);
-            }
-            if let Some(t) = target_us {
-                cfg = cfg.target(Duration::from_micros(*t as u64));
-            }
-            if let Some(i) = interval_us {
-                cfg = cfg.interval(Duration::from_micros(*i as u64));
-            }
-            cfg.write_options(&mut builder)
-        }
+        DeclaredQdiscType::Htb { .. } => t
+            .htb_config()
+            .expect("matched the Htb arm")
+            .write_options(&mut builder),
+        DeclaredQdiscType::FqCodel { .. } => t
+            .fq_codel_config()
+            .expect("matched the FqCodel arm")
+            .write_options(&mut builder),
         DeclaredQdiscType::Tbf { .. } => t
             .tbf_config()
             .expect("matched the Tbf arm")
             .write_options(&mut builder),
-        DeclaredQdiscType::Sfq { perturb_secs } => {
-            let mut cfg = SfqConfig::new();
-            if let Some(p) = perturb_secs {
-                cfg = cfg.perturb(*p as i32);
-            }
-            cfg.write_options(&mut builder)
-        }
-        DeclaredQdiscType::Prio { bands } => {
-            let mut cfg = PrioConfig::new();
-            if let Some(b) = bands {
-                cfg = cfg.bands(*b as i32);
-            }
-            cfg.write_options(&mut builder)
-        }
+        DeclaredQdiscType::Sfq { .. } => t
+            .sfq_config()
+            .expect("matched the Sfq arm")
+            .write_options(&mut builder),
+        DeclaredQdiscType::Prio { .. } => t
+            .prio_config()
+            .expect("matched the Prio arm")
+            .write_options(&mut builder),
         DeclaredQdiscType::Ingress => IngressConfig::new().write_options(&mut builder),
         DeclaredQdiscType::Clsact => ClsactConfig::new().write_options(&mut builder),
     };
@@ -1250,20 +1289,154 @@ mod tests {
         assert_ne!(declared_options_bytes(&a), declared_options_bytes(&b));
     }
 
+    /// A live qdisc as a dump would report it: kind + raw `TCA_OPTIONS`.
+    fn live(kind: &str, options: Option<Vec<u8>>) -> TcMessage {
+        TcMessage {
+            kind: Some(kind.to_string()),
+            options,
+            ..TcMessage::default()
+        }
+    }
+
+    /// One native-endian `u32` attribute, the way the kernel writes it.
+    fn attr_u32(attr_type: u16, value: u32) -> Vec<u8> {
+        let mut out = Vec::with_capacity(8);
+        out.extend_from_slice(&8u16.to_ne_bytes());
+        out.extend_from_slice(&attr_type.to_ne_bytes());
+        out.extend_from_slice(&value.to_ne_bytes());
+        out
+    }
+
+    fn netem_declared(delay_us: u32) -> DeclaredQdiscType {
+        DeclaredQdiscType::Netem {
+            delay_us: Some(delay_us),
+            jitter_us: Some(10_000),
+            loss_percent: Some(0.5),
+            limit: Some(1000),
+            duplicate_percent: None,
+            corrupt_percent: None,
+            reorder_percent: Some(3.0),
+            loss_correlation: None,
+            delay_correlation: None,
+            rate_bps: Some(12_500_000),
+            duplicate_correlation: None,
+            corrupt_correlation: None,
+            reorder_correlation: Some(50.0),
+            gap: Some(5),
+        }
+    }
+
     #[test]
     fn qdisc_params_match_treats_empty_existing_as_mismatch_when_declared_nonempty() {
         let cfg = DeclaredQdiscType::Htb { default_class: 0x10 };
         // Existing has no options at all — should not match a non-empty declared.
-        assert!(!qdisc_params_match(&cfg, None));
-        assert!(!qdisc_params_match(&cfg, Some(&[])));
+        assert!(!qdisc_params_match(&cfg, &live("htb", None)));
+        assert!(!qdisc_params_match(&cfg, &live("htb", Some(Vec::new()))));
     }
 
     #[test]
     fn qdisc_params_match_clsact_has_no_options() {
         // Clsact emits zero option bytes; matches an empty existing.
         let cfg = DeclaredQdiscType::Clsact;
-        assert!(qdisc_params_match(&cfg, Some(&[])));
-        assert!(qdisc_params_match(&cfg, None));
+        assert!(qdisc_params_match(&cfg, &live("clsact", Some(Vec::new()))));
+        assert!(qdisc_params_match(&cfg, &live("clsact", None)));
+    }
+
+    // ---- #346 — field compare against the kernel's echo, not a byte compare ----
+
+    /// The kernel reports attributes netem was never sent (`ECN`, `CORR`,
+    /// …). A declaration must still match its own qdisc.
+    #[test]
+    fn netem_matches_the_kernels_echo_with_extra_attributes() {
+        use crate::netlink::types::tc::qdisc::netem::TCA_NETEM_ECN;
+        let declared = netem_declared(100_000);
+        let mut echo = declared_options_bytes(&declared);
+        echo.extend(attr_u32(TCA_NETEM_ECN, 0));
+        assert_ne!(declared_options_bytes(&declared), echo, "the byte compare would say differs");
+        assert!(qdisc_params_match(&declared, &live("netem", Some(echo.clone()))));
+        // …and a real change is still a change.
+        assert!(!qdisc_params_match(&netem_declared(200_000), &live("netem", Some(echo))));
+    }
+
+    /// codel stores time in 2^-10 s units: a 20 ms target is echoed as
+    /// 19999 µs. Compare in the kernel's quantisation, and only the fields
+    /// the declaration sets.
+    #[test]
+    fn fq_codel_compares_in_codel_ticks_and_only_declared_fields() {
+        use crate::netlink::types::tc::qdisc::fq_codel::TCA_FQ_CODEL_TARGET;
+        let declared = DeclaredQdiscType::FqCodel {
+            limit: None,
+            target_us: Some(20_000),
+            interval_us: None,
+        };
+        let echo = live("fq_codel", Some(attr_u32(TCA_FQ_CODEL_TARGET, 19_999)));
+        assert!(qdisc_params_match(&declared, &echo));
+        let other = DeclaredQdiscType::FqCodel {
+            limit: None,
+            target_us: Some(18_000),
+            interval_us: None,
+        };
+        assert!(!qdisc_params_match(&other, &echo));
+        // Nothing declared: whatever the kernel chose is fine.
+        let bare = DeclaredQdiscType::FqCodel {
+            limit: None,
+            target_us: None,
+            interval_us: None,
+        };
+        assert!(qdisc_params_match(&bare, &echo));
+    }
+
+    #[test]
+    fn htb_default_class_is_compared_as_a_field() {
+        use crate::netlink::types::tc::qdisc::htb::TCA_HTB_DIRECT_QLEN;
+        let declared = DeclaredQdiscType::Htb { default_class: 0x10 };
+        let mut echo = declared_options_bytes(&declared);
+        echo.extend(attr_u32(TCA_HTB_DIRECT_QLEN, 1000));
+        assert!(qdisc_params_match(&declared, &live("htb", Some(echo.clone()))));
+        let other = DeclaredQdiscType::Htb { default_class: 0x20 };
+        assert!(!qdisc_params_match(&other, &live("htb", Some(echo))));
+    }
+
+    #[test]
+    fn tbf_rate_burst_and_limit_are_compared_as_fields() {
+        let declared = DeclaredQdiscType::Tbf {
+            rate_bps: 125_000,
+            burst_bytes: 32_768,
+            limit_bytes: Some(65_536),
+        };
+        let echo = live("tbf", Some(declared_options_bytes(&declared)));
+        assert!(qdisc_params_match(&declared, &echo));
+        let faster = DeclaredQdiscType::Tbf {
+            rate_bps: 250_000,
+            burst_bytes: 32_768,
+            limit_bytes: Some(65_536),
+        };
+        assert!(!qdisc_params_match(&faster, &echo));
+        let bigger_bucket = DeclaredQdiscType::Tbf {
+            rate_bps: 125_000,
+            burst_bytes: 65_536,
+            limit_bytes: Some(65_536),
+        };
+        assert!(!qdisc_params_match(&bigger_bucket, &echo));
+    }
+
+    #[test]
+    fn sfq_and_prio_compare_their_declared_fields() {
+        let sfq = DeclaredQdiscType::Sfq {
+            perturb_secs: Some(10),
+        };
+        let echo = live("sfq", Some(declared_options_bytes(&sfq)));
+        assert!(qdisc_params_match(&sfq, &echo));
+        let other = DeclaredQdiscType::Sfq {
+            perturb_secs: Some(20),
+        };
+        assert!(!qdisc_params_match(&other, &echo));
+
+        let prio = DeclaredQdiscType::Prio { bands: Some(3) };
+        let echo = live("prio", Some(declared_options_bytes(&prio)));
+        assert!(qdisc_params_match(&prio, &echo));
+        let other = DeclaredQdiscType::Prio { bands: Some(4) };
+        assert!(!qdisc_params_match(&other, &echo));
     }
 
     // ---- Plan 188 §2.2 — ApplyOptions builders ----

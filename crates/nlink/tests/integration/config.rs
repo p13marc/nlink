@@ -457,3 +457,75 @@ async fn declarative_netem_rate_and_sub_ms_jitter_reach_the_kernel() -> Result<(
     );
     Ok(())
 }
+
+/// #346 — a second `apply` of an unchanged declaration is a no-op for
+/// every kind the diff can compare field by field. The diff used to
+/// byte-compare the declared `TCA_OPTIONS` against the kernel's echo,
+/// which never matched for netem (the kernel adds `CORR`/`RATE`/`ECN`/
+/// `LATENCY64`/`JITTER64` and reorders), so every reconcile replaced the
+/// qdisc: `changes_made == 1` forever, statistics reset, traffic
+/// disturbed. The maintainer's repro was netem with delay/jitter/rate/
+/// reorder on a dummy; the other kinds are here so the property holds
+/// for the whole declarative surface.
+#[tokio::test]
+async fn unchanged_declared_qdiscs_are_not_replaced_on_reapply() -> Result<()> {
+    require_root!();
+    nlink::require_modules!(
+        "dummy",
+        "sch_netem",
+        "sch_tbf",
+        "sch_htb",
+        "sch_fq_codel",
+        "sch_sfq",
+        "sch_prio"
+    );
+
+    let ns = TestNamespace::new("config-qdisc-idem")?;
+    let conn = ns.connection()?;
+    conn.add_link(DummyLink::new("dummy0")).await?;
+    conn.set_link_up("dummy0").await?;
+
+    let cases: Vec<(&str, NetworkConfig)> = vec![
+        (
+            "netem",
+            NetworkConfig::new().qdisc("dummy0", |q| {
+                q.netem()
+                    .delay(Duration::from_millis(20))
+                    .jitter(Duration::from_millis(2))
+                    .rate(nlink::Rate::mbit(100))
+                    .loss_pct(nlink::Percent::new(0.5))
+                    .reorder_pct(nlink::Percent::new(3.0))
+                    .reorder_correlation_pct(nlink::Percent::new(50.0))
+                    .gap(5)
+            }),
+        ),
+        (
+            "tbf",
+            NetworkConfig::new().qdisc("dummy0", |q| {
+                q.tbf(nlink::Rate::mbit(1), nlink::Bytes::kib(32))
+                    .limit_bytes(nlink::Bytes::kib(64))
+            }),
+        ),
+        (
+            "htb",
+            NetworkConfig::new().qdisc("dummy0", |q| q.htb().default_class(0x10)),
+        ),
+        ("fq_codel", NetworkConfig::new().qdisc("dummy0", |q| q.fq_codel())),
+        ("sfq", NetworkConfig::new().qdisc("dummy0", |q| q.sfq())),
+        ("prio", NetworkConfig::new().qdisc("dummy0", |q| q.prio())),
+    ];
+
+    for (kind, config) in &cases {
+        let first = config.apply(&conn).await?;
+        assert!(first.is_success(), "{kind}: first apply: {first:?}");
+        assert_eq!(first.changes_made, 1, "{kind}: first apply installs (or replaces) the root qdisc");
+
+        let diff = config.diff(&conn).await?;
+        assert!(diff.is_empty(), "{kind}: unchanged declaration diffs as:\n{diff}");
+
+        let second = config.apply(&conn).await?;
+        assert!(second.is_success(), "{kind}: second apply: {second:?}");
+        assert_eq!(second.changes_made, 0, "{kind}: second apply must be a no-op: {second:?}");
+    }
+    Ok(())
+}
