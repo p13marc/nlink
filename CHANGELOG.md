@@ -99,6 +99,29 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **The privileged integration lane runs the suite, and gates on it
+  (#350).** The "Integration tests (root in container)" step carried
+  `continue-on-error: true` behind a note saying it would stay
+  informational until #293 and #294 closed. Both closed in 0.26, and the
+  flag was doing exactly what it says: the step's result never reached
+  the job, so the lane reported `success` while the suite failed 278 of
+  its 361 tests on it — every `LabNamespace` denied `EACCES` at the nsfs
+  bind mount by the container's default AppArmor profile. (The red runs
+  the issue cited, #213/#217, came from the *Library tests* step, which
+  never had the flag.) A probe workflow run on the runner confirmed the
+  enforcing profile, and found three more: workflow-level
+  `container.options` is ignored by this runner, `/lib/modules` was not
+  mounted in — so `has_module` could not see built-ins and their tests
+  skipped, reporting `ok` (#273) — and `ping` was never installed, which
+  three traffic tests need. The runner now grants `apparmor=unconfined`
+  and mounts `/lib/modules` read-only; here, the flag and its note are
+  gone, `iputils-ping` is installed, the runner-side contract is written
+  next to the job, and the module-guard step fails outright if the
+  `/lib/modules` mount ever disappears again rather than degrading into
+  a green run that tested less. `NLINK_TEST_STRICT_MODULES` is
+  unchanged; a genuinely optional feature is gated in the test with
+  `require_module!`, not at the job.
+
 - **`QdiscBuilder::tbf` takes `Rate` and `Bytes`, not a bare `u64`
   that meant bytes per second (#349).** Every imperative TC builder
   takes the typed units — the whole point of `Rate` is that bits and
