@@ -1065,6 +1065,8 @@ async fn plan_204_c1_verdict_goto_round_trips_through_kernel() -> Result<()> {
 #[tokio::test]
 async fn wg_private_key_readback_round_trips() -> Result<()> {
     nlink::require_root!();
+    // Creating the device needs init_user_ns root, module or no module (#357).
+    nlink::require_host_root!();
     nlink::require_module!("wireguard");
     with_timeout(async {
         use nlink::netlink::Wireguard;

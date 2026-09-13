@@ -25,12 +25,35 @@ jobs:
     runs-on: integration
     container:
       image: rust:1.97-bookworm
+      # What this job needs from the runner, and why — none of it can be
+      # requested from here, because a workflow-level `container.options`
+      # is ignored by this runner. The options live in the runner's own
+      # config (myserver `docs/vms/vm-runner.md`, privileged lane), which
+      # has satisfied all of it since 2026-09-13 (#350):
+      #
+      #   --cap-add NET_ADMIN --cap-add SYS_ADMIN
+      #   --security-opt seccomp=unconfined --security-opt apparmor=unconfined
+      #   --volume /lib/modules:/lib/modules:ro
+      #
+      # Every `LabNamespace` is the `ip netns` dance: a bind mount of an
+      # nsfs inode under /var/run/netns, which needs CAP_SYS_ADMIN *and*
+      # an LSM that permits mount(2). Under the default AppArmor profile
+      # the mount is denied and every namespace-creating test fails with
+      # EACCES in milliseconds — 278 of 361, which is what this lane was
+      # silently doing until #350. /lib/modules is what `has_module`
+      # reads to see built-ins (modules.builtin/modules.dep); without it
+      # their tests skip, and a skip reports `ok` (#273). The guard step
+      # below fails the job if that mount ever goes away again.
     steps:
       - name: Install runtime deps and node for actions
         shell: bash
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends iproute2 conntrack nodejs git
+          # iputils-ping: the plug and tc_shaping traffic tests push packets
+          # with `ping`; without it they fail (or the LabNamespace
+          # exec_ignore helper silently sends nothing and the counter
+          # assertion fails), which the flag below used to hide (#350).
+          apt-get install -y --no-install-recommends iproute2 conntrack nodejs git iputils-ping
       - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - name: Guard that kernel modules are available on the runner VM
         shell: bash
@@ -41,6 +64,17 @@ jobs:
           # parameters, so most do not (#273).
           rel=$(uname -r)
           idx="/lib/modules/$rel/modules.builtin /lib/modules/$rel/modules.dep"
+          # The index is only visible if the runner mounts /lib/modules
+          # into the container. Without it `has_module` falls back to
+          # /sys/module alone, which answers "no" for every built-in, and
+          # the tests that needed one skip — reporting `ok`. Fail here
+          # instead of degrading into a green run that tested less (#350).
+          if [ ! -r "/lib/modules/$rel/modules.dep" ]; then
+            echo "::error::/lib/modules/$rel is not readable in this container;"
+            echo "::error::the runner must mount it (-v /lib/modules:/lib/modules:ro)"
+            echo "::error::or built-in modules become silent test skips (#273, #350)"
+            exit 1
+          fi
           for m in nf_tables sch_htb cls_flower sch_netem sch_ingress ifb \
                    act_mirred cls_u32 dummy veth vrf wireguard 8021q; do
             if [ -d "/sys/module/$m" ] || grep -qE "(^|/)$m\.ko" $idx 2>/dev/null; then
@@ -51,21 +85,16 @@ jobs:
       - name: Build with lab feature
         shell: bash
         run: cargo build -p nlink --features lab,sockdiag,namespace_watcher --tests
-      # STILL INFORMATIONAL, but the reason has changed. The old note
-      # here read "39 failures are kernel-behavior assertions that differ
-      # between Debian 13 and the old Ubuntu runners (e.g. HTB class
-      # counts, address replace label semantics)". Most of them were not:
-      # they were real bugs, fixed in #258/#268/#269/#270/#286-#291, and
-      # they had been invisible because `has_module` skipped the tests
-      # that would have caught them (#273).
-      #
-      # What is left before this job can gate: #293 and #294 — one real
-      # bug (loopback address scope) and one test asserting a label
-      # change the kernel does not perform. When those close, drop
-      # `continue-on-error` and let a red integration run be red.
+      # This step gates. It carried `continue-on-error: true` from its
+      # first run until #350, nominally waiting on #293/#294 — both long
+      # fixed — and the flag did exactly what it says: this step's result
+      # never reached the job, so the lane was green while 278 of 361
+      # tests failed on it. (The red runs #213/#217 came from the
+      # *Library tests* step below, which never had the flag.) A
+      # genuinely optional feature is gated in the test with
+      # `require_module!`, never at the job.
       - name: Integration tests (root in container)
         shell: bash
-        continue-on-error: true
         env:
           RUST_LOG: nlink=debug
           # A skipped test reports `ok`. On a runner whose modules the
@@ -77,6 +106,16 @@ jobs:
           NLINK_TEST_STRICT_MODULES: >-
             nf_tables,sch_htb,cls_flower,sch_netem,sch_ingress,ifb,
             act_mirred,cls_u32,dummy,veth,8021q
+          # NLINK_TEST_STRICT_HOST_ROOT is deliberately NOT set. This
+          # lane's containers are rootless: uid 0 here is the runner's
+          # unprivileged user wearing a mapping, and six tests need root
+          # in the *initial* user namespace — mounting the /etc overlay
+          # and remounting /sys in a spawned namespace, the TC police
+          # rate table, creating a WireGuard device. They skip here
+          # (#357) and are covered by local root runs; the 2026-07-27
+          # privileged trial reached the same conclusion. Set it to 1 on
+          # a lane that does run as host root, and those skips become
+          # failures.
         run: cargo test -p nlink --features lab,sockdiag,namespace_watcher -- --test-threads=1 --nocapture
       - name: Library tests
         shell: bash

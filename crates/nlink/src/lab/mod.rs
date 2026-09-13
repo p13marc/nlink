@@ -302,6 +302,81 @@ pub fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
+/// `true` if the current process is root in the **initial** user
+/// namespace — not merely root inside one.
+///
+/// [`is_root`] asks `euid == 0`, which is equally true inside a
+/// rootless container, where uid 0 is the unprivileged host user
+/// wearing a mapping. Most of the suite does not care: a namespace,
+/// a link, a qdisc, an nftables table are all owned by the user
+/// namespace that created them, so mapped root can do the work.
+///
+/// A handful of operations check against `init_user_ns` regardless:
+/// mounting over `/etc` or remounting `/sys` in a spawned namespace,
+/// the TC police rate table, creating a WireGuard device. Those fail
+/// `EPERM` under mapped root no matter what capabilities the container
+/// was given, so a test that needs one must ask this question and not
+/// the other (#357). On the privileged CI lane, whose job containers
+/// are rootless, `require_root!()` alone let six such tests run and
+/// fail.
+///
+/// The predicate is the identity mapping in `/proc/self/uid_map`,
+/// which the initial namespace alone carries:
+///
+/// ```text
+/// initial:  "         0          0 4294967295"
+/// rootless: "         0       1000          1"
+/// ```
+///
+/// A missing or unreadable `uid_map` reads as *not* host root — the
+/// conservative answer, since the caller skips rather than asserts.
+pub fn is_host_root() -> bool {
+    if !is_root() {
+        return false;
+    }
+    std::fs::read_to_string("/proc/self/uid_map").is_ok_and(|map| uid_map_is_identity(&map))
+}
+
+/// Whether a `uid_map` grants the full identity mapping, i.e. the
+/// initial user namespace's `0 0 4294967295`.
+///
+/// Split out from [`is_host_root`] so the parse is unit-testable
+/// without a container to run in.
+fn uid_map_is_identity(map: &str) -> bool {
+    map.lines().any(|line| {
+        let mut f = line.split_whitespace();
+        let (Some(inside), Some(outside), Some(count)) = (f.next(), f.next(), f.next()) else {
+            return false;
+        };
+        // The range must start at 0 on both sides and cover every uid;
+        // a container that maps 0 -> 0 for a single uid is still a
+        // container (`0 0 1`), and init_user_ns is the only namespace
+        // that maps all 2^32 of them.
+        inside == "0" && outside == "0" && count.parse::<u64>() == Ok(u64::from(u32::MAX))
+    })
+}
+
+/// Whether a test that needs [`is_host_root`] should fail rather than
+/// skip when it does not have it.
+///
+/// Set `NLINK_TEST_STRICT_HOST_ROOT=1` in an environment that *does*
+/// run as host root; a skip is then a hard failure. This is the
+/// [`strict_modules`] bargain, for the same reason — a silent skip is
+/// indistinguishable from a pass — with the difference that there is
+/// exactly one thing being promised here, so it is a flag rather than
+/// a list.
+///
+/// The privileged CI lane runs rootless and deliberately does not set
+/// it: those tests genuinely cannot run there, and failing on them
+/// would only teach everyone to ignore the job. They are covered by
+/// the maintainer's local root runs.
+pub fn strict_host_root() -> bool {
+    matches!(
+        std::env::var("NLINK_TEST_STRICT_HOST_ROOT").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
 /// `true` if the named kernel feature is usable — loaded, built into
 /// the kernel, or available for the kernel to load on demand.
 ///
@@ -454,6 +529,63 @@ macro_rules! require_root {
         if !$crate::lab::is_root() {
             eprintln!("Skipping test: requires root");
             return Ok(());
+        }
+    };
+}
+
+/// Macro that returns early with `Ok(())` unless the process is root
+/// in the **initial** user namespace ([`is_host_root`]).
+///
+/// For the few operations the kernel checks against `init_user_ns`
+/// whatever the container was granted — mounting over `/etc` or
+/// remounting `/sys` in a spawned namespace, the TC police rate table,
+/// creating a WireGuard device. Under a rootless container those fail
+/// `EPERM`, and [`crate::require_root!`] cannot see the difference,
+/// which is how six tests came to fail on the privileged CI lane
+/// instead of skipping (#357).
+///
+/// Pair it with [`crate::require_root!`], which stays the gate for
+/// everything else. An environment that does run as host root can set
+/// `NLINK_TEST_STRICT_HOST_ROOT=1` to make the skip a failure —
+/// see [`strict_host_root`].
+///
+/// ```no_run
+/// #[tokio::test]
+/// async fn needs_a_real_mount() -> nlink::Result<()> {
+///     nlink::require_root!();
+///     nlink::require_host_root!();
+///     // ... real test body ...
+///     Ok(())
+/// }
+/// ```
+#[macro_export]
+macro_rules! require_host_root {
+    () => {
+        if !$crate::lab::is_host_root() {
+            let msg = "requires root in the initial user namespace; \
+                       a rootless container's root cannot mount over /etc, \
+                       remount /sys, install a TC police rate table, or \
+                       create a WireGuard device (#357)";
+            assert!(!$crate::lab::strict_host_root(), "{msg}");
+            eprintln!("Skipping test: {msg}");
+            return Ok(());
+        }
+    };
+}
+
+/// Like [`crate::require_host_root!`] but for test functions whose
+/// return type is `()` rather than `Result<()>`.
+#[macro_export]
+macro_rules! require_host_root_void {
+    () => {
+        if !$crate::lab::is_host_root() {
+            let msg = "requires root in the initial user namespace; \
+                       a rootless container's root cannot mount over /etc, \
+                       remount /sys, install a TC police rate table, or \
+                       create a WireGuard device (#357)";
+            assert!(!$crate::lab::strict_host_root(), "{msg}");
+            eprintln!("Skipping test: {msg}");
+            return;
         }
     };
 }
@@ -650,5 +782,21 @@ mod tests {
     #[test]
     fn has_module_says_no_to_something_that_does_not_exist() {
         assert!(!has_module("nlink_definitely_not_a_module_xyzzy"));
+    }
+
+    #[test]
+    fn only_the_initial_namespaces_uid_map_is_the_identity_mapping() {
+        // What /proc/self/uid_map reads outside any user namespace.
+        assert!(uid_map_is_identity("         0          0 4294967295\n"));
+        // A rootless container: uid 0 inside is the host's ordinary user.
+        assert!(!uid_map_is_identity(
+            "         0       1000          1\n         1     100000      65536\n"
+        ));
+        // 0 -> 0, but for a single uid: still a namespace, not the host.
+        assert!(!uid_map_is_identity("         0          0          1\n"));
+        // Whatever a future kernel or a mangled read hands back.
+        assert!(!uid_map_is_identity(""));
+        assert!(!uid_map_is_identity("0 0"));
+        assert!(!uid_map_is_identity("0 0 not-a-number"));
     }
 }

@@ -137,6 +137,8 @@ async fn htb_class_burst_survives_a_kernel_round_trip() -> Result<()> {
 #[tokio::test]
 async fn police_with_a_rate_installs() -> Result<()> {
     require_root!();
+    // The police rate table is CAP_NET_ADMIN in init_user_ns (#357).
+    nlink::require_host_root!();
     nlink::require_modules!("act_police");
 
     let (_ns, conn) = setup("police-tick").await?;

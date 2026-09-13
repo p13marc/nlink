@@ -183,7 +183,8 @@ Set `RUST_LOG=nlink=debug` (or `=trace`) in CI so a failing test
 log includes the in-flight method's span, dramatically cutting
 the "what was happening when this hung?" debug loop. The CI
 workflow in this repo does exactly that for the integration job
-(`RUST_LOG=nlink=debug,nlink::netlink::nftables=trace`).
+(`RUST_LOG=nlink=debug`; raise a single module to `trace` when chasing
+one subsystem, e.g. `nlink=debug,nlink::netlink::nftables=trace`).
 
 Shipped in 0.17. Requires the `lab` feature (test/lab-only).
 
