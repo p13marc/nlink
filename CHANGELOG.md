@@ -99,6 +99,24 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **`QdiscBuilder::tbf` takes `Rate` and `Bytes`, not a bare `u64`
+  that meant bytes per second (#349).** Every imperative TC builder
+  takes the typed units — the whole point of `Rate` is that bits and
+  bytes per second cannot be confused, and the history behind it is an
+  HTB class shaping at 800 Mbit/s because `"100mbit"` was read as bytes.
+  The declarative TBF was the one exception: `tbf(rate_bps: u64,
+  burst_bytes: u32)`, where a Rust caller writing `100_000_000` for
+  100 Mbit/s got 800 Mbit/s with no error anywhere. **Breaking:** the
+  signature is now `tbf(rate: Rate, burst: Bytes)`; a new
+  `QdiscBuilder::limit_bytes(Bytes)` sets the TBF queue limit, which had
+  no builder setter at all. The serde/JSON shape is unchanged
+  (`rate_bps` / `burst_bytes` / `limit_bytes` integers in the kernel's
+  units), and the `Tbf` variant is now `#[non_exhaustive]` like `Netem`
+  so the next field is not the next compile break. Lowering goes through
+  one `DeclaredQdiscType::tbf_config()` instead of three hand-copied
+  arms; a unit test pins that `tbf(Rate::mbit(100), Bytes::kib(32))`
+  lowers to `TbfConfig::new().rate(Rate::mbit(100)).burst(Bytes::kib(32))`.
+
 - **`DsmarkConfig` and `AtmConfig` are deprecated: the kernel retired
   both qdiscs in Linux 6.8 (#347).** `sch_dsmark` and `sch_atm` went out
   with CBQ in the 6.8 "retire" series (their companion classifier

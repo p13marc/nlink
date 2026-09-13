@@ -21,7 +21,7 @@ use crate::netlink::{
     protocol::Route,
     tc::{
         ClsactConfig, FqCodelConfig, HtbQdiscConfig, IngressConfig, PrioConfig,
-        QdiscConfig, SfqConfig, TbfConfig,
+        QdiscConfig, SfqConfig,
     },
     types::{addr::Scope, route::RouteProtocol, route::RouteType},
 };
@@ -960,8 +960,8 @@ fn qdisc_params_match(declared: &DeclaredQdiscType, existing_opts: Option<&[u8]>
 
 /// Render the `TCA_OPTIONS` payload bytes for a declared qdisc type.
 /// Mirrors the typed-config construction in `apply.rs::add_qdisc`;
-/// netem goes through the one shared lowering,
-/// `DeclaredQdiscType::netem_config` (#332).
+/// netem and tbf go through the one shared lowering each,
+/// `DeclaredQdiscType::{netem_config, tbf_config}` (#332, #349).
 fn declared_options_bytes(t: &DeclaredQdiscType) -> Vec<u8> {
     let mut builder = MessageBuilder::new(0, 0);
     let start = builder.len();
@@ -992,19 +992,10 @@ fn declared_options_bytes(t: &DeclaredQdiscType) -> Vec<u8> {
             }
             cfg.write_options(&mut builder)
         }
-        DeclaredQdiscType::Tbf {
-            rate_bps,
-            burst_bytes,
-            limit_bytes,
-        } => {
-            let mut cfg = TbfConfig::new()
-                .rate(crate::util::Rate::bytes_per_sec(*rate_bps))
-                .burst(crate::util::Bytes::new(*burst_bytes as u64));
-            if let Some(lim) = limit_bytes {
-                cfg = cfg.limit(crate::util::Bytes::new(*lim as u64));
-            }
-            cfg.write_options(&mut builder)
-        }
+        DeclaredQdiscType::Tbf { .. } => t
+            .tbf_config()
+            .expect("matched the Tbf arm")
+            .write_options(&mut builder),
         DeclaredQdiscType::Sfq { perturb_secs } => {
             let mut cfg = SfqConfig::new();
             if let Some(p) = perturb_secs {

@@ -21,7 +21,7 @@ use crate::netlink::{
     route::{Ipv4Route, Ipv6Route},
     tc::{
         ClsactConfig, FqCodelConfig, HtbQdiscConfig, IngressConfig, PrioConfig,
-        SfqConfig, TbfConfig,
+        SfqConfig,
     },
 };
 
@@ -887,17 +887,8 @@ async fn add_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Result<()
             }
             conn.add_qdisc(&qdisc.dev, config).await
         }
-        DeclaredQdiscType::Tbf {
-            rate_bps,
-            burst_bytes,
-            limit_bytes,
-        } => {
-            let mut config = TbfConfig::new()
-                .rate(crate::util::Rate::bytes_per_sec(*rate_bps))
-                .burst(crate::util::Bytes::new(*burst_bytes as u64));
-            if let Some(limit) = limit_bytes {
-                config = config.limit(crate::util::Bytes::new(*limit as u64));
-            }
+        DeclaredQdiscType::Tbf { .. } => {
+            let config = qdisc.qdisc_type.tbf_config().expect("matched the Tbf arm");
             conn.add_qdisc(&qdisc.dev, config).await
         }
         DeclaredQdiscType::Sfq { perturb_secs } => {
@@ -989,17 +980,8 @@ async fn replace_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Resul
             }
             conn.replace_qdisc(&qdisc.dev, cfg).await
         }
-        DeclaredQdiscType::Tbf {
-            rate_bps,
-            burst_bytes,
-            limit_bytes,
-        } => {
-            let mut cfg = TbfConfig::new()
-                .rate(crate::util::Rate::bytes_per_sec(*rate_bps))
-                .burst(crate::util::Bytes::new(*burst_bytes as u64));
-            if let Some(lim) = limit_bytes {
-                cfg = cfg.limit(crate::util::Bytes::new(*lim as u64));
-            }
+        DeclaredQdiscType::Tbf { .. } => {
+            let cfg = qdisc.qdisc_type.tbf_config().expect("matched the Tbf arm");
             conn.replace_qdisc(&qdisc.dev, cfg).await
         }
         DeclaredQdiscType::Sfq { perturb_secs } => {

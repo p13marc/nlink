@@ -1487,6 +1487,32 @@ impl DeclaredQdiscType {
         }
         Some(cfg.build())
     }
+
+    /// Lower a `Tbf` declaration to the imperative [`TbfConfig`]; `None`
+    /// for every other variant. The one place the mapping lives, like
+    /// [`netem_config`](Self::netem_config) (#349).
+    ///
+    /// [`TbfConfig`]: crate::netlink::tc::TbfConfig
+    pub(crate) fn tbf_config(&self) -> Option<crate::netlink::tc::TbfConfig> {
+        use crate::netlink::tc::TbfConfig;
+        use crate::util::{Bytes, Rate};
+
+        let Self::Tbf {
+            rate_bps,
+            burst_bytes,
+            limit_bytes,
+        } = self
+        else {
+            return None;
+        };
+        let mut cfg = TbfConfig::new()
+            .rate(Rate::bytes_per_sec(*rate_bps))
+            .burst(Bytes::new(u64::from(*burst_bytes)));
+        if let Some(limit) = limit_bytes {
+            cfg = cfg.limit(Bytes::new(u64::from(*limit)));
+        }
+        Some(cfg.build())
+    }
 }
 
 impl DeclaredQdiscType {
@@ -1567,10 +1593,18 @@ pub enum DeclaredQdiscType {
         interval_us: Option<u32>,
     },
     /// Token Bucket Filter.
+    ///
+    /// Built with [`QdiscBuilder::tbf`], which takes typed units
+    /// ([`Rate`](crate::util::Rate) / [`Bytes`](crate::util::Bytes)); the
+    /// fields are the kernel's units so the serde shape is plain integers.
+    #[non_exhaustive]
     Tbf {
         /// Rate in **bytes** per second — tc(8)'s `bps`, not bits.
         rate_bps: u64,
+        /// Bucket size in bytes (`TbfConfig::burst`).
         burst_bytes: u32,
+        /// Queue limit in bytes (`TbfConfig::limit`); `None` leaves the
+        /// kernel default.
         limit_bytes: Option<u32>,
     },
     /// Stochastic Fair Queueing.
@@ -1860,13 +1894,40 @@ impl QdiscBuilder {
         self
     }
 
-    /// Configure as TBF qdisc.
-    pub fn tbf(mut self, rate_bps: u64, burst_bytes: u32) -> Self {
+    /// Configure as TBF qdisc with a typed rate and bucket size (#349).
+    ///
+    /// Takes [`Rate`](crate::util::Rate) and [`Bytes`](crate::util::Bytes)
+    /// like every imperative TC builder, so `Rate::mbit(100)` here and in
+    /// [`TbfConfig`](crate::netlink::tc::TbfConfig) install the same
+    /// shaper. This used to be `tbf(rate_bps: u64, burst_bytes: u32)`,
+    /// where the number was bytes per second — a caller writing
+    /// `100_000_000` for 100 Mbit/s got 800 Mbit/s, silently, the exact
+    /// bug the `Rate` newtype exists to make a compile error.
+    ///
+    /// ```
+    /// use nlink::netlink::config::NetworkConfig;
+    /// use nlink::{Bytes, Rate};
+    ///
+    /// let cfg = NetworkConfig::new().qdisc("eth0", |q| {
+    ///     q.tbf(Rate::mbit(100), Bytes::kib(32)).limit_bytes(Bytes::kib(64))
+    /// });
+    /// # let _ = cfg;
+    /// ```
+    pub fn tbf(mut self, rate: crate::util::Rate, burst: crate::util::Bytes) -> Self {
         self.qdisc_type = Some(DeclaredQdiscType::Tbf {
-            rate_bps,
-            burst_bytes,
+            rate_bps: rate.as_bytes_per_sec(),
+            burst_bytes: burst.as_u32_saturating(),
             limit_bytes: None,
         });
+        self
+    }
+
+    /// Set the TBF queue limit in bytes (`TbfConfig::limit`). No-op for
+    /// other kinds; netem's packet limit is [`QdiscBuilder::limit`].
+    pub fn limit_bytes(mut self, limit: crate::util::Bytes) -> Self {
+        if let Some(DeclaredQdiscType::Tbf { limit_bytes, .. }) = &mut self.qdisc_type {
+            *limit_bytes = Some(limit.as_u32_saturating());
+        }
         self
     }
 
@@ -2419,6 +2480,47 @@ mod plan_228_tests {
         assert_eq!(cfg.rate, Some(Rate::mbit(100)));
     }
 
+    // ---- #349 — tbf takes Rate + Bytes, and lowers through one place ----
+
+    #[test]
+    fn tbf_takes_typed_units_and_lowers_to_tbf_config() {
+        use crate::netlink::tc::TbfConfig;
+        use crate::util::{Bytes, Rate};
+        let q = QdiscBuilder::new("eth0")
+            .tbf(Rate::mbit(100), Bytes::kib(32))
+            .limit_bytes(Bytes::kib(64))
+            .build();
+        let DeclaredQdiscType::Tbf {
+            rate_bps,
+            burst_bytes,
+            limit_bytes,
+        } = &q.qdisc_type
+        else {
+            panic!("tbf");
+        };
+        assert_eq!(*rate_bps, 12_500_000, "100 Mbit/s is 12.5 MB/s — bytes, not bits");
+        assert_eq!(*burst_bytes, 32_768);
+        assert_eq!(*limit_bytes, Some(65_536));
+
+        let lowered = q.qdisc_type.tbf_config().unwrap();
+        let by_hand = TbfConfig::new()
+            .rate(Rate::mbit(100))
+            .burst(Bytes::kib(32))
+            .limit(Bytes::kib(64))
+            .build();
+        assert_eq!(format!("{lowered:?}"), format!("{by_hand:?}"));
+        assert_eq!(lowered.rate, Rate::mbit(100));
+
+        // No limit declared → TbfConfig's default (zero) is left alone.
+        let q = QdiscBuilder::new("eth0").tbf(Rate::kbit(512), Bytes::kb(10)).build();
+        let lowered = q.qdisc_type.tbf_config().unwrap();
+        assert_eq!(lowered.limit, Bytes::ZERO);
+        assert!(QdiscBuilder::new("eth0").netem().build().qdisc_type.tbf_config().is_none());
+        // limit_bytes on a non-tbf kind is a no-op, like the netem setters.
+        let q = QdiscBuilder::new("eth0").htb().limit_bytes(Bytes::kib(1)).build();
+        assert!(matches!(q.qdisc_type, DeclaredQdiscType::Htb { .. }));
+    }
+
     #[test]
     fn duration_setters_keep_sub_millisecond_precision() {
         let q = QdiscBuilder::new("eth0")
@@ -2565,6 +2667,20 @@ mod serde_roundtrip_tests {
             panic!("netem");
         };
         assert_eq!((*rate_bps, *gap, *delay_us), (None, None, Some(100_000)));
+    }
+
+    /// #349 — the builder took typed units; the wire shape did not move.
+    #[test]
+    fn tbf_serde_shape_is_still_bytes_per_second_integers() {
+        use crate::util::{Bytes, Rate};
+        let cfg = NetworkConfig::new()
+            .qdisc("eth0", |q| q.tbf(Rate::mbit(100), Bytes::kib(32)).limit_bytes(Bytes::kib(64)));
+        assert_roundtrips(&cfg);
+        let json = cfg.to_json_string().unwrap();
+        assert!(
+            json.contains(r#""tbf":{"rate_bps":12500000,"burst_bytes":32768,"limit_bytes":65536}"#),
+            "{json}"
+        );
     }
 
     #[test]
