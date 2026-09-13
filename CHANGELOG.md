@@ -6,6 +6,21 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`NetworkConfig::apply_reconcile_with_options` — purge + retry in one
+  call (#345).** `apply_reconcile` is the retry-on-`EBUSY`/`EAGAIN` shape
+  a concurrent-mutator consumer is told to use, but every attempt
+  recomputed the non-purge `diff()` and applied with
+  `ApplyOptions::default()`, so purge was unreachable through it; anyone
+  wanting both wrote the loop by hand around `apply_with_options`. The new
+  method takes `ApplyOptions` and computes each attempt's diff with the
+  same `purge` / `purge_tables` lowering `apply_with_options` uses (since
+  #333/#335 that reaches every table the config declares into);
+  `dry_run` and `continue_on_error` are honoured too. `apply_reconcile`
+  delegates with the defaults and behaves as before. Root test: plain
+  `apply_reconcile` leaves an undeclared address alone, the `with_purge`
+  variant removes it in one attempt, and a second call reports zero
+  changes.
+
 - **`namespace::list_live()`, `impl AsFd for NamespaceFd`,
   `Connection::new_in_namespace_fd` / `NetlinkSocket::new_in_namespace_fd`
   (#186).** `list()` returns every entry under `/var/run/netns`,

@@ -207,6 +207,47 @@ impl NetworkConfig {
         conn: &Connection<Route>,
         opts: crate::netlink::nftables::config::ReconcileOptions,
     ) -> Result<crate::netlink::nftables::config::ReconcileReport> {
+        self.apply_reconcile_with_options(conn, opts, ApplyOptions::default())
+            .await
+    }
+
+    /// [`Self::apply_reconcile`] with [`ApplyOptions`] for each attempt
+    /// (#345).
+    ///
+    /// `apply_reconcile` recomputed every attempt with the non-purge
+    /// [`Self::diff`] and applied with `ApplyOptions::default()`, so
+    /// purge + retry was unreachable: a concurrent-mutator consumer that
+    /// also wanted undeclared addresses and routes removed had to write
+    /// the retry loop by hand around [`Self::apply_with_options`]. Each
+    /// attempt here computes the diff with `apply.purge` /
+    /// `apply.purge_tables` (the same lowering `apply_with_options`
+    /// uses) and applies with `apply`; `dry_run` and
+    /// `continue_on_error` are honoured too.
+    ///
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// use nlink::netlink::config::{ApplyOptions, NetworkConfig};
+    /// use nlink::netlink::nftables::config::ReconcileOptions;
+    ///
+    /// let cfg = NetworkConfig::new().link("eth0", |b| b.dummy());
+    /// let report = cfg
+    ///     .apply_reconcile_with_options(
+    ///         &conn,
+    ///         ReconcileOptions::default(),
+    ///         ApplyOptions::default().with_purge(true),
+    ///     )
+    ///     .await?;
+    /// println!("{} attempt(s), {} change(s)", report.attempts, report.change_count);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn apply_reconcile_with_options(
+        &self,
+        conn: &Connection<Route>,
+        opts: crate::netlink::nftables::config::ReconcileOptions,
+        apply: ApplyOptions,
+    ) -> Result<crate::netlink::nftables::config::ReconcileReport> {
         // Plan 207e H4 — recompute the diff at the START of each
         // attempt. Pre-0.19 this loop re-ran the same `apply`
         // against changed kernel state, causing this failure mode:
@@ -226,11 +267,15 @@ impl NetworkConfig {
         // Cumulative `change_count` across attempts is the sum of
         // each successful apply pass. An empty diff at start of an
         // attempt is treated as "done", short-circuiting.
+        let diff_opts = DiffOptions::default()
+            .purge(apply.purge)
+            .purge_tables(apply.purge_tables.iter().copied());
         let mut attempt: usize = 0;
         let mut cumulative_changes: usize = 0;
         loop {
-            // Compute fresh diff against current kernel state.
-            let diff = self.diff(conn).await?;
+            // Compute fresh diff against current kernel state, with the
+            // purge scope the caller asked for.
+            let diff = self.diff_with_options(conn, diff_opts.clone()).await?;
             if diff.is_empty() {
                 return Ok(crate::netlink::nftables::config::ReconcileReport {
                     attempts: attempt + 1,
@@ -238,7 +283,7 @@ impl NetworkConfig {
                 });
             }
 
-            match apply::apply_diff(&diff, conn, apply::ApplyOptions::default()).await {
+            match apply::apply_diff(&diff, conn, apply.clone()).await {
                 Ok(result) => {
                     cumulative_changes += result.changes_made;
                     return Ok(crate::netlink::nftables::config::ReconcileReport {
@@ -265,8 +310,10 @@ mod apply_reconcile_tests {
     //! These tests verify the retry classification (the
     //! NftablesConfig precedent's logic mirrored for the
     //! RTNETLINK side). The integration-test side of the
-    //! happy path lives in `tests/integration/config.rs`
-    //! (root-gated).
+    //! happy path lives in `tests/integration/cycle_0_19_backfill.rs`
+    //! (`plan_188_apply_reconcile_first_attempt_succeeds`); the purge
+    //! variant is `apply_reconcile_with_options_purges_and_plain_does_not`
+    //! in `tests/integration/network_config_apply.rs`. Both root-gated.
 
     use crate::Error;
     use std::time::Duration;

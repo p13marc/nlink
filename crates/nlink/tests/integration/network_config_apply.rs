@@ -27,8 +27,9 @@ use std::time::Duration;
 use nlink::Result;
 use nlink::netlink::{
     Connection, Route,
-    config::{DiffOptions, NetworkConfig},
+    config::{ApplyOptions, DiffOptions, NetworkConfig},
     namespace,
+    nftables::config::ReconcileOptions,
 };
 
 use crate::common::TestNamespace;
@@ -643,6 +644,91 @@ async fn purge_tolerates_a_route_removed_between_diff_and_apply() -> Result<()> 
             "{:?}",
             result.summary
         );
+        Ok(())
+    })
+    .await
+}
+
+/// #345 — `apply_reconcile` could not purge: every attempt recomputed
+/// the non-purge diff and applied with `ApplyOptions::default()`, so a
+/// concurrent-mutator consumer that also wanted undeclared state removed
+/// had to write the retry loop by hand. `apply_reconcile_with_options`
+/// takes the `ApplyOptions` per attempt; plain `apply_reconcile` keeps
+/// its defaults and removes nothing.
+#[tokio::test]
+async fn apply_reconcile_with_options_purges_and_plain_does_not() -> Result<()> {
+    nlink::require_root!();
+
+    with_timeout(async {
+        use std::net::{IpAddr, Ipv4Addr};
+
+        use nlink::netlink::addr::Ipv4Address;
+        use nlink::netlink::link::DummyLink;
+
+        let ns = TestNamespace::new("reconcile-purge")?;
+        let conn = conn_in_ns(&ns)?;
+
+        conn.add_link(DummyLink::new("eth0")).await?;
+        conn.set_link_up("eth0").await?;
+        conn.add_address(Ipv4Address::new("eth0", Ipv4Addr::new(10, 0, 0, 1), 24))
+            .await?;
+        conn.add_address(Ipv4Address::new("eth0", Ipv4Addr::new(10, 0, 0, 2), 24))
+            .await?;
+
+        let cfg = NetworkConfig::new()
+            .link("eth0", |b| b.dummy())
+            .address("eth0", "10.0.0.1/24")
+            .expect("valid CIDR");
+
+        let v4 = |addrs: &[nlink::netlink::messages::AddressMessage]| -> Vec<IpAddr> {
+            addrs
+                .iter()
+                .filter(|a| a.is_ipv4())
+                .filter_map(|a| a.address().copied())
+                .collect()
+        };
+
+        // Plain reconcile: the declaration is already satisfied and the
+        // undeclared address is not its business.
+        let report = cfg
+            .apply_reconcile(&conn, ReconcileOptions::default())
+            .await?;
+        assert_eq!((report.attempts, report.change_count), (1, 0), "{report:?}");
+        let have = v4(&conn.get_addresses().await?);
+        assert!(
+            have.contains(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
+            "plain apply_reconcile must not purge; have {have:?}"
+        );
+
+        // With purge: one attempt, one change, the undeclared address gone
+        // and the declared one kept.
+        let report = cfg
+            .apply_reconcile_with_options(
+                &conn,
+                ReconcileOptions::default(),
+                ApplyOptions::default().with_purge(true),
+            )
+            .await?;
+        assert_eq!((report.attempts, report.change_count), (1, 1), "{report:?}");
+        let have = v4(&conn.get_addresses().await?);
+        assert!(
+            have.contains(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+            "declared address must survive; have {have:?}"
+        );
+        assert!(
+            !have.contains(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
+            "undeclared address must be purged; have {have:?}"
+        );
+
+        // And it converges: a second purge-reconcile has nothing to do.
+        let report = cfg
+            .apply_reconcile_with_options(
+                &conn,
+                ReconcileOptions::default(),
+                ApplyOptions::default().with_purge(true),
+            )
+            .await?;
+        assert_eq!((report.attempts, report.change_count), (1, 0), "{report:?}");
         Ok(())
     })
     .await

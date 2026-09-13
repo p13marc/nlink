@@ -99,8 +99,10 @@ impl Stack {
     /// a peer disappearing between validation and apply still
     /// leaves partial state. Use
     /// [`NetworkConfig::apply_reconcile`](crate::netlink::config::NetworkConfig::apply_reconcile)
-    /// for the network layer if concurrent mutators are a
-    /// concern; nftables already uses an atomic single-batch
+    /// (or
+    /// [`apply_reconcile_with_options`](crate::netlink::config::NetworkConfig::apply_reconcile_with_options)
+    /// to purge as well) for the network layer if concurrent mutators
+    /// are a concern; nftables already uses an atomic single-batch
     /// commit. True rollback would require a Reverse-Diff
     /// abstraction across all layers — out of scope.
     pub async fn apply(&self) -> Result<StackApplyReport> {
