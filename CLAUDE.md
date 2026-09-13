@@ -786,39 +786,50 @@ sets are checked: `cargo test -p nlink --doc` in the `test` job and
 
 ## Active work
 
-**0.26.0 shipped 2026-09-10** (`0.26.0` tagged — bare, no `v`; both crates
-on crates.io). Headline narrative in `CHANGELOG.md ## [0.26.0]` +
-`docs/migration_guide/0.25.0-to-0.26.0.md`, which leads with the silent
-behaviour changes because there are eight of them.
+**0.27.0 shipped 2026-09-13** (`0.27.0` tagged — bare, no `v`; both crates
+on crates.io). Headline narrative in `CHANGELOG.md ## [0.27.0]` +
+`docs/migration_guide/0.26.0-to-0.27.0.md`, which leads with purge because
+that is the change that deletes.
 
 **The next cycle is open on `master`** — new work lands in
 `CHANGELOG.md ## [Unreleased]` and is promoted to the next `## [X.Y.0]` at
-cut time. The workspace version stays at the released 0.26.0 until the
+cut time. The workspace version stays at the released 0.27.0 until the
 cycle's first breaking PR bumps it (the cargo-semver-checks convention).
 
-That cycle started from a review that filed 25 bugs (#258–#282) and grew
-as fixing them surfaced more (#286–#294, #300, #304, #310–#319) — 37 in
-all, every one closed. What they have in common is worth stating,
-because it shapes how to work here: almost
-none is a logic error in isolation. They are **places where nothing was
-checking**. Wrong constants because the audit gate only read `#[repr]`
-enums; wrong endianness because the byte-order gate only banned the
-reader half; three HTB default-class bugs because no test asserted that
-traffic was classified; failed dumps reported as success because the
-loop was copy-pasted seven times and the copies disagreed.
+0.27.0 was the declarative-configuration cycle, and its lesson is narrower
+than 0.26.0's but worth carrying: **almost every bug in it needed a second
+`apply()` to show itself.** A declared netem was replaced on every reconcile
+because the diff byte-compared `TCA_OPTIONS` the kernel never echoes back
+(#346). A `Stack` created its WireGuard links after the addresses that needed
+them (#330), and `ensure_devices` created them down, so the next layer's
+routes failed `ENETDOWN` (#329). A purge skipped every table but main, so a
+VRF route that left the config never left the kernel (#333/#335). Each is
+invisible applying once to an empty namespace. **New declarative work gets a
+test that applies twice and asserts the second diff is empty.**
 
-So every fix in this cycle lands with the check that was missing, and
-several arrived as new CI gates: `audit-uapi-constants` now reads plain
-`pub const`s too, `audit-bytes-le` bans writers as well as readers,
-`audit-dump-termination` keeps dump loops on the shared classifier, and
-`audit-doc-examples` compiles the documentation.
+The cycle also made the privileged CI lane real for the first time (#350,
+#357). It had reported `success` for a year while failing 278 of 361 tests:
+`continue-on-error: true` swallowed the step, the runner's containers ran
+under an enforcing AppArmor profile that denied every `LabNamespace` bind
+mount, and `/lib/modules` was not mounted so built-ins read as absent. The
+runner grants `apparmor=unconfined` and mounts `/lib/modules` now; the job
+gates, its module-guard step fails if that mount disappears, and six tests
+that need root in the *initial* user namespace — the lane is rootless — skip
+via `require_host_root!()` rather than failing. **A green integration job
+means something as of 0.27.0; before it, it meant nothing.**
 
-The last of those is the clearest case. 508 doc examples were
-```` ```ignore ````, so nothing had compiled them in years; converting them
-found 24 that no longer built **and five library bugs the examples had been
-documenting around** (#310, #313, #315, #316, #317). Documentation nobody
-compiles is not documentation that happens to be stale — it is an unchecked
-assertion about the API's shape.
+**0.26.0 shipped 2026-09-10** (`0.26.0` tagged; both crates on crates.io) —
+narrative in `CHANGELOG.md ## [0.26.0]` +
+`docs/migration_guide/0.25.0-to-0.26.0.md`, which leads with the silent
+behaviour changes because there are eight of them. That cycle started from a
+review that filed 25 bugs (#258–#282) and grew as fixing them surfaced more
+(#286–#294, #300, #304, #310–#319) — 37 in all. Almost none was a logic error
+in isolation; they were **places where nothing was checking**, which is why
+four CI gates came out of it (`audit-uapi-constants` reads plain `pub const`s,
+`audit-bytes-le` bans writers as well as readers, `audit-dump-termination`
+keeps dump loops on the shared classifier, `audit-doc-examples` compiles the
+documentation — converting 508 ```` ```ignore ```` blocks found 24 that no
+longer built and five library bugs the examples had been documenting around).
 
 **0.24.0 shipped 2026-07-03** (`v0.24.0` tagged; both crates on
 crates.io) — narrative in `CHANGELOG.md ## [0.24.0]` +

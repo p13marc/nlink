@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-09-13
+
 > Upgrading from 0.26.0? See
 > [`docs/migration_guide/0.26.0-to-0.27.0.md`](docs/migration_guide/0.26.0-to-0.27.0.md).
 > Two compile breaks, and four behaviour changes with no compiler error —
