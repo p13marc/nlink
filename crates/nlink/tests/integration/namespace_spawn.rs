@@ -92,9 +92,55 @@ async fn test_spawn_captures_stdout() -> Result<()> {
 async fn test_spawn_nonexistent_namespace() -> Result<()> {
     require_root!();
 
-    let result = namespace::spawn("definitely_does_not_exist_12345", Command::new("true"));
-    assert!(result.is_err());
+    let err = namespace::spawn("definitely_does_not_exist_12345", Command::new("true"))
+        .expect_err("missing namespace must fail");
+    assert!(err.is_not_found(), "got unclassifiable error: {err}");
 
+    Ok(())
+}
+
+/// #348 — an `ip netns` marker with no namespace mounted over it (what a
+/// crash or a bare `umount` leaves behind) is `NamespaceNotFound` from
+/// every by-name entry point, not an `EINVAL` out of `setns(2)`.
+#[tokio::test]
+async fn stale_marker_is_not_found_from_every_by_name_entry_point() -> Result<()> {
+    require_root!();
+    use nlink::netlink::namespace::NETNS_RUN_DIR;
+
+    // A real namespace first, so the run dir exists the way `ip netns add`
+    // leaves it (and is cleaned up by Drop).
+    let _ns = TestNamespace::new("stale-marker")?;
+    let name = format!("nlink-stale-{}", std::process::id());
+    let marker = PathBuf::from(NETNS_RUN_DIR).join(&name);
+    fs::write(&marker, b"")?;
+    assert!(namespace::exists(&name), "the marker is on disk");
+
+    let spawn = namespace::spawn(&name, Command::new("true")).map(drop);
+    let spawn_etc = namespace::spawn_with_etc(&name, Command::new("true")).map(drop);
+    let conn = namespace::connection_for::<nlink::Route>(&name).map(drop);
+    let conn_async = namespace::connection_for_async::<nlink::Wireguard>(&name)
+        .await
+        .map(drop);
+    let open = namespace::open(&name).map(drop);
+    let enter = namespace::enter(&name).map(drop);
+    let sysctl = namespace::get_sysctl(&name, "net.ipv4.ip_forward").map(drop);
+    let spec = NamespaceSpec::Named(&name).spawn(Command::new("true")).map(drop);
+    // Clean up before asserting so a failure cannot leak the marker.
+    let _ = fs::remove_file(&marker);
+
+    for (what, result) in [
+        ("spawn", spawn),
+        ("spawn_with_etc", spawn_etc),
+        ("connection_for", conn),
+        ("connection_for_async", conn_async),
+        ("open", open),
+        ("enter", enter),
+        ("get_sysctl", sysctl),
+        ("NamespaceSpec::Named.spawn", spec),
+    ] {
+        let err = result.expect_err(what);
+        assert!(err.is_not_found(), "{what}: got unclassifiable error: {err}");
+    }
     Ok(())
 }
 
