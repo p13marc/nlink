@@ -7,8 +7,8 @@ use nlink::{
         Connection, Result, Route,
         messages::TcMessage,
         tc::{
-            AtmConfig, BfifoConfig, CakeConfig, CbsConfig, ChokeConfig, ClsactConfig, CodelConfig,
-            DrrConfig, DsmarkConfig, EtfConfig, EtsConfig, FqCodelConfig, FqConfig, FqPieConfig,
+            BfifoConfig, CakeConfig, CbsConfig, ChokeConfig, ClsactConfig, CodelConfig,
+            DrrConfig, EtfConfig, EtsConfig, FqCodelConfig, FqConfig, FqPieConfig,
             GredConfig,
             HfscConfig, HhfConfig, HtbQdiscConfig, IngressConfig, MqConfig, MqprioConfig,
             MultiqConfig, NetemConfig, PfifoConfig, PfifoFastConfig, PieConfig, PlugConfig,
@@ -18,6 +18,9 @@ use nlink::{
     },
     output::{OutputFormat, OutputOptions, print_all},
 };
+// Retired by the kernel in Linux 6.8 (#347); still dispatchable for older kernels.
+#[allow(deprecated)]
+use nlink::netlink::tc::{AtmConfig, DsmarkConfig};
 
 #[derive(Args)]
 pub struct QdiscCmd {
@@ -341,10 +344,13 @@ async fn dispatch_qdisc(
         "sfb" => dispatch!(SfbConfig),
         "multiq" => dispatch!(MultiqConfig),
         "hhf" => dispatch!(HhfConfig),
+        // Retired by the kernel in 6.8 (#347); still offered for older kernels.
+        #[allow(deprecated)]
         "dsmark" => dispatch!(DsmarkConfig),
         "choke" => dispatch!(ChokeConfig),
         "pfifo_fast" => dispatch!(PfifoFastConfig),
         "gred" => dispatch!(GredConfig),
+        #[allow(deprecated)]
         "atm" => dispatch!(AtmConfig),
         other => Err(Error::InvalidMessage(format!(
             "tc qdisc: unknown kind `{other}` (recognised: htb, netem, cake, tbf, sfq, prio, fq_codel, fq, codel, fq_pie, pfifo, bfifo, red, pie, hfsc, drr, qfq, ingress, clsact, plug, mqprio, mq, ets, etf, taprio, cbs, skbprio, sfb, multiq, hhf, dsmark, choke, pfifo_fast, gred, atm)"

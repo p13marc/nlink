@@ -84,6 +84,24 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **`DsmarkConfig` and `AtmConfig` are deprecated: the kernel retired
+  both qdiscs in Linux 6.8 (#347).** `sch_dsmark` and `sch_atm` went out
+  with CBQ in the 6.8 "retire" series (their companion classifier
+  `cls_tcindex` had already left in 6.3), so on any current kernel an add
+  of either fails with `ENOENT`/`EOPNOTSUPP` whatever the arguments. The
+  types stay for callers on older kernels, marked `#[deprecated(since =
+  "0.27.0")]`, and will be dropped in a later release; `nlink-tc` still
+  dispatches `dsmark` and `atm` for the same reason. Independently of the
+  retirement, `DsmarkConfig::new().build()` could never install anywhere:
+  every write in `write_options` was optional, so it sent an empty
+  `TCA_OPTIONS` nest, and `dsmark_init` requires `TCA_DSMARK_INDICES` with
+  no default — `EINVAL` on every kernel that had the qdisc, the #327 shape
+  with no absent-nest fallback to reach for. `write_options` (and
+  `parse_params`) now return a `dsmark: indices is required …` error
+  instead of sending the request the kernel refuses. A wire-level unit
+  test pins both the error and the attribute the nest carries when
+  `indices` is set.
+
 - **Purge reaches every table the config declares into, not just
   main (#333, #335).** `DeclaredRouteBuilder::table` (0.26) let a
   `NetworkConfig` declare routes into a VRF table, and the add/modify

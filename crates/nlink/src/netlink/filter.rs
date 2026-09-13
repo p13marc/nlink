@@ -2135,7 +2135,9 @@ impl FilterConfig for FwFilter {
 ///
 /// The tcindex classifier maps `skb->tc_index` (set upstream by dsmark
 /// or an `skbedit`/`flow` action) through a hash table to a class id.
-/// It is the canonical companion to the `dsmark` qdisc for DiffServ.
+/// It was the canonical companion to the `dsmark` qdisc for DiffServ;
+/// note that the kernel retired `cls_tcindex` in Linux 6.3 and
+/// `sch_dsmark` in 6.8, so on current kernels neither can be installed.
 ///
 /// ```no_run
 /// use nlink::netlink::filter::TcindexFilter;

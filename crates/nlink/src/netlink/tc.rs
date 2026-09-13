@@ -2823,12 +2823,19 @@ impl QdiscConfig for PfifoFastConfig {
 
 /// ATM (`sch_atm`) qdisc configuration.
 ///
+/// **Deprecated: the kernel retired `sch_atm` in Linux 6.8** (together
+/// with CBQ and dsmark — "net/sched: Retire ATM qdisc"). On 6.8 and later
+/// every add fails with `ENOENT` / `EOPNOTSUPP` whatever the arguments;
+/// the type remains for callers on older kernels and will be removed in
+/// a later release (#347).
+///
 /// The ATM qdisc is classful: it maps classified flows onto ATM virtual
 /// circuits. The **qdisc itself takes no options** — `tc qdisc add dev X
 /// root atm` simply instantiates the classful qdisc, so this is a unit
 /// config (like [`PfifoFastConfig`] / `MultiqConfig`).
 ///
 /// ```no_run
+/// # #![allow(deprecated)]
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// # let conn = nlink::Connection::<nlink::Route>::new()?;
 /// use nlink::netlink::tc::AtmConfig;
@@ -2849,8 +2856,13 @@ impl QdiscConfig for PfifoFastConfig {
 /// hand-rolled `MessageBuilder` with your own socket fd if you target
 /// ATM hardware.
 #[derive(Debug, Clone, Default)]
+#[deprecated(
+    since = "0.27.0",
+    note = "sch_atm was removed from the kernel in Linux 6.8; the type will be dropped in a later release — #347"
+)]
 pub struct AtmConfig;
 
+#[allow(deprecated)]
 impl AtmConfig {
     /// Create a new ATM qdisc configuration.
     pub fn new() -> Self {
@@ -2875,6 +2887,7 @@ impl AtmConfig {
     }
 }
 
+#[allow(deprecated)]
 impl QdiscConfig for AtmConfig {
     fn kind(&self) -> &'static str {
         "atm"
@@ -4761,17 +4774,34 @@ impl QdiscConfig for HhfConfig {
 
 /// dsmark (DiffServ marking) qdisc configuration.
 ///
+/// **Deprecated: the kernel retired `sch_dsmark` in Linux 6.8** (together
+/// with CBQ and ATM — "net/sched: Retire dsmark qdisc"; its companion
+/// classifier `cls_tcindex` went in 6.3). On 6.8 and later every add
+/// fails with `ENOENT` / `EOPNOTSUPP` whatever the arguments; the type
+/// remains for callers on older kernels and will be removed in a later
+/// release (#347).
+///
 /// dsmark classifies packets into a table of indices, each carrying a
 /// DiffServ mask/value applied to the DS field. This config covers the
 /// qdisc-level knobs; the per-index `mask`/`value` are class-level
 /// (`TCA_DSMARK_MASK`/`VALUE`).
 ///
+/// `indices` is **required**: `dsmark_init` rejects a `TCA_OPTIONS` nest
+/// without `TCA_DSMARK_INDICES` with `EINVAL`, and there is no kernel
+/// default. A config without it fails in `write_options` with a readable
+/// error instead of sending the request the kernel refuses (#347).
+///
 /// ```no_run
+/// # #![allow(deprecated)]
 /// use nlink::netlink::tc::DsmarkConfig;
 ///
 /// let cfg = DsmarkConfig::new().indices(64).set_tc_index().build();
 /// ```
 #[derive(Debug, Clone, Default)]
+#[deprecated(
+    since = "0.27.0",
+    note = "sch_dsmark was removed from the kernel in Linux 6.8; the type will be dropped in a later release — #347"
+)]
 pub struct DsmarkConfig {
     /// Number of indices (power of two).
     pub indices: Option<u16>,
@@ -4781,13 +4811,15 @@ pub struct DsmarkConfig {
     pub set_tc_index: bool,
 }
 
+#[allow(deprecated)]
 impl DsmarkConfig {
-    /// Create a new dsmark configuration builder.
+    /// Create a new dsmark configuration builder. `indices` must be set
+    /// before the config can install — see the type docs.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Set the number of indices (power of two).
+    /// Set the number of indices (power of two). Required.
     pub fn indices(mut self, indices: u16) -> Self {
         self.indices = Some(indices);
         self
@@ -4813,9 +4845,9 @@ impl DsmarkConfig {
     /// Parse a tc-style dsmark params slice into a typed
     /// `DsmarkConfig`.
     ///
-    /// Recognised tokens: `indices <n>`, `default_index <n>`,
+    /// Recognised tokens: `indices <n>` (required), `default_index <n>`,
     /// `set_tc_index`. Strict: unknown tokens, missing values, and
-    /// unparseable values all error.
+    /// unparseable values all error, as does a missing `indices`.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut cfg = Self::new();
         let mut i = 0;
@@ -4853,10 +4885,17 @@ impl DsmarkConfig {
                 }
             }
         }
+        if cfg.indices.is_none() {
+            return Err(Error::InvalidMessage(
+                "dsmark: `indices <n>` is required (dsmark_init rejects options without TCA_DSMARK_INDICES)"
+                    .to_string(),
+            ));
+        }
         Ok(cfg)
     }
 }
 
+#[allow(deprecated)]
 impl QdiscConfig for DsmarkConfig {
     fn kind(&self) -> &'static str {
         "dsmark"
@@ -4865,9 +4904,17 @@ impl QdiscConfig for DsmarkConfig {
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         use super::types::tc::qdisc::dsmark::*;
 
-        if let Some(indices) = self.indices {
-            builder.append_attr_u16(TCA_DSMARK_INDICES, indices);
-        }
+        // `dsmark_init`: `if (!tb[TCA_DSMARK_INDICES]) goto errout;` —
+        // there is no default, so an empty nest is a request the kernel
+        // refuses with EINVAL. Say so here instead (#347).
+        let Some(indices) = self.indices else {
+            return Err(Error::InvalidMessage(
+                "dsmark: indices is required (dsmark_init rejects TCA_OPTIONS without \
+                 TCA_DSMARK_INDICES); use DsmarkConfig::new().indices(n)"
+                    .to_string(),
+            ));
+        };
+        builder.append_attr_u16(TCA_DSMARK_INDICES, indices);
         if let Some(default_index) = self.default_index {
             builder.append_attr_u16(TCA_DSMARK_DEFAULT_INDEX, default_index);
         }
@@ -8833,6 +8880,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_dsmark_parse() {
         let cfg =
             DsmarkConfig::parse_params(&["indices", "64", "default_index", "0", "set_tc_index"])
@@ -8848,6 +8896,35 @@ mod tests {
         assert!(DsmarkConfig::parse_params(&["indices"]).is_err());
         assert!(DsmarkConfig::parse_params(&["indices", "x"]).is_err());
         assert!(DsmarkConfig::parse_params(&["unknown"]).is_err());
+        // and a missing `indices`, which the kernel would refuse (#347).
+        let err = DsmarkConfig::parse_params(&["set_tc_index"]).unwrap_err();
+        assert!(err.to_string().contains("dsmark: `indices <n>` is required"), "{err}");
+    }
+
+    /// `DsmarkConfig::new().build()` used to send an empty `TCA_OPTIONS`
+    /// nest, which `dsmark_init` refuses with EINVAL because
+    /// `TCA_DSMARK_INDICES` has no default. The request the kernel cannot
+    /// accept is now a readable error before it is sent; with `indices`
+    /// the nest carries exactly that attribute (#347).
+    #[test]
+    #[allow(deprecated)]
+    fn dsmark_without_indices_is_an_error_not_an_empty_nest() {
+        use crate::netlink::test_support::qdisc_attrs;
+        use crate::netlink::types::tc::qdisc::dsmark::*;
+
+        let mut b = MessageBuilder::new(0, 0);
+        let err = DsmarkConfig::new().build().write_options(&mut b).unwrap_err();
+        assert!(err.to_string().contains("dsmark: indices is required"), "{err}");
+        assert_eq!(b.len(), MessageBuilder::new(0, 0).len(), "nothing written on error");
+
+        let attrs = qdisc_attrs(&DsmarkConfig::new().indices(64).build());
+        assert_eq!(attrs.get(&TCA_DSMARK_INDICES).map(Vec::as_slice), Some(&64u16.to_ne_bytes()[..]));
+        assert!(!attrs.contains_key(&TCA_DSMARK_DEFAULT_INDEX));
+        assert!(!attrs.contains_key(&TCA_DSMARK_SET_TC_INDEX));
+
+        let attrs = qdisc_attrs(&DsmarkConfig::new().indices(16).default_index(3).set_tc_index().build());
+        assert_eq!(attrs.get(&TCA_DSMARK_DEFAULT_INDEX).map(Vec::as_slice), Some(&3u16.to_ne_bytes()[..]));
+        assert_eq!(attrs.get(&TCA_DSMARK_SET_TC_INDEX).map(Vec::len), Some(0));
     }
 
     #[test]
@@ -9836,6 +9913,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn atm_parse_params_takes_no_args() {
         assert!(AtmConfig::parse_params(&[]).is_ok());
         assert_eq!(AtmConfig::new().kind(), "atm");

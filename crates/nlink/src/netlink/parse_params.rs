@@ -96,8 +96,8 @@ macro_rules! impl_parse_params {
 }
 
 impl_parse_params! {
-    // Qdisc configs (35) — see crates/nlink/src/netlink/tc.rs.
-    crate::netlink::tc::AtmConfig,
+    // Qdisc configs (35, two of them deprecated and listed below) — see
+    // crates/nlink/src/netlink/tc.rs.
     crate::netlink::tc::BfifoConfig,
     crate::netlink::tc::CakeConfig,
     crate::netlink::tc::CbsConfig,
@@ -105,7 +105,6 @@ impl_parse_params! {
     crate::netlink::tc::ClsactConfig,
     crate::netlink::tc::CodelConfig,
     crate::netlink::tc::DrrConfig,
-    crate::netlink::tc::DsmarkConfig,
     crate::netlink::tc::EtfConfig,
     crate::netlink::tc::EtsConfig,
     crate::netlink::tc::FqConfig,
@@ -177,6 +176,26 @@ impl_parse_params! {
     crate::netlink::action::SkbmodAction,
     crate::netlink::action::TunnelKeyAction,
     crate::netlink::action::VlanAction,
+}
+
+// Retired by the kernel in Linux 6.8 (#347). Deprecated, still dispatchable
+// for callers on older kernels — the sealed trait keeps the contract
+// type-checked until the types go.
+#[allow(deprecated)]
+impl sealed::Sealed for crate::netlink::tc::AtmConfig {}
+#[allow(deprecated)]
+impl ParseParams for crate::netlink::tc::AtmConfig {
+    fn parse_params(params: &[&str]) -> Result<Self> {
+        <crate::netlink::tc::AtmConfig>::parse_params(params)
+    }
+}
+#[allow(deprecated)]
+impl sealed::Sealed for crate::netlink::tc::DsmarkConfig {}
+#[allow(deprecated)]
+impl ParseParams for crate::netlink::tc::DsmarkConfig {
+    fn parse_params(params: &[&str]) -> Result<Self> {
+        <crate::netlink::tc::DsmarkConfig>::parse_params(params)
+    }
 }
 
 #[cfg(test)]
