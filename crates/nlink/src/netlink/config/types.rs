@@ -1513,6 +1513,72 @@ impl DeclaredQdiscType {
         }
         Some(cfg.build())
     }
+
+    /// Lower an `Htb` declaration to [`HtbQdiscConfig`]; `None` otherwise
+    /// (#346).
+    ///
+    /// [`HtbQdiscConfig`]: crate::netlink::tc::HtbQdiscConfig
+    pub(crate) fn htb_config(&self) -> Option<crate::netlink::tc::HtbQdiscConfig> {
+        let Self::Htb { default_class } = self else {
+            return None;
+        };
+        Some(crate::netlink::tc::HtbQdiscConfig::new().default_class(*default_class))
+    }
+
+    /// Lower an `FqCodel` declaration to [`FqCodelConfig`]; `None`
+    /// otherwise (#346). Only the fields the declaration sets are written;
+    /// the kernel fills in the rest.
+    ///
+    /// [`FqCodelConfig`]: crate::netlink::tc::FqCodelConfig
+    pub(crate) fn fq_codel_config(&self) -> Option<crate::netlink::tc::FqCodelConfig> {
+        let Self::FqCodel {
+            limit,
+            target_us,
+            interval_us,
+        } = self
+        else {
+            return None;
+        };
+        let mut cfg = crate::netlink::tc::FqCodelConfig::new();
+        if let Some(lim) = limit {
+            cfg = cfg.limit(*lim);
+        }
+        if let Some(t) = target_us {
+            cfg = cfg.target(Duration::from_micros(u64::from(*t)));
+        }
+        if let Some(i) = interval_us {
+            cfg = cfg.interval(Duration::from_micros(u64::from(*i)));
+        }
+        Some(cfg)
+    }
+
+    /// Lower an `Sfq` declaration to [`SfqConfig`]; `None` otherwise (#346).
+    ///
+    /// [`SfqConfig`]: crate::netlink::tc::SfqConfig
+    pub(crate) fn sfq_config(&self) -> Option<crate::netlink::tc::SfqConfig> {
+        let Self::Sfq { perturb_secs } = self else {
+            return None;
+        };
+        let mut cfg = crate::netlink::tc::SfqConfig::new();
+        if let Some(p) = perturb_secs {
+            cfg = cfg.perturb(*p as i32);
+        }
+        Some(cfg)
+    }
+
+    /// Lower a `Prio` declaration to [`PrioConfig`]; `None` otherwise (#346).
+    ///
+    /// [`PrioConfig`]: crate::netlink::tc::PrioConfig
+    pub(crate) fn prio_config(&self) -> Option<crate::netlink::tc::PrioConfig> {
+        let Self::Prio { bands } = self else {
+            return None;
+        };
+        let mut cfg = crate::netlink::tc::PrioConfig::new();
+        if let Some(b) = bands {
+            cfg = cfg.bands(i32::from(*b));
+        }
+        Some(cfg)
+    }
 }
 
 impl DeclaredQdiscType {

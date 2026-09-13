@@ -2,7 +2,7 @@
 //!
 //! This module applies the computed diff to achieve the desired network state.
 
-use std::{net::IpAddr, time::Duration};
+use std::net::IpAddr;
 
 use super::{
     diff::{ConfigDiff, DiffOptions, LinkChanges, compute_diff_with_options},
@@ -20,8 +20,7 @@ use crate::netlink::{
     protocol::Route,
     route::{Ipv4Route, Ipv6Route},
     tc::{
-        ClsactConfig, FqCodelConfig, HtbQdiscConfig, IngressConfig, PrioConfig,
-        SfqConfig,
+        ClsactConfig, IngressConfig,
     },
 };
 
@@ -860,8 +859,8 @@ async fn add_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Result<()
             let config = qdisc.qdisc_type.netem_config().expect("matched the Netem arm");
             conn.add_qdisc(&qdisc.dev, config).await
         }
-        DeclaredQdiscType::Htb { default_class } => {
-            let config = HtbQdiscConfig::new().default_class(*default_class);
+        DeclaredQdiscType::Htb { .. } => {
+            let config = qdisc.qdisc_type.htb_config().expect("matched the Htb arm");
             conn.add_qdisc_full(
                 &qdisc.dev,
                 crate::TcHandle::ROOT,
@@ -870,39 +869,20 @@ async fn add_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Result<()
             )
             .await
         }
-        DeclaredQdiscType::FqCodel {
-            limit,
-            target_us,
-            interval_us,
-        } => {
-            let mut config = FqCodelConfig::new();
-            if let Some(lim) = limit {
-                config = config.limit(*lim);
-            }
-            if let Some(target) = target_us {
-                config = config.target(Duration::from_micros(*target as u64));
-            }
-            if let Some(interval) = interval_us {
-                config = config.interval(Duration::from_micros(*interval as u64));
-            }
+        DeclaredQdiscType::FqCodel { .. } => {
+            let config = qdisc.qdisc_type.fq_codel_config().expect("matched the FqCodel arm");
             conn.add_qdisc(&qdisc.dev, config).await
         }
         DeclaredQdiscType::Tbf { .. } => {
             let config = qdisc.qdisc_type.tbf_config().expect("matched the Tbf arm");
             conn.add_qdisc(&qdisc.dev, config).await
         }
-        DeclaredQdiscType::Sfq { perturb_secs } => {
-            let mut config = SfqConfig::new();
-            if let Some(perturb) = perturb_secs {
-                config = config.perturb(*perturb as i32);
-            }
+        DeclaredQdiscType::Sfq { .. } => {
+            let config = qdisc.qdisc_type.sfq_config().expect("matched the Sfq arm");
             conn.add_qdisc(&qdisc.dev, config).await
         }
-        DeclaredQdiscType::Prio { bands } => {
-            let mut config = PrioConfig::new();
-            if let Some(b) = bands {
-                config = config.bands(*b as i32);
-            }
+        DeclaredQdiscType::Prio { .. } => {
+            let config = qdisc.qdisc_type.prio_config().expect("matched the Prio arm");
             conn.add_qdisc(&qdisc.dev, config).await
         }
         DeclaredQdiscType::Ingress => conn.add_qdisc(&qdisc.dev, IngressConfig::new()).await,
@@ -953,8 +933,8 @@ async fn replace_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Resul
             let cfg = qdisc.qdisc_type.netem_config().expect("matched the Netem arm");
             conn.replace_qdisc(&qdisc.dev, cfg).await
         }
-        DeclaredQdiscType::Htb { default_class } => {
-            let cfg = HtbQdiscConfig::new().default_class(*default_class);
+        DeclaredQdiscType::Htb { .. } => {
+            let cfg = qdisc.qdisc_type.htb_config().expect("matched the Htb arm");
             conn.replace_qdisc_full(
                 &qdisc.dev,
                 crate::TcHandle::ROOT,
@@ -963,39 +943,20 @@ async fn replace_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Resul
             )
             .await
         }
-        DeclaredQdiscType::FqCodel {
-            limit,
-            target_us,
-            interval_us,
-        } => {
-            let mut cfg = FqCodelConfig::new();
-            if let Some(lim) = limit {
-                cfg = cfg.limit(*lim);
-            }
-            if let Some(t) = target_us {
-                cfg = cfg.target(Duration::from_micros(*t as u64));
-            }
-            if let Some(i) = interval_us {
-                cfg = cfg.interval(Duration::from_micros(*i as u64));
-            }
+        DeclaredQdiscType::FqCodel { .. } => {
+            let cfg = qdisc.qdisc_type.fq_codel_config().expect("matched the FqCodel arm");
             conn.replace_qdisc(&qdisc.dev, cfg).await
         }
         DeclaredQdiscType::Tbf { .. } => {
             let cfg = qdisc.qdisc_type.tbf_config().expect("matched the Tbf arm");
             conn.replace_qdisc(&qdisc.dev, cfg).await
         }
-        DeclaredQdiscType::Sfq { perturb_secs } => {
-            let mut cfg = SfqConfig::new();
-            if let Some(p) = perturb_secs {
-                cfg = cfg.perturb(*p as i32);
-            }
+        DeclaredQdiscType::Sfq { .. } => {
+            let cfg = qdisc.qdisc_type.sfq_config().expect("matched the Sfq arm");
             conn.replace_qdisc(&qdisc.dev, cfg).await
         }
-        DeclaredQdiscType::Prio { bands } => {
-            let mut cfg = PrioConfig::new();
-            if let Some(b) = bands {
-                cfg = cfg.bands(*b as i32);
-            }
+        DeclaredQdiscType::Prio { .. } => {
+            let cfg = qdisc.qdisc_type.prio_config().expect("matched the Prio arm");
             conn.replace_qdisc(&qdisc.dev, cfg).await
         }
         // Ingress/Clsact already handled above.

@@ -189,6 +189,36 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **A declared qdisc is no longer replaced on every reconcile (#346).**
+  `diff_qdiscs` decided "same kind, different parameters" by rendering
+  the declared config's `TCA_OPTIONS` and byte-comparing it with the
+  kernel's. The kernel does not echo what it was sent: netem always
+  reports `CORR`/`RATE`/`ECN`/`LATENCY64`/`JITTER64`, rounds latency to
+  ticks and orders attributes its own way; fq_codel echoes every field
+  with its defaults filled in. So an unchanged declaration was
+  "different" on every `diff()`, landed in `qdiscs_to_replace`, and every
+  `apply()` replaced the qdisc — `changes_made >= 1` forever (measured:
+  a second `apply` of an unchanged netem reported `Replaced qdisc netem
+  on dummy0`), statistics reset, traffic briefly disturbed, and the
+  "second apply converges" property everything else in `NetworkConfig`
+  has was broken for any interface with a declared netem.
+  `qdisc_params_match` now compares field by field through the parsed
+  `QdiscOptions`, in the kernel's units and quantisation: netem via the
+  same `netem_matches` that `PerPeerImpairer::reconcile` uses to leave a
+  leaf alone (which now also compares the five correlations), tbf
+  (rate/burst/limit), htb (default class, r2q), fq_codel (only the
+  declared fields, codel times through `codel_round_trip_us` — 20 ms
+  reads back as 19999 µs), sfq (perturb) and prio (bands, priomap).
+  Kinds without a parser fall back to the byte compare. Every kind's
+  declarative → imperative lowering is now one `DeclaredQdiscType`
+  method (`htb_config`, `fq_codel_config`, `sfq_config`, `prio_config`
+  join `netem_config`/`tbf_config`) instead of three hand-copied arms.
+  Unit tests feed the comparator the kernel's kind of echo (extra
+  attributes, truncated codel target); a root test applies netem, tbf,
+  htb, fq_codel, sfq and prio declarations twice each and asserts the
+  second `diff()` is empty and the second `apply()` reports
+  `changes_made == 0`.
+
 - **A stale `ip netns` marker is `NamespaceNotFound`, not an `EINVAL`
   out of `setns` (#348).** `ip netns add` bind-mounts an nsfs inode over
   an empty file; after a crash or a bare `umount` the file stays. The
