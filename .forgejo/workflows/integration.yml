@@ -106,6 +106,16 @@ jobs:
           NLINK_TEST_STRICT_MODULES: >-
             nf_tables,sch_htb,cls_flower,sch_netem,sch_ingress,ifb,
             act_mirred,cls_u32,dummy,veth,8021q
+          # NLINK_TEST_STRICT_HOST_ROOT is deliberately NOT set. This
+          # lane's containers are rootless: uid 0 here is the runner's
+          # unprivileged user wearing a mapping, and six tests need root
+          # in the *initial* user namespace — mounting the /etc overlay
+          # and remounting /sys in a spawned namespace, the TC police
+          # rate table, creating a WireGuard device. They skip here
+          # (#357) and are covered by local root runs; the 2026-07-27
+          # privileged trial reached the same conclusion. Set it to 1 on
+          # a lane that does run as host root, and those skips become
+          # failures.
         run: cargo test -p nlink --features lab,sockdiag,namespace_watcher -- --test-threads=1 --nocapture
       - name: Library tests
         shell: bash

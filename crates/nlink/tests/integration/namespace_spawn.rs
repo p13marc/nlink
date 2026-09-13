@@ -227,6 +227,8 @@ fn cleanup_etc_netns(ns_name: &str) {
 #[tokio::test]
 async fn test_spawn_with_etc_hosts() -> Result<()> {
     require_root!();
+    // Mounting the /etc overlay is checked against init_user_ns (#357).
+    nlink::require_host_root!();
 
     let ns = TestNamespace::new("spawn-etc-h")?;
     let custom_hosts = "127.0.0.1 custom-host.lab\n";
@@ -253,6 +255,8 @@ async fn test_spawn_with_etc_hosts() -> Result<()> {
 #[tokio::test]
 async fn namespace_spec_path_gets_the_etc_overlay_and_pid_does_not() -> Result<()> {
     require_root!();
+    // Mounting the /etc overlay is checked against init_user_ns (#357).
+    nlink::require_host_root!();
     use nlink::netlink::namespace::{NETNS_RUN_DIR, NamespaceSpec};
 
     let ns = TestNamespace::new("spawn-etc-spec")?;
@@ -314,6 +318,8 @@ async fn test_spawn_with_etc_no_dir() -> Result<()> {
 #[tokio::test]
 async fn test_spawn_with_etc_host_unaffected() -> Result<()> {
     require_root!();
+    // Mounting the /etc overlay is checked against init_user_ns (#357).
+    nlink::require_host_root!();
 
     let ns = TestNamespace::new("spawn-etc-ha")?;
     let custom_hosts = "127.0.0.1 only-in-namespace\n";
@@ -340,6 +346,8 @@ async fn test_spawn_with_etc_host_unaffected() -> Result<()> {
 #[tokio::test]
 async fn test_spawn_with_etc_sys_remount() -> Result<()> {
     require_root!();
+    // Remounting /sys is checked against init_user_ns (#357).
+    nlink::require_host_root!();
 
     let ns = TestNamespace::new("spawn-etc-sys")?;
     // Need at least one /etc overlay file to trigger mount namespace setup

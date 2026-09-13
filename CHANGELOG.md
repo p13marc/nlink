@@ -99,6 +99,23 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **`require_root!()` could not tell host root from a rootless
+  container's root, and six tests needed the difference (#357).**
+  `euid == 0` is equally true inside a rootless container, where uid 0
+  is an unprivileged host user wearing a mapping. Almost everything the
+  suite does is owned by the user namespace that created it and works
+  fine there — but mounting the `/etc` overlay or remounting `/sys` in a
+  spawned namespace, installing a TC police rate table, and creating a
+  WireGuard device are all checked against `init_user_ns`, so those six
+  tests ran and failed `EPERM` on the privileged CI lane instead of
+  skipping. New: `lab::is_host_root()` (the identity mapping in
+  `/proc/self/uid_map`, which only the initial namespace carries),
+  `require_host_root!()` / `require_host_root_void!()`, and
+  `NLINK_TEST_STRICT_HOST_ROOT=1` for an environment that does provide
+  host root — the `NLINK_TEST_STRICT_MODULES` bargain, so the skip is
+  not silently mistaken for a pass. The lane is rootless and does not
+  set it; those six stay covered by local root runs.
+
 - **The privileged integration lane runs the suite, and gates on it
   (#350).** The "Integration tests (root in container)" step carried
   `continue-on-error: true` behind a note saying it would stay

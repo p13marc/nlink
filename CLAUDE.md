@@ -62,7 +62,15 @@ sudo ./target/debug/deps/integration-* --test-threads=1
 ```
 
 For new tests that need root, gate with `nlink::require_root!()`
-(early-returns `Ok(())` when `euid != 0`). For tests that depend
+(early-returns `Ok(())` when `euid != 0`). For the few operations the
+kernel checks against `init_user_ns` no matter what the container was
+granted — mounting over `/etc` or remounting `/sys` in a spawned
+namespace, the TC police rate table, creating a WireGuard device — add
+`nlink::require_host_root!()`: `euid == 0` is also true inside a
+rootless container, which is where six tests were failing instead of
+skipping (#357). An environment that really is host root sets
+`NLINK_TEST_STRICT_HOST_ROOT=1` so those skips become failures; the
+privileged lane is rootless and does not. For tests that depend
 on a specific kernel module, also gate with
 `nlink::require_module!("nf_conntrack")`. `has_module()` asks three
 questions — `/sys/module/<name>`, `modules.builtin`, `modules.dep` —
