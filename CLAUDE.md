@@ -43,10 +43,17 @@ user, so root-gated tests would **bit-rot silently** if they
 weren't both (a) gated with `nlink::require_root!()` (so they
 skip cleanly as non-root) and (b) run under the privileged-CI
 gate that landed in 0.15.0 (Plan 140 — see
-`.forgejo/workflows/integration.yml`; runs on every push/PR
-to master under a container with `CAP_NET_ADMIN` + `CAP_SYS_ADMIN`
-+ `seccomp=unconfined`). For local validation as a non-root user,
-the `--apply` example runners stay the canonical channel (e.g.,
+`.forgejo/workflows/integration.yml`; runs on every push/PR to
+master). That job gates as of #350; before it, `continue-on-error:
+true` was swallowing a suite failing 278 of its 361 tests, because
+the runner's container lacked `apparmor=unconfined` (so the nsfs
+bind mount every `LabNamespace` does was denied) and did not mount
+`/lib/modules` (so every built-in module read as absent and its
+tests skipped). The container's full contract — those two plus
+`CAP_NET_ADMIN`, `CAP_SYS_ADMIN`, `seccomp=unconfined` — is stated
+in the workflow and enforced on the runner, not requestable from
+the workflow. For local validation as a non-root user, the
+`--apply` example runners stay the canonical channel (e.g.,
 `examples/netfilter/conntrack.rs --apply`).
 
 ```bash
