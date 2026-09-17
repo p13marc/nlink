@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A declared `masquerade` rule diffed as changed on every reconcile,
+  forever (#362).** `Expr::Masquerade` rendered only `NFTA_EXPR_NAME`,
+  on the reasoning that basic masquerade has no attributes. It has none
+  *inside* the data nest, but the nest itself is not optional:
+  `nft_expr_dump` opens `NFTA_EXPR_DATA` for every expression whose ops
+  have a `dump` callback and closes it whatever the callback wrote, so
+  the kernel echoes an empty 4-byte nest. The declared body was
+  therefore 4 bytes shorter than the kernel's, which no amount of TLV
+  normalisation can reconcile — one side simply lacks an attribute — and
+  the rule landed in `rules_to_replace` on every `NftablesConfig::diff`.
+
+  It hid because `apply` converges anyway: re-issuing the rule is
+  idempotent and keeps its handle, so the *applier* was right while the
+  *diff* was wrong, and nothing downstream broke visibly. What it did
+  break is anything that reads the diff — `NftablesDiff::is_empty()` was
+  never true for a config with a masquerade rule, so nlink-lab's
+  `apply --check` (a CI gate that exits non-zero on drift) reported
+  drift forever, seconds after `apply` had reported none.
+
+  A portless `redirect` had the same omission and is fixed with it. The
+  regression test asserts the wire bytes, because `parse_expressions`
+  cannot tell an absent nest from an empty one — which is exactly why
+  this went unnoticed — plus a root test that a NAT config with both
+  expressions diffs empty after apply.
+
 ## [0.27.0] - 2026-09-13
 
 > Upgrading from 0.26.0? See

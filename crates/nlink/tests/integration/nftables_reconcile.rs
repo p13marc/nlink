@@ -115,6 +115,72 @@ async fn reconcile_idempotent_reapply_yields_empty_diff() -> nlink::Result<()> {
     .await
 }
 
+/// #362: a masquerade rule diffed as changed on every reconcile,
+/// forever.
+///
+/// `Expr::Masquerade` rendered only NFTA_EXPR_NAME, but
+/// `nft_expr_dump` opens an NFTA_EXPR_DATA nest for every expression
+/// with a `dump` callback and closes it whatever the callback wrote —
+/// so the kernel echoed an empty 4-byte nest the encoder never
+/// produced. No TLV normalisation can reconcile "one side has an
+/// attribute the other does not", so the rule landed in
+/// `rules_to_replace` every time.
+///
+/// It hid because `apply` converges anyway (re-issuing the rule is
+/// idempotent and keeps its handle), so nothing downstream broke
+/// visibly — the *applier* was right and the *diff* was wrong. The
+/// existing idempotency test above only ever used `match_tcp_dport`
+/// rules, so no NAT expression was in an is-empty assertion at all.
+///
+/// A portless `redirect` had the same omission and is covered here
+/// with it.
+#[tokio::test]
+async fn reconcile_nat_exprs_without_attributes_are_idempotent() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("rec-nat-dataless")?;
+        let nft = nft_in_ns(&ns)?;
+
+        let cfg = NftablesConfig::new().table("nat_dataless", Family::Inet, |t| {
+            t.chain("postrouting", |c| {
+                c.hook(Hook::Postrouting)
+                    .priority(Priority::SrcNat)
+                    .chain_type(ChainType::Nat)
+            })
+            .chain("prerouting", |c| {
+                c.hook(Hook::Prerouting)
+                    .priority(Priority::DstNat)
+                    .chain_type(ChainType::Nat)
+            })
+            .rule_keyed("postrouting", "masq", |r| {
+                r.match_saddr_v4("10.0.0.0".parse().unwrap(), 8).masquerade()
+            })
+            .rule_keyed("prerouting", "redir", |r| {
+                r.match_tcp_dport(8080).redirect(None)
+            })
+        });
+
+        cfg.diff(&nft).await?.apply(&nft).await?;
+
+        let again = cfg.diff(&nft).await?;
+        assert!(
+            again.is_empty(),
+            "a NAT expression with no attributes of its own must still \
+             round-trip: the kernel echoes an empty NFTA_EXPR_DATA nest \
+             for it (#362). Second diff: {again}"
+        );
+        // Belt and braces: a third diff after the (no-op) apply of the
+        // second, in case apply itself perturbs the rule.
+        again.apply(&nft).await?;
+        let third = cfg.diff(&nft).await?;
+        assert!(third.is_empty(), "third diff must be empty too: {third}");
+        Ok(())
+    })
+    .await
+}
+
 #[tokio::test]
 async fn reconcile_add_one_rule_in_existing_chain() -> nlink::Result<()> {
     require_root!();
