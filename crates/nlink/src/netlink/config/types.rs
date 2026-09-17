@@ -1501,6 +1501,9 @@ impl DeclaredQdiscType {
             rate_bps,
             burst_bytes,
             limit_bytes,
+            peakrate_bps,
+            mtu,
+            ..
         } = self
         else {
             return None;
@@ -1510,6 +1513,12 @@ impl DeclaredQdiscType {
             .burst(Bytes::new(u64::from(*burst_bytes)));
         if let Some(limit) = limit_bytes {
             cfg = cfg.limit(Bytes::new(u64::from(*limit)));
+        }
+        if let Some(peak) = peakrate_bps {
+            cfg = cfg.peakrate(Rate::bytes_per_sec(*peak));
+        }
+        if let Some(m) = mtu {
+            cfg = cfg.mtu(*m);
         }
         Some(cfg.build())
     }
@@ -1530,11 +1539,26 @@ impl DeclaredQdiscType {
     /// the kernel fills in the rest.
     ///
     /// [`FqCodelConfig`]: crate::netlink::tc::FqCodelConfig
-    pub(crate) fn fq_codel_config(&self) -> Option<crate::netlink::tc::FqCodelConfig> {
+    /// `creating` must be `false` for a *change* to an fq_codel that
+    /// already exists. `flows` sizes the flow table, which the kernel
+    /// allocates in `fq_codel_init` and refuses to resize:
+    /// `fq_codel_change` starts with `if (tb[TCA_FQ_CODEL_FLOWS]) { if
+    /// (q->flows) return -EINVAL; }`, so a change message carrying the
+    /// attribute is rejected **even when the value is unchanged**.
+    /// Sending it anyway would make every later edit of any other knob
+    /// fail with EINVAL (#361).
+    pub(crate) fn fq_codel_config(
+        &self,
+        creating: bool,
+    ) -> Option<crate::netlink::tc::FqCodelConfig> {
         let Self::FqCodel {
             limit,
             target_us,
             interval_us,
+            flows,
+            quantum,
+            ecn,
+            ..
         } = self
         else {
             return None;
@@ -1549,6 +1573,17 @@ impl DeclaredQdiscType {
         if let Some(i) = interval_us {
             cfg = cfg.interval(Duration::from_micros(u64::from(*i)));
         }
+        if let Some(f) = flows
+            && creating
+        {
+            cfg = cfg.flows(*f);
+        }
+        if let Some(q) = quantum {
+            cfg = cfg.quantum(*q);
+        }
+        if let Some(e) = ecn {
+            cfg = cfg.ecn(*e);
+        }
         Some(cfg)
     }
 
@@ -1556,12 +1591,24 @@ impl DeclaredQdiscType {
     ///
     /// [`SfqConfig`]: crate::netlink::tc::SfqConfig
     pub(crate) fn sfq_config(&self) -> Option<crate::netlink::tc::SfqConfig> {
-        let Self::Sfq { perturb_secs } = self else {
+        let Self::Sfq {
+            perturb_secs,
+            limit,
+            quantum,
+            ..
+        } = self
+        else {
             return None;
         };
         let mut cfg = crate::netlink::tc::SfqConfig::new();
         if let Some(p) = perturb_secs {
-            cfg = cfg.perturb(*p as i32);
+            cfg = cfg.perturb(i32::try_from(*p).unwrap_or(i32::MAX));
+        }
+        if let Some(l) = limit {
+            cfg = cfg.limit(*l);
+        }
+        if let Some(q) = quantum {
+            cfg = cfg.quantum(*q);
         }
         Some(cfg)
     }
@@ -1653,10 +1700,33 @@ pub enum DeclaredQdiscType {
     /// Hierarchical Token Bucket.
     Htb { default_class: u32 },
     /// Fair Queueing Controlled Delay.
+    ///
+    /// `#[non_exhaustive]` since 0.28 for the same reason [`Netem`] is:
+    /// the variant grew the three knobs `FqCodelConfig` had and it
+    /// should not cost a major bump again. Construct through
+    /// [`QdiscBuilder::fq_codel`]; match with `..`.
+    ///
+    /// [`Netem`]: Self::Netem
+    #[non_exhaustive]
     FqCodel {
+        /// Queue limit in packets.
         limit: Option<u32>,
+        /// CoDel target delay.
         target_us: Option<u32>,
+        /// CoDel interval.
         interval_us: Option<u32>,
+        /// Number of flow buckets. **Honoured only when the qdisc is
+        /// created**: the kernel allocates the flow table in
+        /// `fq_codel_init` and `fq_codel_change` rejects the attribute
+        /// outright on an existing qdisc, so it is omitted from change
+        /// messages and excluded from the diff. To change it, delete the
+        /// qdisc and let it be re-added. Added in 0.28 (#361).
+        flows: Option<u32>,
+        /// Bytes dequeued per round. Added in 0.28 (#361).
+        quantum: Option<u32>,
+        /// Mark rather than drop, where the peer negotiated ECN.
+        /// `None` leaves the kernel default (off). Added in 0.28 (#361).
+        ecn: Option<bool>,
     },
     /// Token Bucket Filter.
     ///
@@ -1672,9 +1742,28 @@ pub enum DeclaredQdiscType {
         /// Queue limit in bytes (`TbfConfig::limit`); `None` leaves the
         /// kernel default.
         limit_bytes: Option<u32>,
+        /// Peak rate in **bytes** per second (`TbfConfig::peakrate`),
+        /// the ceiling a burst may drain at. Requires `mtu` to be
+        /// meaningful — the kernel sizes the peak bucket from it.
+        /// Added in 0.28 (#361).
+        peakrate_bps: Option<u64>,
+        /// Peak-burst / maximum packet size in bytes
+        /// (`TbfConfig::mtu`). `None` leaves the kernel default.
+        /// Added in 0.28 (#361).
+        mtu: Option<u32>,
     },
     /// Stochastic Fair Queueing.
-    Sfq { perturb_secs: Option<u32> },
+    ///
+    /// `#[non_exhaustive]` since 0.28 — see [`FqCodel`](Self::FqCodel).
+    #[non_exhaustive]
+    Sfq {
+        /// Hash-perturbation period in whole seconds.
+        perturb_secs: Option<u32>,
+        /// Queue limit in packets. Added in 0.28 (#361).
+        limit: Option<u32>,
+        /// Bytes dequeued per round. Added in 0.28 (#361).
+        quantum: Option<u32>,
+    },
     /// Priority qdisc.
     Prio { bands: Option<u8> },
     /// Ingress qdisc.
@@ -1928,10 +2017,126 @@ impl QdiscBuilder {
         self
     }
 
-    /// Set netem queue limit.
+    /// Set the queue limit in **packets**.
+    ///
+    /// Applies to netem, fq_codel and sfq — all three take a packet
+    /// limit and all three call it `limit`. TBF's limit is a byte count
+    /// and has its own setter, [`limit_bytes`](Self::limit_bytes); the
+    /// units are why they are not one method.
+    ///
+    /// Before 0.28 this reached netem only, which left fq_codel and sfq
+    /// unconfigurable through the builder entirely (#361).
     pub fn limit(mut self, packets: u32) -> Self {
-        if let Some(DeclaredQdiscType::Netem { limit, .. }) = &mut self.qdisc_type {
-            *limit = Some(packets);
+        match &mut self.qdisc_type {
+            Some(DeclaredQdiscType::Netem { limit, .. })
+            | Some(DeclaredQdiscType::FqCodel { limit, .. })
+            | Some(DeclaredQdiscType::Sfq { limit, .. }) => *limit = Some(packets),
+            _ => {}
+        }
+        self
+    }
+
+    /// Set the fq_codel target delay (`FqCodelConfig::target`).
+    ///
+    /// The kernel stores CoDel times as psched ticks, so the value that
+    /// comes back is the tick round-trip of this one rather than the
+    /// exact `Duration`; the diff accounts for that.
+    pub fn target(mut self, target: Duration) -> Self {
+        if let Some(DeclaredQdiscType::FqCodel { target_us, .. }) = &mut self.qdisc_type {
+            *target_us = Some(target.as_micros().min(u128::from(u32::MAX)) as u32);
+        }
+        self
+    }
+
+    /// Set the fq_codel interval (`FqCodelConfig::interval`). See
+    /// [`target`](Self::target) on tick rounding.
+    pub fn interval(mut self, interval: Duration) -> Self {
+        if let Some(DeclaredQdiscType::FqCodel { interval_us, .. }) = &mut self.qdisc_type {
+            *interval_us = Some(interval.as_micros().min(u128::from(u32::MAX)) as u32);
+        }
+        self
+    }
+
+    /// Set the number of fq_codel flow buckets (`FqCodelConfig::flows`).
+    ///
+    /// **Create-only.** The kernel sizes the flow table in
+    /// `fq_codel_init` and will not resize it: `fq_codel_change`
+    /// returns `EINVAL` if the attribute is present at all, *even when
+    /// the value is unchanged*. So this is applied when the qdisc is
+    /// first installed, dropped from any later change, and not compared
+    /// by the diff — declaring it cannot make a reconcile fail or churn,
+    /// but changing it on a live qdisc does nothing. Delete the qdisc to
+    /// resize the table. Added in 0.28 (#361).
+    pub fn flows(mut self, flows: u32) -> Self {
+        if let Some(DeclaredQdiscType::FqCodel { flows: f, .. }) = &mut self.qdisc_type {
+            *f = Some(flows);
+        }
+        self
+    }
+
+    /// Set the bytes dequeued per round — fq_codel's and sfq's
+    /// `quantum`, which mean the same thing. Added in 0.28 (#361).
+    pub fn quantum(mut self, bytes: u32) -> Self {
+        match &mut self.qdisc_type {
+            Some(DeclaredQdiscType::FqCodel { quantum, .. })
+            | Some(DeclaredQdiscType::Sfq { quantum, .. }) => *quantum = Some(bytes),
+            _ => {}
+        }
+        self
+    }
+
+    /// Enable fq_codel ECN marking instead of dropping, where the flow
+    /// negotiated it (`FqCodelConfig::ecn`). Added in 0.28 (#361).
+    pub fn ecn(mut self, enabled: bool) -> Self {
+        if let Some(DeclaredQdiscType::FqCodel { ecn, .. }) = &mut self.qdisc_type {
+            *ecn = Some(enabled);
+        }
+        self
+    }
+
+    /// Set the sfq hash-perturbation period (`SfqConfig::perturb`).
+    ///
+    /// The kernel's field is whole seconds, so sub-second precision is
+    /// truncated — `perturb(Duration::from_millis(1500))` installs 1s.
+    /// Added in 0.28 (#361).
+    pub fn perturb(mut self, period: Duration) -> Self {
+        if let Some(DeclaredQdiscType::Sfq { perturb_secs, .. }) = &mut self.qdisc_type {
+            *perturb_secs = Some(period.as_secs().min(u64::from(u32::MAX)) as u32);
+        }
+        self
+    }
+
+    /// Set the number of prio bands (`PrioConfig::bands`).
+    ///
+    /// The `Prio` variant has had this field since it was added, but
+    /// [`prio`](Self::prio) hardcoded `None` and no setter existed — so
+    /// the declarative path could only ever install the kernel default
+    /// of 3 (#361).
+    pub fn bands(mut self, bands: u8) -> Self {
+        if let Some(DeclaredQdiscType::Prio { bands: b }) = &mut self.qdisc_type {
+            *b = Some(bands);
+        }
+        self
+    }
+
+    /// Set the TBF peak rate (`TbfConfig::peakrate`) — the ceiling a
+    /// burst may drain at, above the sustained [`tbf`](Self::tbf) rate.
+    ///
+    /// The kernel sizes the peak bucket from the MTU, so set
+    /// [`mtu`](Self::mtu) with it. Added in 0.28 (#361).
+    pub fn peakrate(mut self, rate: crate::util::Rate) -> Self {
+        if let Some(DeclaredQdiscType::Tbf { peakrate_bps, .. }) = &mut self.qdisc_type {
+            *peakrate_bps = Some(rate.as_bytes_per_sec());
+        }
+        self
+    }
+
+    /// Set the TBF peak-burst / maximum packet size in bytes
+    /// (`TbfConfig::mtu`). Defaults to 1514 when unset. Added in 0.28
+    /// (#361).
+    pub fn mtu(mut self, bytes: u32) -> Self {
+        if let Some(DeclaredQdiscType::Tbf { mtu, .. }) = &mut self.qdisc_type {
+            *mtu = Some(bytes);
         }
         self
     }
@@ -1956,6 +2161,9 @@ impl QdiscBuilder {
             limit: None,
             target_us: None,
             interval_us: None,
+            flows: None,
+            quantum: None,
+            ecn: None,
         });
         self
     }
@@ -1984,6 +2192,8 @@ impl QdiscBuilder {
             rate_bps: rate.as_bytes_per_sec(),
             burst_bytes: burst.as_u32_saturating(),
             limit_bytes: None,
+            peakrate_bps: None,
+            mtu: None,
         });
         self
     }
@@ -1999,7 +2209,11 @@ impl QdiscBuilder {
 
     /// Configure as SFQ qdisc.
     pub fn sfq(mut self) -> Self {
-        self.qdisc_type = Some(DeclaredQdiscType::Sfq { perturb_secs: None });
+        self.qdisc_type = Some(DeclaredQdiscType::Sfq {
+            perturb_secs: None,
+            limit: None,
+            quantum: None,
+        });
         self
     }
 
@@ -2037,6 +2251,9 @@ impl QdiscBuilder {
                 limit: None,
                 target_us: None,
                 interval_us: None,
+                flows: None,
+                quantum: None,
+                ecn: None,
             }),
         }
     }
@@ -2560,6 +2777,7 @@ mod plan_228_tests {
             rate_bps,
             burst_bytes,
             limit_bytes,
+            ..
         } = &q.qdisc_type
         else {
             panic!("tbf");
@@ -2585,6 +2803,147 @@ mod plan_228_tests {
         // limit_bytes on a non-tbf kind is a no-op, like the netem setters.
         let q = QdiscBuilder::new("eth0").htb().limit_bytes(Bytes::kib(1)).build();
         assert!(matches!(q.qdisc_type, DeclaredQdiscType::Htb { .. }));
+    }
+
+    // ---- #361 — fq_codel / sfq / prio / tbf are configurable at all ----
+
+    /// Before 0.28, `fq_codel()`, `sfq()` and `prio()` hardcoded every
+    /// field to `None` and no setter reached them, so the declarative
+    /// path could only ever install kernel defaults for those kinds —
+    /// even for the fields `DeclaredQdiscType` already had. Every knob
+    /// the imperative config exposes must now survive the builder and
+    /// the lowering.
+    #[test]
+    fn fq_codel_knobs_reach_the_lowered_config() {
+        use crate::netlink::tc::FqCodelConfig;
+        let q = QdiscBuilder::new("eth0")
+            .fq_codel()
+            .limit(1200)
+            .target(Duration::from_millis(5))
+            .interval(Duration::from_millis(100))
+            .flows(1024)
+            .quantum(300)
+            .ecn(true)
+            .build();
+        let lowered = q.qdisc_type.fq_codel_config(true).unwrap();
+        let by_hand = FqCodelConfig::new()
+            .limit(1200)
+            .target(Duration::from_millis(5))
+            .interval(Duration::from_millis(100))
+            .flows(1024)
+            .quantum(300)
+            .ecn(true);
+        assert_eq!(format!("{lowered:?}"), format!("{by_hand:?}"));
+
+        // On a *change*, `flows` must be dropped: the kernel refuses
+        // TCA_FQ_CODEL_FLOWS on an initialised fq_codel even when the
+        // value is unchanged, so leaving it in would make every edit of
+        // any other knob fail with EINVAL (#361).
+        let changing = q.qdisc_type.fq_codel_config(false).unwrap();
+        assert_eq!(changing.flows, None, "flows must not ride on a change");
+        let without_flows = FqCodelConfig::new()
+            .limit(1200)
+            .target(Duration::from_millis(5))
+            .interval(Duration::from_millis(100))
+            .quantum(300)
+            .ecn(true);
+        assert_eq!(format!("{changing:?}"), format!("{without_flows:?}"));
+    }
+
+    #[test]
+    fn sfq_knobs_reach_the_lowered_config() {
+        use crate::netlink::tc::SfqConfig;
+        let q = QdiscBuilder::new("eth0")
+            .sfq()
+            .perturb(Duration::from_secs(10))
+            .limit(200)
+            .quantum(1514)
+            .build();
+        let lowered = q.qdisc_type.sfq_config().unwrap();
+        let by_hand = SfqConfig::new().perturb(10).limit(200).quantum(1514);
+        assert_eq!(format!("{lowered:?}"), format!("{by_hand:?}"));
+    }
+
+    /// `perturb` takes a `Duration` for consistency with the other
+    /// time-valued setters, but the kernel field is whole seconds.
+    #[test]
+    fn sfq_perturb_truncates_to_whole_seconds() {
+        let q = QdiscBuilder::new("eth0")
+            .sfq()
+            .perturb(Duration::from_millis(1_500))
+            .build();
+        let DeclaredQdiscType::Sfq { perturb_secs, .. } = &q.qdisc_type else {
+            panic!("sfq");
+        };
+        assert_eq!(*perturb_secs, Some(1));
+    }
+
+    #[test]
+    fn prio_bands_reach_the_lowered_config() {
+        let q = QdiscBuilder::new("eth0").prio().bands(4).build();
+        let lowered = q.qdisc_type.prio_config().unwrap();
+        assert_eq!(lowered.bands, 4);
+        // Unset still means the kernel default, as before.
+        let bare = QdiscBuilder::new("eth0").prio().build();
+        assert_eq!(bare.qdisc_type.prio_config().unwrap().bands, 3);
+    }
+
+    #[test]
+    fn tbf_peakrate_and_mtu_reach_the_lowered_config() {
+        use crate::netlink::tc::TbfConfig;
+        use crate::util::{Bytes, Rate};
+        let q = QdiscBuilder::new("eth0")
+            .tbf(Rate::mbit(100), Bytes::kib(32))
+            .peakrate(Rate::mbit(200))
+            .mtu(1600)
+            .build();
+        let lowered = q.qdisc_type.tbf_config().unwrap();
+        let by_hand = TbfConfig::new()
+            .rate(Rate::mbit(100))
+            .burst(Bytes::kib(32))
+            .peakrate(Rate::mbit(200))
+            .mtu(1600)
+            .build();
+        assert_eq!(format!("{lowered:?}"), format!("{by_hand:?}"));
+    }
+
+    /// The setters follow the established "no-op on the wrong kind"
+    /// rule, so chaining them onto another kind cannot silently rewrite
+    /// it.
+    #[test]
+    fn the_new_setters_are_no_ops_on_other_kinds() {
+        use crate::util::{Bytes, Rate};
+        let q = QdiscBuilder::new("eth0")
+            .htb()
+            .flows(8)
+            .ecn(true)
+            .bands(4)
+            .peakrate(Rate::mbit(1))
+            .mtu(9000)
+            .target(Duration::from_millis(5))
+            .perturb(Duration::from_secs(1))
+            .build();
+        assert!(matches!(q.qdisc_type, DeclaredQdiscType::Htb { .. }));
+
+        // `limit` and `quantum` are shared across kinds by design; each
+        // must land on the kind in hand and nowhere else.
+        let netem = QdiscBuilder::new("eth0").netem().limit(50).build();
+        let DeclaredQdiscType::Netem { limit, .. } = &netem.qdisc_type else {
+            panic!("netem");
+        };
+        assert_eq!(*limit, Some(50));
+        let tbf = QdiscBuilder::new("eth0")
+            .tbf(Rate::mbit(1), Bytes::kib(4))
+            .limit(50)
+            .build();
+        let DeclaredQdiscType::Tbf { limit_bytes, .. } = &tbf.qdisc_type else {
+            panic!("tbf");
+        };
+        assert_eq!(
+            *limit_bytes, None,
+            "tbf's limit is a byte count and has its own setter; the packet \
+             `limit` must not land on it"
+        );
     }
 
     #[test]
@@ -2743,10 +3102,26 @@ mod serde_roundtrip_tests {
             .qdisc("eth0", |q| q.tbf(Rate::mbit(100), Bytes::kib(32)).limit_bytes(Bytes::kib(64)));
         assert_roundtrips(&cfg);
         let json = cfg.to_json_string().unwrap();
+        // 0.28 added `peakrate_bps`/`mtu` (#361). Unset optional fields
+        // serialize as null here, as netem's have always done — the
+        // point of this test is that the *units* stayed bytes-per-second
+        // integers, not that the field list is frozen. Deserialization
+        // is unaffected: serde reads a missing `Option` as `None`, so a
+        // document written before 0.28 still loads.
         assert!(
-            json.contains(r#""tbf":{"rate_bps":12500000,"burst_bytes":32768,"limit_bytes":65536}"#),
+            json.contains(
+                r#""tbf":{"rate_bps":12500000,"burst_bytes":32768,"limit_bytes":65536,"peakrate_bps":null,"mtu":null}"#
+            ),
             "{json}"
         );
+
+        let pre_0_28 =
+            r#"{"qdiscs":[{"dev":"eth0","qdisc-type":{"tbf":{"rate_bps":1,"burst_bytes":2}}}]}"#;
+        let back = NetworkConfig::from_json_str(pre_0_28).unwrap();
+        let DeclaredQdiscType::Tbf { peakrate_bps, mtu, .. } = &back.qdiscs()[0].qdisc_type else {
+            panic!("tbf");
+        };
+        assert_eq!((*peakrate_bps, *mtu), (None, None));
     }
 
     #[test]

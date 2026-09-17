@@ -31,6 +31,59 @@ All notable changes to this project will be documented in this file.
   this went unnoticed — plus a root test that a NAT config with both
   expressions diffs empty after apply.
 
+- **`sfq` parameter edits failed with EINVAL.** A same-kind replace
+  becomes `qdisc_change()` in the kernel and `sch_sfq` sets
+  `.change = NULL`, so it answers *"Change operation not supported by
+  specified qdisc"*. The declarative applier now falls back to del+add
+  for that kind when the atomic replace is refused, the same way it
+  already does for `ingress`/`clsact`. Changing the *kind* was never
+  affected: that takes the create-and-graft path.
+
+### Added
+
+- **The declarative `QdiscBuilder` reaches every knob the imperative
+  configs do, for `fq_codel`, `sfq`, `prio` and `tbf` (#361).**
+
+  This was worse than a few missing fields. `fq_codel()`, `sfq()` and
+  `prio()` hardcoded every field to `None` and **no setter existed for
+  any of them** — so through the builder those three kinds were "kernel
+  defaults or nothing", even for the fields `DeclaredQdiscType` already
+  carried and the lowering and diff already honoured. Only a
+  hand-written serde document could reach them.
+
+  New on `QdiscBuilder`: `target(Duration)`, `interval(Duration)`,
+  `flows(u32)`, `quantum(u32)`, `ecn(bool)` for fq_codel;
+  `perturb(Duration)` for sfq; `bands(u8)` for prio; `peakrate(Rate)`
+  and `mtu(u32)` for tbf. `limit(u32)` now reaches fq_codel and sfq as
+  well as netem — all three take a packet count, while TBF's byte-valued
+  limit keeps its own `limit_bytes(Bytes)`; `quantum` is shared by
+  fq_codel and sfq for the same reason. Every setter is a no-op on a
+  kind that does not have that knob, matching the existing netem
+  setters.
+
+  `DeclaredQdiscType` gains `FqCodel { flows, quantum, ecn }`,
+  `Sfq { limit, quantum }` and `Tbf { peakrate_bps, mtu }`, and all four
+  values take part in `qdisc_params_match`, so a drift in any of them is
+  now seen rather than silently accepted.
+
+  **`flows` is create-only, by the kernel's design.** `fq_codel_init`
+  allocates the flow table and `fq_codel_change` opens with
+  `if (tb[TCA_FQ_CODEL_FLOWS]) { if (q->flows) return -EINVAL; }` — so a
+  change message carrying the attribute is rejected *even when the value
+  is unchanged*, which would make every later edit of any other knob
+  fail. It is therefore applied when the qdisc is created, dropped from
+  change messages, and excluded from the diff (a difference there is not
+  something a replace could close, so comparing it would churn on every
+  reconcile). Delete the qdisc to resize the table.
+
+  **This is the cycle's first breaking change, and it bumps the
+  workspace to 0.28.0.** `DeclaredQdiscType::{FqCodel, Sfq}` grew
+  fields, which breaks a downstream `match` that destructures them
+  without `..`. Both are `#[non_exhaustive]` from now on — as `Netem`
+  and `Tbf` became in 0.27 — so this is the last time a knob on them
+  costs a major bump.
+
+
 ## [0.27.0] - 2026-09-13
 
 > Upgrading from 0.26.0? See
