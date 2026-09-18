@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.28.1] - 2026-09-18
+
+### Fixed
+
+- **Every IPv6 route declared without a metric diffed as missing,
+  forever** (#366) — the same shape as #362 one release earlier, in the
+  route layer instead of nftables: `apply` reported no changes and
+  `diff()` reported one, permanently, and they never converged.
+
+  `diff_routes` compared `declared.metric.unwrap_or(0)` against the
+  kernel's priority, on the reasoning that an unspecified metric comes
+  back as 0. That holds for IPv4. IPv6 substitutes `IP6_RT_PRIO_USER`
+  (1024, `include/net/ip6_route.h`), so a declared `None` was measured
+  against 1024, never matched, and the route sat in `routes_to_add` on
+  every diff. It compares against the kernel's default *for the family*
+  now.
+
+  Nothing broke visibly because `routes_to_add` applies with
+  `NLM_F_REPLACE` and the apply path does not go through `diff_routes` —
+  which is why it survived. It is what a consumer reading the diff sees:
+  downstream, an `apply --check` CI gate could never go green on an IPv6
+  topology.
+
+  The test pins both halves: an unmetriced v4 *and* v6 route diff clean
+  after apply, and an explicit `metric(700)` on either is still drift —
+  the fix is "compare against the family default", not "an undeclared
+  metric matches anything".
+
 ## [0.28.0] - 2026-09-18
 
 > Upgrading from 0.27.0? See

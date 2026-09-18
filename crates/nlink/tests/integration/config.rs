@@ -458,6 +458,68 @@ async fn declarative_netem_rate_and_sub_ms_jitter_reach_the_kernel() -> Result<(
     Ok(())
 }
 
+/// #366 — an IPv6 route diffed as missing on every reconcile.
+///
+/// A route added without an explicit metric does not come back as 0 for
+/// both families: IPv4 leaves it 0, IPv6 substitutes `IP6_RT_PRIO_USER`
+/// (1024). The diff compared a declared `None` against 0, so it never
+/// matched its own IPv6 routes and put every one of them in
+/// `routes_to_add`, forever.
+///
+/// It hid the same way #362 did: `apply` does not go through
+/// `diff_routes`, so it reported no changes at the same moment
+/// `diff()` reported one. A downstream `apply --check` gate on any
+/// IPv6 topology could never go green.
+///
+/// The v4 leg is here to pin that the fix did not loosen the common
+/// case into "any metric matches".
+#[tokio::test]
+async fn ipv6_routes_without_a_metric_diff_clean_after_apply() -> Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy");
+
+    let ns = TestNamespace::new("config-v6-metric")?;
+    let conn = ns.connection()?;
+    conn.add_link(DummyLink::new("dummy0")).await?;
+    conn.set_link_up("dummy0").await?;
+
+    // `NetworkConfig` is not `Clone`, so build each one from scratch.
+    let addressed = || -> Result<NetworkConfig> {
+        Ok(NetworkConfig::new()
+            .address("dummy0", "fd00::1/64")?
+            .address("dummy0", "10.9.0.1/24")?)
+    };
+    let cfg = addressed()?
+        .route("::/0", |r| r.via("fd00::2"))?
+        .route("0.0.0.0/0", |r| r.via("10.9.0.2"))?;
+
+    let applied = cfg.apply(&conn).await?;
+    assert!(applied.is_success(), "{applied:?}");
+
+    let again = cfg.diff(&conn).await?;
+    assert!(
+        again.is_empty(),
+        "a route declared with no metric must match the one the kernel \
+         installed — IPv6 stamps 1024 on it, not 0. Second diff:\n{again}"
+    );
+
+    // And an apply of that empty diff is genuinely zero ops.
+    let second = cfg.apply(&conn).await?;
+    assert_eq!(second.changes_made, 0, "{second:?}");
+
+    // A metric that really does differ is still drift, both families.
+    let moved = addressed()?
+        .route("::/0", |r| r.via("fd00::2").metric(700))?
+        .route("0.0.0.0/0", |r| r.via("10.9.0.2").metric(700))?;
+    let drift = moved.diff(&conn).await?;
+    assert_eq!(
+        drift.routes_to_add.len(),
+        2,
+        "an explicitly different metric is a change, not a match:\n{drift}"
+    );
+    Ok(())
+}
+
 /// #361 — the fq_codel / sfq / prio / tbf knobs reach the kernel.
 ///
 /// `DeclaredQdiscType` carried `FqCodel { limit, target_us,

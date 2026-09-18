@@ -786,8 +786,8 @@ sets are checked: `cargo test -p nlink --doc` in the `test` job and
 
 ## Active work
 
-**0.28.0 shipped 2026-09-18** (`0.28.0` tagged — bare, no `v`; both crates
-on crates.io). Headline narrative in `CHANGELOG.md ## [0.28.0]` +
+**0.28.1 shipped 2026-09-18** (`0.28.1` tagged — bare, no `v`; both crates
+on crates.io; 0.28.0 the same day). Headline narrative in `CHANGELOG.md ## [0.28.0]` +
 `docs/migration_guide/0.27.0-to-0.28.0.md`. A small release with one
 theme: **the declarative layer described things it could not do, and
 diffed things the kernel does not echo.** `QdiscBuilder` offered no
