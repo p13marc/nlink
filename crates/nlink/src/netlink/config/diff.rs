@@ -708,6 +708,12 @@ fn diff_addresses(
     }
 }
 
+/// The metric the kernel gives an IPv6 route added without one
+/// (`IP6_RT_PRIO_USER`, include/net/ip6_route.h). IPv4 leaves an
+/// unspecified metric at 0; IPv6 does not, and a diff that assumes it
+/// does never matches its own routes.
+const IP6_RT_PRIO_USER: u32 = 1024;
+
 fn diff_routes(
     config: &NetworkConfig,
     current: &[RouteMessage],
@@ -812,8 +818,23 @@ fn diff_routes(
                     (None, Some(_)) => true,
                     (Some(_), None) => false,
                 };
-                // Metric (priority). Kernel reports None as 0.
-                let metric_match = declared.metric.unwrap_or(0) == r.priority().unwrap_or(0);
+                // Metric (priority). A route added without an explicit
+                // metric does not come back as 0 for both families:
+                // IPv4 leaves it 0, but IPv6 substitutes
+                // `IP6_RT_PRIO_USER` (1024, include/net/ip6_route.h).
+                // Comparing a declared `None` against 0 therefore never
+                // matched an IPv6 route, so every one of them sat in
+                // `routes_to_add` on every diff — forever, and with
+                // `apply` reporting no changes at the same time,
+                // because the apply path does not go through here
+                // (#366).
+                let kernel_default_metric = if declared.destination.is_ipv6() {
+                    IP6_RT_PRIO_USER
+                } else {
+                    0
+                };
+                let metric_match =
+                    declared.metric.unwrap_or(kernel_default_metric) == r.priority().unwrap_or(0);
                 gw_match && dev_match && metric_match
             })
             });
