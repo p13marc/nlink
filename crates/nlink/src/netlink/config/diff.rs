@@ -975,10 +975,22 @@ fn qdisc_params_match(declared: &DeclaredQdiscType, existing: &TcMessage) -> boo
             let cfg = declared.tbf_config().expect("matched the Tbf arm");
             // The kernel echoes the byte-valued TCA_TBF_BURST, so burst is
             // exact; rate is `tc_ratespec.rate` (or RATE64), limit is
-            // `tc_tbf_qopt.limit`.
+            // `tc_tbf_qopt.limit`. `peakrate` is PRATE64/`tc_ratespec`
+            // in bytes/sec, and `mtu` comes back through TCA_TBF_PBURST,
+            // which the encoder always sends — both are normalised to
+            // bytes by `parse_tbf_options`, so neither needs the tick
+            // round-trip `codel_round_trip_us` does for fq_codel (#361).
+            // Compared against the *lowered* config rather than the
+            // declared `Option`s, because the lowering's defaults (mtu
+            // 1514, no peakrate) are what actually goes on the wire.
+            let declared_peak = cfg
+                .peakrate
+                .map_or(0, |r| r.as_bytes_per_sec());
             live.rate == cfg.rate.as_bytes_per_sec()
                 && live.burst == cfg.burst.as_u32_saturating()
                 && live.limit == cfg.limit.as_u32_saturating()
+                && live.peakrate == declared_peak
+                && live.mtu == cfg.mtu
         }
         (DeclaredQdiscType::Htb { .. }, Some(QdiscOptions::Htb(live))) => {
             let cfg = declared.htb_config().expect("matched the Htb arm");
@@ -989,17 +1001,42 @@ fn qdisc_params_match(declared: &DeclaredQdiscType, existing: &TcMessage) -> boo
                 limit,
                 target_us,
                 interval_us,
+                quantum,
+                ecn,
+                ..
             },
             Some(QdiscOptions::FqCodel(live)),
         ) => {
             // Only the fields the declaration sets are written; the kernel
             // chooses the rest, so only those are compared.
+            //
+            // `flows` is deliberately *not* compared. It sizes the flow
+            // table, which the kernel allocates at init and refuses to
+            // resize, so a declared-vs-live difference cannot be acted
+            // on: reporting it would put the qdisc in
+            // `qdiscs_to_replace` on every diff, and the replace — which
+            // must omit the attribute to avoid EINVAL — would never
+            // close the gap. Changing `flows` needs the qdisc deleted
+            // and re-added, which is the caller's decision to make, not
+            // something to churn on (#361).
             limit.is_none_or(|l| live.limit == l)
                 && target_us.is_none_or(|t| codel_round_trip_us(t) == live.target_us)
                 && interval_us.is_none_or(|i| codel_round_trip_us(i) == live.interval_us)
+                && quantum.is_none_or(|q| live.quantum == q)
+                && ecn.is_none_or(|e| live.ecn == e)
         }
-        (DeclaredQdiscType::Sfq { perturb_secs }, Some(QdiscOptions::Sfq(live))) => {
-            perturb_secs.is_none_or(|p| live.perturb_period == p as i32)
+        (
+            DeclaredQdiscType::Sfq {
+                perturb_secs,
+                limit,
+                quantum,
+                ..
+            },
+            Some(QdiscOptions::Sfq(live)),
+        ) => {
+            perturb_secs.is_none_or(|p| live.perturb_period == i32::try_from(p).unwrap_or(i32::MAX))
+                && limit.is_none_or(|l| live.limit == l)
+                && quantum.is_none_or(|q| live.quantum == q)
         }
         (DeclaredQdiscType::Prio { .. }, Some(QdiscOptions::Prio(live))) => {
             let cfg = declared.prio_config().expect("matched the Prio arm");
@@ -1034,7 +1071,7 @@ fn declared_options_bytes(t: &DeclaredQdiscType) -> Vec<u8> {
             .expect("matched the Htb arm")
             .write_options(&mut builder),
         DeclaredQdiscType::FqCodel { .. } => t
-            .fq_codel_config()
+            .fq_codel_config(true)
             .expect("matched the FqCodel arm")
             .write_options(&mut builder),
         DeclaredQdiscType::Tbf { .. } => t
@@ -1364,26 +1401,61 @@ mod tests {
     #[test]
     fn fq_codel_compares_in_codel_ticks_and_only_declared_fields() {
         use crate::netlink::types::tc::qdisc::fq_codel::TCA_FQ_CODEL_TARGET;
-        let declared = DeclaredQdiscType::FqCodel {
+        let fq = |target_us, flows, quantum, ecn| DeclaredQdiscType::FqCodel {
             limit: None,
-            target_us: Some(20_000),
+            target_us,
             interval_us: None,
+            flows,
+            quantum,
+            ecn,
         };
+        let declared = fq(Some(20_000), None, None, None);
         let echo = live("fq_codel", Some(attr_u32(TCA_FQ_CODEL_TARGET, 19_999)));
         assert!(qdisc_params_match(&declared, &echo));
-        let other = DeclaredQdiscType::FqCodel {
-            limit: None,
-            target_us: Some(18_000),
-            interval_us: None,
-        };
+        let other = fq(Some(18_000), None, None, None);
         assert!(!qdisc_params_match(&other, &echo));
         // Nothing declared: whatever the kernel chose is fine.
-        let bare = DeclaredQdiscType::FqCodel {
+        let bare = fq(None, None, None, None);
+        assert!(qdisc_params_match(&bare, &echo));
+    }
+
+    /// The 0.28 fq_codel knobs (#361) take part in the comparison, and
+    /// keep the "only what was declared" rule: an undeclared field must
+    /// not make the diff fire, and a declared one that drifted must.
+    ///
+    /// `flows` is the exception and is asserted *not* to fire — see the
+    /// comment in `qdisc_params_match`: the kernel will not resize the
+    /// flow table, so a difference there is not something a replace can
+    /// close, and comparing it would mean churning on every diff.
+    #[test]
+    fn fq_codel_compares_the_0_28_knobs() {
+        use crate::netlink::types::tc::qdisc::fq_codel::{
+            TCA_FQ_CODEL_ECN, TCA_FQ_CODEL_FLOWS, TCA_FQ_CODEL_QUANTUM,
+        };
+        let fq = |flows, quantum, ecn| DeclaredQdiscType::FqCodel {
             limit: None,
             target_us: None,
             interval_us: None,
+            flows,
+            quantum,
+            ecn,
         };
-        assert!(qdisc_params_match(&bare, &echo));
+        let mut opts = attr_u32(TCA_FQ_CODEL_FLOWS, 1024);
+        opts.extend(attr_u32(TCA_FQ_CODEL_QUANTUM, 300));
+        opts.extend(attr_u32(TCA_FQ_CODEL_ECN, 1));
+        let echo = live("fq_codel", Some(opts));
+
+        assert!(qdisc_params_match(&fq(Some(1024), Some(300), Some(true)), &echo));
+        assert!(
+            qdisc_params_match(&fq(None, None, None), &echo),
+            "undeclared knobs must not make the diff fire"
+        );
+        assert!(
+            qdisc_params_match(&fq(Some(512), None, None), &echo),
+            "a flows difference is not actionable, so it must not make the diff fire"
+        );
+        assert!(!qdisc_params_match(&fq(None, Some(1514), None), &echo));
+        assert!(!qdisc_params_match(&fq(None, None, Some(false)), &echo));
     }
 
     #[test]
@@ -1399,38 +1471,62 @@ mod tests {
 
     #[test]
     fn tbf_rate_burst_and_limit_are_compared_as_fields() {
-        let declared = DeclaredQdiscType::Tbf {
-            rate_bps: 125_000,
-            burst_bytes: 32_768,
+        let tbf = |rate_bps, burst_bytes, peakrate_bps, mtu| DeclaredQdiscType::Tbf {
+            rate_bps,
+            burst_bytes,
             limit_bytes: Some(65_536),
+            peakrate_bps,
+            mtu,
         };
+        let declared = tbf(125_000, 32_768, None, None);
         let echo = live("tbf", Some(declared_options_bytes(&declared)));
         assert!(qdisc_params_match(&declared, &echo));
-        let faster = DeclaredQdiscType::Tbf {
-            rate_bps: 250_000,
-            burst_bytes: 32_768,
-            limit_bytes: Some(65_536),
-        };
+        let faster = tbf(250_000, 32_768, None, None);
         assert!(!qdisc_params_match(&faster, &echo));
-        let bigger_bucket = DeclaredQdiscType::Tbf {
-            rate_bps: 125_000,
-            burst_bytes: 65_536,
-            limit_bytes: Some(65_536),
-        };
+        let bigger_bucket = tbf(125_000, 65_536, None, None);
         assert!(!qdisc_params_match(&bigger_bucket, &echo));
+
+        // 0.28 (#361): peakrate and mtu are part of the comparison too,
+        // so a drift in either is not silently accepted. Both come back
+        // in bytes (PRATE64 and TCA_TBF_PBURST), so no tick round-trip.
+        let peaked = tbf(125_000, 32_768, Some(250_000), Some(1600));
+        let peaked_echo = live("tbf", Some(declared_options_bytes(&peaked)));
+        assert!(qdisc_params_match(&peaked, &peaked_echo));
+        assert!(
+            !qdisc_params_match(&tbf(125_000, 32_768, Some(500_000), Some(1600)), &peaked_echo),
+            "a changed peakrate must be seen"
+        );
+        assert!(
+            !qdisc_params_match(&tbf(125_000, 32_768, Some(250_000), Some(9000)), &peaked_echo),
+            "a changed mtu must be seen"
+        );
+        assert!(
+            !qdisc_params_match(&declared, &peaked_echo),
+            "dropping the peakrate must be seen"
+        );
     }
 
     #[test]
     fn sfq_and_prio_compare_their_declared_fields() {
-        let sfq = DeclaredQdiscType::Sfq {
-            perturb_secs: Some(10),
+        let mk_sfq = |perturb_secs, limit, quantum| DeclaredQdiscType::Sfq {
+            perturb_secs,
+            limit,
+            quantum,
         };
+        let sfq = mk_sfq(Some(10), None, None);
         let echo = live("sfq", Some(declared_options_bytes(&sfq)));
         assert!(qdisc_params_match(&sfq, &echo));
-        let other = DeclaredQdiscType::Sfq {
-            perturb_secs: Some(20),
-        };
+        let other = mk_sfq(Some(20), None, None);
         assert!(!qdisc_params_match(&other, &echo));
+
+        // 0.28 (#361): sfq's limit and quantum are declarable now, and
+        // compared the same "only what was declared" way.
+        let tuned = mk_sfq(Some(10), Some(200), Some(1514));
+        let tuned_echo = live("sfq", Some(declared_options_bytes(&tuned)));
+        assert!(qdisc_params_match(&tuned, &tuned_echo));
+        assert!(qdisc_params_match(&mk_sfq(None, None, None), &tuned_echo));
+        assert!(!qdisc_params_match(&mk_sfq(None, Some(64), None), &tuned_echo));
+        assert!(!qdisc_params_match(&mk_sfq(None, None, Some(300)), &tuned_echo));
 
         let prio = DeclaredQdiscType::Prio { bands: Some(3) };
         let echo = live("prio", Some(declared_options_bytes(&prio)));

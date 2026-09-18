@@ -458,6 +458,123 @@ async fn declarative_netem_rate_and_sub_ms_jitter_reach_the_kernel() -> Result<(
     Ok(())
 }
 
+/// #361 — the fq_codel / sfq / prio / tbf knobs reach the kernel.
+///
+/// `DeclaredQdiscType` carried `FqCodel { limit, target_us,
+/// interval_us }`, `Sfq { perturb_secs }` and `Prio { bands }` since
+/// they were added, and the lowering and the diff honoured them — but
+/// `QdiscBuilder` had no setter for any of them and `fq_codel()` /
+/// `sfq()` / `prio()` hardcoded `None`, so through the builder those
+/// kinds were "kernel defaults or nothing". TBF was missing `peakrate`
+/// and `mtu` on the variant as well.
+///
+/// Read back through the parsed `QdiscOptions`, so this asserts what
+/// the kernel stored rather than what we sent.
+#[tokio::test]
+async fn declarative_qdisc_knobs_reach_the_kernel() -> Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "sch_fq_codel", "sch_sfq", "sch_prio", "sch_tbf");
+
+    let ns = TestNamespace::new("config-qdisc-knobs")?;
+    let conn = ns.connection()?;
+    conn.add_link(DummyLink::new("dummy0")).await?;
+    conn.set_link_up("dummy0").await?;
+
+    let live = |kind: &'static str| {
+        let conn = &conn;
+        async move {
+            let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
+            let q = qdiscs
+                .iter()
+                .find(|q| q.kind() == Some(kind))
+                .unwrap_or_else(|| panic!("{kind} qdisc installed"))
+                .clone();
+            Ok::<_, nlink::Error>(q)
+        }
+    };
+
+    // ---- fq_codel ----
+    NetworkConfig::new()
+        .qdisc("dummy0", |q| {
+            q.fq_codel()
+                .limit(1200)
+                .target(Duration::from_millis(5))
+                .interval(Duration::from_millis(100))
+                .flows(1024)
+                .quantum(300)
+                .ecn(true)
+        })
+        .apply(&conn)
+        .await
+        .map(|r| assert!(r.is_success(), "{r:?}"))?;
+    let Some(QdiscOptions::FqCodel(opts)) = live("fq_codel").await?.options() else {
+        panic!("fq_codel options parse");
+    };
+    assert_eq!(opts.limit, 1200);
+    assert_eq!(opts.flows, 1024);
+    assert_eq!(opts.quantum, 300);
+    assert!(opts.ecn, "ecn must be on");
+    // codel times are psched ticks, so the echo is the round-trip of
+    // what we sent rather than the exact microsecond count.
+    assert!(
+        (4_900..=5_100).contains(&opts.target_us),
+        "target ~5ms, got {}us",
+        opts.target_us
+    );
+    assert!(
+        (99_000..=101_000).contains(&opts.interval_us),
+        "interval ~100ms, got {}us",
+        opts.interval_us
+    );
+
+    // ---- sfq ----
+    NetworkConfig::new()
+        .qdisc("dummy0", |q| {
+            q.sfq()
+                .perturb(Duration::from_secs(10))
+                .limit(200)
+                .quantum(1514)
+        })
+        .apply(&conn)
+        .await
+        .map(|r| assert!(r.is_success(), "{r:?}"))?;
+    let Some(QdiscOptions::Sfq(opts)) = live("sfq").await?.options() else {
+        panic!("sfq options parse");
+    };
+    assert_eq!(opts.perturb_period, 10);
+    assert_eq!(opts.limit, 200);
+    assert_eq!(opts.quantum, 1514);
+
+    // ---- prio ----
+    NetworkConfig::new()
+        .qdisc("dummy0", |q| q.prio().bands(4))
+        .apply(&conn)
+        .await
+        .map(|r| assert!(r.is_success(), "{r:?}"))?;
+    let Some(QdiscOptions::Prio(opts)) = live("prio").await?.options() else {
+        panic!("prio options parse");
+    };
+    assert_eq!(opts.bands, 4, "prio() could only ever install the default 3 before");
+
+    // ---- tbf ----
+    NetworkConfig::new()
+        .qdisc("dummy0", |q| {
+            q.tbf(Rate::mbit(1), nlink::Bytes::kib(32))
+                .peakrate(Rate::mbit(2))
+                .mtu(1600)
+        })
+        .apply(&conn)
+        .await
+        .map(|r| assert!(r.is_success(), "{r:?}"))?;
+    let Some(QdiscOptions::Tbf(opts)) = live("tbf").await?.options() else {
+        panic!("tbf options parse");
+    };
+    assert_eq!(opts.rate, Rate::mbit(1).as_bytes_per_sec());
+    assert_eq!(opts.peakrate, Rate::mbit(2).as_bytes_per_sec(), "peakrate is bytes/sec");
+    assert_eq!(opts.mtu, 1600, "mtu comes back through TCA_TBF_PBURST, in bytes");
+    Ok(())
+}
+
 /// #346 — a second `apply` of an unchanged declaration is a no-op for
 /// every kind the diff can compare field by field. The diff used to
 /// byte-compare the declared `TCA_OPTIONS` against the kernel's echo,
@@ -507,23 +624,73 @@ async fn unchanged_declared_qdiscs_are_not_replaced_on_reapply() -> Result<()> {
             }),
         ),
         (
+            "tbf-peaked",
+            NetworkConfig::new().qdisc("dummy0", |q| {
+                q.tbf(nlink::Rate::mbit(1), nlink::Bytes::kib(32))
+                    .limit_bytes(nlink::Bytes::kib(64))
+                    .peakrate(nlink::Rate::mbit(2))
+                    .mtu(1600)
+            }),
+        ),
+        (
             "htb",
             NetworkConfig::new().qdisc("dummy0", |q| q.htb().default_class(0x10)),
         ),
         ("fq_codel", NetworkConfig::new().qdisc("dummy0", |q| q.fq_codel())),
+        // #361: the same property, but with every knob actually set.
+        // Before 0.28 these kinds had no setters at all, so the cases
+        // above could only ever exercise kernel defaults — a diff that
+        // mishandled a declared value had nothing to fail on.
+        (
+            "fq_codel-tuned",
+            NetworkConfig::new().qdisc("dummy0", |q| {
+                q.fq_codel()
+                    .limit(1200)
+                    .target(Duration::from_millis(5))
+                    .interval(Duration::from_millis(100))
+                    .flows(1024)
+                    .quantum(300)
+                    .ecn(true)
+            }),
+        ),
         ("sfq", NetworkConfig::new().qdisc("dummy0", |q| q.sfq())),
+        (
+            "sfq-tuned",
+            NetworkConfig::new().qdisc("dummy0", |q| {
+                q.sfq()
+                    .perturb(Duration::from_secs(10))
+                    .limit(200)
+                    .quantum(1514)
+            }),
+        ),
         ("prio", NetworkConfig::new().qdisc("dummy0", |q| q.prio())),
+        (
+            "prio-bands",
+            NetworkConfig::new().qdisc("dummy0", |q| q.prio().bands(4)),
+        ),
     ];
 
     for (kind, config) in &cases {
-        let first = config.apply(&conn).await?;
+        // Name the case in the failure: a bare `?` here reports only
+        // "replace_qdisc: Invalid argument" with no clue which of the
+        // eleven declarations the kernel rejected.
+        let first = config
+            .apply(&conn)
+            .await
+            .unwrap_or_else(|e| panic!("{kind}: first apply failed: {e}"));
         assert!(first.is_success(), "{kind}: first apply: {first:?}");
         assert_eq!(first.changes_made, 1, "{kind}: first apply installs (or replaces) the root qdisc");
 
-        let diff = config.diff(&conn).await?;
+        let diff = config
+            .diff(&conn)
+            .await
+            .unwrap_or_else(|e| panic!("{kind}: diff failed: {e}"));
         assert!(diff.is_empty(), "{kind}: unchanged declaration diffs as:\n{diff}");
 
-        let second = config.apply(&conn).await?;
+        let second = config
+            .apply(&conn)
+            .await
+            .unwrap_or_else(|e| panic!("{kind}: second apply failed: {e}"));
         assert!(second.is_success(), "{kind}: second apply: {second:?}");
         assert_eq!(second.changes_made, 0, "{kind}: second apply must be a no-op: {second:?}");
     }
