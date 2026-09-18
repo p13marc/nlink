@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-09-18
+
+> Upgrading from 0.27.0? See
+> [`docs/migration_guide/0.27.0-to-0.28.0.md`](docs/migration_guide/0.27.0-to-0.28.0.md).
+> One compile break — two enum variants grew fields — and two behaviour
+> changes, both "something that always failed now works".
+
 ### Fixed
 
 - **A declared `masquerade` rule diffed as changed on every reconcile,

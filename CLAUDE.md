@@ -786,14 +786,27 @@ sets are checked: `cargo test -p nlink --doc` in the `test` job and
 
 ## Active work
 
-**0.27.0 shipped 2026-09-13** (`0.27.0` tagged — bare, no `v`; both crates
-on crates.io). Headline narrative in `CHANGELOG.md ## [0.27.0]` +
-`docs/migration_guide/0.26.0-to-0.27.0.md`, which leads with purge because
-that is the change that deletes.
+**0.28.0 shipped 2026-09-18** (`0.28.0` tagged — bare, no `v`; both crates
+on crates.io). Headline narrative in `CHANGELOG.md ## [0.28.0]` +
+`docs/migration_guide/0.27.0-to-0.28.0.md`. A small release with one
+theme: **the declarative layer described things it could not do, and
+diffed things the kernel does not echo.** `QdiscBuilder` offered no
+setter at all for fq_codel, sfq or prio, so those kinds were "kernel
+defaults or nothing" (#361); and `masq` rendered without the empty
+`NFTA_EXPR_DATA` nest the kernel echoes, so every masquerade rule diffed
+as changed forever (#362). Both surfaced downstream, not here — the
+second as a consumer's CI drift gate that could never go green.
+
+The lesson to carry: **a diff that no test asserts `is_empty()` on is not
+tested.** `reconcile_idempotent_reapply_yields_empty_diff` existed and
+used only `match_tcp_dport` rules, so no NAT expression was ever in an
+is-empty assertion; `unchanged_declared_qdiscs_are_not_replaced_on_reapply`
+existed and could only exercise kernel defaults for three of its kinds,
+because nothing could set a value. Both bugs sat behind a green suite.
 
 **The next cycle is open on `master`** — new work lands in
 `CHANGELOG.md ## [Unreleased]` and is promoted to the next `## [X.Y.0]` at
-cut time. The workspace version stays at the released 0.27.0 until the
+cut time. The workspace version stays at the released 0.28.0 until the
 cycle's first breaking PR bumps it (the cargo-semver-checks convention).
 
 0.27.0 was the declarative-configuration cycle, and its lesson is narrower
