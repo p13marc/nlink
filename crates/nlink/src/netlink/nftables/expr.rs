@@ -161,7 +161,18 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr) {
         }
         Expr::Masquerade => {
             builder.append_attr_str(NFTA_EXPR_NAME, "masq");
-            // masq has no data attributes for basic masquerade
+            // Basic masquerade has no attributes *inside* the data nest,
+            // but the nest itself is not optional: `nft_expr_dump` opens
+            // NFTA_EXPR_DATA for every expression whose ops have a
+            // `dump` callback and closes it whatever the callback wrote,
+            // so the kernel echoes an empty 4-byte nest here. Omitting
+            // it made a declared masquerade rule render 4 bytes shorter
+            // than the kernel's echo, which no amount of TLV
+            // normalisation can reconcile — one side simply lacks an
+            // attribute — so `NftablesDiff` reported the rule changed on
+            // every diff, forever (#362).
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.nest_end(data);
         }
         Expr::Nat(nat) => {
             // NAT needs to load address/port into registers first via Immediate,
@@ -221,6 +232,12 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr) {
                 // so omitting MAX would produce a phantom diff.
                 builder.append_attr_u32_be(NFTA_REDIR_REG_PROTO_MAX, Register::R0 as u32);
                 builder.append_attr_u32_be(NFTA_REDIR_FLAGS, NF_NAT_RANGE_PROTO_SPECIFIED);
+                builder.nest_end(data);
+            } else {
+                // Portless redirect still gets the empty nest the kernel
+                // echoes — same reason as the Masquerade arm above
+                // (#362).
+                let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
                 builder.nest_end(data);
             }
         }
@@ -949,7 +966,7 @@ mod decode_tests {
 
     #[test]
     fn dataless_expr_yields_unknown_with_empty_data() {
-        // `masq` writes no NFTA_EXPR_DATA at all.
+        // `masq` writes an NFTA_EXPR_DATA nest with nothing in it.
         let bytes = encode(&[Expr::Masquerade]);
         assert_eq!(
             parse_expressions(&bytes),
@@ -958,6 +975,40 @@ mod decode_tests {
                 data: vec![],
             }]
         );
+    }
+
+    /// The empty nest is not cosmetic. `nft_expr_dump` opens
+    /// NFTA_EXPR_DATA for every expression with a `dump` callback and
+    /// closes it whatever the callback wrote, so the kernel echoes one
+    /// even for an expression with no attributes. Rendering the
+    /// expression without it makes the declared bytes 4 shorter than
+    /// the kernel's, which `NftablesDiff` reads as "changed" on every
+    /// diff, for the life of the rule (#362).
+    ///
+    /// Asserted on the wire bytes rather than through
+    /// `parse_expressions`, which cannot tell an absent nest from an
+    /// empty one — that is exactly why the omission went unnoticed.
+    #[test]
+    fn dataless_exprs_still_emit_the_empty_data_nest() {
+        // The trailing attribute of the elem: len 4, type
+        // NFTA_EXPR_DATA (2), no payload. The nested flag is a parser
+        // hint the diff strips, so only len and type matter here.
+        let empty_nest = {
+            let mut v = 4u16.to_ne_bytes().to_vec();
+            v.extend_from_slice(&(NFTA_EXPR_DATA | 0x8000).to_ne_bytes());
+            v
+        };
+        for expr in [Expr::Masquerade, Expr::Redirect { port: None }] {
+            let bytes = encode(std::slice::from_ref(&expr));
+            assert!(
+                bytes.ends_with(&empty_nest),
+                "{expr:?} must end with an empty NFTA_EXPR_DATA nest; got {bytes:02x?}"
+            );
+        }
+        // A redirect *with* a port carries real attributes, so the nest
+        // is non-empty and this must not match.
+        let with_port = encode(&[Expr::Redirect { port: Some(8080) }]);
+        assert!(!with_port.ends_with(&empty_nest), "{with_port:02x?}");
     }
 
     #[test]
