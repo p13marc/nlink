@@ -786,6 +786,24 @@ sets are checked: `cargo test -p nlink --doc` in the `test` job and
 
 ## Active work
 
+**0.29.0 shipped 2026-10-01** (`0.29.0` tagged — bare, no `v`; both crates
+on crates.io). Headline narrative in `CHANGELOG.md ## [0.29.0]` +
+`docs/migration_guide/0.28.0-to-0.29.0.md`. A netem release, found
+downstream: a fault lab's `loss 0.5% 25%` profile had dropped **nothing**
+for every run it made, because netem's correlation lowers a small loss
+probability instead of making loss bursty (#369). The real bursty-loss
+generators, `loss gemodel` / `loss state`, could be read but not written
+(#368). And the apply-twice test for them found that a netem replace keeps
+every attribute it is not sent, so a declaration that dropped `rate` never
+converged (#370).
+
+Two lessons to carry. **Check semantics against the reference tool, not its
+docs**: every loss-model value in the tests is what iproute2 6.15 put in the
+kernel, and that is how two of nlink's own doc comments turned out to be
+wrong. And **a test that only ever installs onto a fresh device cannot see
+what a replace keeps**: every netem case so far had started from a new qdisc
+or a different kind, so nothing ever removed an attribute.
+
 **0.28.1 shipped 2026-09-18** (`0.28.1` tagged — bare, no `v`; both crates
 on crates.io; 0.28.0 the same day). Headline narrative in `CHANGELOG.md ## [0.28.0]` +
 `docs/migration_guide/0.27.0-to-0.28.0.md`. A small release with one
@@ -806,7 +824,7 @@ because nothing could set a value. Both bugs sat behind a green suite.
 
 **The next cycle is open on `master`** — new work lands in
 `CHANGELOG.md ## [Unreleased]` and is promoted to the next `## [X.Y.0]` at
-cut time. The workspace version stays at the released 0.28.0 until the
+cut time. The workspace version stays at the released 0.29.0 until the
 cycle's first breaking PR bumps it (the cargo-semver-checks convention).
 
 0.27.0 was the declarative-configuration cycle, and its lesson is narrower
