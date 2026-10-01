@@ -47,13 +47,57 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
-- **`NetemLossModel`'s doc comments described the models wrongly.** The
-  4-state model's states were "Good, Bad Burst, Bad Gap, Loss" while its
+- **A netem replace could not remove `rate`, `reorder`, `corrupt` or a
+  correlation, so a declaration that dropped one never converged (#370).**
+  A replace of an existing netem is `netem_change()`, which updates only the
+  attributes it is sent. `NetemConfig::write_options` wrote
+  `TCA_NETEM_RATE`/`REORDER`/`CORRUPT`/`CORR` only when set, so after a
+  replace the old value **stayed**. `diff()` then reported the stale value
+  forever, and every `apply()` replaced the qdisc again — the #346 property,
+  through a different door.
+
+  It hid because no test removed an attribute: every netem case started from
+  a fresh device or a different kind. Measured before the fix, replacing a
+  fully loaded netem with `delay 20ms` left rate, reorder, corrupt and all
+  three correlations in place. The writer now sends each of them as its off
+  state (zero) when unset. The base `tc_netem_qopt` always carried latency,
+  loss, duplicate, gap and limit, which is why those never had the problem.
+
+  Covered by:
+  - an imperative test that replaces a fully loaded netem and reads back what
+    survived;
+  - a `netem-attributes-removed` case in
+    `unchanged_declared_qdiscs_are_not_replaced_on_reapply`, after the
+    `netem` case that sets them.
+
+  Both fail against the old writer.
+
+- **The netem correlation docs promised bursts (#369).** `loss_correlation`
+  and friends were "correlation between adjacent packets' loss outcomes".
+  netem's correlation is an approximation that averages each random draw
+  with the previous one, and it **lowers** a small probability rather than
+  grouping events: `loss 0.5% 25%` drops 0 of 40 000 packets. The setters
+  now say so, with the effective-rate table, and point at `loss_model` for
+  bursty loss.
+
+- **`NetemLossModel`'s doc comments described the models wrongly.**
+  The 4-state model's states were "Good, Bad Burst, Bad Gap, Loss" while its
   transitions named state 3 as "Bad Burst"; `tc-netem(8)` numbers them
   good reception, good reception within a burst, burst losses, independent
   losses. Gilbert-Elliot's `h` was "Loss probability in Bad state". It is
   the probability of *delivering* there: the loss probability is `1-h`, the
   value `tc` takes and converts.
+
+### Changed
+
+- **`NetemOptions::requires_recreation_for` now answers `true` only for a
+  live `slot` or ECN** — what `NetemConfig` cannot express, and so a replace
+  cannot clear. With #370 a replace clears every parameter `NetemConfig`
+  sets. The old answer ("any parameter dropped") was never needed for delay,
+  jitter, loss or duplicate, and for reorder, corrupt and rate it was the
+  workaround for #370. A caller that deleted and re-added on its say-so now
+  replaces instead, which keeps statistics and does not drop what the qdisc
+  holds.
 
 ## [0.28.1] - 2026-09-18
 
