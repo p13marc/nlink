@@ -1306,6 +1306,7 @@ mod tests {
             corrupt_correlation: None,
             reorder_correlation: None,
             gap: None,
+            loss_model: None,
         };
         assert_eq!(declared_options_bytes(&cfg), declared_options_bytes(&cfg));
     }
@@ -1327,6 +1328,7 @@ mod tests {
             corrupt_correlation: None,
             reorder_correlation: None,
             gap: None,
+            loss_model: None,
         };
         let b = DeclaredQdiscType::Netem {
             delay_us: Some(200_000),
@@ -1343,6 +1345,7 @@ mod tests {
             corrupt_correlation: None,
             reorder_correlation: None,
             gap: None,
+            loss_model: None,
         };
         assert_ne!(declared_options_bytes(&a), declared_options_bytes(&b));
     }
@@ -1381,6 +1384,7 @@ mod tests {
             corrupt_correlation: None,
             reorder_correlation: Some(50.0),
             gap: Some(5),
+            loss_model: None,
         }
     }
 

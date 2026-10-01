@@ -1438,6 +1438,7 @@ impl DeclaredQdiscType {
             corrupt_correlation,
             reorder_correlation,
             gap,
+            loss_model,
         } = self
         else {
             return None;
@@ -1484,6 +1485,9 @@ impl DeclaredQdiscType {
         }
         if let Some(g) = gap {
             cfg = cfg.gap(*g);
+        }
+        if let Some(m) = loss_model {
+            cfg = cfg.loss_model(*m);
         }
         Some(cfg.build())
     }
@@ -1696,6 +1700,10 @@ pub enum DeclaredQdiscType {
         reorder_correlation: Option<f64>,
         /// Reorder gap in packets (netem `gap`).
         gap: Option<u32>,
+        /// A Markov loss model (netem `loss state …` / `loss gemodel …`)
+        /// in place of random loss. Set through
+        /// [`QdiscBuilder::loss_model`]. Added in 0.29 (#368).
+        loss_model: Option<crate::netlink::tc_options::NetemLossModel>,
     },
     /// Hierarchical Token Bucket.
     Htb { default_class: u32 },
@@ -1823,6 +1831,7 @@ impl QdiscBuilder {
             corrupt_correlation: None,
             reorder_correlation: None,
             gap: None,
+            loss_model: None,
         });
         self
     }
@@ -1967,6 +1976,37 @@ impl QdiscBuilder {
             &mut self.qdisc_type
         {
             *loss_correlation = Some(percent.as_percent());
+        }
+        self
+    }
+
+    /// Set a netem Markov loss model — Gilbert-Elliot (`loss gemodel …`)
+    /// or the 4-state Gilbert-Intuitive model (`loss state …`), netem's
+    /// generators for **bursty** loss.
+    ///
+    /// Mirror of `NetemConfig::loss_model` for the declarative path, and
+    /// exclusive with [`loss_pct`](Self::loss_pct) and
+    /// [`loss_correlation_pct`](Self::loss_correlation_pct) in the same
+    /// way: applying a declaration that sets both is an error. No-op on a
+    /// kind other than netem (#368).
+    ///
+    /// ```no_run
+    /// # async fn example() -> nlink::Result<()> {
+    /// use nlink::Percent;
+    /// use nlink::netlink::config::NetworkConfig;
+    /// use nlink::netlink::tc::NetemLossModel;
+    ///
+    /// let model = NetemLossModel::gilbert_elliot(Percent::new(1.0))
+    ///     .r(Percent::new(30.0))
+    ///     .loss_in_bad(Percent::new(50.0));
+    /// let config = NetworkConfig::new().qdisc("eth0", |q| q.netem().loss_model(model));
+    /// # let _ = config;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn loss_model(mut self, model: crate::netlink::tc_options::NetemLossModel) -> Self {
+        if let Some(DeclaredQdiscType::Netem { loss_model, .. }) = &mut self.qdisc_type {
+            *loss_model = Some(model);
         }
         self
     }

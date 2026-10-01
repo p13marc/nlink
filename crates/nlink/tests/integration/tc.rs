@@ -10,9 +10,10 @@ use nlink::{
         filter::{FlowerFilter, MatchallFilter, U32Filter},
         link::{DummyLink, IfbLink},
         tc::{
-            FqCodelConfig, HtbClassConfig, HtbQdiscConfig, IngressConfig, NetemConfig, PlugConfig,
-            PrioConfig, SfqConfig, TbfConfig,
+            FqCodelConfig, HtbClassConfig, HtbQdiscConfig, IngressConfig, NetemConfig,
+            NetemLossModel, PlugConfig, PrioConfig, SfqConfig, TbfConfig,
         },
+        tc_options::QdiscOptions,
     },
 };
 
@@ -152,6 +153,107 @@ async fn test_netem_with_loss() -> Result<()> {
     let netem = qdiscs.iter().find(|q| q.kind() == Some("netem"));
     assert!(netem.is_some());
 
+    Ok(())
+}
+
+/// The Markov loss models go into the kernel and come back as written
+/// (#368). The kernel echoes `TCA_NETEM_LOSS` only after `get_loss_clg`
+/// accepted it, so a model read back is a model the kernel parsed — the
+/// nested attribute, its `NLA_F_NESTED` flag and the struct layout all
+/// included. A plain `loss` replace must then clear it.
+#[tokio::test]
+async fn netem_loss_models_round_trip_through_the_kernel() -> Result<()> {
+    require_root!();
+    nlink::require_modules!("sch_netem");
+    use nlink::Percent;
+
+    let (_ns, conn) = setup_tc_ns("netem-lossmodel").await?;
+    let models = [
+        NetemLossModel::gilbert_elliot(Percent::new(1.0))
+            .r(Percent::new(30.0))
+            .loss_in_bad(Percent::new(50.0))
+            .loss_in_good(Percent::new(0.1)),
+        NetemLossModel::gilbert_intuitive(Percent::new(1.0))
+            .p31(Percent::new(2.0))
+            .p32(Percent::new(3.0))
+            .p23(Percent::new(4.0))
+            .p14(Percent::new(5.0)),
+    ];
+    for model in models {
+        conn.replace_qdisc("dummy0", NetemConfig::new().loss_model(model).build())
+            .await?;
+        let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
+        let netem = qdiscs
+            .iter()
+            .find(|q| q.kind() == Some("netem"))
+            .expect("netem installed");
+        let Some(QdiscOptions::Netem(opts)) = netem.options() else {
+            panic!("netem options did not parse");
+        };
+        let echoed = opts
+            .loss_model()
+            .unwrap_or_else(|| panic!("the kernel echoed no loss model for {model:?}"));
+        assert_eq!(
+            format!("{echoed:.3?}"),
+            format!("{model:.3?}"),
+            "kernel stored a different model"
+        );
+        assert_eq!(opts.loss(), Some(0.0), "a model must not also set random loss");
+    }
+
+    conn.replace_qdisc("dummy0", NetemConfig::new().loss(Percent::new(2.0)).build())
+        .await?;
+    let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
+    let netem = qdiscs.iter().find(|q| q.kind() == Some("netem")).unwrap();
+    let Some(QdiscOptions::Netem(opts)) = netem.options() else {
+        panic!("netem options did not parse");
+    };
+    assert!(opts.loss_model().is_none(), "random loss must replace the model");
+    Ok(())
+}
+
+/// A configured model must actually *drop* — the property nlink-lab#153
+/// asks to pin, because `loss <p>% <corr>%` went quiet for a year without
+/// anything noticing (#369). Deterministic models, so the counts are
+/// exact: Gilbert-Elliot that never enters the bad state drops nothing;
+/// one that loses everything in the good state drops every packet, and so
+/// does a 4-state model with p13 = 100% (it never leaves "burst losses").
+#[tokio::test]
+async fn netem_loss_models_drop_what_they_describe() -> Result<()> {
+    require_root!();
+    nlink::require_modules!("sch_netem", "dummy");
+    use nlink::Percent;
+
+    let cases = [
+        ("ge-never-bad", NetemLossModel::gilbert_elliot(Percent::ZERO), false),
+        (
+            "ge-lose-in-good",
+            NetemLossModel::gilbert_elliot(Percent::ZERO).loss_in_good(Percent::HUNDRED),
+            true,
+        ),
+        ("gi-always-burst", NetemLossModel::gilbert_intuitive(Percent::HUNDRED), true),
+    ];
+    for (name, model, drops_all) in cases {
+        let ns = crate::common::TestNamespace::new(&format!("netem-drop-{name}"))?;
+        let conn = ns.connection()?;
+        conn.add_link(DummyLink::new("dummy0")).await?;
+        conn.set_link_up("dummy0").await?;
+        ns.add_addr("dummy0", "10.31.0.1/24")?;
+        conn.add_qdisc("dummy0", NetemConfig::new().loss_model(model).build())
+            .await?;
+
+        // dummy is NOARP: every ping goes straight through the qdisc.
+        ns.exec_ignore("ping", &["-c", "5", "-i", "0.2", "-W", "1", "10.31.0.2"]);
+
+        let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
+        let netem = qdiscs.iter().find(|q| q.kind() == Some("netem")).unwrap();
+        let stats = netem.stats_queue().expect("netem reports queue stats");
+        if drops_all {
+            assert!(stats.drops >= 5, "{name}: dropped {} of 5 pings", stats.drops);
+        } else {
+            assert_eq!(stats.drops, 0, "{name}: must drop nothing, dropped {}", stats.drops);
+        }
+    }
     Ok(())
 }
 

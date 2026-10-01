@@ -665,6 +665,35 @@ async fn unchanged_declared_qdiscs_are_not_replaced_on_reapply() -> Result<()> {
     conn.set_link_up("dummy0").await?;
 
     let cases: Vec<(&str, NetworkConfig)> = vec![
+        // #368: a declared Markov loss model must diff clean against the
+        // kernel's echo, which arrives as u32 probabilities read back as
+        // f64 — a float compare would replace it on every reconcile (#346).
+        // These two run FIRST, on a fresh dummy0: placed after "netem"
+        // they would inherit its rate/reorder, which a netem replace cannot
+        // remove (#370) — a separate bug, with its own case to add.
+        (
+            "netem-gemodel",
+            NetworkConfig::new().qdisc("dummy0", |q| {
+                q.netem().delay(Duration::from_millis(20)).loss_model(
+                    nlink::netlink::tc::NetemLossModel::gilbert_elliot(nlink::Percent::new(1.0))
+                        .r(nlink::Percent::new(30.0))
+                        .loss_in_bad(nlink::Percent::new(50.0))
+                        .loss_in_good(nlink::Percent::new(0.1)),
+                )
+            }),
+        ),
+        (
+            "netem-4state",
+            NetworkConfig::new().qdisc("dummy0", |q| {
+                q.netem().loss_model(
+                    nlink::netlink::tc::NetemLossModel::gilbert_intuitive(nlink::Percent::new(1.0))
+                        .p31(nlink::Percent::new(2.0))
+                        .p32(nlink::Percent::new(3.0))
+                        .p23(nlink::Percent::new(4.0))
+                        .p14(nlink::Percent::new(5.0)),
+                )
+            }),
+        ),
         (
             "netem",
             NetworkConfig::new().qdisc("dummy0", |q| {

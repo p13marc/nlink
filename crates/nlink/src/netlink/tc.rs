@@ -39,6 +39,7 @@
 use std::time::Duration;
 
 // Re-export for convenience
+pub use super::tc_options::NetemLossModel;
 pub use super::types::tc::qdisc::hfsc::TcServiceCurve;
 pub use super::types::tc::qdisc::taprio::TaprioSchedEntry;
 use super::{
@@ -175,6 +176,9 @@ pub struct NetemConfig {
     pub rate: Option<crate::util::Rate>,
     /// Queue limit in packets.
     pub limit: u32,
+    /// A Markov loss model (`loss state …` / `loss gemodel …`) in place
+    /// of random [`loss`](Self::loss). Added in 0.29 (#368).
+    pub loss_model: Option<NetemLossModel>,
 }
 
 impl NetemConfig {
@@ -213,6 +217,20 @@ impl NetemConfig {
     /// Set the loss correlation.
     pub fn loss_correlation(mut self, corr: crate::util::Percent) -> Self {
         self.loss_correlation = corr;
+        self
+    }
+
+    /// Use a Markov loss model instead of random loss: Gilbert-Elliot
+    /// (`loss gemodel …`) or the 4-state Gilbert-Intuitive model
+    /// (`loss state …`). These are netem's generators for **bursty** loss;
+    /// see [`NetemLossModel`].
+    ///
+    /// Exclusive with [`loss`](Self::loss) and
+    /// [`loss_correlation`](Self::loss_correlation): the kernel would
+    /// accept both and silently ignore the random-loss values, so
+    /// installing a config that sets both is an error.
+    pub fn loss_model(mut self, model: NetemLossModel) -> Self {
+        self.loss_model = Some(model);
         self
     }
 
@@ -284,6 +302,10 @@ impl NetemConfig {
     ///
     /// - `delay <time> [<jitter> [<corr>]]` (alias `latency`)
     /// - `loss [random] <pct> [<corr>]` (alias `drop`)
+    /// - `loss state <p13> [<p31> [<p32> [<p23> [<p14>]]]]` and
+    ///   `loss gemodel <p> [<r> [<1-h> [<1-k>]]]` (alias `drop`), with
+    ///   `tc(8)`'s defaults for the omitted values — see
+    ///   [`NetemLossModel`]
     /// - `duplicate <pct> [<corr>]`
     /// - `corrupt <pct> [<corr>]`
     /// - `reorder <pct> [<corr>]`
@@ -294,9 +316,8 @@ impl NetemConfig {
     /// - `limit <packets>`
     ///
     /// **Not yet typed-modelled** (returns `Error::InvalidMessage`):
-    /// `slot`, `ecn`, `distribution`, the `loss state` 4-state
-    /// Markov, `loss gemodel`. These need `NetemConfig` extensions
-    /// before they can land here.
+    /// `slot`, `ecn`, `distribution`. These need `NetemConfig`
+    /// extensions before they can land here.
     ///
     /// Strict: unknown keywords, missing values, and unparseable
     /// time/rate/percent/integer values all return an error rather
@@ -353,17 +374,30 @@ impl NetemConfig {
                 "loss" | "drop" => {
                     i += 1;
                     // Optional `random` qualifier on `loss`.
-                    if key == "loss" && params.get(i) == Some(&"random") {
+                    let random = key == "loss" && params.get(i) == Some(&"random");
+                    if random {
                         i += 1;
                     }
-                    // Reject 4-state Markov / gemodel — needs typed
-                    // config extension.
-                    if let Some(next) = params.get(i)
-                        && (*next == "state" || *next == "gemodel")
+                    // The Markov models: positional percents, greedy up
+                    // to the next keyword, tc(8)'s defaults for the rest.
+                    if let Some(model) = params.get(i).copied()
+                        && (model == "state" || model == "gemodel")
                     {
-                        return Err(Error::InvalidMessage(format!(
-                            "netem: `loss {next}` (Markov model) is not supported by the typed parser yet — file an issue if you need this"
-                        )));
+                        if random {
+                            return Err(Error::InvalidMessage(format!(
+                                "netem: `loss random {model}` mixes two loss generators; use `loss {model} …`"
+                            )));
+                        }
+                        i += 1;
+                        let mut values = Vec::new();
+                        while let Some(v) = params.get(i)
+                            && !is_netem_keyword(v)
+                        {
+                            values.push(parse_netem_percent(v, &format!("loss {model} value"))?);
+                            i += 1;
+                        }
+                        cfg.loss_model = Some(netem_loss_model(model, &values)?);
+                        continue;
                     }
                     let pct_str = params.get(i).copied().ok_or_else(|| {
                         Error::InvalidMessage(format!("netem: `{key}` requires a percent value"))
@@ -499,6 +533,46 @@ fn is_netem_keyword(s: &str) -> bool {
     )
 }
 
+/// Build a `loss state …` / `loss gemodel …` model from its positional
+/// values, in `tc(8)`'s order, defaulting the omitted ones as iproute2
+/// does.
+fn netem_loss_model(model: &str, v: &[crate::util::Percent]) -> Result<NetemLossModel> {
+    let (max, args) = if model == "state" {
+        (5, "<p13> [<p31> [<p32> [<p23> [<p14>]]]]")
+    } else {
+        (4, "<p> [<r> [<1-h> [<1-k>]]]")
+    };
+    if v.is_empty() || v.len() > max {
+        return Err(Error::InvalidMessage(format!(
+            "netem: `loss {model}` takes {args}, got {} value(s)",
+            v.len()
+        )));
+    }
+    Ok(if model == "state" {
+        let mut m = NetemLossModel::gilbert_intuitive(v[0]);
+        // tc's order is p13 p31 p32 p23 p14 — not the struct's.
+        for (j, p) in v.iter().enumerate().skip(1) {
+            m = match j {
+                1 => m.p31(*p),
+                2 => m.p32(*p),
+                3 => m.p23(*p),
+                _ => m.p14(*p),
+            };
+        }
+        m
+    } else {
+        let mut m = NetemLossModel::gilbert_elliot(v[0]);
+        for (j, p) in v.iter().enumerate().skip(1) {
+            m = match j {
+                1 => m.r(*p),
+                2 => m.loss_in_bad(*p),
+                _ => m.loss_in_good(*p),
+            };
+        }
+        m
+    })
+}
+
 /// Parse a netem percent value (`"1.5"`, `"1.5%"`) with a context
 /// label folded into the error so the user knows which field failed.
 fn parse_netem_percent(s: &str, label: &str) -> Result<crate::util::Percent> {
@@ -516,6 +590,15 @@ impl QdiscConfig for NetemConfig {
         if !self.reorder.is_zero() && self.delay.is_none() {
             return Err(Error::InvalidMessage(
                 "netem: reorder requires delay to be set".into(),
+            ));
+        }
+        // A loss model replaces random loss in the kernel, which would
+        // accept `loss` / its correlation alongside one and ignore them.
+        if self.loss_model.is_some()
+            && (!self.loss.is_zero() || !self.loss_correlation.is_zero())
+        {
+            return Err(Error::InvalidMessage(
+                "netem: a loss model (`loss state`/`loss gemodel`) excludes random `loss` and its correlation".into(),
             ));
         }
 
@@ -600,6 +683,11 @@ impl QdiscConfig for NetemConfig {
                 rate_struct.rate = bytes_per_sec as u32;
                 builder.append_attr(TCA_NETEM_RATE, rate_struct.as_bytes());
             }
+        }
+
+        // Markov loss model, nested TCA_NETEM_LOSS
+        if let Some(model) = &self.loss_model {
+            model.write_attr(builder);
         }
 
         Ok(())
@@ -8705,6 +8793,7 @@ mod psched_wire_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::Percent;
 
     #[test]
     fn test_pfifo_parse_params() {
@@ -9370,12 +9459,129 @@ mod tests {
         }
     }
 
+    // The Markov loss models (#368). Every expected value below is what
+    // iproute2 6.15 put in the kernel for the same `tc` arguments, read back
+    // through `parse_netem_loss_model` — so these pin tc(8)'s semantics,
+    // not this parser's opinion of them.
+
+    fn ge(m: &NetemLossModel) -> (f64, f64, f64, f64) {
+        match *m {
+            NetemLossModel::GilbertElliot { p, r, h, k1 } => (p, r, h, k1),
+            other => panic!("expected Gilbert-Elliot, got {other:?}"),
+        }
+    }
+
+    fn gi(m: &NetemLossModel) -> (f64, f64, f64, f64, f64) {
+        match *m {
+            NetemLossModel::GilbertIntuitive {
+                p13,
+                p31,
+                p32,
+                p14,
+                p23,
+            } => (p13, p31, p32, p14, p23),
+            other => panic!("expected Gilbert-Intuitive, got {other:?}"),
+        }
+    }
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
+    }
+
     #[test]
-    fn netem_parse_params_loss_state_rejected() {
-        // 4-state Markov model — typed config doesn't carry the
-        // p13/p31/p32/p23/p14 fields.
-        let err = NetemConfig::parse_params(&["loss", "state", "0.1"]).unwrap_err();
-        assert!(err.to_string().contains("Markov"), "got: {err}");
+    fn netem_parse_params_gemodel_full() {
+        // tc: `loss gemodel 1% 10% 70% 0.1%` -> kernel p=1 r=10 h=30 k1=0.1.
+        // `1-h` is converted (70 -> h 30); `1-k` is sent as given.
+        let cfg = NetemConfig::parse_params(&["loss", "gemodel", "1%", "10%", "70%", "0.1%"]).unwrap();
+        let (p, r, h, k1) = ge(cfg.loss_model.as_ref().unwrap());
+        assert!(close(p, 1.0) && close(r, 10.0) && close(h, 30.0) && close(k1, 0.1), "{p} {r} {h} {k1}");
+        assert!(cfg.loss.is_zero(), "a model must not also set random loss");
+    }
+
+    #[test]
+    fn netem_parse_params_gemodel_tc_defaults() {
+        // tc: `loss gemodel 1%` -> r = 100 - p, 1-h = 100% (h 0), 1-k = 0.
+        let cfg = NetemConfig::parse_params(&["loss", "gemodel", "1%"]).unwrap();
+        let (p, r, h, k1) = ge(cfg.loss_model.as_ref().unwrap());
+        assert!(close(p, 1.0) && close(r, 99.0) && close(h, 0.0) && close(k1, 0.0), "{p} {r} {h} {k1}");
+        // and the partial forms keep the defaults for what they omit
+        let cfg = NetemConfig::parse_params(&["loss", "gemodel", "1%", "10%", "70%"]).unwrap();
+        let (_, r, h, k1) = ge(cfg.loss_model.as_ref().unwrap());
+        assert!(close(r, 10.0) && close(h, 30.0) && close(k1, 0.0), "{r} {h} {k1}");
+    }
+
+    #[test]
+    fn netem_parse_params_state_takes_p23_before_p14() {
+        // tc: `loss state 1% 2% 3% 4% 5%` is p13 p31 p32 *p23 p14*; the
+        // kernel struct stores p14 before p23. Read back: p14 5, p23 4.
+        let cfg = NetemConfig::parse_params(&["loss", "state", "1%", "2%", "3%", "4%", "5%"]).unwrap();
+        let (p13, p31, p32, p14, p23) = gi(cfg.loss_model.as_ref().unwrap());
+        assert!(close(p13, 1.0) && close(p31, 2.0) && close(p32, 3.0), "{p13} {p31} {p32}");
+        assert!(close(p23, 4.0) && close(p14, 5.0), "p23 {p23} p14 {p14} — swapped?");
+    }
+
+    #[test]
+    fn netem_parse_params_state_tc_defaults() {
+        // tc: `loss state 1%` -> p31 = 100 - p13, p32 0, p23 100, p14 0.
+        let cfg = NetemConfig::parse_params(&["loss", "state", "1%"]).unwrap();
+        let (p13, p31, p32, p14, p23) = gi(cfg.loss_model.as_ref().unwrap());
+        assert!(close(p13, 1.0) && close(p31, 99.0) && close(p32, 0.0), "{p13} {p31} {p32}");
+        assert!(close(p23, 100.0) && close(p14, 0.0), "{p23} {p14}");
+    }
+
+    #[test]
+    fn netem_parse_params_loss_model_then_more_groups() {
+        let cfg = NetemConfig::parse_params(&["drop", "gemodel", "2%", "delay", "10ms", "limit", "50"]).unwrap();
+        assert!(matches!(cfg.loss_model, Some(NetemLossModel::GilbertElliot { .. })));
+        assert_eq!(cfg.delay, Some(Duration::from_millis(10)));
+        assert_eq!(cfg.limit, 50);
+    }
+
+    #[test]
+    fn netem_parse_params_loss_model_arity_errors() {
+        let err = NetemConfig::parse_params(&["loss", "gemodel"]).unwrap_err();
+        assert!(err.to_string().contains("takes <p>"), "got: {err}");
+        let err = NetemConfig::parse_params(&["loss", "gemodel", "1", "2", "3", "4", "5"]).unwrap_err();
+        assert!(err.to_string().contains("got 5"), "got: {err}");
+        let err = NetemConfig::parse_params(&["loss", "state", "1", "2", "3", "4", "5", "6"]).unwrap_err();
+        assert!(err.to_string().contains("got 6"), "got: {err}");
+        let err = NetemConfig::parse_params(&["loss", "state", "lots"]).unwrap_err();
+        assert!(err.to_string().contains("invalid loss state value"), "got: {err}");
+    }
+
+    #[test]
+    fn netem_parse_params_random_with_a_model_rejected() {
+        let err = NetemConfig::parse_params(&["loss", "random", "gemodel", "1%"]).unwrap_err();
+        assert!(err.to_string().contains("mixes two loss generators"), "got: {err}");
+    }
+
+    #[test]
+    fn netem_loss_model_excludes_random_loss_at_write() {
+        let model = NetemLossModel::gilbert_elliot(Percent::new(1.0));
+        for cfg in [
+            NetemConfig::new().loss(Percent::new(1.0)).loss_model(model),
+            NetemConfig::new().loss_correlation(Percent::new(25.0)).loss_model(model),
+        ] {
+            let mut b = MessageBuilder::new(0, 0);
+            let err = cfg.write_options(&mut b).unwrap_err();
+            assert!(err.to_string().contains("excludes random `loss`"), "got: {err}");
+        }
+    }
+
+    #[test]
+    fn netem_loss_model_builders_match_tc_semantics() {
+        // The named setters do tc's `1-h` conversion; the variant stores
+        // the kernel's `h`.
+        let m = NetemLossModel::gilbert_elliot(Percent::new(1.0))
+            .r(Percent::new(30.0))
+            .loss_in_bad(Percent::new(50.0))
+            .loss_in_good(Percent::new(0.1));
+        let (p, r, h, k1) = ge(&m);
+        assert!(close(p, 1.0) && close(r, 30.0) && close(h, 50.0) && close(k1, 0.1));
+        // A setter for the other model is a no-op, not a panic.
+        assert_eq!(m.p14(Percent::new(9.0)), m);
+        let s = NetemLossModel::gilbert_intuitive(Percent::new(1.0)).r(Percent::new(9.0));
+        assert_eq!(s, NetemLossModel::gilbert_intuitive(Percent::new(1.0)));
     }
 
     #[test]

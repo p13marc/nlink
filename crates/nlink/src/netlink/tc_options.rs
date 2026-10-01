@@ -311,38 +311,244 @@ pub struct NetemOptions {
     pub(crate) loss_model: Option<NetemLossModel>,
 }
 
-/// Netem loss model configuration.
-#[derive(Debug, Clone, Copy)]
+/// A netem Markov loss model — `tc`'s `loss state …` and `loss gemodel …`.
+///
+/// These are netem's two **bursty** loss generators. `loss <p>% <corr>%`
+/// is not one: its correlation lowers the loss rate instead of grouping
+/// losses (#369). Read back from the kernel in
+/// [`NetemOptions::loss_model`], and set through
+/// [`NetemConfig::loss_model`](crate::netlink::tc::NetemConfig::loss_model)
+/// or the declarative `QdiscBuilder::loss_model`.
+///
+/// Every field holds a probability in **percent** (`0.0..=100.0`), exactly
+/// as the kernel stores it, so a model read back from the kernel and one
+/// built here compare field for field. Build one with
+/// [`gilbert_elliot`](Self::gilbert_elliot) or
+/// [`gilbert_intuitive`](Self::gilbert_intuitive), which apply `tc(8)`'s
+/// defaults and take each parameter by its meaning, rather than writing the
+/// variants directly: Gilbert-Elliot's `h` in particular is the probability
+/// of *delivering* in the bad state, the complement of what `tc` takes.
+///
+/// Field semantics follow `tc-netem(8)` and iproute2's `q_netem.c`, and were
+/// checked against what iproute2 6.15 installs in the kernel.
+///
+/// # Example
+///
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = nlink::Connection::<nlink::Route>::new()?;
+/// use nlink::Percent;
+/// use nlink::netlink::tc::{NetemConfig, NetemLossModel};
+///
+/// // tc qdisc add dev eth0 root netem loss gemodel 1% 30% 50% 0.1%
+/// let model = NetemLossModel::gilbert_elliot(Percent::new(1.0)) // enter the bad state
+///     .r(Percent::new(30.0))                                     // leave it
+///     .loss_in_bad(Percent::new(50.0))                           // tc's `1-h`
+///     .loss_in_good(Percent::new(0.1));                          // tc's `1-k`
+/// conn.add_qdisc("eth0", NetemConfig::new().loss_model(model)).await?;
+/// # Ok(())
+/// # }
+/// ```
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum NetemLossModel {
-    /// Gilbert-Intuitive 4-state loss model.
+    /// Gilbert-Intuitive 4-state Markov model (`loss state p13 [p31 [p32
+    /// [p23 [p14]]]]`). The states, per `tc-netem(8)`:
     ///
-    /// States: Good (1), Bad Burst (2), Bad Gap (3), Loss (4)
+    /// 1. good packet reception (no loss);
+    /// 2. good reception within a burst;
+    /// 3. burst losses;
+    /// 4. independent losses.
+    ///
+    /// `tc` takes `p23` *before* `p14` on its command line, while the
+    /// kernel struct (and this variant) stores `p14` first.
     GilbertIntuitive {
-        /// Probability of transitioning from Good to Bad Burst (p13).
+        /// 1 → 3: from good reception into a loss burst. `tc`'s first,
+        /// mandatory value.
         p13: f64,
-        /// Probability of transitioning from Bad Burst to Good (p31).
+        /// 3 → 1: from a loss burst back to good reception.
         p31: f64,
-        /// Probability of transitioning from Bad Burst to Bad Gap (p32).
+        /// 3 → 2: from a loss burst to good reception within the burst.
         p32: f64,
-        /// Probability of transitioning from Good to Loss (p14).
+        /// 1 → 4: an independent (isolated) loss.
         p14: f64,
-        /// Probability of transitioning from Bad Gap to Bad Burst (p23).
+        /// 2 → 3: from good reception within a burst back to losing.
         p23: f64,
     },
-    /// Gilbert-Elliot 2-state loss model.
-    ///
-    /// States: Good, Bad with different loss probabilities.
+    /// Gilbert-Elliot 2-state model (`loss gemodel p [r [1-h [1-k]]]`): a
+    /// good state and a bad (lossy) state, each with its own loss
+    /// probability.
     GilbertElliot {
-        /// Probability of transitioning from Good to Bad (p).
+        /// Good → bad: the probability of entering the bad state.
         p: f64,
-        /// Probability of transitioning from Bad to Good (r).
+        /// Bad → good: the probability of leaving the bad state.
         r: f64,
-        /// Loss probability in Bad state (h), 1-h in Good state (1-k).
+        /// The probability of **delivering** a packet in the bad state.
+        /// The loss probability there is `100 - h`: `tc`'s `1-h` argument,
+        /// which iproute2 converts before sending.
         h: f64,
-        /// Loss probability in Good state (1-k).
+        /// The **loss** probability in the good state: `tc`'s `1-k`
+        /// argument, which is sent as given.
         k1: f64,
     },
+}
+
+impl NetemLossModel {
+    /// A Gilbert-Elliot model entering the bad state with probability `p`,
+    /// with `tc(8)`'s defaults for the rest, i.e. `loss gemodel p`: leave
+    /// the bad state with `r = 100% - p`, lose everything while in it, and
+    /// nothing in the good state (the "simple Gilbert" model).
+    ///
+    /// Refine with [`r`](Self::r), [`loss_in_bad`](Self::loss_in_bad) and
+    /// [`loss_in_good`](Self::loss_in_good).
+    #[doc(alias = "gemodel")]
+    pub fn gilbert_elliot(p: crate::util::Percent) -> Self {
+        Self::GilbertElliot {
+            p: p.as_percent(),
+            r: 100.0 - p.as_percent(),
+            h: 0.0,
+            k1: 0.0,
+        }
+    }
+
+    /// A Gilbert-Intuitive 4-state model entering a loss burst with
+    /// probability `p13`, with `tc(8)`'s defaults for the rest, i.e.
+    /// `loss state p13`: `p31 = 100% - p13`, `p32 = 0`, `p23 = 100%`,
+    /// `p14 = 0`.
+    ///
+    /// Refine with [`p31`](Self::p31), [`p32`](Self::p32),
+    /// [`p23`](Self::p23) and [`p14`](Self::p14).
+    #[doc(alias = "state")]
+    pub fn gilbert_intuitive(p13: crate::util::Percent) -> Self {
+        Self::GilbertIntuitive {
+            p13: p13.as_percent(),
+            p31: 100.0 - p13.as_percent(),
+            p32: 0.0,
+            p14: 0.0,
+            p23: 100.0,
+        }
+    }
+
+    /// Gilbert-Elliot: the probability of leaving the bad state (`r`).
+    /// No-op on a 4-state model.
+    pub fn r(mut self, r: crate::util::Percent) -> Self {
+        if let Self::GilbertElliot { r: v, .. } = &mut self {
+            *v = r.as_percent();
+        }
+        self
+    }
+
+    /// Gilbert-Elliot: the loss probability in the bad state, `tc`'s
+    /// `1-h`. Stored as the kernel's `h`, its complement. No-op on a
+    /// 4-state model.
+    pub fn loss_in_bad(mut self, loss: crate::util::Percent) -> Self {
+        if let Self::GilbertElliot { h, .. } = &mut self {
+            *h = 100.0 - loss.as_percent();
+        }
+        self
+    }
+
+    /// Gilbert-Elliot: the loss probability in the good state, `tc`'s
+    /// `1-k` and the kernel's `k1`. No-op on a 4-state model.
+    pub fn loss_in_good(mut self, loss: crate::util::Percent) -> Self {
+        if let Self::GilbertElliot { k1, .. } = &mut self {
+            *k1 = loss.as_percent();
+        }
+        self
+    }
+
+    /// 4-state: loss burst → good reception (`p31`). No-op on
+    /// Gilbert-Elliot.
+    pub fn p31(mut self, p: crate::util::Percent) -> Self {
+        if let Self::GilbertIntuitive { p31, .. } = &mut self {
+            *p31 = p.as_percent();
+        }
+        self
+    }
+
+    /// 4-state: loss burst → good reception within the burst (`p32`).
+    /// No-op on Gilbert-Elliot.
+    pub fn p32(mut self, p: crate::util::Percent) -> Self {
+        if let Self::GilbertIntuitive { p32, .. } = &mut self {
+            *p32 = p.as_percent();
+        }
+        self
+    }
+
+    /// 4-state: good reception within a burst → loss burst (`p23`).
+    /// No-op on Gilbert-Elliot.
+    pub fn p23(mut self, p: crate::util::Percent) -> Self {
+        if let Self::GilbertIntuitive { p23, .. } = &mut self {
+            *p23 = p.as_percent();
+        }
+        self
+    }
+
+    /// 4-state: good reception → independent loss (`p14`). No-op on
+    /// Gilbert-Elliot.
+    pub fn p14(mut self, p: crate::util::Percent) -> Self {
+        if let Self::GilbertIntuitive { p14, .. } = &mut self {
+            *p14 = p.as_percent();
+        }
+        self
+    }
+
+    /// The model as the kernel stores it: its `NETEM_LOSS_*` type and its
+    /// fields in struct order, each as a `u32` probability.
+    pub(crate) fn kernel_fields(&self) -> (u16, Vec<u32>) {
+        use super::types::tc::qdisc::netem::{NETEM_LOSS_GE, NETEM_LOSS_GI};
+        let k = |v: f64| crate::util::Percent::new(v).as_kernel_probability();
+        match *self {
+            Self::GilbertIntuitive {
+                p13,
+                p31,
+                p32,
+                p14,
+                p23,
+            } => (NETEM_LOSS_GI, vec![k(p13), k(p31), k(p32), k(p14), k(p23)]),
+            Self::GilbertElliot { p, r, h, k1 } => (NETEM_LOSS_GE, vec![k(p), k(r), k(h), k(k1)]),
+        }
+    }
+
+    /// Whether two models are the same in the kernel's own units. This is
+    /// the comparison the declarative diff needs, since a model read back
+    /// carries `u32 → f64` rounding that a built one does not.
+    pub(crate) fn kernel_eq(&self, other: &Self) -> bool {
+        self.kernel_fields() == other.kernel_fields()
+    }
+
+    /// Append the nested `TCA_NETEM_LOSS` attribute that selects this
+    /// model.
+    pub(crate) fn write_attr(&self, builder: &mut super::builder::MessageBuilder) {
+        use super::types::tc::qdisc::netem::{
+            NETEM_LOSS_GE, NETEM_LOSS_GI, TCA_NETEM_LOSS, TcNetemGeModel, TcNetemGiModel,
+        };
+        let (kind, f) = self.kernel_fields();
+        let nest = builder.nest_start(TCA_NETEM_LOSS);
+        if kind == NETEM_LOSS_GI {
+            let gi = TcNetemGiModel {
+                p13: f[0],
+                p31: f[1],
+                p32: f[2],
+                p14: f[3],
+                p23: f[4],
+            };
+            builder.append_attr(NETEM_LOSS_GI, gi.as_bytes());
+        } else {
+            debug_assert_eq!(kind, NETEM_LOSS_GE);
+            let ge = TcNetemGeModel {
+                p: f[0],
+                r: f[1],
+                h: f[2],
+                k1: f[3],
+            };
+            builder.append_attr(NETEM_LOSS_GE, ge.as_bytes());
+        }
+        builder.nest_end(nest);
+    }
 }
 
 /// Netem slot-based transmission options.
@@ -604,7 +810,8 @@ impl NetemOptions {
         self.slot.as_ref()
     }
 
-    /// Get the loss model configuration, if using state-based loss.
+    /// The Markov loss model, when the qdisc uses one instead of
+    /// random loss (`loss state …` / `loss gemodel …`).
     #[inline]
     pub fn loss_model(&self) -> Option<&NetemLossModel> {
         self.loss_model.as_ref()

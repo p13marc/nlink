@@ -242,6 +242,15 @@ pub(crate) fn netem_matches(desired: &NetemConfig, live: &TcMessage) -> bool {
         return false;
     }
 
+    // Markov loss model (#368). The kernel echoes TCA_NETEM_LOSS only for
+    // a model, so "none" on both sides is a match; otherwise compare in the
+    // kernel's u32 units, since the read side carries u32 → f64 rounding.
+    match (&desired.loss_model, live_opts.loss_model()) {
+        (None, None) => {}
+        (Some(d), Some(l)) if d.kernel_eq(l) => {}
+        _ => return false,
+    }
+
     true
 }
 
@@ -502,6 +511,54 @@ mod tests {
         out.extend_from_slice(&TCA_FQ_CODEL_TARGET.to_ne_bytes());
         out.extend_from_slice(&target_us.to_ne_bytes());
         out
+    }
+
+    // Markov loss models (#368): encoded by `write_options` as a nested
+    // TCA_NETEM_LOSS, decoded by the read side, compared in kernel units.
+    #[test]
+    fn netem_matches_round_trips_loss_models() {
+        use crate::netlink::tc::NetemLossModel;
+        use crate::util::Percent;
+        for model in [
+            NetemLossModel::gilbert_elliot(Percent::new(1.0))
+                .r(Percent::new(30.0))
+                .loss_in_bad(Percent::new(50.0))
+                .loss_in_good(Percent::new(0.1)),
+            NetemLossModel::gilbert_intuitive(Percent::new(1.0))
+                .p31(Percent::new(2.0))
+                .p32(Percent::new(3.0))
+                .p23(Percent::new(4.0))
+                .p14(Percent::new(5.0)),
+        ] {
+            let desired = NetemConfig::new().loss_model(model).build();
+            let live = make_netem_msg(desired.clone());
+            let Some(QdiscOptions::Netem(opts)) = live.options() else {
+                panic!("netem options did not parse");
+            };
+            let echoed = opts.loss_model().expect("TCA_NETEM_LOSS did not decode");
+            assert!(echoed.kernel_eq(&model), "{model:?} came back as {echoed:?}");
+            assert!(netem_matches(&desired, &live), "{model:?} does not match itself");
+        }
+    }
+
+    #[test]
+    fn netem_matches_rejects_a_changed_or_missing_loss_model() {
+        use crate::netlink::tc::NetemLossModel;
+        use crate::util::Percent;
+        let ge = |r: f64| {
+            NetemConfig::new()
+                .loss_model(NetemLossModel::gilbert_elliot(Percent::new(1.0)).r(Percent::new(r)))
+                .build()
+        };
+        assert!(!netem_matches(&ge(30.0), &make_netem_msg(ge(31.0))));
+        // A model where there is none, and none where there is one.
+        assert!(!netem_matches(&ge(30.0), &make_netem_msg(NetemConfig::new().build())));
+        assert!(!netem_matches(&NetemConfig::new().build(), &make_netem_msg(ge(30.0))));
+        // Same probability, different model.
+        let gi = NetemConfig::new()
+            .loss_model(NetemLossModel::gilbert_intuitive(Percent::new(1.0)))
+            .build();
+        assert!(!netem_matches(&gi, &make_netem_msg(ge(99.0))));
     }
 
     #[test]
