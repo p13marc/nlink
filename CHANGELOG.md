@@ -4,6 +4,57 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+> **One compile break:** `NetemConfig` gained a public field, `loss_model`, and
+> its fields are all public, so a struct literal that lists them no longer
+> builds. Construct it with `NetemConfig::new()` and the setters. Hence 0.29.0.
+
+### Added
+
+- **netem's Markov loss models can be written, not only read (#368).**
+  `loss gemodel` (Gilbert-Elliot) and `loss state` (4-state Gilbert-Intuitive)
+  are netem's two generators for **bursty** loss. Before this release nlink
+  decoded them from the kernel and rejected them everywhere else:
+  `NetemConfig` had no field for them, its tc-params parser refused them, and
+  the declarative builder had no setter. So the only way to ask nlink for
+  bursty loss was `loss <p>% <corr>%`, which does not produce bursts — its
+  correlation suppresses small loss rates instead (#369).
+
+  New:
+  - `NetemConfig::loss_model(NetemLossModel)`, written as a nested
+    `TCA_NETEM_LOSS`.
+  - `QdiscBuilder::loss_model` on the declarative path, compared by
+    `netem_matches` in the kernel's `u32` units, so a declared model diffs
+    clean against its echo.
+  - `NetemConfig::parse_params` accepts `loss|drop state …` and
+    `loss|drop gemodel …`, with tc(8)'s defaults for omitted values.
+  - `NetemLossModel::gilbert_elliot` / `gilbert_intuitive`, which apply those
+    defaults, plus setters named for what they mean: `loss_in_bad` is tc's
+    `1-h` and does the conversion; `p23` and `p14` are named, because tc's
+    command line orders them opposite to the kernel struct. `NetemLossModel`
+    is re-exported from `nlink::netlink::tc` and gains `PartialEq` and the
+    optional serde/schemars derives.
+
+  A model is exclusive with random `loss` and `loss_correlation`. The kernel
+  would accept both and ignore the random values, so `write_options` rejects
+  the combination. Field semantics and defaults were checked against what
+  iproute2 6.15 installs. Tests cover:
+  - the parser against those values;
+  - an encode/decode round trip;
+  - a kernel round trip;
+  - deterministic models that must drop every packet, or none;
+  - an apply-twice case for each model in
+    `unchanged_declared_qdiscs_are_not_replaced_on_reapply`.
+
+### Fixed
+
+- **`NetemLossModel`'s doc comments described the models wrongly.** The
+  4-state model's states were "Good, Bad Burst, Bad Gap, Loss" while its
+  transitions named state 3 as "Bad Burst"; `tc-netem(8)` numbers them
+  good reception, good reception within a burst, burst losses, independent
+  losses. Gilbert-Elliot's `h` was "Loss probability in Bad state". It is
+  the probability of *delivering* there: the loss probability is `1-h`, the
+  value `tc` takes and converts.
+
 ## [0.28.1] - 2026-09-18
 
 ### Fixed
