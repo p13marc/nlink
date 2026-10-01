@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+> **One compile break:** `NetemConfig` gained a public field, `loss_model`, and
+> its fields are all public, so a struct literal that lists them no longer
+> builds. Construct it with `NetemConfig::new()` and the setters. Hence 0.29.0.
+
 ### Added
 
 - **netem's Markov loss models can be written, not only read (#368).**
