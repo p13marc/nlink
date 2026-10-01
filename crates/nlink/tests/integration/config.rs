@@ -668,9 +668,6 @@ async fn unchanged_declared_qdiscs_are_not_replaced_on_reapply() -> Result<()> {
         // #368: a declared Markov loss model must diff clean against the
         // kernel's echo, which arrives as u32 probabilities read back as
         // f64 — a float compare would replace it on every reconcile (#346).
-        // These two run FIRST, on a fresh dummy0: placed after "netem"
-        // they would inherit its rate/reorder, which a netem replace cannot
-        // remove (#370) — a separate bug, with its own case to add.
         (
             "netem-gemodel",
             NetworkConfig::new().qdisc("dummy0", |q| {
@@ -706,6 +703,15 @@ async fn unchanged_declared_qdiscs_are_not_replaced_on_reapply() -> Result<()> {
                     .reorder_correlation_pct(nlink::Percent::new(50.0))
                     .gap(5)
             }),
+        ),
+        // #370: the same device, the "netem" case above replaced by one that
+        // sets none of rate / reorder / gap / loss. A replace is
+        // `netem_change()`, which keeps what it is not sent, so before the
+        // writer sent explicit off states this never converged: diff
+        // reported the stale rate, and every apply replaced the qdisc.
+        (
+            "netem-attributes-removed",
+            NetworkConfig::new().qdisc("dummy0", |q| q.netem().delay(Duration::from_millis(20))),
         ),
         (
             "tbf",

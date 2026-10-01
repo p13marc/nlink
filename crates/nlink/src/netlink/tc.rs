@@ -156,7 +156,8 @@ pub struct NetemConfig {
     pub delay_correlation: crate::util::Percent,
     /// Packet loss percentage.
     pub loss: crate::util::Percent,
-    /// Loss correlation.
+    /// Loss correlation. **Lowers the loss rate, it does not make loss
+    /// bursty** — see [`loss_correlation`](Self::loss_correlation).
     pub loss_correlation: crate::util::Percent,
     /// Packet duplication percentage.
     pub duplicate: crate::util::Percent,
@@ -214,7 +215,29 @@ impl NetemConfig {
         self
     }
 
-    /// Set the loss correlation.
+    /// Set the loss correlation (`loss <p>% <corr>%`).
+    ///
+    /// **This does not produce bursty loss; it lowers the loss rate.**
+    /// netem's correlation is not a statistical correlation (`tc-netem(8)`
+    /// calls it "an approximation"): each random draw is averaged with the
+    /// previous one, `value = (1 - corr)·rand + corr·last`, and a packet is
+    /// lost when that value falls below the loss probability. Averaging pulls
+    /// the value towards the middle of its range, so a small probability
+    /// almost never triggers. Effective loss, simulated from the formula (#369):
+    ///
+    /// | `loss` | corr 0 % | 10 % | 25 % | 50 % |
+    /// |---|---|---|---|---|
+    /// | 0.5 % | 0.50 % | **0.00 %** | 0.00 % | 0.00 % |
+    /// | 2 % | 2.00 % | 0.14 % | 0.01 % | 0.00 % |
+    /// | 10 % | 9.99 % | 5.58 % | 1.77 % | 0.10 % |
+    ///
+    /// Measured on Linux 6.12 with plain `tc`, `loss 0.5% 25%` dropped 0 of
+    /// 40 000 paced packets where `loss 0.5%` dropped 0.48 %. For loss that
+    /// arrives in bursts, use a Markov model:
+    /// [`loss_model`](Self::loss_model).
+    ///
+    /// The duplicate, corrupt and reorder correlations use the same
+    /// generator, with the same effect on small probabilities.
     pub fn loss_correlation(mut self, corr: crate::util::Percent) -> Self {
         self.loss_correlation = corr;
         self
@@ -240,7 +263,9 @@ impl NetemConfig {
         self
     }
 
-    /// Set the duplication correlation.
+    /// Set the duplication correlation. Like
+    /// [`loss_correlation`](Self::loss_correlation), it lowers a small
+    /// probability rather than grouping events.
     pub fn duplicate_correlation(mut self, corr: crate::util::Percent) -> Self {
         self.duplicate_correlation = corr;
         self
@@ -252,7 +277,9 @@ impl NetemConfig {
         self
     }
 
-    /// Set the corruption correlation.
+    /// Set the corruption correlation. Like
+    /// [`loss_correlation`](Self::loss_correlation), it lowers a small
+    /// probability rather than grouping events.
     pub fn corrupt_correlation(mut self, corr: crate::util::Percent) -> Self {
         self.corrupt_correlation = corr;
         self
@@ -266,7 +293,9 @@ impl NetemConfig {
         self
     }
 
-    /// Set the reordering correlation.
+    /// Set the reordering correlation. Like
+    /// [`loss_correlation`](Self::loss_correlation), it lowers a small
+    /// probability rather than grouping events.
     pub fn reorder_correlation(mut self, corr: crate::util::Percent) -> Self {
         self.reorder_correlation = corr;
         self
@@ -301,7 +330,8 @@ impl NetemConfig {
     /// up to the next keyword):
     ///
     /// - `delay <time> [<jitter> [<corr>]]` (alias `latency`)
-    /// - `loss [random] <pct> [<corr>]` (alias `drop`)
+    /// - `loss [random] <pct> [<corr>]` (alias `drop`) — the correlation
+    ///   lowers the loss rate; see [`loss_correlation`](Self::loss_correlation)
     /// - `loss state <p13> [<p31> [<p32> [<p23> [<p14>]]]]` and
     ///   `loss gemodel <p> [<r> [<1-h> [<1-k>]]]` (alias `drop`), with
     ///   `tc(8)`'s defaults for the omitted values — see
@@ -640,49 +670,46 @@ impl QdiscConfig for NetemConfig {
             builder.append_attr(TCA_NETEM_JITTER64, &jitter_ns.to_ne_bytes());
         }
 
-        // Add correlation if any set
-        if !self.delay_correlation.is_zero()
-            || !self.loss_correlation.is_zero()
-            || !self.duplicate_correlation.is_zero()
-        {
-            let corr = TcNetemCorr {
-                delay_corr: self.delay_correlation.as_kernel_probability(),
-                loss_corr: self.loss_correlation.as_kernel_probability(),
-                dup_corr: self.duplicate_correlation.as_kernel_probability(),
-            };
-            builder.append_attr(TCA_NETEM_CORR, corr.as_bytes());
-        }
+        // CORR, REORDER, CORRUPT and RATE are written even when unset, as
+        // zeros — the kernel's "off" for each. A replace of an existing
+        // netem is `netem_change()`, which updates only the attributes it is
+        // sent: omit one and the old value survives, so a declaration that
+        // drops `rate`, `reorder` or `corrupt` could never converge, and
+        // `apply()` replaced it on every run (#370). `tc_netem_qopt` above
+        // is always sent, which is why latency, loss, duplicate, gap and
+        // limit never had this problem; a loss model is reset by the kernel
+        // itself when `TCA_NETEM_LOSS` is absent.
+        let corr = TcNetemCorr {
+            delay_corr: self.delay_correlation.as_kernel_probability(),
+            loss_corr: self.loss_correlation.as_kernel_probability(),
+            dup_corr: self.duplicate_correlation.as_kernel_probability(),
+        };
+        builder.append_attr(TCA_NETEM_CORR, corr.as_bytes());
 
-        // Add reorder if set
-        if !self.reorder.is_zero() {
-            let reorder = TcNetemReorder {
-                probability: self.reorder.as_kernel_probability(),
-                correlation: self.reorder_correlation.as_kernel_probability(),
-            };
-            builder.append_attr(TCA_NETEM_REORDER, reorder.as_bytes());
-        }
+        let reorder = TcNetemReorder {
+            probability: self.reorder.as_kernel_probability(),
+            correlation: self.reorder_correlation.as_kernel_probability(),
+        };
+        builder.append_attr(TCA_NETEM_REORDER, reorder.as_bytes());
 
-        // Add corrupt if set
-        if !self.corrupt.is_zero() {
-            let corrupt = TcNetemCorrupt {
-                probability: self.corrupt.as_kernel_probability(),
-                correlation: self.corrupt_correlation.as_kernel_probability(),
-            };
-            builder.append_attr(TCA_NETEM_CORRUPT, corrupt.as_bytes());
-        }
+        let corrupt = TcNetemCorrupt {
+            probability: self.corrupt.as_kernel_probability(),
+            correlation: self.corrupt_correlation.as_kernel_probability(),
+        };
+        builder.append_attr(TCA_NETEM_CORRUPT, corrupt.as_bytes());
 
-        // Add rate limit if set
-        if let Some(rate) = self.rate {
-            let bytes_per_sec = rate.as_bytes_per_sec();
-            let mut rate_struct = TcNetemRate::default();
-            if bytes_per_sec > u32::MAX as u64 {
-                rate_struct.rate = u32::MAX;
-                builder.append_attr(TCA_NETEM_RATE, rate_struct.as_bytes());
-                builder.append_attr(TCA_NETEM_RATE64, &bytes_per_sec.to_ne_bytes());
-            } else {
-                rate_struct.rate = bytes_per_sec as u32;
-                builder.append_attr(TCA_NETEM_RATE, rate_struct.as_bytes());
-            }
+        // Rate: 0 is "no rate limit". RATE64 only when the rate needs it;
+        // the kernel assigns `q->rate` from TCA_NETEM_RATE first, so a stale
+        // 64-bit rate cannot survive a replace that omits RATE64.
+        let bytes_per_sec = self.rate.map_or(0, |r| r.as_bytes_per_sec());
+        let mut rate_struct = TcNetemRate::default();
+        if bytes_per_sec > u32::MAX as u64 {
+            rate_struct.rate = u32::MAX;
+            builder.append_attr(TCA_NETEM_RATE, rate_struct.as_bytes());
+            builder.append_attr(TCA_NETEM_RATE64, &bytes_per_sec.to_ne_bytes());
+        } else {
+            rate_struct.rate = bytes_per_sec as u32;
+            builder.append_attr(TCA_NETEM_RATE, rate_struct.as_bytes());
         }
 
         // Markov loss model, nested TCA_NETEM_LOSS
@@ -9566,6 +9593,38 @@ mod tests {
             let err = cfg.write_options(&mut b).unwrap_err();
             assert!(err.to_string().contains("excludes random `loss`"), "got: {err}");
         }
+    }
+
+    /// #370: a replace is `netem_change()`, which keeps every attribute
+    /// it is not sent, so the "off" state must be written explicitly —
+    /// otherwise a declaration that drops `rate`/`reorder`/`corrupt` can
+    /// never reach the kernel.
+    #[test]
+    fn netem_writes_off_states_so_a_replace_can_clear_them() {
+        let mut b = MessageBuilder::new(0, 0);
+        let start = b.len();
+        NetemConfig::new().build().write_options(&mut b).unwrap();
+        let blob = &b.as_bytes()[start..];
+        // Walk the attributes after the fixed tc_netem_qopt.
+        let mut attrs = std::collections::HashMap::new();
+        let mut rest = &blob[TcNetemQopt::SIZE..];
+        while rest.len() >= 4 {
+            let len = u16::from_ne_bytes([rest[0], rest[1]]) as usize;
+            let ty = u16::from_ne_bytes([rest[2], rest[3]]) & 0x3FFF;
+            attrs.insert(ty, rest[4..len].to_vec());
+            rest = &rest[((len + 3) & !3).min(rest.len())..];
+        }
+        for (ty, name) in [
+            (TCA_NETEM_CORR, "CORR"),
+            (TCA_NETEM_REORDER, "REORDER"),
+            (TCA_NETEM_CORRUPT, "CORRUPT"),
+            (TCA_NETEM_RATE, "RATE"),
+        ] {
+            let payload = attrs.get(&ty).unwrap_or_else(|| panic!("TCA_NETEM_{name} not written"));
+            assert!(payload.iter().all(|&x| x == 0), "TCA_NETEM_{name} is not the off state: {payload:?}");
+        }
+        assert!(!attrs.contains_key(&TCA_NETEM_RATE64), "RATE64 only when the rate needs it");
+        assert!(!attrs.contains_key(&TCA_NETEM_LOSS), "no loss model unless one is set");
     }
 
     #[test]

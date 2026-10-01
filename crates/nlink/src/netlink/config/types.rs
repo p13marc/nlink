@@ -1681,8 +1681,10 @@ pub enum DeclaredQdiscType {
         corrupt_percent: Option<f64>,
         /// Packet-reorder probability (netem `reorder`).
         reorder_percent: Option<f64>,
-        /// Loss-correlation between adjacent packets
-        /// (netem `loss <p>% <corr>%`).
+        /// Loss-correlation (netem `loss <p>% <corr>%`). Lowers the loss
+        /// rate rather than making it bursty — see
+        /// [`NetemConfig::loss_correlation`](crate::netlink::tc::NetemConfig::loss_correlation);
+        /// for bursts, [`loss_model`](QdiscBuilder::loss_model).
         loss_correlation: Option<f64>,
         /// Delay-correlation between adjacent packets
         /// (netem `delay <t> <jitter> <corr>%`).
@@ -1966,8 +1968,13 @@ impl QdiscBuilder {
         self
     }
 
-    /// Set netem loss correlation (correlation between adjacent
-    /// packets' loss outcomes).
+    /// Set netem loss correlation (`loss <p>% <corr>%`).
+    ///
+    /// **It lowers the loss rate, it does not make loss bursty**: netem
+    /// averages each random draw with the previous one, so a small loss
+    /// probability almost never triggers (`loss 0.5% 25%` drops ~0 %; #369,
+    /// table on [`NetemConfig::loss_correlation`](crate::netlink::tc::NetemConfig::loss_correlation)).
+    /// For loss in bursts use [`loss_model`](Self::loss_model).
     ///
     /// Mirror of `NetemConfig::loss_correlation(Percent)` for the
     /// declarative path (Plan 228 extension, 0.21).

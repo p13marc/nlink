@@ -257,6 +257,64 @@ async fn netem_loss_models_drop_what_they_describe() -> Result<()> {
     Ok(())
 }
 
+/// #370: replacing a netem with one that sets fewer attributes must clear
+/// the rest. A replace is `netem_change()`, which keeps whatever it is not
+/// sent; `rate`, `reorder` and `corrupt` used to survive this.
+#[tokio::test]
+async fn netem_replace_clears_what_the_new_config_does_not_set() -> Result<()> {
+    require_root!();
+    nlink::require_modules!("sch_netem");
+    use nlink::Percent;
+
+    let (_ns, conn) = setup_tc_ns("netem-replace-clears").await?;
+    conn.add_qdisc(
+        "dummy0",
+        NetemConfig::new()
+            .delay(Duration::from_millis(20))
+            .jitter(Duration::from_millis(2))
+            .delay_correlation(Percent::new(30.0))
+            .rate(nlink::Rate::mbit(100))
+            .loss(Percent::new(1.0))
+            .loss_correlation(Percent::new(25.0))
+            .duplicate(Percent::new(2.0))
+            .duplicate_correlation(Percent::new(10.0))
+            .corrupt(Percent::new(1.0))
+            .corrupt_correlation(Percent::new(5.0))
+            .reorder(Percent::new(3.0))
+            .reorder_correlation(Percent::new(50.0))
+            .gap(5)
+            .build(),
+    )
+    .await?;
+    let bare = NetemConfig::new().delay(Duration::from_millis(20)).build();
+    conn.replace_qdisc("dummy0", bare).await?;
+
+    let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
+    let netem = qdiscs.iter().find(|q| q.kind() == Some("netem")).unwrap();
+    let Some(QdiscOptions::Netem(o)) = netem.options() else {
+        panic!("netem options did not parse");
+    };
+    let left: Vec<String> = [
+        ("rate", o.rate_bps().unwrap_or(0) as f64),
+        ("reorder", o.reorder().unwrap_or(0.0)),
+        ("reorder correlation", o.reorder_correlation().unwrap_or(0.0)),
+        ("corrupt", o.corrupt().unwrap_or(0.0)),
+        ("corrupt correlation", o.corrupt_correlation().unwrap_or(0.0)),
+        ("delay correlation", o.delay_correlation().unwrap_or(0.0)),
+        ("loss correlation", o.loss_correlation().unwrap_or(0.0)),
+        ("duplicate correlation", o.duplicate_correlation().unwrap_or(0.0)),
+        ("loss", o.loss().unwrap_or(0.0)),
+        ("duplicate", o.duplicate().unwrap_or(0.0)),
+    ]
+    .into_iter()
+    .filter(|(_, v)| *v != 0.0)
+    .map(|(k, v)| format!("{k}={v}"))
+    .collect();
+    assert!(left.is_empty(), "survived the replace: {left:?}");
+    assert_eq!(o.jitter(), None);
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_del_netem() -> Result<()> {
     require_root!();
