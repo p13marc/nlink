@@ -4,9 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-> **One compile break:** `NetemConfig` gained a public field, `loss_model`, and
-> its fields are all public, so a struct literal that lists them no longer
-> builds. Construct it with `NetemConfig::new()` and the setters. Hence 0.29.0.
+## [0.29.0] - 2026-10-01
+
+> Upgrading from 0.28.x? See
+> [`docs/migration_guide/0.28.0-to-0.29.0.md`](docs/migration_guide/0.28.0-to-0.29.0.md).
+> One compile break — `NetemConfig` gained a public field — and two behaviour
+> changes, both towards what was always meant: a netem replace now sets the
+> whole state, and `NetemOptions::requires_recreation_for` stops asking for a
+> delete-and-add a replace can do.
+
+A netem release, found downstream again. A network-fault lab that "ran on a
+lossy LTE link" for every experiment it made turned out to have **no random
+loss at all**, because `loss 0.5% 25%` drops nothing (#369). Asking nlink for
+bursty loss correctly, through netem's loss models, was not possible (#368).
+Writing the test for that found that a netem replace keeps whatever it is not
+sent (#370).
 
 ### Added
 
