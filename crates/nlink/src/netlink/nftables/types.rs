@@ -589,6 +589,17 @@ const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
 const IPPROTO_ICMPV6: u8 = 58;
 
+/// TCP header flag bits, for [`Rule::match_tcp_flags`].
+pub const TCP_FLAG_FIN: u8 = 0x01;
+pub const TCP_FLAG_SYN: u8 = 0x02;
+pub const TCP_FLAG_RST: u8 = 0x04;
+pub const TCP_FLAG_PSH: u8 = 0x08;
+pub const TCP_FLAG_ACK: u8 = 0x10;
+pub const TCP_FLAG_URG: u8 = 0x20;
+
+/// TCP option kind of the maximum segment size (`TCPOPT_MAXSEG`).
+pub const TCPOPT_MAXSEG: u8 = 2;
+
 /// Comparison operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -632,6 +643,38 @@ impl PayloadBase {
             0 => Some(Self::LinkLayer),
             1 => Some(Self::Network),
             2 => Some(Self::Transport),
+            _ => None,
+        }
+    }
+}
+
+/// Which header family an `exthdr` expression addresses — `enum
+/// nft_exthdr_op` in the kernel UAPI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ExthdrOp {
+    /// IPv6 extension header (`exthdr`).
+    Ipv6 = 0,
+    /// TCP option (`tcp option`).
+    TcpOpt = 1,
+    /// IPv4 option (`ip option`).
+    Ipv4 = 2,
+    /// SCTP chunk (`sctp chunk`).
+    Sctp = 3,
+    /// DCCP option (`dccp option`).
+    Dccp = 4,
+}
+
+impl ExthdrOp {
+    /// Reverse mapping for the expression decoder. `None` for ops the
+    /// typed enum doesn't model yet.
+    pub(crate) fn from_u32(v: u32) -> Option<Self> {
+        match v {
+            0 => Some(Self::Ipv6),
+            1 => Some(Self::TcpOpt),
+            2 => Some(Self::Ipv4),
+            3 => Some(Self::Sctp),
+            4 => Some(Self::Dccp),
             _ => None,
         }
     }
@@ -1724,6 +1767,90 @@ impl Rule {
         self
     }
 
+    /// Set the packet mark (nfmark/fwmark): `meta mark set <mark>`.
+    ///
+    /// A statement, not a match: place it after the rule's matches. The
+    /// mark is what `tc` `fw` filters and `ip rule fwmark` act on.
+    pub fn set_mark(mut self, mark: u32) -> Self {
+        use super::expr::Expr;
+        self.exprs.push(Expr::Immediate {
+            dreg: Register::R0,
+            data: mark.to_ne_bytes().to_vec(),
+        });
+        self.exprs.push(Expr::MetaSet {
+            key: MetaKey::Mark,
+            sreg: Register::R0,
+        });
+        self
+    }
+
+    /// Match TCP header flags: `tcp flags & <mask> == <flags>`.
+    ///
+    /// Built from the `TCP_FLAG_*` constants, e.g. a connection opening
+    /// (`tcp flags syn / syn,rst`) is
+    /// `match_tcp_flags(TCP_FLAG_SYN, TCP_FLAG_SYN | TCP_FLAG_RST)`.
+    pub fn match_tcp_flags(mut self, flags: u8, mask: u8) -> Self {
+        use super::expr::Expr;
+        self.push_meta_eq(MetaKey::L4Proto, IPPROTO_TCP);
+        // Flags byte at offset 13 of the TCP header.
+        self.exprs.push(Expr::Payload {
+            dreg: Register::R0,
+            base: PayloadBase::Transport,
+            offset: 13,
+            len: 1,
+        });
+        self.exprs.push(Expr::Bitwise {
+            sreg: Register::R0,
+            dreg: Register::R0,
+            len: 1,
+            mask: vec![mask],
+            xor: vec![0],
+        });
+        self.exprs.push(Expr::Cmp {
+            sreg: Register::R0,
+            op: CmpOp::Eq,
+            data: vec![flags & mask],
+        });
+        self
+    }
+
+    /// Clamp the TCP MSS option to `mss`:
+    /// `tcp option maxseg size > <mss> tcp option maxseg size set <mss>`.
+    ///
+    /// Same semantics as iptables `TCPMSS --set-mss`: the MSS is only
+    /// ever lowered. Unlike `TCPMSS`, a segment without an MSS option is
+    /// left untouched (nftables cannot insert an option). Usually
+    /// combined with a SYN match ([`match_tcp_flags`](Self::match_tcp_flags)).
+    pub fn clamp_tcp_mss(mut self, mss: u16) -> Self {
+        use super::expr::Expr;
+        self.push_meta_eq(MetaKey::L4Proto, IPPROTO_TCP);
+        // MSS value: 2 bytes at offset 2 of the option (kind, length, value).
+        self.exprs.push(Expr::Exthdr {
+            dreg: Register::R0,
+            op: ExthdrOp::TcpOpt,
+            exthdr_type: TCPOPT_MAXSEG,
+            offset: 2,
+            len: 2,
+        });
+        self.exprs.push(Expr::Cmp {
+            sreg: Register::R0,
+            op: CmpOp::Gt,
+            data: mss.to_be_bytes().to_vec(),
+        });
+        self.exprs.push(Expr::Immediate {
+            dreg: Register::R0,
+            data: mss.to_be_bytes().to_vec(),
+        });
+        self.exprs.push(Expr::ExthdrSet {
+            sreg: Register::R0,
+            op: ExthdrOp::TcpOpt,
+            exthdr_type: TCPOPT_MAXSEG,
+            offset: 2,
+            len: 2,
+        });
+        self
+    }
+
     /// Reject the packet: send an ICMP port-unreachable, then drop.
     ///
     /// The client fails fast with "connection refused" instead of hanging to
@@ -1915,6 +2042,7 @@ pub struct Set {
     pub(crate) family: Family,
     pub(crate) key_type: SetKeyType,
     pub(crate) flags: u32,
+    pub(crate) size: Option<u32>,
 }
 
 impl Set {
@@ -1926,6 +2054,7 @@ impl Set {
             family: Family::Inet,
             key_type: SetKeyType::Ipv4Addr,
             flags: 0,
+            size: None,
         }
     }
 
@@ -1944,6 +2073,15 @@ impl Set {
     /// Mark as constant (immutable after creation).
     pub fn constant(mut self) -> Self {
         self.flags |= super::NFT_SET_CONSTANT;
+        self
+    }
+
+    /// Maximum number of elements (`nft add set ... { size N; }`).
+    ///
+    /// Adding an element to a full set fails with `ENFILE`. Without a
+    /// size, the kernel picks the backend default.
+    pub fn size(mut self, size: u32) -> Self {
+        self.size = Some(size);
         self
     }
 

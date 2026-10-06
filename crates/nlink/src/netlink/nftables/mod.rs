@@ -194,6 +194,18 @@ pub const NFTA_EXPR_DATA: u16 = 2;
 // Meta
 pub const NFTA_META_DREG: u16 = 1;
 pub const NFTA_META_KEY: u16 = 2;
+/// Source register of the set form (`meta <key> set ...`).
+pub const NFTA_META_SREG: u16 = 3;
+
+// Exthdr (IPv6 extension headers, TCP/IPv4/SCTP/DCCP options)
+pub const NFTA_EXTHDR_DREG: u16 = 1;
+pub const NFTA_EXTHDR_TYPE: u16 = 2;
+pub const NFTA_EXTHDR_OFFSET: u16 = 3;
+pub const NFTA_EXTHDR_LEN: u16 = 4;
+pub const NFTA_EXTHDR_FLAGS: u16 = 5;
+pub const NFTA_EXTHDR_OP: u16 = 6;
+/// Source register of the set form (`tcp option ... set ...`).
+pub const NFTA_EXTHDR_SREG: u16 = 7;
 
 // Cmp
 pub const NFTA_CMP_SREG: u16 = 1;
@@ -308,6 +320,9 @@ pub const NFTA_SET_DATA_LEN: u16 = 7;
 // drift went unnoticed.
 pub const NFTA_SET_POLICY: u16 = 8;
 pub const NFTA_SET_DESC: u16 = 9;
+/// `NFTA_SET_DESC_SIZE` — inside the `NFTA_SET_DESC` nest: maximum
+/// number of elements (`nft add set ... { size N; }`).
+pub const NFTA_SET_DESC_SIZE: u16 = 1;
 pub const NFTA_SET_ID: u16 = 10;
 pub const NFTA_SET_HANDLE: u16 = 16;
 

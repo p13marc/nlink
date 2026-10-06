@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **nftables write statements: `meta mark set`, TCP MSS clamping, set
+  size.** Three things `nft` does that nlink could not express, so a
+  firewall needing them still had to shell out to `nft`/`iptables`:
+
+  - `Expr::MetaSet { key, sreg }` (`meta <key> set ...`) and the
+    `Rule::set_mark(mark)` helper — the mark `tc` `fw` filters and
+    `ip rule fwmark` act on.
+  - `Expr::Exthdr` / `Expr::ExthdrSet` with the new `ExthdrOp` enum
+    (IPv6 extension headers, TCP/IPv4/SCTP/DCCP options), and the
+    `Rule::clamp_tcp_mss(mss)` helper:
+    `tcp option maxseg size > <mss> tcp option maxseg size set <mss>`,
+    the same never-raise semantics as iptables `TCPMSS --set-mss`.
+    `Rule::match_tcp_flags(flags, mask)` and the `TCP_FLAG_*` constants
+    express the usual `tcp flags syn / syn,rst` guard.
+  - `Set::size(n)`, written as `NFTA_SET_DESC`/`NFTA_SET_DESC_SIZE` by
+    both `Connection::add_set` and `Transaction::add_set`.
+
+  The decoder follows: `RuleExpr::MetaSet`, `RuleExpr::Exthdr` and
+  `RuleExpr::ExthdrSet` replace the `Unknown` these used to dump as. An
+  exthdr carrying `NFT_EXTHDR_F_PRESENT` still decodes as `Unknown`.
+
+  One wire asymmetry handled: `nft_exthdr_tcp_set_init()` rejects
+  `NFTA_EXTHDR_FLAGS` with `EINVAL`, yet the dump always carries it. The
+  request omits it; the declarative diff lowers the declared rule with
+  it, so a declared MSS clamp reconciles to an empty diff instead of a
+  replace on every run (same class as #362).
+
 ## [0.29.0] - 2026-10-01
 
 > Upgrading from 0.28.x? See

@@ -150,7 +150,11 @@ fn lower_to_expression_bytes(rule: &super::super::types::Rule) -> Vec<u8> {
     // to get just the inner elem list (matches what the kernel
     // emits as the `NFTA_RULE_EXPRESSIONS` payload).
     let mut b = MessageBuilder::new(0, 0);
-    super::super::expr::write_expressions(&mut b, &rule.exprs);
+    super::super::expr::write_expressions_as(
+        &mut b,
+        &rule.exprs,
+        super::super::expr::WireForm::Echo,
+    );
     let raw = b.finish();
     // NlMsgHdr is 16 bytes, attribute header is 4 bytes.
     if raw.len() <= 20 {

@@ -162,6 +162,12 @@ mod ovpn;
 #[path = "integration/nftables_safety.rs"]
 mod nftables_safety;
 
+// nftables write statements: `meta mark set`, `tcp option maxseg size set`
+// (exthdr) and the set size. Pins that the kernel accepts the bytes the
+// unit tests pin, and echoes back the same expressions.
+#[path = "integration/nftables_statements.rs"]
+mod nftables_statements;
+
 // #191-#194, #218 — psched tick conversion. The unit tests pin the
 // bytes nlink emits; these pin that the *kernel* accepts them and
 // reads back what we wrote. Needed because the pre-fix writer and
