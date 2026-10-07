@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+> **One compile break:** `SetInfo` gained a public field, `size`, and is now
+> `#[non_exhaustive]`, so a struct literal of it no longer builds. Nothing
+> outside the crate needs to build one — it comes from `list_sets` and the
+> set events. Hence 0.30.0.
+
 ### Added
 
 - **nftables write statements: `meta mark set`, TCP MSS clamping, set
