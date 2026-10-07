@@ -5,6 +5,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use super::expr::Expr;
 use crate::netlink::error::{Error, Result};
+use crate::netlink::tc_handle::TcHandle;
 
 /// nftables address family.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -643,8 +644,9 @@ impl std::ops::BitOrAssign for TcpFlags {
 /// `<netinet/tcp.h>`; the kernel's private name is `TCPOPT_MSS`).
 pub const TCPOPT_MAXSEG: u8 = 2;
 
-/// Comparison operator.
+/// Comparison operator — `enum nft_cmp_ops`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
 #[non_exhaustive]
 pub enum CmpOp {
     Eq = 0,
@@ -670,8 +672,9 @@ impl CmpOp {
     }
 }
 
-/// Payload base header.
+/// Payload base header — `enum nft_payload_bases`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
 #[non_exhaustive]
 pub enum PayloadBase {
     LinkLayer = 0,
@@ -732,12 +735,21 @@ impl ExthdrOp {
     }
 }
 
-/// Meta key for loading metadata.
+/// Meta key — `enum nft_meta_keys`. Loaded by [`Expr::Meta`]; the keys
+/// the kernel lets a rule write (`Mark`, `Priority`) are set with
+/// [`Expr::MetaSet`].
+///
+/// [`Expr::Meta`]: super::expr::Expr::Meta
+/// [`Expr::MetaSet`]: super::expr::Expr::MetaSet
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
 #[non_exhaustive]
 pub enum MetaKey {
     Len = 0,
     Protocol = 1,
+    /// `skb->priority` — a TC classid (`major:minor`) that HTB and prio
+    /// classify on directly; see [`Rule::set_priority`].
+    Priority = 2,
     Mark = 3,
     Iif = 4,
     Oif = 5,
@@ -758,6 +770,7 @@ impl MetaKey {
         match v {
             0 => Some(Self::Len),
             1 => Some(Self::Protocol),
+            2 => Some(Self::Priority),
             3 => Some(Self::Mark),
             4 => Some(Self::Iif),
             5 => Some(Self::Oif),
@@ -785,6 +798,7 @@ impl MetaKey {
 /// `Helper`, `L3Protocol` were added so the previously-shadowed
 /// kernel values are reachable through the typed enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
 #[non_exhaustive]
 pub enum CtKey {
     State = 0,
@@ -797,8 +811,86 @@ pub enum CtKey {
     L3Protocol = 7,
 }
 
-/// NAT type.
+impl CtKey {
+    /// Reverse mapping for the expression decoder. `None` for conntrack
+    /// keys the typed enum doesn't model — such expressions decode as
+    /// `RuleExpr::Unknown`.
+    pub(crate) fn from_u32(v: u32) -> Option<Self> {
+        match v {
+            0 => Some(Self::State),
+            1 => Some(Self::Direction),
+            2 => Some(Self::Status),
+            3 => Some(Self::Mark),
+            4 => Some(Self::Secmark),
+            5 => Some(Self::Expiration),
+            6 => Some(Self::Helper),
+            7 => Some(Self::L3Protocol),
+            _ => None,
+        }
+    }
+}
+
+/// Route key for [`Expr::Rt`] — `enum nft_rt_keys`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+#[non_exhaustive]
+pub enum RtKey {
+    /// Realm of the packet's route (`skb->dst->tclassid`).
+    Classid = 0,
+    /// IPv4 next hop.
+    Nexthop4 = 1,
+    /// IPv6 next hop.
+    Nexthop6 = 2,
+    /// TCP MSS the path allows: the smaller of the route's and the reverse
+    /// route's MTU, less the IP and TCP headers. A **host-order** `u16` —
+    /// convert with [`Expr::Byteorder`]
+    /// before writing it into a TCP option. Only in the `forward`,
+    /// `output` and `postrouting` hooks (`nft_rt_validate`).
+    TcpMss = 3,
+    /// Whether the route goes through an xfrm (IPsec) transform.
+    Xfrm = 4,
+}
+
+impl RtKey {
+    /// Reverse mapping for the expression decoder.
+    pub(crate) fn from_u32(v: u32) -> Option<Self> {
+        match v {
+            0 => Some(Self::Classid),
+            1 => Some(Self::Nexthop4),
+            2 => Some(Self::Nexthop6),
+            3 => Some(Self::TcpMss),
+            4 => Some(Self::Xfrm),
+            _ => None,
+        }
+    }
+}
+
+/// Direction of a [`Expr::Byteorder`]
+/// conversion — `enum nft_byteorder_ops`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+#[non_exhaustive]
+pub enum ByteorderOp {
+    /// Network to host order.
+    Ntoh = 0,
+    /// Host to network order.
+    Hton = 1,
+}
+
+impl ByteorderOp {
+    /// Reverse mapping for the expression decoder.
+    pub(crate) fn from_u32(v: u32) -> Option<Self> {
+        match v {
+            0 => Some(Self::Ntoh),
+            1 => Some(Self::Hton),
+            _ => None,
+        }
+    }
+}
+
+/// NAT type — `enum nft_nat_types`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
 #[non_exhaustive]
 pub enum NatType {
     Snat = 0,
@@ -1831,11 +1923,153 @@ impl Rule {
     ///
     /// A statement, not a match: place it after the rule's matches. The
     /// mark is what `tc` `fw` filters and `ip rule fwmark` act on.
+    ///
+    /// This replaces all 32 bits. On a host where other software uses its
+    /// own mark bits (kube-proxy, CNI plugins, VPN policy routing), use
+    /// [`set_mark_masked`](Self::set_mark_masked).
     pub fn set_mark(mut self, mark: u32) -> Self {
         use super::expr::Expr;
         self.exprs.push(Expr::Immediate {
             dreg: Register::R0,
             data: mark.to_ne_bytes().to_vec(),
+        });
+        self.exprs.push(Expr::MetaSet {
+            key: MetaKey::Mark,
+            sreg: Register::R0,
+        });
+        self
+    }
+
+    /// Set only the mark bits under `mask` to `value`, keeping the rest:
+    /// `meta mark set mark and ~<mask> or <value>` — iptables
+    /// `MARK --set-mark value/mask`.
+    ///
+    /// Bits of `value` outside `mask` are ignored. Pairs with
+    /// [`match_mark_masked`](Self::match_mark_masked) and a `tc` `fw`
+    /// filter's mask.
+    pub fn set_mark_masked(mut self, value: u32, mask: u32) -> Self {
+        self.exprs.push(Expr::Meta {
+            dreg: Register::R0,
+            key: MetaKey::Mark,
+        });
+        // (mark & !mask) ^ (value & mask): the masked bits are zero after
+        // the AND, so the XOR sets them.
+        self.exprs.push(Expr::Bitwise {
+            sreg: Register::R0,
+            dreg: Register::R0,
+            len: 4,
+            mask: (!mask).to_ne_bytes().to_vec(),
+            xor: (value & mask).to_ne_bytes().to_vec(),
+        });
+        self.exprs.push(Expr::MetaSet {
+            key: MetaKey::Mark,
+            sreg: Register::R0,
+        });
+        self
+    }
+
+    /// Match the mark bits under `mask`: `meta mark and <mask> == <value>`.
+    ///
+    /// Bits of `value` outside `mask` are ignored.
+    pub fn match_mark_masked(mut self, value: u32, mask: u32) -> Self {
+        self.exprs.push(Expr::Meta {
+            dreg: Register::R0,
+            key: MetaKey::Mark,
+        });
+        self.exprs.push(Expr::Bitwise {
+            sreg: Register::R0,
+            dreg: Register::R0,
+            len: 4,
+            mask: mask.to_ne_bytes().to_vec(),
+            xor: vec![0; 4],
+        });
+        self.exprs.push(Expr::Cmp {
+            sreg: Register::R0,
+            op: CmpOp::Eq,
+            data: (value & mask).to_ne_bytes().to_vec(),
+        });
+        self
+    }
+
+    /// Set the packet's TC priority to a class: `meta priority set
+    /// <major>:<minor>`.
+    ///
+    /// `skb->priority` is a classid. An HTB qdisc whose handle is `major:`
+    /// sends the packet straight to leaf class `major:minor` without
+    /// running any filter (`htb_classify`); an inner class runs its own
+    /// filters; no such class falls through to the filters and then the
+    /// default class. A `prio` qdisc `major:` picks band `minor - 1`. So a
+    /// firewall rule can classify into a shaper with no `tc` filter at
+    /// all.
+    ///
+    /// Set it in an `output`, `forward` or `postrouting` chain: for
+    /// forwarded IPv4 traffic the kernel overwrites `skb->priority` from
+    /// the TOS before the `forward` hook (`net.ipv4.ip_forward_update_priority`,
+    /// on by default), so a value set in `prerouting` is lost.
+    pub fn set_priority(mut self, class: TcHandle) -> Self {
+        self.exprs.push(Expr::Immediate {
+            dreg: Register::R0,
+            data: u32::from(class).to_ne_bytes().to_vec(),
+        });
+        self.exprs.push(Expr::MetaSet {
+            key: MetaKey::Priority,
+            sreg: Register::R0,
+        });
+        self
+    }
+
+    /// Set the connection's mark: `ct mark set <mark>`.
+    ///
+    /// The conntrack mark lives with the flow rather than the packet, so
+    /// one rule can classify a whole connection: set it once, then copy it
+    /// onto every packet with [`restore_mark_from_ct`](Self::restore_mark_from_ct).
+    /// Needs the `nft_ct` module.
+    pub fn set_ct_mark(mut self, mark: u32) -> Self {
+        self.exprs.push(Expr::Immediate {
+            dreg: Register::R0,
+            data: mark.to_ne_bytes().to_vec(),
+        });
+        self.exprs.push(Expr::CtSet {
+            key: CtKey::Mark,
+            sreg: Register::R0,
+        });
+        self
+    }
+
+    /// Match the connection's mark: `ct mark <mark>`.
+    pub fn match_ct_mark(mut self, mark: u32) -> Self {
+        self.exprs.push(Expr::Ct {
+            dreg: Register::R0,
+            key: CtKey::Mark,
+        });
+        self.exprs.push(Expr::Cmp {
+            sreg: Register::R0,
+            op: CmpOp::Eq,
+            data: mark.to_ne_bytes().to_vec(),
+        });
+        self
+    }
+
+    /// Copy the packet mark to the connection: `ct mark set mark` —
+    /// iptables `CONNMARK --save-mark`.
+    pub fn save_mark_to_ct(mut self) -> Self {
+        self.exprs.push(Expr::Meta {
+            dreg: Register::R0,
+            key: MetaKey::Mark,
+        });
+        self.exprs.push(Expr::CtSet {
+            key: CtKey::Mark,
+            sreg: Register::R0,
+        });
+        self
+    }
+
+    /// Copy the connection mark to the packet: `meta mark set ct mark` —
+    /// iptables `CONNMARK --restore-mark`.
+    pub fn restore_mark_from_ct(mut self) -> Self {
+        self.exprs.push(Expr::Ct {
+            dreg: Register::R0,
+            key: CtKey::Mark,
         });
         self.exprs.push(Expr::MetaSet {
             key: MetaKey::Mark,
@@ -1895,6 +2129,38 @@ impl Rule {
         self.exprs.push(Expr::Immediate {
             dreg: Register::R0,
             data: mss.to_be_bytes().to_vec(),
+        });
+        self.push_tcp_mss_write();
+        self
+    }
+
+    /// Clamp the TCP MSS option to what the path allows: `tcp option
+    /// maxseg size set rt mtu` — iptables `TCPMSS --clamp-mss-to-pmtu`.
+    ///
+    /// The route lookup's MSS (the smaller of the route's and the reverse
+    /// route's MTU, less the IP and TCP headers) is converted to network
+    /// byte order and written, exactly as `nft` linearizes it. As with
+    /// [`clamp_tcp_mss`](Self::clamp_tcp_mss) the MSS is only ever lowered,
+    /// and a segment without the option is left alone.
+    ///
+    /// The kernel only allows `rt` in `ip`, `ip6` and `inet` tables, and the
+    /// path MSS only in the `forward`, `output` and `postrouting` hooks —
+    /// anywhere else the rule is rejected. Usually combined with a SYN
+    /// match in `forward`, where a tunnel or PPPoE uplink narrows the path.
+    pub fn clamp_tcp_mss_to_pmtu(mut self) -> Self {
+        self.push_meta_eq(MetaKey::L4Proto, IPPROTO_TCP);
+        self.exprs.push(Expr::Rt {
+            dreg: Register::R0,
+            key: RtKey::TcpMss,
+        });
+        // `rt tcpmss` stores a host-order u16; the option wants it in
+        // network order.
+        self.exprs.push(Expr::Byteorder {
+            sreg: Register::R0,
+            dreg: Register::R0,
+            op: ByteorderOp::Hton,
+            len: 2,
+            size: 2,
         });
         self.push_tcp_mss_write();
         self

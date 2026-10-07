@@ -730,6 +730,10 @@ recipe rather than re-synthesizing:
   for kernel-parallel dump fan-out (one fd per task).
 - [`cgroup-classification`](docs/recipes/cgroup-classification.md) —
   cgroup-based TC classification.
+- [`nft-mark-tc-classification`](docs/recipes/nft-mark-tc-classification.md) —
+  nftables decides, TC shapes: `Rule::set_priority` (HTB leaf, no
+  filter), `set_mark_masked` + `FwFilter`, connmark save/restore, and
+  `clamp_tcp_mss{,_to_pmtu}` on the same path.
 - [`error-handling-patterns`](docs/recipes/error-handling-patterns.md) —
   `is_X()` recovery predicates + typed not-found variants.
 

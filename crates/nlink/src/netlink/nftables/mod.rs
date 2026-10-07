@@ -254,6 +254,23 @@ pub const NFT_BITWISE_BOOL: u32 = 0;
 // Conntrack
 pub const NFTA_CT_DREG: u16 = 1;
 pub const NFTA_CT_KEY: u16 = 2;
+/// `NFTA_CT_DIRECTION` — original/reply, for the directional keys. The
+/// decoder demotes a `ct` carrying it to `RuleExpr::Unknown`: `Expr::Ct`
+/// does not model a direction.
+pub const NFTA_CT_DIRECTION: u16 = 3;
+/// Source register of the set form (`ct mark set ...`).
+pub const NFTA_CT_SREG: u16 = 4;
+
+// Route (`rt`)
+pub const NFTA_RT_DREG: u16 = 1;
+pub const NFTA_RT_KEY: u16 = 2;
+
+// Byteorder
+pub const NFTA_BYTEORDER_SREG: u16 = 1;
+pub const NFTA_BYTEORDER_DREG: u16 = 2;
+pub const NFTA_BYTEORDER_OP: u16 = 3;
+pub const NFTA_BYTEORDER_LEN: u16 = 4;
+pub const NFTA_BYTEORDER_SIZE: u16 = 5;
 
 // Limit
 pub const NFTA_LIMIT_RATE: u16 = 1;

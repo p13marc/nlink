@@ -39,6 +39,42 @@ All notable changes to this project will be documented in this file.
   it, so a declared MSS clamp reconciles to an empty diff instead of a
   replace on every run (same class as #362).
 
+- **nftables → TC classification, connmark and path-MTU clamping.** The
+  statements a firewall uses to hand packets to a shaper, each tested by
+  sending traffic through a netns and reading rule counters and HTB class
+  statistics:
+
+  - `Rule::set_priority(TcHandle)` — `meta priority set 1:10`. HTB sends
+    the packet straight to leaf class `1:10` with no `tc` filter
+    (`htb_classify` reads `skb->priority` first); `prio` picks a band.
+    New `MetaKey::Priority`.
+  - `Rule::set_mark_masked(value, mask)` / `match_mark_masked(value,
+    mask)` — iptables `MARK --set-mark v/m`: only the bits under `mask`
+    change, so kube-proxy's, a CNI's or a VPN's mark bits survive. Pairs
+    with `FwFilter::mask`. `set_mark` now says it replaces all 32 bits.
+  - Connmark: `Expr::CtSet` (`ct <key> set`), `Rule::set_ct_mark`,
+    `match_ct_mark`, `save_mark_to_ct` (`CONNMARK --save-mark`) and
+    `restore_mark_from_ct` (`--restore-mark`).
+  - `Rule::clamp_tcp_mss_to_pmtu()` — `tcp option maxseg size set rt mtu`
+    (`TCPMSS --clamp-mss-to-pmtu`), with the new `Expr::Rt` + `RtKey` and
+    `Expr::Byteorder` + `ByteorderOp`, linearized exactly as `nft` does
+    (`rt load tcpmss`, `byteorder hton`, `exthdr write`).
+  - The decoder: `RuleExpr::{Ct, CtSet, Rt, Byteorder, Bitwise, Lookup}`
+    replace the `Unknown` these dumped as (directional `ct`, inverted or
+    map lookups and the shift / register forms of `bitwise` stay
+    `Unknown` rather than guess).
+  - New recipe [`nft-mark-tc-classification`](docs/recipes/nft-mark-tc-classification.md).
+  - `nlink-nft` rule specs accept `ip saddr|daddr @set`, `mark V[/M]`,
+    `meta mark set V[/M]|ct mark`, `meta priority set X:Y`,
+    `ct mark [set] V|mark`, `tcp flags F / M` and
+    `tcp option maxseg size set N|rt mtu`.
+
+  `MetaKey`, `CtKey`, `CmpOp`, `PayloadBase` and `NatType` are now
+  `#[repr(u32)]` and mapped in the UAPI audit, with the new `RtKey` and
+  `ByteorderOp`: they were the nftables wire enums the audit could not
+  see. All values matched the kernel already; now they are checked
+  (686 discriminants across 70 enums).
+
 - **`Rule::flow_offload(flowtable)`** — `flow add @<flowtable>`. The
   expression existed (`Expr::FlowOffload`) but had no helper, and could
   not be installed at all (see Fixed, #375).

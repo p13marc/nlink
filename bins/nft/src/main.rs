@@ -482,6 +482,122 @@ fn build_rule(family: Family, table: &str, chain: &str, tokens: &[&str]) -> Resu
                 rule = rule.match_ct_state(state);
                 i += 3;
             }
+            // `ip saddr @set` / `ip daddr @set` — before the CIDR arms,
+            // which would reject the `@`.
+            "ip" if matches!(tokens.get(i + 1), Some(&"saddr" | &"daddr"))
+                && tokens.get(i + 2).is_some_and(|t| t.starts_with('@')) =>
+            {
+                let set = &tokens[i + 2][1..];
+                if set.is_empty() {
+                    return Err(rule_err("`@` needs a set name"));
+                }
+                rule = if tokens[i + 1] == "saddr" {
+                    rule.match_saddr_in_set(set)
+                } else {
+                    rule.match_daddr_in_set(set)
+                };
+                i += 3;
+            }
+            // mark <value>[/<mask>]
+            "mark" => {
+                let (value, mask) = parse_rule_mark(tokens.get(i + 1), "mark")?;
+                rule = match mask {
+                    Some(mask) => rule.match_mark_masked(value, mask),
+                    None => rule.match_mark(value),
+                };
+                i += 2;
+            }
+            // meta mark set ct mark | meta mark set <value>[/<mask>]
+            "meta" if tokens.get(i + 1) == Some(&"mark") && tokens.get(i + 2) == Some(&"set") => {
+                if tokens.get(i + 3) == Some(&"ct") && tokens.get(i + 4) == Some(&"mark") {
+                    rule = rule.restore_mark_from_ct();
+                    i += 5;
+                } else {
+                    let (value, mask) = parse_rule_mark(tokens.get(i + 3), "meta mark set")?;
+                    rule = match mask {
+                        Some(mask) => rule.set_mark_masked(value, mask),
+                        None => rule.set_mark(value),
+                    };
+                    i += 4;
+                }
+            }
+            // meta priority set <major>:<minor>
+            "meta"
+                if tokens.get(i + 1) == Some(&"priority") && tokens.get(i + 2) == Some(&"set") =>
+            {
+                let class = tokens
+                    .get(i + 3)
+                    .ok_or_else(|| rule_err("`meta priority set` requires a class like 1:10"))?;
+                let class: nlink::TcHandle = class.parse().map_err(|_| {
+                    rule_err(&format!(
+                        "invalid `meta priority set` class `{class}` (expected major:minor, e.g. 1:10)"
+                    ))
+                })?;
+                rule = rule.set_priority(class);
+                i += 4;
+            }
+            // ct mark set mark | ct mark set <value>
+            "ct" if tokens.get(i + 1) == Some(&"mark") && tokens.get(i + 2) == Some(&"set") => {
+                match tokens.get(i + 3) {
+                    Some(&"mark") => {
+                        rule = rule.save_mark_to_ct();
+                        i += 4;
+                    }
+                    Some(&"meta") if tokens.get(i + 4) == Some(&"mark") => {
+                        rule = rule.save_mark_to_ct();
+                        i += 5;
+                    }
+                    tok => {
+                        let (value, mask) = parse_rule_mark(tok, "ct mark set")?;
+                        if mask.is_some() {
+                            return Err(rule_err("`ct mark set` takes no mask"));
+                        }
+                        rule = rule.set_ct_mark(value);
+                        i += 4;
+                    }
+                }
+            }
+            // ct mark <value>
+            "ct" if tokens.get(i + 1) == Some(&"mark") => {
+                let (value, mask) = parse_rule_mark(tokens.get(i + 2), "ct mark")?;
+                if mask.is_some() {
+                    return Err(rule_err("`ct mark` takes no mask"));
+                }
+                rule = rule.match_ct_mark(value);
+                i += 3;
+            }
+            // tcp flags <flags> / <mask>
+            "tcp" if tokens.get(i + 1) == Some(&"flags") => {
+                if tokens.get(i + 3) != Some(&"/") {
+                    return Err(rule_err(
+                        "`tcp flags` needs an explicit mask: `tcp flags syn / syn,rst`",
+                    ));
+                }
+                let flags = parse_tcp_flags(tokens.get(i + 2))?;
+                let mask = parse_tcp_flags(tokens.get(i + 4))?;
+                rule = rule.match_tcp_flags(flags, mask);
+                i += 5;
+            }
+            // tcp option maxseg size set <mss> | tcp option maxseg size set rt mtu
+            "tcp"
+                if tokens[i + 1..].starts_with(&["option", "maxseg", "size", "set"]) =>
+            {
+                if tokens.get(i + 5) == Some(&"rt") && tokens.get(i + 6) == Some(&"mtu") {
+                    rule = rule.clamp_tcp_mss_to_pmtu();
+                    i += 7;
+                } else {
+                    let mss = tokens.get(i + 5).ok_or_else(|| {
+                        rule_err("`tcp option maxseg size set` requires an MSS or `rt mtu`")
+                    })?;
+                    let mss = mss.parse::<u16>().map_err(|_| {
+                        rule_err(&format!(
+                            "invalid MSS `{mss}` (expected 0-65535 or `rt mtu`)"
+                        ))
+                    })?;
+                    rule = rule.clamp_tcp_mss(mss);
+                    i += 6;
+                }
+            }
             "ip" if tokens.get(i + 1) == Some(&"saddr") => {
                 let (ip, prefix) = parse_rule_cidr(tokens.get(i + 2), "ip saddr")?;
                 rule = rule.match_saddr_v4(ip, prefix);
@@ -1357,6 +1473,56 @@ fn parse_cidr(s: &str) -> Option<(Ipv4Addr, u8)> {
     }
 }
 
+fn rule_err(msg: &str) -> nlink::netlink::Error {
+    nlink::netlink::Error::InvalidAttribute(format!("nft: {msg}"))
+}
+
+/// Strict `<value>[/<mask>]` parse for a mark token; each part decimal or
+/// `0x` hex.
+fn parse_rule_mark(tok: Option<&&str>, what: &str) -> Result<(u32, Option<u32>)> {
+    let s = tok.ok_or_else(|| rule_err(&format!("`{what}` requires a value")))?;
+    let num = |n: &str| {
+        let parsed = match n.strip_prefix("0x").or_else(|| n.strip_prefix("0X")) {
+            Some(hex) => u32::from_str_radix(hex, 16),
+            None => n.parse::<u32>(),
+        };
+        parsed.map_err(|_| {
+            rule_err(&format!(
+                "invalid {what} value `{s}` (expected a u32, decimal or 0x hex, optionally /mask)"
+            ))
+        })
+    };
+    match s.split_once('/') {
+        Some((value, mask)) => Ok((num(value)?, Some(num(mask)?))),
+        None => Ok((num(s)?, None)),
+    }
+}
+
+/// Strict comma-separated TCP flag list (`syn,ack`).
+fn parse_tcp_flags(tok: Option<&&str>) -> Result<nlink::netlink::nftables::TcpFlags> {
+    use nlink::netlink::nftables::TcpFlags;
+    let s = tok.ok_or_else(|| rule_err("`tcp flags` requires a flag list like syn,rst"))?;
+    let mut flags = TcpFlags::empty();
+    for name in s.split(',') {
+        flags |= match name {
+            "fin" => TcpFlags::FIN,
+            "syn" => TcpFlags::SYN,
+            "rst" => TcpFlags::RST,
+            "psh" => TcpFlags::PSH,
+            "ack" => TcpFlags::ACK,
+            "urg" => TcpFlags::URG,
+            "ecn" | "ece" => TcpFlags::ECE,
+            "cwr" => TcpFlags::CWR,
+            other => {
+                return Err(rule_err(&format!(
+                    "unknown tcp flag `{other}` (expected fin/syn/rst/psh/ack/urg/ecn/cwr)"
+                )));
+            }
+        };
+    }
+    Ok(flags)
+}
+
 /// Strict port parse for a rule-spec token: rejects a missing or
 /// unparseable value instead of silently dropping the clause.
 fn parse_rule_port(tok: Option<&&str>, what: &str) -> Result<u16> {
@@ -1493,6 +1659,44 @@ mod tests {
         assert!(build_rule(Family::Inet, "t", "c", &["tcp", "dpot", "22"]).is_err());
         assert!(build_rule(Family::Inet, "t", "c", &["bogus"]).is_err());
         assert!(build_rule(Family::Inet, "t", "c", &["ct", "state", "frobnicate"]).is_err());
+    }
+
+    #[test]
+    fn build_rule_mark_priority_connmark_and_mss_tokens() {
+        let ok = |spec: &str| {
+            let tokens: Vec<&str> = spec.split_whitespace().collect();
+            if let Err(e) = build_rule(Family::Ip, "t", "c", &tokens) {
+                panic!("`{spec}` should parse: {e}");
+            }
+        };
+        ok("ip daddr @throttled meta mark set 0x10");
+        ok("ip saddr @allow accept");
+        ok("mark 0x10/0xff meta mark set 0x20/0xff");
+        ok("meta priority set 1:10");
+        ok("ct mark set mark");
+        ok("ct mark set meta mark");
+        ok("ct mark set 7");
+        ok("ct mark 7 meta mark set ct mark");
+        ok("tcp flags syn / syn,rst tcp option maxseg size set 1360");
+        ok("tcp flags syn / syn,rst tcp option maxseg size set rt mtu");
+
+        let err = |spec: &str| {
+            let tokens: Vec<&str> = spec.split_whitespace().collect();
+            assert!(
+                build_rule(Family::Ip, "t", "c", &tokens).is_err(),
+                "`{spec}` should be rejected"
+            );
+        };
+        err("ip daddr @");
+        err("mark");
+        err("mark 0x1g");
+        err("meta mark set");
+        err("meta priority set 10");
+        err("ct mark set 7/0xff");
+        err("tcp flags syn");
+        err("tcp flags syn / syn,frob");
+        err("tcp option maxseg size set");
+        err("tcp option maxseg size set 70000");
     }
 
     #[test]

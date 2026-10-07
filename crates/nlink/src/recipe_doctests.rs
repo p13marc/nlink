@@ -59,6 +59,9 @@ mod multi_namespace_events {}
 #[doc = include_str!("../../../docs/recipes/netdev-lifecycle.md")]
 mod netdev_lifecycle {}
 
+#[doc = include_str!("../../../docs/recipes/nft-mark-tc-classification.md")]
+mod nft_mark_tc_classification {}
+
 #[cfg(feature = "serde")]
 #[doc = include_str!("../../../docs/recipes/nftables-declarative-config.md")]
 mod nftables_declarative_config {}
