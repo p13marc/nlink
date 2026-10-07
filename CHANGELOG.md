@@ -38,6 +38,40 @@ All notable changes to this project will be documented in this file.
   a range to the top of the key space — and 0.30 refused interval elements
   outright.
 
+- **Set timeouts and `dynset`: rules that add to, refresh and delete from a
+  set (ipset `timeout`, `SET --add-set`/`--del-set`).**
+  - `Set::{dynamic, timeout, per_element_timeouts, gc_interval}` (and the
+    same on `DeclaredSetBuilder`), and `SetElement::with_timeout`.
+    `SetInfo::{timeout, gc_interval}` and `SetElement::{timeout,
+    expiration}` read them back. As the kernel reports it, an element's
+    timeout appears only when it differs from the set's default.
+  - `Expr::Dynset(DynsetExpr)` with `DynsetOp::{Add, Update, Delete}`, and
+    `Rule::{add_to_set, update_in_set, delete_from_set}`. These load a
+    `PacketField` and write it to the set, for example `update @seen { ip
+    daddr timeout 60s }`. `RuleExpr::Dynset` decodes them; one carrying
+    per-element expressions stays `Unknown`.
+  - `DeclaredSetBuilder::element_mode(SetElementMode::{Exact, Ensure})`.
+    `Ensure` adds the declared elements and leaves the rest. It is the
+    default for a dynamic or timeout set, whose elements come from the
+    packet path (see Fixed, #395).
+  - A declared set's default timeout and GC interval are changed in place,
+    like its size. The timeout is compared in 20 ms steps: the kernel keeps
+    it in jiffies, rounding down both ways, and 20 ms is a whole number of
+    jiffies at every `HZ`. A dynset's timeout is compared the same way, and
+    a dynset without one is compared against the zero the kernel echoes. A
+    request carrying that zero would be `EOPNOTSUPP` on a set without
+    timeouts.
+
+  Tested on traffic: `update @seen { ip daddr timeout 60s }` records each
+  destination with 60 s to run, `delete @s { ip daddr }` removes it, and
+  elements expire after the set's default timeout or their own. A declared
+  dynamic set keeps what its rule put there, and its 1001 ms dynset
+  timeout, which the kernel reads back as 1000 ms, converges. A changed
+  default timeout keeps the set, its elements and the rule's handle.
+  Mutation-checked: the old exact element mode, an update without the
+  kernel's timers, comparing timeouts unrounded, and a missing echoed zero
+  timeout each fail a test.
+
 - **Sets of concatenated keys (ipset `hash:ip,port`, `hash:net,port`).**
   `SetKeyType::Concat` could declare such a set, but nothing could fill
   one or match against it. Now:
@@ -227,6 +261,20 @@ All notable changes to this project will be documented in this file.
   agree — and the next attribute worth reading back is no longer a break.
 
 ### Fixed
+
+- **A declared dynamic or timeout set lost its runtime elements on every
+  apply (#395).** The documented way to declare a set that rules populate
+  was to declare it with no elements. But the diff reconciled every set's
+  elements exactly, so every element the packet path had added was
+  "undeclared" and removed. Such sets now default to
+  `SetElementMode::Ensure`, and with no declared elements their contents
+  are not even read.
+
+- **An in-place set resize zeroed the set's timeout and GC interval
+  (#396).** An update sets both to whatever it carries, and nlink's `Set`
+  carried neither, so resizing a set with `timeout 30s` left elements that
+  never expired. The update now carries the declared values, or else the
+  kernel's.
 
 - **Declared rule order is enforced (#387).** `apply` used to append every
   new rule to the end of its chain, and the diff never compared order — so a

@@ -609,6 +609,7 @@ impl Connection<Nftables> {
         builder.append_attr_u32_be(NFTA_SET_KEY_TYPE, set.key_type.type_id());
         builder.append_attr_u32_be(NFTA_SET_KEY_LEN, set.key_type.len());
         builder.append_attr_u32_be(NFTA_SET_FLAGS, set.wire_flags().bits());
+        append_set_timeouts(&mut builder, &set);
         append_set_desc(&mut builder, &set);
         // Set ID (arbitrary, used for referencing in same batch)
         builder.append_attr_u32_be(NFTA_SET_ID, 1);
@@ -1385,10 +1386,20 @@ pub(crate) fn parse_set(data: &[u8], family: Family) -> Option<SetInfo> {
         key_len: 0,
         handle: 0,
         size: None,
+        timeout: None,
+        gc_interval: None,
     };
 
     for (attr_type, payload) in AttrIter::new(data) {
         match attr_type & 0x7FFF {
+            NFTA_SET_TIMEOUT if payload.len() >= 8 => {
+                let ms = u64::from_be_bytes(payload[..8].try_into().unwrap());
+                set.timeout = Some(std::time::Duration::from_millis(ms));
+            }
+            NFTA_SET_GC_INTERVAL if payload.len() >= 4 => {
+                let ms = u32::from_be_bytes(payload[..4].try_into().unwrap());
+                set.gc_interval = Some(std::time::Duration::from_millis(ms.into()));
+            }
             // Always dumped, without NLA_F_NESTED, and empty when the set
             // has no size.
             NFTA_SET_DESC => {
@@ -1456,6 +1467,13 @@ fn parse_set_elem(elem: &[u8]) -> Option<SetElement> {
     let mut key = None;
     let mut key_end = None;
     let mut flags = 0;
+    let mut timeout = None;
+    let mut expiration = None;
+    let millis = |payload: &[u8]| {
+        payload
+            .get(..8)
+            .map(|b| std::time::Duration::from_millis(u64::from_be_bytes(b.try_into().unwrap())))
+    };
     let value = |payload: &[u8]| {
         AttrIter::new(payload)
             .find(|(data_type, _)| data_type & 0x7FFF == NFTA_DATA_VALUE)
@@ -1465,6 +1483,8 @@ fn parse_set_elem(elem: &[u8]) -> Option<SetElement> {
         match attr_type & 0x7FFF {
             NFTA_SET_ELEM_KEY => key = value(payload),
             NFTA_SET_ELEM_KEY_END => key_end = value(payload),
+            NFTA_SET_ELEM_TIMEOUT => timeout = millis(payload),
+            NFTA_SET_ELEM_EXPIRATION => expiration = millis(payload),
             NFTA_SET_ELEM_FLAGS if payload.len() >= 4 => {
                 flags = u32::from_be_bytes(payload[..4].try_into().unwrap());
             }
@@ -1472,7 +1492,11 @@ fn parse_set_elem(elem: &[u8]) -> Option<SetElement> {
         }
     }
     match key {
-        Some(key) => Some(SetElement::from_wire(key, flags).with_key_end(key_end)),
+        Some(key) => Some(
+            SetElement::from_wire(key, flags)
+                .with_key_end(key_end)
+                .with_timers(timeout, expiration),
+        ),
         None if flags & NFT_SET_ELEM_CATCHALL != 0 => Some(SetElement::from_wire(Vec::new(), flags)),
         None => None,
     }
@@ -1801,9 +1825,10 @@ impl Transaction {
     /// The kernel (6.2+) first checks the key, data, flags and lengths
     /// match the existing set (`EEXIST` otherwise), then at commit takes
     /// the new size (6.5+, when non-zero) and **overwrites** the timeout
-    /// and GC interval with what the message carries — absent means 0.
-    /// [`Set`] models neither, so this is only for sets without them.
-    /// Older kernels accept the message and change nothing.
+    /// and GC interval with what the message carries — absent means 0. So
+    /// `set` must carry the timeout and GC interval the set is to keep; the
+    /// declarative diff fills in the kernel's where the declaration has
+    /// none. Older kernels accept the message and change nothing.
     pub(crate) fn update_set(self, set: Set) -> Self {
         self.push_newset(set, NLM_F_REQUEST)
     }
@@ -1818,6 +1843,7 @@ impl Transaction {
         builder.append_attr_u32_be(NFTA_SET_KEY_TYPE, set.key_type.type_id());
         builder.append_attr_u32_be(NFTA_SET_KEY_LEN, set.key_type.len());
         builder.append_attr_u32_be(NFTA_SET_FLAGS, set.wire_flags().bits());
+        append_set_timeouts(&mut builder, &set);
         append_set_desc(&mut builder, &set);
         builder.append_attr_u32_be(NFTA_SET_ID, set_id);
         self.messages.push(builder.finish());
@@ -1926,6 +1952,17 @@ impl RawMessage {
     }
 }
 
+/// Append the set's default element timeout and GC interval, if any.
+fn append_set_timeouts(builder: &mut MessageBuilder, set: &Set) {
+    if let Some(timeout) = set.timeout {
+        builder.append_attr_u64_be(NFTA_SET_TIMEOUT, super::expr::millis(timeout));
+    }
+    if let Some(gc) = set.gc_interval {
+        let ms = u32::try_from(gc.as_millis()).unwrap_or(u32::MAX);
+        builder.append_attr_u32_be(NFTA_SET_GC_INTERVAL, ms);
+    }
+}
+
 /// Append the `NFTA_SET_DESC` nest: the set size, if any, and for an
 /// interval set of concatenated keys the length of each field in bytes
 /// (`NFTA_SET_DESC_CONCAT`), which the kernel requires with
@@ -2005,6 +2042,8 @@ fn append_set_elements(
     // flagged INTERVAL_END (see `interval`) — except one of concatenated
     // keys, which stores it in one element with its inclusive end
     // (KEY_END); other sets one element each.
+    // An element's timeout goes on its start: the kernel refuses one on an
+    // interval end (EINVAL).
     let wire: Vec<super::interval::WireElement> = if set.ranges_per_field() {
         elements
             .iter()
@@ -2012,12 +2051,17 @@ fn append_set_elements(
                 key: e.key().to_vec(),
                 key_end: e.key_end().filter(|end| *end != e.key()).map(<[u8]>::to_vec),
                 flags: 0,
+                timeout: e.timeout(),
             })
             .collect()
     } else if set.flags.contains(SetFlags::INTERVAL) {
         elements
             .iter()
-            .flat_map(|e| super::interval::lower(&super::interval::range_of(e)))
+            .flat_map(|e| {
+                let mut wire = super::interval::lower(&super::interval::range_of(e));
+                wire[0].timeout = e.timeout();
+                wire
+            })
             .collect()
     } else {
         elements
@@ -2026,6 +2070,7 @@ fn append_set_elements(
                 key: e.key().to_vec(),
                 key_end: None,
                 flags: 0,
+                timeout: e.timeout(),
             })
             .collect()
     };
@@ -2042,6 +2087,9 @@ fn append_set_elements(
         }
         if elem.flags != 0 {
             builder.append_attr_u32_be(NFTA_SET_ELEM_FLAGS, elem.flags);
+        }
+        if let Some(timeout) = elem.timeout {
+            builder.append_attr_u64_be(NFTA_SET_ELEM_TIMEOUT, super::expr::millis(timeout));
         }
         builder.nest_end(elem_nest);
     }
@@ -2624,6 +2672,52 @@ mod transaction_tests {
             .interval();
         let elem = SetElement::concat([SetElement::mark(1), SetElement::port(1)]);
         assert!(new_tx().add_set_elements(&mark_port, &[elem]).error.is_some());
+    }
+
+    #[test]
+    fn set_timeouts_go_out_in_milliseconds_and_read_back() {
+        use std::time::Duration;
+        let set = Set::new("t", "s")
+            .dynamic()
+            .timeout(Duration::from_secs(60))
+            .gc_interval(Duration::from_millis(1500));
+        let tx = new_tx().add_set(set);
+        let body = body_after_nfgenmsg(&tx.messages[0]);
+        let flags = find_attr(body, NFTA_SET_FLAGS).unwrap();
+        assert_eq!(
+            u32::from_be_bytes(flags.try_into().unwrap()),
+            NFT_SET_EVAL | NFT_SET_TIMEOUT
+        );
+        let timeout = find_attr(body, NFTA_SET_TIMEOUT).expect("NFTA_SET_TIMEOUT");
+        assert_eq!(u64::from_be_bytes(timeout.try_into().unwrap()), 60_000);
+        let gc = find_attr(body, NFTA_SET_GC_INTERVAL).expect("NFTA_SET_GC_INTERVAL");
+        assert_eq!(u32::from_be_bytes(gc.try_into().unwrap()), 1500);
+        // The writer's attributes are what parse_set reads.
+        let info = parse_set(body, Family::Inet).unwrap();
+        assert_eq!(info.timeout, Some(Duration::from_secs(60)));
+        assert_eq!(info.gc_interval, Some(Duration::from_millis(1500)));
+    }
+
+    #[test]
+    fn element_timeouts_need_a_timeout_set_and_go_on_the_start_only() {
+        use std::time::Duration;
+        let v4 = std::net::Ipv4Addr::new(10, 0, 0, 1);
+        let elem = SetElement::ipv4(v4).with_timeout(Duration::from_secs(5));
+        let err = new_tx()
+            .add_set_elements(&Set::new("t", "s"), std::slice::from_ref(&elem))
+            .error
+            .expect("a timeout on a set without timeouts");
+        assert!(err.to_string().contains("needs a set with timeouts"), "{err}");
+
+        // In an interval set the end element must not carry it (EINVAL).
+        let set = Set::new("t", "s").interval().per_element_timeouts();
+        let tx = new_tx().add_set_elements(&set, &[elem]);
+        assert!(tx.error.is_none(), "{:?}", tx.error);
+        let mut wire = Vec::new();
+        super::parse_set_elements(body_after_nfgenmsg(&tx.messages[0]), &mut wire);
+        assert_eq!(wire.len(), 2);
+        assert_eq!(wire[0].timeout(), Some(Duration::from_secs(5)));
+        assert!(wire[1].is_interval_end() && wire[1].timeout().is_none());
     }
 
     #[test]

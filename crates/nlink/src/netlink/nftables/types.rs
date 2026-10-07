@@ -1840,6 +1840,53 @@ impl Rule {
         self
     }
 
+    /// Add `field` to a set from the packet path: `add @<set> { <field>
+    /// [timeout T] }` — ipset `SET --add-set`. An element already there is
+    /// left alone (its timeout keeps running). `timeout` overrides the
+    /// set's default; the set must be [`Set::dynamic`], and have timeouts
+    /// for a timeout. See [`DynsetExpr`](super::expr::DynsetExpr).
+    pub fn add_to_set(
+        self,
+        field: PacketField,
+        set: &str,
+        timeout: Option<std::time::Duration>,
+    ) -> Self {
+        self.push_dynset(super::expr::DynsetOp::Add, field, set, timeout)
+    }
+
+    /// Add `field` to a set, or restart its timeout if it is there:
+    /// `update @<set> { <field> [timeout T] }` — "seen in the last T".
+    pub fn update_in_set(
+        self,
+        field: PacketField,
+        set: &str,
+        timeout: Option<std::time::Duration>,
+    ) -> Self {
+        self.push_dynset(super::expr::DynsetOp::Update, field, set, timeout)
+    }
+
+    /// Remove `field` from a set: `delete @<set> { <field> }` — ipset
+    /// `SET --del-set`. Kernel 5.4+.
+    pub fn delete_from_set(self, field: PacketField, set: &str) -> Self {
+        self.push_dynset(super::expr::DynsetOp::Delete, field, set, None)
+    }
+
+    fn push_dynset(
+        mut self,
+        op: super::expr::DynsetOp,
+        field: PacketField,
+        set: &str,
+        timeout: Option<std::time::Duration>,
+    ) -> Self {
+        self.push_field_load(field);
+        let mut dynset = super::expr::DynsetExpr::new(op, set, Register::R0);
+        if let Some(timeout) = timeout {
+            dynset = dynset.timeout(timeout);
+        }
+        self.exprs.push(dynset.into());
+        self
+    }
+
     /// Load `field` into `R0` behind the protocol guard `nft` emits for it.
     pub(crate) fn push_field_load(&mut self, field: PacketField) {
         self.push_field_guard(field);
@@ -2699,6 +2746,8 @@ pub struct Set {
     pub(crate) key_type: SetKeyType,
     pub(crate) flags: SetFlags,
     pub(crate) size: Option<u32>,
+    pub(crate) timeout: Option<std::time::Duration>,
+    pub(crate) gc_interval: Option<std::time::Duration>,
 }
 
 impl Set {
@@ -2711,7 +2760,46 @@ impl Set {
             key_type: SetKeyType::Ipv4Addr,
             flags: SetFlags::empty(),
             size: None,
+            timeout: None,
+            gc_interval: None,
         }
+    }
+
+    /// Let rules add, refresh and delete elements from the packet path
+    /// ([`DynsetExpr`](super::expr::DynsetExpr), `Rule::add_to_set` …):
+    /// `NFT_SET_EVAL`, nft's `flags dynamic`. It selects the resizable
+    /// hash backend, the one that supports updates — without it a sized
+    /// set gets a fixed hash, and a rule updating it fails `EOPNOTSUPP`.
+    pub fn dynamic(mut self) -> Self {
+        self.flags |= SetFlags::EVAL;
+        self
+    }
+
+    /// Give elements a default timeout (`timeout 60s`): an element expires
+    /// this long after it was added, unless it carries its own. Sets
+    /// `NFT_SET_TIMEOUT`. The kernel keeps it in jiffies, so it reads back
+    /// rounded down to one; sub-millisecond parts are dropped.
+    pub fn timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.flags |= SetFlags::TIMEOUT;
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Let elements carry their own timeouts, without a default (`flags
+    /// timeout`): `NFT_SET_TIMEOUT`.
+    pub fn per_element_timeouts(mut self) -> Self {
+        self.flags |= SetFlags::TIMEOUT;
+        self
+    }
+
+    /// How often the kernel sweeps expired elements out (`gc-interval`).
+    /// Expired elements stop matching and stop being listed at once; this
+    /// only bounds the memory they hold. Sets `NFT_SET_TIMEOUT`, which the
+    /// kernel requires with it.
+    pub fn gc_interval(mut self, interval: std::time::Duration) -> Self {
+        self.flags |= SetFlags::TIMEOUT;
+        self.gc_interval = Some(interval);
+        self
     }
 
     /// Set the address family.
@@ -2971,12 +3059,24 @@ impl SetElement {
         self.key_end.is_some()
     }
 
+    /// Give this element its own timeout. The set needs timeouts
+    /// ([`Set::timeout`] or [`Set::per_element_timeouts`]).
+    ///
+    /// The declarative diff does not compare it: a declared element that is
+    /// present is left to run out its time, and added again once it has
+    /// expired.
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
     /// The data a map element maps to.
     pub fn data(&self) -> Option<&SetElementData> {
         self.data.as_ref()
     }
 
-    /// The element's own timeout, if it has one.
+    /// The element's own timeout, if it has one. Read back from the kernel,
+    /// only a timeout that differs from the set's default is reported.
     pub fn timeout(&self) -> Option<std::time::Duration> {
         self.timeout
     }
@@ -3050,9 +3150,10 @@ impl SetElement {
                 set.name
             )));
         }
-        if self.timeout.is_some() {
+        if self.timeout.is_some() && !set.flags.contains(SetFlags::TIMEOUT) {
             return Err(Error::InvalidMessage(format!(
-                "set {}: element timeouts are not supported on this set",
+                "set {}: an element timeout needs a set with timeouts \
+                 (`Set::timeout` or `Set::per_element_timeouts`)",
                 set.name
             )));
         }
@@ -3065,6 +3166,17 @@ impl SetElement {
             flags,
             ..Self::new(key)
         }
+    }
+
+    /// With the timeout and time left read back.
+    pub(crate) fn with_timers(
+        mut self,
+        timeout: Option<std::time::Duration>,
+        expiration: Option<std::time::Duration>,
+    ) -> Self {
+        self.timeout = timeout;
+        self.expiration = expiration;
+        self
     }
 
     /// With the range end read back (`NFTA_SET_ELEM_KEY_END`). An end equal
@@ -3101,6 +3213,11 @@ pub struct SetInfo {
     /// The kernel can report one nobody declared: a set a `dynset`
     /// expression writes to is given 65535.
     pub size: Option<u32>,
+    /// Default element timeout (`NFTA_SET_TIMEOUT`), if the set has one —
+    /// in whole jiffies, so possibly a little under what was written.
+    pub timeout: Option<std::time::Duration>,
+    /// Garbage-collection interval (`NFTA_SET_GC_INTERVAL`), if set.
+    pub gc_interval: Option<std::time::Duration>,
 }
 
 /// The inclusive range a prefix covers: `addr` with its host bits cleared,

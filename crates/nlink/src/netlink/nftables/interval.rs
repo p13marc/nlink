@@ -23,6 +23,8 @@ pub(crate) struct WireElement {
     /// an interval set of concatenated keys stores a range.
     pub(crate) key_end: Option<Vec<u8>>,
     pub(crate) flags: u32,
+    /// The element's own timeout (on a range's start only).
+    pub(crate) timeout: Option<std::time::Duration>,
 }
 
 /// `key + 1`, big-endian; `None` when `key` is the maximum value.
@@ -71,12 +73,14 @@ pub(crate) fn lower(range: &Range) -> Vec<WireElement> {
         key: range.0.clone(),
         key_end: None,
         flags: 0,
+        timeout: None,
     }];
     if let Some(end) = increment(&range.1) {
         out.push(WireElement {
             key: end,
             key_end: None,
             flags: NFT_SET_ELEM_INTERVAL_END,
+            timeout: None,
         });
     }
     out
@@ -175,11 +179,13 @@ mod tests {
                     key: 1000u16.to_be_bytes().to_vec(),
                     key_end: None,
                     flags: 0,
+                    timeout: None,
                 },
                 WireElement {
                     key: 2001u16.to_be_bytes().to_vec(),
                     key_end: None,
                     flags: NFT_SET_ELEM_INTERVAL_END,
+                    timeout: None,
                 },
             ]
         );

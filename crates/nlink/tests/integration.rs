@@ -192,6 +192,11 @@ mod nftables_intervals;
 #[path = "integration/nftables_concat.rs"]
 mod nftables_concat;
 
+// Set timeouts and dynset (add/update/delete @set from a rule) on traffic;
+// declared dynamic sets keep what the packet path put in them.
+#[path = "integration/nftables_timeouts.rs"]
+mod nftables_timeouts;
+
 // #191-#194, #218 — psched tick conversion. The unit tests pin the
 // bytes nlink emits; these pin that the *kernel* accepts them and
 // reads back what we wrote. Needed because the pre-fix writer and
