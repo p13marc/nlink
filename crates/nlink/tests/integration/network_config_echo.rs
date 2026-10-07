@@ -406,6 +406,58 @@ async fn routes_converge() -> nlink::Result<()> {
 // Qdiscs
 // ============================================================================
 
+/// TBF across a rate sweep, with and without peakrate and limit. The
+/// kernel keeps `buffer` and `mtu` as psched ticks and does not echo the
+/// byte-valued `TCA_TBF_BURST`/`PBURST`, so the burst that comes back is
+/// a tick round-trip of the declared one.
+#[tokio::test]
+async fn tbf_rate_sweep_converges() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "sch_tbf");
+
+    let rates = [
+        Rate::kbit(512),
+        Rate::mbit(1),
+        Rate::mbit(3),
+        Rate::mbit(100),
+        Rate::gbit(1),
+        Rate::gbit(10),
+    ];
+    let mut cases = Vec::new();
+    for rate in rates {
+        let peak = Rate::bytes_per_sec(rate.as_bytes_per_sec() * 2);
+        for burst in [Bytes::kib(32), Bytes::new(10_000)] {
+            let tag = format!("{rate}-burst{}", burst.as_u32_saturating());
+            cases.push(case(
+                format!("tbf-{tag}"),
+                vec![dummy_up("d0").qdisc("d0", |q| q.tbf(rate, burst))],
+            ));
+            cases.push(case(
+                format!("tbf-{tag}-limit"),
+                vec![dummy_up("d0").qdisc("d0", |q| {
+                    q.tbf(rate, burst).limit_bytes(Bytes::kib(64))
+                })],
+            ));
+            cases.push(case(
+                format!("tbf-{tag}-limit-peakrate"),
+                vec![dummy_up("d0").qdisc("d0", |q| {
+                    q.tbf(rate, burst).limit_bytes(Bytes::kib(64)).peakrate(peak)
+                })],
+            ));
+            cases.push(case(
+                format!("tbf-{tag}-limit-peakrate-mtu"),
+                vec![dummy_up("d0").qdisc("d0", |q| {
+                    q.tbf(rate, burst)
+                        .limit_bytes(Bytes::kib(64))
+                        .peakrate(peak)
+                        .mtu(1600)
+                })],
+            ));
+        }
+    }
+    assert_converges("nce-tbf", cases).await
+}
+
 /// Each netem knob added to a plain delay, then removed again. A replace
 /// is `netem_change()`, which keeps whatever it is not sent (#370).
 #[tokio::test]

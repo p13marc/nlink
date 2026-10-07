@@ -18,6 +18,7 @@ use crate::netlink::{
     error::Result,
     messages::{AddressMessage, LinkMessage, RouteMessage, TcMessage},
     protocol::Route,
+    psched,
     tc::{
         ClsactConfig, IngressConfig, QdiscConfig,
     },
@@ -994,24 +995,43 @@ fn qdisc_params_match(declared: &DeclaredQdiscType, existing: &TcMessage) -> boo
         }
         (DeclaredQdiscType::Tbf { .. }, Some(QdiscOptions::Tbf(live))) => {
             let cfg = declared.tbf_config().expect("matched the Tbf arm");
-            // The kernel echoes the byte-valued TCA_TBF_BURST, so burst is
-            // exact; rate is `tc_ratespec.rate` (or RATE64), limit is
-            // `tc_tbf_qopt.limit`. `peakrate` is PRATE64/`tc_ratespec`
-            // in bytes/sec, and `mtu` comes back through TCA_TBF_PBURST,
-            // which the encoder always sends — both are normalised to
-            // bytes by `parse_tbf_options`, so neither needs the tick
-            // round-trip `codel_round_trip_us` does for fq_codel (#361).
+            // Rate is `tc_ratespec.rate` (or RATE64), peakrate the same
+            // for the peak spec, limit is `tc_tbf_qopt.limit`: all exact.
+            //
+            // Burst and mtu are not. The kernel keeps both buckets as
+            // nanoseconds and `tbf_dump()` echoes them only as psched
+            // ticks — it never sends TCA_TBF_BURST/PBURST back — so the
+            // bytes `parse_tbf_options` recovers are a tick round trip of
+            // what was sent: 32768 at 10 gbit reads back as 32719, the
+            // default mtu of 1514 at 100 mbit as 1513. This used to compare
+            // them exactly, believing the byte attributes were echoed, and
+            // only 1 mbit — the one rate every test used — happens to
+            // survive the trip; at nearly every other rate a declared TBF
+            // was replaced on every apply, forever (#TBD).
+            //
+            // So compare against the declared values pushed through the
+            // same trip. The burst always goes as TCA_TBF_BURST, which
+            // the kernel turns into nanoseconds at the rate. The mtu goes
+            // as TCA_TBF_PBURST — nanoseconds at the peak rate — only when
+            // there is a peak rate; otherwise the kernel keeps the tick
+            // count nlink wrote into `qopt.mtu`, and only the userspace
+            // half of the trip applies.
+            //
             // Compared against the *lowered* config rather than the
             // declared `Option`s, because the lowering's defaults (mtu
             // 1514, no peakrate) are what actually goes on the wire.
-            let declared_peak = cfg
-                .peakrate
-                .map_or(0, |r| r.as_bytes_per_sec());
-            live.rate == cfg.rate.as_bytes_per_sec()
-                && live.burst == cfg.burst.as_u32_saturating()
+            let rate = cfg.rate.as_bytes_per_sec();
+            let peak = cfg.peakrate.map(|r| r.as_bytes_per_sec());
+            let burst = psched::tbf_bucket_round_trip(rate, cfg.burst.as_u32_saturating());
+            let mtu = match peak {
+                Some(peak) => psched::tbf_bucket_round_trip(peak, cfg.mtu),
+                None => psched::tc_calc_xmitsize(rate, psched::tc_calc_xmittime(rate, cfg.mtu)),
+            };
+            live.rate == rate
+                && live.burst == burst
                 && live.limit == cfg.limit.as_u32_saturating()
-                && live.peakrate == declared_peak
-                && live.mtu == cfg.mtu
+                && live.peakrate == peak.unwrap_or(0)
+                && live.mtu == mtu
         }
         (DeclaredQdiscType::Htb { .. }, Some(QdiscOptions::Htb(live))) => {
             let cfg = declared.htb_config().expect("matched the Htb arm");
@@ -1512,8 +1532,11 @@ mod tests {
         assert!(!qdisc_params_match(&bigger_bucket, &echo));
 
         // 0.28 (#361): peakrate and mtu are part of the comparison too,
-        // so a drift in either is not silently accepted. Both come back
-        // in bytes (PRATE64 and TCA_TBF_PBURST), so no tick round-trip.
+        // so a drift in either is not silently accepted. (This echo is
+        // nlink's own bytes, BURST/PBURST included, which the kernel never
+        // sends; at 1 and 2 mbit the tick round trip is exact, so it
+        // stands in. The kernel's real echo is pinned in
+        // `tbf_burst_and_mtu_are_compared_after_the_kernels_tick_round_trip`.)
         let peaked = tbf(125_000, 32_768, Some(250_000), Some(1600));
         let peaked_echo = live("tbf", Some(declared_options_bytes(&peaked)));
         assert!(qdisc_params_match(&peaked, &peaked_echo));
@@ -1528,6 +1551,49 @@ mod tests {
         assert!(
             !qdisc_params_match(&declared, &peaked_echo),
             "dropping the peakrate must be seen"
+        );
+    }
+
+    /// What `tbf_dump()` sends back: `tc_tbf_qopt` alone, with `buffer`
+    /// and `mtu` as psched ticks and no TCA_TBF_BURST/PBURST.
+    fn kernel_tbf_echo(rate: u32, limit: u32, buffer_ticks: u32, mtu_ticks: u32) -> Vec<u8> {
+        use crate::netlink::types::tc::qdisc::{TcRateSpec, tbf};
+        let qopt = tbf::TcTbfQopt {
+            rate: TcRateSpec::new(rate),
+            peakrate: TcRateSpec::default(),
+            limit,
+            buffer: buffer_ticks,
+            mtu: mtu_ticks,
+        };
+        let mut out = Vec::new();
+        out.extend_from_slice(&((4 + tbf::TcTbfQopt::SIZE) as u16).to_ne_bytes());
+        out.extend_from_slice(&tbf::TCA_TBF_PARMS.to_ne_bytes());
+        out.extend_from_slice(qopt.as_bytes());
+        out
+    }
+
+    /// 10 gbit, a 32 KiB burst, the default mtu: a 6.12 kernel dumps
+    /// `buffer` 409 ticks (32768 bytes in nanoseconds at that rate, >> 6)
+    /// and `mtu` 18 ticks, which parse back as 32719 and 1440 bytes. The
+    /// diff compared those against 32768 and 1514 and replaced the qdisc
+    /// on every apply (#TBD).
+    #[test]
+    fn tbf_burst_and_mtu_are_compared_after_the_kernels_tick_round_trip() {
+        let tbf = |burst_bytes| DeclaredQdiscType::Tbf {
+            rate_bps: 1_250_000_000,
+            burst_bytes,
+            limit_bytes: Some(65_536),
+            peakrate_bps: None,
+            mtu: None,
+        };
+        let echo = live("tbf", Some(kernel_tbf_echo(1_250_000_000, 65_536, 409, 18)));
+        assert!(
+            qdisc_params_match(&tbf(32_768), &echo),
+            "the kernel's echo of a declared 10 gbit / 32 KiB TBF must match it"
+        );
+        assert!(
+            !qdisc_params_match(&tbf(65_536), &echo),
+            "a burst that really differs must still be seen"
         );
     }
 

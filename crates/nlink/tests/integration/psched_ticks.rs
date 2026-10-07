@@ -63,7 +63,9 @@ async fn tbf_burst_survives_a_kernel_round_trip() -> Result<()> {
 
     assert_eq!(opts.rate, 125_000, "rate reads back as bytes/sec");
 
-    // The kernel echoes the byte-valued TCA_TBF_BURST, so this is exact.
+    // The kernel does not echo TCA_TBF_BURST: this is the tick value
+    // converted back, which at 1 mbit happens to be exact. At most rates it
+    // is not (see psched::tbf_bucket_round_trip).
     assert_eq!(
         opts.burst, 32_768,
         "burst must round-trip as bytes, not as the tick value 4_096_000",
