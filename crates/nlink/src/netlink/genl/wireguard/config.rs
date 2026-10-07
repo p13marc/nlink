@@ -388,14 +388,23 @@ impl WireguardConfig {
                 })?;
 
             if changes.has_device_level_change() {
+                // Only the fields that differ, as for peers: rewriting an
+                // unchanged listen port of 0 would rebind the device to a
+                // fresh random port as a side effect of, say, a key change.
                 conn.set_device_by_name(ifname, |mut b| {
-                    if let Some(k) = declared.private_key {
+                    if changes.private_key_set
+                        && let Some(k) = declared.private_key
+                    {
                         b = b.private_key(k);
                     }
-                    if let Some(p) = declared.listen_port {
+                    if changes.listen_port_set
+                        && let Some(p) = declared.listen_port
+                    {
                         b = b.listen_port(p);
                     }
-                    if let Some(fw) = declared.fwmark {
+                    if changes.fwmark_set
+                        && let Some(fw) = declared.fwmark
+                    {
                         b = b.fwmark(fw);
                     }
                     b
@@ -821,7 +830,14 @@ impl DeclaredWgDevice {
         {
             changes.private_key_set = true;
         }
+        // A declared port of 0 asks the kernel to pick one, and the port
+        // it picked is then what `GET_DEVICE` reports — never 0. Compared
+        // literally it never matched, and every apply wrote 0 again, which
+        // `set_port()` takes as "bind a new random port": the device moved
+        // port on every apply and its peers lost it (#TBD). Any port
+        // satisfies a declared 0.
         if let Some(p) = self.listen_port
+            && p != 0
             && current.listen_port != Some(p)
         {
             changes.listen_port_set = true;
@@ -888,6 +904,9 @@ impl DeclaredWgDeviceBuilder {
         self
     }
 
+    /// Set the UDP listen port. 0 lets the kernel pick one, and is then
+    /// satisfied by whatever port it picked (the diff does not rewrite
+    /// it, which would rebind the device to another random port).
     pub fn listen_port(mut self, port: u16) -> Self {
         self.listen_port = Some(port);
         self
@@ -1536,6 +1555,17 @@ mod tests {
         curr.listen_port = Some(12345);
         let changes = declared.diff_against(&curr);
         assert!(changes.listen_port_set);
+    }
+
+    /// 0 asks the kernel to pick; the port it picked satisfies it.
+    #[test]
+    fn diff_listen_port_zero_accepts_the_kernels_choice() {
+        let declared = DeclaredWgDeviceBuilder::new("wg0".into())
+            .listen_port(0)
+            .build();
+        let mut curr = empty_device("wg0");
+        curr.listen_port = Some(41_234);
+        assert!(!declared.diff_against(&curr).listen_port_set);
     }
 
     #[test]

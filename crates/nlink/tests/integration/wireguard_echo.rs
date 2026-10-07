@@ -142,6 +142,30 @@ async fn every_wireguard_shape_converges() -> nlink::Result<()> {
             "fwmark-0",
             vec![WireguardConfig::new().device("wg0", |d| d.fwmark(0))],
         ),
+        // 0 means "kernel, pick one"; the port it picked is never 0.
+        case(
+            "listen-port-0",
+            vec![WireguardConfig::new().device("wg0", |d| {
+                d.private_key(UNCLAMPED).listen_port(0)
+            })],
+        ),
+        case(
+            "keepalive-0",
+            vec![WireguardConfig::new().device("wg0", |d| {
+                d.peer(peer_key(0xe1), |p| p.persistent_keepalive(Duration::ZERO))
+            })],
+        ),
+        case(
+            "endpoint-v4-to-v6",
+            vec![
+                WireguardConfig::new().device("wg0", |d| {
+                    d.peer(peer_key(0xe2), |p| p.endpoint(v4_endpoint()))
+                }),
+                WireguardConfig::new().device("wg0", |d| {
+                    d.peer(peer_key(0xe2), |p| p.endpoint("[2001:db8::9]:5".parse().unwrap()))
+                }),
+            ],
+        ),
         case(
             "device-fields-together",
             vec![WireguardConfig::new().device("wg0", |d| {
