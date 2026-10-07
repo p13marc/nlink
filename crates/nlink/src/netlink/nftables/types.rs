@@ -589,15 +589,58 @@ const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
 const IPPROTO_ICMPV6: u8 = 58;
 
-/// TCP header flag bits, for [`Rule::match_tcp_flags`].
-pub const TCP_FLAG_FIN: u8 = 0x01;
-pub const TCP_FLAG_SYN: u8 = 0x02;
-pub const TCP_FLAG_RST: u8 = 0x04;
-pub const TCP_FLAG_PSH: u8 = 0x08;
-pub const TCP_FLAG_ACK: u8 = 0x10;
-pub const TCP_FLAG_URG: u8 = 0x20;
+/// TCP header flags — the flags byte at offset 13 of the TCP header, for
+/// [`Rule::match_tcp_flags`].
+///
+/// A newtype rather than bare `TCP_FLAG_*` constants: `linux/tcp.h` already
+/// defines `TCP_FLAG_SYN` & co., as big-endian masks over the whole fourth
+/// header word (`TCP_FLAG_SYN == htonl(0x00020000)`). Same names, different
+/// values, different width — and the UAPI audit cannot see the clash, because
+/// it cannot evaluate `__constant_cpu_to_be32`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TcpFlags(pub u8);
 
-/// TCP option kind of the maximum segment size (`TCPOPT_MAXSEG`).
+impl TcpFlags {
+    pub const FIN: Self = Self(0x01);
+    pub const SYN: Self = Self(0x02);
+    pub const RST: Self = Self(0x04);
+    pub const PSH: Self = Self(0x08);
+    pub const ACK: Self = Self(0x10);
+    pub const URG: Self = Self(0x20);
+    pub const ECE: Self = Self(0x40);
+    pub const CWR: Self = Self(0x80);
+
+    /// No flags set.
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    pub fn bits(self) -> u8 {
+        self.0
+    }
+}
+
+impl Default for TcpFlags {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl std::ops::BitOr for TcpFlags {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOrAssign for TcpFlags {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
+/// TCP option kind of the maximum segment size (`TCPOPT_MAXSEG` in glibc's
+/// `<netinet/tcp.h>`; the kernel's private name is `TCPOPT_MSS`).
 pub const TCPOPT_MAXSEG: u8 = 2;
 
 /// Comparison operator.
@@ -650,18 +693,27 @@ impl PayloadBase {
 
 /// Which header family an `exthdr` expression addresses — `enum
 /// nft_exthdr_op` in the kernel UAPI.
+///
+/// Only [`TcpOpt`](Self::TcpOpt) can be written
+/// ([`Expr::ExthdrSet`]); every op can be
+/// loaded, but see [`Dccp`](Self::Dccp).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
 #[non_exhaustive]
 pub enum ExthdrOp {
     /// IPv6 extension header (`exthdr`).
     Ipv6 = 0,
     /// TCP option (`tcp option`).
     TcpOpt = 1,
-    /// IPv4 option (`ip option`).
+    /// IPv4 option (`ip option`), kernel 5.3+. Not valid in an `ip6` table.
     Ipv4 = 2,
-    /// SCTP chunk (`sctp chunk`).
+    /// SCTP chunk (`sctp chunk`), kernel 5.14+.
     Sctp = 3,
-    /// DCCP option (`dccp option`).
+    /// DCCP option (`dccp option`), kernel 6.5+. The kernel only accepts
+    /// it as an existence test (`NFT_EXTHDR_F_PRESENT`), which
+    /// [`Expr::Exthdr`] does not model, so a
+    /// load built from it is rejected. Upstream has scheduled DCCP option
+    /// matching for removal in 2027.
     Dccp = 4,
 }
 
@@ -1786,10 +1838,10 @@ impl Rule {
 
     /// Match TCP header flags: `tcp flags & <mask> == <flags>`.
     ///
-    /// Built from the `TCP_FLAG_*` constants, e.g. a connection opening
-    /// (`tcp flags syn / syn,rst`) is
-    /// `match_tcp_flags(TCP_FLAG_SYN, TCP_FLAG_SYN | TCP_FLAG_RST)`.
-    pub fn match_tcp_flags(mut self, flags: u8, mask: u8) -> Self {
+    /// A connection opening (`tcp flags syn / syn,rst`) is
+    /// `match_tcp_flags(TcpFlags::SYN, TcpFlags::SYN | TcpFlags::RST)`.
+    /// Bits of `flags` outside `mask` are ignored.
+    pub fn match_tcp_flags(mut self, flags: TcpFlags, mask: TcpFlags) -> Self {
         use super::expr::Expr;
         self.push_meta_eq(MetaKey::L4Proto, IPPROTO_TCP);
         // Flags byte at offset 13 of the TCP header.
@@ -1803,44 +1855,47 @@ impl Rule {
             sreg: Register::R0,
             dreg: Register::R0,
             len: 1,
-            mask: vec![mask],
+            mask: vec![mask.bits()],
             xor: vec![0],
         });
         self.exprs.push(Expr::Cmp {
             sreg: Register::R0,
             op: CmpOp::Eq,
-            data: vec![flags & mask],
+            data: vec![flags.bits() & mask.bits()],
         });
         self
     }
 
-    /// Clamp the TCP MSS option to `mss`:
-    /// `tcp option maxseg size > <mss> tcp option maxseg size set <mss>`.
+    /// Clamp the TCP MSS option to `mss`: `tcp option maxseg size set <mss>`.
     ///
-    /// Same semantics as iptables `TCPMSS --set-mss`: the MSS is only
-    /// ever lowered. Unlike `TCPMSS`, a segment without an MSS option is
-    /// left untouched (nftables cannot insert an option). Usually
-    /// combined with a SYN match ([`match_tcp_flags`](Self::match_tcp_flags)).
+    /// The MSS is only ever lowered, as with iptables `TCPMSS --set-mss`:
+    /// the kernel itself refuses to raise it (`nft_exthdr_tcp_set_eval`,
+    /// since 4.14 — "increase can cause connection to stall"), so a SYN
+    /// already at or below `mss` passes unchanged. A segment without an
+    /// MSS option is also left alone; unlike `TCPMSS`, nftables cannot
+    /// insert one.
+    ///
+    /// A statement, not a match: whatever follows it in the rule still
+    /// runs for every TCP packet. Emits what `nft` does — an immediate and
+    /// an `exthdr` write — behind the `meta l4proto tcp` guard, because on
+    /// a non-TCP packet the write ends rule evaluation. Usually combined
+    /// with a SYN match ([`match_tcp_flags`](Self::match_tcp_flags)) in a
+    /// `forward` or `postrouting` chain.
     pub fn clamp_tcp_mss(mut self, mss: u16) -> Self {
         use super::expr::Expr;
         self.push_meta_eq(MetaKey::L4Proto, IPPROTO_TCP);
-        // MSS value: 2 bytes at offset 2 of the option (kind, length, value).
-        self.exprs.push(Expr::Exthdr {
-            dreg: Register::R0,
-            op: ExthdrOp::TcpOpt,
-            exthdr_type: TCPOPT_MAXSEG,
-            offset: 2,
-            len: 2,
-        });
-        self.exprs.push(Expr::Cmp {
-            sreg: Register::R0,
-            op: CmpOp::Gt,
-            data: mss.to_be_bytes().to_vec(),
-        });
         self.exprs.push(Expr::Immediate {
             dreg: Register::R0,
             data: mss.to_be_bytes().to_vec(),
         });
+        self.push_tcp_mss_write();
+        self
+    }
+
+    /// Push the `exthdr` write of the TCP MSS option from `R0`: the 2-byte
+    /// value at offset 2 of the option (kind, length, value), network
+    /// byte order.
+    fn push_tcp_mss_write(&mut self) {
         self.exprs.push(Expr::ExthdrSet {
             sreg: Register::R0,
             op: ExthdrOp::TcpOpt,
@@ -1848,7 +1903,6 @@ impl Rule {
             offset: 2,
             len: 2,
         });
-        self
     }
 
     /// Reject the packet: send an ICMP port-unreachable, then drop.
@@ -2078,8 +2132,11 @@ impl Set {
 
     /// Maximum number of elements (`nft add set ... { size N; }`).
     ///
-    /// Adding an element to a full set fails with `ENFILE`. Without a
-    /// size, the kernel picks the backend default.
+    /// Adding an element to a full set fails with `ENFILE`
+    /// (`err.errno() == Some(libc::ENFILE)`). Without a size the set is
+    /// unbounded. The size also steers the kernel's backend choice: a sized
+    /// set without the timeout or interval flags gets the fixed-bucket
+    /// `nft_hash` instead of the resizable `nft_rhash`.
     pub fn size(mut self, size: u32) -> Self {
         self.size = Some(size);
         self

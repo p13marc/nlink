@@ -15,17 +15,23 @@ All notable changes to this project will be documented in this file.
     `ip rule fwmark` act on.
   - `Expr::Exthdr` / `Expr::ExthdrSet` with the new `ExthdrOp` enum
     (IPv6 extension headers, TCP/IPv4/SCTP/DCCP options), and the
-    `Rule::clamp_tcp_mss(mss)` helper:
-    `tcp option maxseg size > <mss> tcp option maxseg size set <mss>`,
-    the same never-raise semantics as iptables `TCPMSS --set-mss`.
-    `Rule::match_tcp_flags(flags, mask)` and the `TCP_FLAG_*` constants
-    express the usual `tcp flags syn / syn,rst` guard.
+    `Rule::clamp_tcp_mss(mss)` helper: `tcp option maxseg size set <mss>`,
+    the same bytecode `nft` emits. The MSS is only ever lowered — the
+    kernel refuses to raise it, as iptables `TCPMSS --set-mss` does — and
+    the clamp is a statement, so the rest of the rule still runs for every
+    TCP packet. `Rule::match_tcp_flags(flags, mask)` with the `TcpFlags`
+    newtype (`TcpFlags::SYN | TcpFlags::RST`, …) expresses the usual
+    `tcp flags syn / syn,rst` guard. A newtype rather than `TCP_FLAG_*`
+    constants, because `linux/tcp.h` already uses those names for
+    big-endian masks with different values.
   - `Set::size(n)`, written as `NFTA_SET_DESC`/`NFTA_SET_DESC_SIZE` by
     both `Connection::add_set` and `Transaction::add_set`.
 
   The decoder follows: `RuleExpr::MetaSet`, `RuleExpr::Exthdr` and
-  `RuleExpr::ExthdrSet` replace the `Unknown` these used to dump as. An
-  exthdr carrying `NFT_EXTHDR_F_PRESENT` still decodes as `Unknown`.
+  `RuleExpr::ExthdrSet` replace the `Unknown` these used to dump as — code
+  matching `RuleExpr::Unknown { name: "meta" | "exthdr", .. }` for them
+  stops matching. An exthdr carrying `NFT_EXTHDR_F_PRESENT` still decodes
+  as `Unknown`. `ExthdrOp` is `#[repr(u32)]` and checked by the UAPI audit.
 
   One wire asymmetry handled: `nft_exthdr_tcp_set_init()` rejects
   `NFTA_EXTHDR_FLAGS` with `EINVAL`, yet the dump always carries it. The

@@ -41,13 +41,20 @@ pub enum Expr {
     },
     /// Overwrite an extension header / option field from a register
     /// (`tcp option maxseg size set ...`). The kernel fixes up the
-    /// checksum; only TCP options are writable (`len` 2 or 4).
+    /// checksum.
+    ///
+    /// Only [`ExthdrOp::TcpOpt`] is writable, and `nft_exthdr_tcp_set_init`
+    /// requires `offset >= 2` (the kind and length bytes are not writable)
+    /// and `len` of 2 or 4 — anything else is `EOPNOTSUPP`. The register
+    /// must hold the value in network byte order. The kernel never raises
+    /// an MSS through this expression, and a packet without the option is
+    /// left alone; a non-TCP packet ends rule evaluation.
     ExthdrSet {
         sreg: Register,
         op: ExthdrOp,
         /// Extension header type, or option kind (e.g. [`TCPOPT_MAXSEG`]).
         exthdr_type: u8,
-        /// Byte offset within the header / option.
+        /// Byte offset within the option; at least 2.
         offset: u32,
         /// Number of bytes written.
         len: u32,
@@ -1465,28 +1472,30 @@ mod decode_tests {
     }
 
     #[test]
-    fn rule_clamp_tcp_mss_only_lowers() {
+    fn rule_clamp_tcp_mss_is_the_nft_statement() {
         let rule = Rule::new("t", "c").clamp_tcp_mss(1360);
         let decoded = parse_expressions(&encode(&rule.exprs));
-        // meta l4proto tcp, then load > 1360, then set 1360.
+        // `nft add rule ... tcp option maxseg size set 1360` (nftables
+        // tests/py/any/tcpopt.t.payload): an immediate and the exthdr
+        // write, nothing else — behind nlink's `meta l4proto tcp` guard.
+        // No load-and-compare first: the kernel already refuses to raise
+        // an MSS, and a load would end rule evaluation for SYNs without the
+        // option, skipping whatever follows the clamp in the rule.
         assert_eq!(
-            decoded[2..],
+            decoded,
             [
-                RuleExpr::Exthdr {
+                RuleExpr::Meta {
                     dreg: Register::R0,
-                    op: ExthdrOp::TcpOpt,
-                    exthdr_type: TCPOPT_MAXSEG,
-                    offset: 2,
-                    len: 2,
+                    key: MetaKey::L4Proto,
                 },
                 RuleExpr::Cmp {
                     sreg: Register::R0,
-                    op: CmpOp::Gt,
-                    data: 1360u16.to_be_bytes().to_vec(),
+                    op: CmpOp::Eq,
+                    data: vec![6],
                 },
                 RuleExpr::Immediate {
                     dreg: Register::R0,
-                    data: 1360u16.to_be_bytes().to_vec(),
+                    data: vec![0x05, 0x50],
                 },
                 RuleExpr::ExthdrSet {
                     sreg: Register::R0,
@@ -1501,7 +1510,8 @@ mod decode_tests {
 
     #[test]
     fn rule_match_tcp_flags_masks_the_flags_byte() {
-        let rule = Rule::new("t", "c").match_tcp_flags(TCP_FLAG_SYN, TCP_FLAG_SYN | TCP_FLAG_RST);
+        let rule =
+            Rule::new("t", "c").match_tcp_flags(TcpFlags::SYN, TcpFlags::SYN | TcpFlags::RST);
         let decoded = parse_expressions(&encode(&rule.exprs));
         assert_eq!(
             decoded[2],
@@ -1517,7 +1527,7 @@ mod decode_tests {
             RuleExpr::Cmp {
                 sreg: Register::R0,
                 op: CmpOp::Eq,
-                data: vec![TCP_FLAG_SYN],
+                data: vec![TcpFlags::SYN.bits()],
             }
         );
     }
