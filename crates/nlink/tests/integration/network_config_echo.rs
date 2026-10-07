@@ -874,6 +874,116 @@ async fn link_kind_parameter_changes_reach_the_kernel() -> nlink::Result<()> {
     assert_kind_cases(cases).await
 }
 
+/// A VXLAN with IPv6 endpoints. The builder wrote `IFLA_VXLAN_LOCAL` and
+/// `IFLA_VXLAN_GROUP` for IPv4 addresses and dropped IPv6 ones without a
+/// word, so a declared IPv6 `local` (or `remote`) never reached the kernel
+/// and the diff, which did not compare them, said nothing either (#418).
+#[tokio::test]
+async fn vxlan_ipv6_endpoints_reach_the_kernel() -> nlink::Result<()> {
+    use serde_json::json;
+    require_root!();
+    nlink::require_modules!("dummy", "vxlan");
+
+    let ip = |s: &str| -> std::net::IpAddr { s.parse().unwrap() };
+    let vx = |local: Option<&str>, remote: Option<&str>| {
+        let (local, remote) = (local.map(ip), remote.map(ip));
+        NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .address("d0", "fd00:1::1/64")
+            .unwrap()
+            .address("d0", "fd00:1::5/64")
+            .unwrap()
+            .address("d0", "10.1.0.1/24")
+            .unwrap()
+            .link("vx0", |l| {
+                let mut l = l.vxlan(100).vxlan_underlay_dev("d0").vxlan_port(4789).up();
+                if let Some(a) = local {
+                    l = l.vxlan_local(a);
+                }
+                if let Some(a) = remote {
+                    l = l.vxlan_remote(a);
+                }
+                l
+            })
+            .address("vx0", "fd00:2::1/64")
+            .unwrap()
+    };
+    let null = serde_json::Value::Null;
+    let cases = vec![
+        kind_case(
+            "local-and-remote",
+            vec![vx(Some("fd00:1::1"), Some("fd00:1::2"))],
+            vec![
+                ("vx0", "linkinfo.info_data.local6", json!("fd00:1::1")),
+                ("vx0", "linkinfo.info_data.remote6", json!("fd00:1::2")),
+            ],
+        ),
+        kind_case(
+            "local-only",
+            vec![vx(Some("fd00:1::1"), None)],
+            vec![("vx0", "linkinfo.info_data.local6", json!("fd00:1::1"))],
+        ),
+        kind_case(
+            "remote-only",
+            vec![vx(None, Some("fd00:1::2"))],
+            vec![("vx0", "linkinfo.info_data.remote6", json!("fd00:1::2"))],
+        ),
+        in_place(
+            kind_case(
+                "local-changed",
+                vec![
+                    vx(Some("fd00:1::1"), Some("fd00:1::2")),
+                    vx(Some("fd00:1::5"), Some("fd00:1::2")),
+                ],
+                vec![("vx0", "linkinfo.info_data.local6", json!("fd00:1::5"))],
+            ),
+            "vx0",
+        ),
+        in_place(
+            kind_case(
+                "remote-changed-then-removed",
+                vec![
+                    vx(Some("fd00:1::1"), Some("fd00:1::2")),
+                    vx(Some("fd00:1::1"), Some("fd00:1::3")),
+                    vx(Some("fd00:1::1"), None),
+                ],
+                vec![
+                    ("vx0", "linkinfo.info_data.remote6", null.clone()),
+                    ("vx0", "linkinfo.info_data.local6", json!("fd00:1::1")),
+                ],
+            ),
+            "vx0",
+        ),
+        // `vxlan_nl2conf` refuses a change of address family on a live
+        // VXLAN, so this one is recreated.
+        kind_case(
+            "ipv4-to-ipv6",
+            vec![
+                vx(Some("10.1.0.1"), Some("10.1.0.2")),
+                vx(Some("fd00:1::1"), Some("fd00:1::2")),
+            ],
+            vec![
+                ("vx0", "linkinfo.info_data.local6", json!("fd00:1::1")),
+                ("vx0", "linkinfo.info_data.local", null.clone()),
+                ("vx0", "linkinfo.info_data.remote", null.clone()),
+            ],
+        ),
+        kind_case(
+            "ipv6-to-ipv4",
+            vec![
+                vx(Some("fd00:1::1"), Some("fd00:1::2")),
+                vx(Some("10.1.0.1"), Some("10.1.0.2")),
+            ],
+            vec![
+                ("vx0", "linkinfo.info_data.local", json!("10.1.0.1")),
+                ("vx0", "linkinfo.info_data.local6", null.clone()),
+                ("vx0", "linkinfo.info_data.remote6", null),
+            ],
+        ),
+    ];
+    assert_kind_cases(cases).await
+}
+
 /// A recreate that would destroy something the config does not declare
 /// is refused, says what, and leaves the kernel alone.
 #[tokio::test]

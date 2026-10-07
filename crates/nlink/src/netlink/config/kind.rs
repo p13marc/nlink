@@ -17,7 +17,8 @@
 //! | VLAN id, protocol | `vlan_changelink` applies only `IFLA_VLAN_FLAGS` and the QoS maps; it ignores `IFLA_VLAN_ID`/`IFLA_VLAN_PROTOCOL` and returns 0 | recreate |
 //! | VLAN / macvlan lower device | nothing changes `IFLA_LINK` on a live link | recreate |
 //! | VXLAN VNI, port | `vxlan_nl2conf`: "Cannot change VNI", "Cannot change port" (EOPNOTSUPP) | recreate |
-//! | VXLAN remote, local | `vxlan_nl2conf` takes them when the address family stays | in place |
+//! | VXLAN remote, local, same family | `vxlan_nl2conf` takes them | in place |
+//! | VXLAN address family | `vxlan_nl2conf`: "New group address family does not match old group" (EOPNOTSUPP) | recreate |
 //! | VXLAN lower device, set or moved | `vxlan_changelink` moves it (`netdev_adjacent_change_*`) | in place |
 //! | VXLAN lower device, removed | `vxlan_config_apply` only assigns `remote_ifindex` when there is a new lower device, so the old one stays | recreate |
 //! | bond mode | `BOND_OPT_MODE` is `BOND_OPTFLAG_NOSLAVES \| BOND_OPTFLAG_IFDOWN` | recreate |
@@ -53,7 +54,7 @@
 //! option), an undeclared parameter is not compared.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use super::types::{DeclaredLink, DeclaredLinkType, NetworkConfig, QdiscParent};
 use crate::netlink::{
@@ -194,6 +195,22 @@ impl<'a> InfoData<'a> {
         let octets: [u8; 4] = p.get(..4)?.try_into().ok()?;
         Some(Ipv4Addr::from(octets))
     }
+
+    fn ipv6(&self, t: u16) -> Option<Ipv6Addr> {
+        let p = self.0.get(&t)?;
+        let octets: [u8; 16] = p.get(..16)?.try_into().ok()?;
+        Some(Ipv6Addr::from(octets))
+    }
+}
+
+/// The attribute a VXLAN endpoint goes in, by family.
+fn vxlan_attr(what: &str, v6: bool) -> u16 {
+    match (what, v6) {
+        ("local", false) => vxlan::IFLA_VXLAN_LOCAL,
+        ("local", true) => vxlan::IFLA_VXLAN_LOCAL6,
+        (_, false) => vxlan::IFLA_VXLAN_GROUP,
+        (_, true) => vxlan::IFLA_VXLAN_GROUP6,
+    }
 }
 
 fn vlan_protocol_name(p: u16) -> String {
@@ -330,23 +347,53 @@ fn compare(declared: &DeclaredLink, live: &LinkMessage, names: &HashMap<u32, &st
                 (None, Some(have)) => d.recreate.push(format!("vxlan underlay {have} -> none")),
                 (None, None) => {}
             }
-            // IPv4 endpoints only: an IPv6 one is not written at creation
-            // either, and so is not compared (#418).
-            let endpoints = [
-                (remote, vxlan::IFLA_VXLAN_GROUP, "remote"),
-                (local, vxlan::IFLA_VXLAN_LOCAL, "local"),
-            ];
-            for (want, attr, what) in endpoints {
-                let want = match want {
-                    Some(IpAddr::V6(_)) => continue,
-                    Some(IpAddr::V4(a)) => Some(*a),
-                    None => None,
-                };
-                let have = data.ipv4(attr);
-                if have != want {
-                    // The unspecified address clears it, as `ip link set
-                    // ... type vxlan remote 0.0.0.0` does.
-                    let bytes = want.unwrap_or(Ipv4Addr::UNSPECIFIED).octets().to_vec();
+            // The endpoints, either family (#418). `vxlan_nl2conf` takes a
+            // new remote or local on a live link only in the family it has
+            // ("New group address family does not match old group",
+            // EOPNOTSUPP), and the kernel keeps both in one family
+            // (`vxlan_config_validate`), so a declared family that differs
+            // from the live one recreates the link.
+            let have_remote = data
+                .ipv4(vxlan::IFLA_VXLAN_GROUP)
+                .map(IpAddr::V4)
+                .or_else(|| data.ipv6(vxlan::IFLA_VXLAN_GROUP6).map(IpAddr::V6));
+            let have_local = data
+                .ipv4(vxlan::IFLA_VXLAN_LOCAL)
+                .map(IpAddr::V4)
+                .or_else(|| data.ipv6(vxlan::IFLA_VXLAN_LOCAL6).map(IpAddr::V6));
+            // Neither dumped: the kernel assumed IPv4 at creation ("Unless
+            // IPv6 is explicitly requested, assume IPv4").
+            let have_v6 = have_local.or(have_remote).is_some_and(|a| a.is_ipv6());
+            let want_v6 = local.or(*remote).map(|a| a.is_ipv6());
+            if let Some(want_v6) = want_v6
+                && want_v6 != have_v6
+            {
+                let family = |v6: bool| if v6 { "IPv6" } else { "IPv4" };
+                d.recreate.push(format!(
+                    "vxlan address family {} -> {}",
+                    family(have_v6),
+                    family(want_v6)
+                ));
+            } else {
+                let endpoints = [
+                    (*remote, have_remote, "remote"),
+                    (*local, have_local, "local"),
+                ];
+                for (want, have, what) in endpoints {
+                    if want == have {
+                        continue;
+                    }
+                    // The unspecified address of the link's family clears
+                    // it, as `ip link set ... type vxlan remote 0.0.0.0`
+                    // does.
+                    let (attr, bytes) = match want {
+                        Some(IpAddr::V4(a)) => (vxlan_attr(what, false), a.octets().to_vec()),
+                        Some(IpAddr::V6(a)) => (vxlan_attr(what, true), a.octets().to_vec()),
+                        None if have_v6 => {
+                            (vxlan_attr(what, true), Ipv6Addr::UNSPECIFIED.octets().to_vec())
+                        }
+                        None => (vxlan_attr(what, false), Ipv4Addr::UNSPECIFIED.octets().to_vec()),
+                    };
                     d.update(
                         "vxlan",
                         KindAttr::Bytes(attr, bytes),
@@ -842,6 +889,36 @@ mod tests {
             update.attrs.as_slice(),
             [KindAttr::Bytes(t, b)] if *t == vxlan::IFLA_VXLAN_GROUP && b == &[10, 0, 0, 3]
         ));
+    }
+
+    /// IPv6 endpoints are read back and compared (#418); a change within
+    /// the family is made in place, a change of family recreates.
+    #[test]
+    fn vxlan_ipv6_endpoints_are_compared() {
+        let local: Ipv6Addr = "fd00::1".parse().unwrap();
+        let mut data = attr(vxlan::IFLA_VXLAN_ID, &7u32.to_ne_bytes());
+        data.extend(attr(vxlan::IFLA_VXLAN_LOCAL6, &local.octets()));
+        let link = live("vxlan", data);
+        let names = HashMap::new();
+        let vx = |local: &str| {
+            declared(NetworkConfig::new().link("l0", |l| {
+                l.vxlan(7).vxlan_local(local.parse().unwrap())
+            }))
+        };
+
+        let d = compare(&vx("fd00::1"), &link, &names);
+        assert!(d.recreate.is_empty() && d.update.is_none(), "{d:?}");
+
+        let d = compare(&vx("fd00::5"), &link, &names);
+        assert!(d.recreate.is_empty(), "{d:?}");
+        let update = d.update.expect("an in-place change");
+        assert!(matches!(
+            update.attrs.as_slice(),
+            [KindAttr::Bytes(t, b)] if *t == vxlan::IFLA_VXLAN_LOCAL6 && b.len() == 16
+        ));
+
+        let d = compare(&vx("10.0.0.1"), &link, &names);
+        assert_eq!(d.recreate, vec!["vxlan address family IPv6 -> IPv4".to_string()]);
     }
 
     /// The kernel stores a bond delay as a count of miimon intervals.

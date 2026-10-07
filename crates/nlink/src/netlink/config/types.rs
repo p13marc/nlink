@@ -341,8 +341,8 @@ pub enum DeclaredLinkType {
         vni: u32,
         remote: Option<IpAddr>,
         /// Tunnel source IP (`IFLA_VXLAN_LOCAL` /
-        /// `IFLA_VXLAN_LOCAL6`). IPv4 only at the imperative
-        /// layer today — IPv6 source addresses ignored.
+        /// `IFLA_VXLAN_LOCAL6`), either family — but the same family as
+        /// `remote`; the kernel refuses a VXLAN that mixes them.
         local: Option<IpAddr>,
         /// UDP destination port (`IFLA_VXLAN_PORT`). Left out, the
         /// kernel uses the `vxlan` module's `udp_port` parameter — 8472
@@ -567,8 +567,9 @@ impl LinkBuilder {
         self
     }
 
-    /// Set the VXLAN remote endpoint. No-op if the builder
-    /// isn't a VXLAN.
+    /// Set the VXLAN remote endpoint (`IFLA_VXLAN_GROUP` /
+    /// `IFLA_VXLAN_GROUP6`), IPv4 or IPv6. No-op if the builder isn't a
+    /// VXLAN.
     pub fn vxlan_remote(mut self, remote_addr: IpAddr) -> Self {
         if let DeclaredLinkType::Vxlan { remote, .. } = &mut self.link_type {
             *remote = Some(remote_addr);
@@ -576,10 +577,11 @@ impl LinkBuilder {
         self
     }
 
-    /// Set the VXLAN tunnel source IP (`IFLA_VXLAN_LOCAL`).
-    /// The local address must be configured on the underlay
-    /// interface — the kernel rejects mismatches.
-    /// Plan 190 §2.1.
+    /// Set the VXLAN tunnel source IP (`IFLA_VXLAN_LOCAL` /
+    /// `IFLA_VXLAN_LOCAL6`), IPv4 or IPv6 — the same family as the
+    /// remote, or the kernel refuses the link ("Local and remote address
+    /// must be from the same family"). An IPv6 one used to be dropped
+    /// (#418). Plan 190 §2.1.
     pub fn vxlan_local(mut self, local_addr: IpAddr) -> Self {
         if let DeclaredLinkType::Vxlan { local, .. } = &mut self.link_type {
             *local = Some(local_addr);

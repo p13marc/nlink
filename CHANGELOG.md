@@ -454,6 +454,18 @@ All notable changes to this project will be documented in this file.
   multiple of `miimon`. The VXLAN port's doc comments said the default is
   4789; the kernel's default is the `vxlan` module's `udp_port`, 8472.
 
+- **A VXLAN's IPv6 local or remote address was silently dropped (#418).**
+  `VxlanLink` stored its endpoints as `Ipv4Addr` and wrote only
+  `IFLA_VXLAN_LOCAL`/`IFLA_VXLAN_GROUP`, so `NetworkConfig`'s `create_link`
+  skipped an IPv6 `vxlan_local`/`vxlan_remote` (a code comment said so) and
+  the link came up as an IPv4 VXLAN with no endpoints; `nlink-ip link add
+  vxlan` did the same with `--local`/`--remote`, and also ignored an
+  unparseable address. `VxlanLink` gained `local6`, `remote6` and `group6`,
+  which write `IFLA_VXLAN_LOCAL6`/`IFLA_VXLAN_GROUP6`; the declarative layer
+  and `nlink-ip` use them; and the link diff reads both families back and
+  compares them — in place within a family, recreating the link across
+  families, which `vxlan_nl2conf` refuses on a live link.
+
 ## [0.29.0] - 2026-10-01
 
 > Upgrading from 0.28.x? See

@@ -653,16 +653,18 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             underlay_dev,
         } => {
             let mut config = VxlanLink::new(&link.name, *vni);
-            if let Some(IpAddr::V4(remote_v4)) = remote {
-                config = config.remote(*remote_v4);
+            // Both families: IPv6 endpoints used to be dropped here,
+            // silently, because the builder had no way to write them
+            // (#418).
+            match remote {
+                Some(IpAddr::V4(a)) => config = config.remote(*a),
+                Some(IpAddr::V6(a)) => config = config.remote6(*a),
+                None => {}
             }
-            // Plan 190 §2.1 — local/port/underlay are v4-only
-            // at the imperative VxlanLink layer today (IPv6
-            // tunnel source not yet plumbed); IPv6 local
-            // values are silently dropped, matching the
-            // existing IPv4-only `remote` handling.
-            if let Some(IpAddr::V4(local_v4)) = local {
-                config = config.local(*local_v4);
+            match local {
+                Some(IpAddr::V4(a)) => config = config.local(*a),
+                Some(IpAddr::V6(a)) => config = config.local6(*a),
+                None => {}
             }
             if let Some(p) = port {
                 config = config.port(*p);
