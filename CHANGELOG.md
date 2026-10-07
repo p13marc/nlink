@@ -137,6 +137,24 @@ All notable changes to this project will be documented in this file.
   using them changes body, so the first apply after upgrading replaces it
   once.
 
+- **Recreating a drifted set that a rule references failed with `EBUSY`
+  (#377).** A set whose key type or flags change is deleted and recreated
+  (#275), but a rule that matches `@set` pins it, and the rule itself had
+  not changed, so nothing deleted it first: every apply failed and the
+  config could never converge — for nearly any real set, since a set
+  exists to be referenced. Each keyed rule bound to a recreated set is now
+  deleted ahead of the `DELSET` and re-inserted after the new set, right
+  before the next rule that stayed, so chain order is unchanged (new
+  `NftablesDiff::rules_to_reinsert`). A pending in-place replace of such a
+  rule becomes the re-insert. A rule nlink does not manage still pins the
+  set; the diff now warns about it.
+
+- **`Rule::position(handle)` places the rule *after* `handle`, not
+  before.** `add_rule` always sends `NLM_F_APPEND` (#195), and with it the
+  kernel links a positioned rule after the one named — nft's `add rule ...
+  position`. The doc said "before", which was only true before #195. Doc
+  fixed and pinned by an integration test.
+
 ## [0.29.0] - 2026-10-01
 
 > Upgrading from 0.28.x? See

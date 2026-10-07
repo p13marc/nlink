@@ -1562,17 +1562,29 @@ impl Transaction {
     ///
     /// Rules are appended in the order they are added — see the
     /// `NLM_F_APPEND` note on [`Connection::add_rule`] (#195).
-    pub fn add_rule(mut self, rule: Rule) -> Self {
-        let mut builder = MessageBuilder::new(
-            nft_msg_type(NFT_MSG_NEWRULE),
-            NLM_F_REQUEST | NLM_F_CREATE | NLM_F_APPEND,
-        );
+    pub fn add_rule(self, rule: Rule) -> Self {
+        let position = rule.position;
+        self.push_newrule(rule, NLM_F_REQUEST | NLM_F_CREATE | NLM_F_APPEND, position)
+    }
+
+    /// Insert a rule immediately **before** the rule with kernel handle
+    /// `before` (nft's `insert rule ... position <handle>`). Without
+    /// `NLM_F_APPEND` the kernel links the new rule ahead of the
+    /// positioned one; [`add_rule`](Self::add_rule)'s `NLM_F_APPEND` puts it
+    /// after. Rule order is policy, so the declarative apply uses this to
+    /// put a rule back exactly where it was.
+    pub(crate) fn insert_rule_before(self, rule: Rule, before: u64) -> Self {
+        self.push_newrule(rule, NLM_F_REQUEST | NLM_F_CREATE, Some(before))
+    }
+
+    fn push_newrule(mut self, rule: Rule, flags: u16, position: Option<u64>) -> Self {
+        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_NEWRULE), flags);
         let nfgenmsg = NfGenMsg::new(rule.family);
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_RULE_TABLE, &rule.table);
         builder.append_attr_str(NFTA_RULE_CHAIN, &rule.chain);
 
-        if let Some(pos) = rule.position {
+        if let Some(pos) = position {
             builder.append_attr_u64_be(NFTA_RULE_POSITION, pos);
         }
 

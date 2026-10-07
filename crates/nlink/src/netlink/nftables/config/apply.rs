@@ -35,14 +35,26 @@
 use std::time::Duration;
 
 use super::diff::NftablesDiff;
-use super::types::{DeclaredChain, DeclaredSet};
+use super::types::{DeclaredChain, DeclaredRule, DeclaredSet};
 use super::super::connection::Transaction;
-use super::super::types::{Chain, Family, Set};
+use super::super::types::{Chain, Family, Rule, Set};
 use crate::netlink::{
     connection::Connection,
     error::{Error, Result},
     protocol::Nftables,
 };
+
+/// A declared rule's body with its `handle_key` as the comment, which the
+/// kernel round-trips as `NFTA_RULE_USERDATA` (the diff identity).
+fn keyed_body(rule: &DeclaredRule) -> Rule {
+    let mut body = rule.body.clone();
+    if let Some(key) = rule.handle_key()
+        && body.comment.is_none()
+    {
+        body.comment = Some(key.to_string());
+    }
+    body
+}
 
 /// Re-build a runtime [`Set`] from a [`DeclaredSet`].
 fn runtime_set(table: &str, family: Family, declared: &DeclaredSet) -> Set {
@@ -121,6 +133,11 @@ impl NftablesDiff {
         // rule — contrary to an earlier assumption in this code.
         // Plan 178 closeout.
         for (table, family, chain, handle) in &self.rules_to_delete {
+            tx = tx.del_rule(table, chain, *family, handle.0);
+        }
+        // ...and the rules bound to a set being recreated, which must be
+        // gone before its DELSET (EBUSY otherwise). Re-added in step 8.
+        for (table, family, chain, handle, _, _) in &self.rules_to_reinsert {
             tx = tx.del_rule(table, chain, *family, handle.0);
         }
 
@@ -219,6 +236,16 @@ impl NftablesDiff {
                 runtime = runtime.counter(true);
             }
             tx = tx.add_flowtable(&runtime);
+        }
+
+        // 8a. Rules put back after their set was recreated, each right
+        //     before the next rule that stayed, so chain order holds.
+        for (_table, _family, _chain, _handle, anchor, rule) in &self.rules_to_reinsert {
+            let body = keyed_body(rule);
+            tx = match anchor {
+                Some(before) => tx.insert_rule_before(body, before.0),
+                None => tx.add_rule(body),
+            };
         }
 
         // 8. Rule adds. Wire `handle_key` → `body.comment` so the
