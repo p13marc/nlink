@@ -609,6 +609,7 @@ impl Connection<Nftables> {
         builder.append_attr_u32_be(NFTA_SET_KEY_TYPE, set.key_type.type_id());
         builder.append_attr_u32_be(NFTA_SET_KEY_LEN, set.key_type.len());
         builder.append_attr_u32_be(NFTA_SET_FLAGS, set.wire_flags().bits());
+        append_set_data_type(&mut builder, &set);
         append_set_timeouts(&mut builder, &set);
         append_set_desc(&mut builder, &set);
         // Set ID (arbitrary, used for referencing in same batch)
@@ -698,7 +699,7 @@ impl Connection<Nftables> {
             nft_msg_type(NFT_MSG_NEWSETELEM),
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE,
         );
-        append_set_elements(&mut builder, set, elements)?;
+        append_set_elements(&mut builder, set, elements, ElementWrite::Add)?;
         self.nft_request_ack(builder).await
     }
 
@@ -708,7 +709,7 @@ impl Connection<Nftables> {
     pub async fn del_set_elements(&self, set: &Set, elements: &[SetElement]) -> Result<()> {
         let mut builder =
             MessageBuilder::new(nft_msg_type(NFT_MSG_DELSETELEM), NLM_F_REQUEST | NLM_F_ACK);
-        append_set_elements(&mut builder, set, elements)?;
+        append_set_elements(&mut builder, set, elements, ElementWrite::Delete)?;
         self.nft_request_ack(builder).await
     }
 
@@ -748,10 +749,7 @@ impl Connection<Nftables> {
             .find(|s| s.name == set)
             .map_or(SetFlags::empty(), |s| s.flags);
         if flags.contains(SetFlags::INTERVAL) && !flags.contains(SetFlags::CONCAT) {
-            elements = super::interval::pair(&elements)
-                .iter()
-                .map(super::interval::element_of)
-                .collect();
+            elements = super::interval::pair_elements(&elements);
         }
         Ok(elements)
     }
@@ -1388,10 +1386,18 @@ pub(crate) fn parse_set(data: &[u8], family: Family) -> Option<SetInfo> {
         size: None,
         timeout: None,
         gc_interval: None,
+        data_type: None,
+        data_len: None,
     };
 
     for (attr_type, payload) in AttrIter::new(data) {
         match attr_type & 0x7FFF {
+            NFTA_SET_DATA_TYPE if payload.len() >= 4 => {
+                set.data_type = Some(u32::from_be_bytes(payload[..4].try_into().unwrap()));
+            }
+            NFTA_SET_DATA_LEN if payload.len() >= 4 => {
+                set.data_len = Some(u32::from_be_bytes(payload[..4].try_into().unwrap()));
+            }
             NFTA_SET_TIMEOUT if payload.len() >= 8 => {
                 let ms = u64::from_be_bytes(payload[..8].try_into().unwrap());
                 set.timeout = Some(std::time::Duration::from_millis(ms));
@@ -1469,6 +1475,7 @@ fn parse_set_elem(elem: &[u8]) -> Option<SetElement> {
     let mut flags = 0;
     let mut timeout = None;
     let mut expiration = None;
+    let mut data = None;
     let millis = |payload: &[u8]| {
         payload
             .get(..8)
@@ -1484,6 +1491,20 @@ fn parse_set_elem(elem: &[u8]) -> Option<SetElement> {
             NFTA_SET_ELEM_KEY => key = value(payload),
             NFTA_SET_ELEM_KEY_END => key_end = value(payload),
             NFTA_SET_ELEM_TIMEOUT => timeout = millis(payload),
+            NFTA_SET_ELEM_DATA => {
+                data = AttrIter::new(payload).find_map(|(data_type, inner)| {
+                    match data_type & 0x7FFF {
+                        NFTA_DATA_VALUE => Some(SetElementData::Value(inner.to_vec())),
+                        NFTA_DATA_VERDICT => {
+                            super::expr::parse_verdict(inner).map(SetElementData::Verdict)
+                        }
+                        _ => None,
+                    }
+                });
+            }
+            NFTA_SET_ELEM_OBJREF => {
+                data = attr_str(payload).map(SetElementData::Object);
+            }
             NFTA_SET_ELEM_EXPIRATION => expiration = millis(payload),
             NFTA_SET_ELEM_FLAGS if payload.len() >= 4 => {
                 flags = u32::from_be_bytes(payload[..4].try_into().unwrap());
@@ -1495,7 +1516,8 @@ fn parse_set_elem(elem: &[u8]) -> Option<SetElement> {
         Some(key) => Some(
             SetElement::from_wire(key, flags)
                 .with_key_end(key_end)
-                .with_timers(timeout, expiration),
+                .with_timers(timeout, expiration)
+                .with_data(data),
         ),
         None if flags & NFT_SET_ELEM_CATCHALL != 0 => Some(SetElement::from_wire(Vec::new(), flags)),
         None => None,
@@ -1843,6 +1865,7 @@ impl Transaction {
         builder.append_attr_u32_be(NFTA_SET_KEY_TYPE, set.key_type.type_id());
         builder.append_attr_u32_be(NFTA_SET_KEY_LEN, set.key_type.len());
         builder.append_attr_u32_be(NFTA_SET_FLAGS, set.wire_flags().bits());
+        append_set_data_type(&mut builder, &set);
         append_set_timeouts(&mut builder, &set);
         append_set_desc(&mut builder, &set);
         builder.append_attr_u32_be(NFTA_SET_ID, set_id);
@@ -1868,7 +1891,7 @@ impl Transaction {
     pub fn add_set_elements(mut self, set: &Set, elements: &[SetElement]) -> Self {
         let mut builder =
             MessageBuilder::new(nft_msg_type(NFT_MSG_NEWSETELEM), NLM_F_REQUEST | NLM_F_CREATE);
-        match append_set_elements(&mut builder, set, elements) {
+        match append_set_elements(&mut builder, set, elements, ElementWrite::Add) {
             Ok(()) => self.messages.push(builder.finish()),
             Err(e) => self.defer(e),
         }
@@ -1879,7 +1902,7 @@ impl Transaction {
     /// imperative [`Connection::<Nftables>::del_set_elements`](Connection).
     pub fn del_set_elements(mut self, set: &Set, elements: &[SetElement]) -> Self {
         let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_DELSETELEM), NLM_F_REQUEST);
-        match append_set_elements(&mut builder, set, elements) {
+        match append_set_elements(&mut builder, set, elements, ElementWrite::Delete) {
             Ok(()) => self.messages.push(builder.finish()),
             Err(e) => self.defer(e),
         }
@@ -1952,6 +1975,16 @@ impl RawMessage {
     }
 }
 
+/// Append a map's data type, and its data length for a value map.
+fn append_set_data_type(builder: &mut MessageBuilder, set: &Set) {
+    if let Some(data) = &set.data_type {
+        builder.append_attr_u32_be(NFTA_SET_DATA_TYPE, data.type_id());
+        if let Some(len) = data.len() {
+            builder.append_attr_u32_be(NFTA_SET_DATA_LEN, len);
+        }
+    }
+}
+
 /// Append the set's default element timeout and GC interval, if any.
 fn append_set_timeouts(builder: &mut MessageBuilder, set: &Set) {
     if let Some(timeout) = set.timeout {
@@ -1992,10 +2025,18 @@ fn append_set_desc(builder: &mut MessageBuilder, set: &Set) {
     builder.nest_end(desc);
 }
 
+/// Whether elements are being added or deleted: a delete names elements by
+/// key alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ElementWrite {
+    Add,
+    Delete,
+}
+
 /// Check `elements` against the set they go into: everything the writer
 /// cannot encode is an error, never something dropped. Shared by the
 /// element writers and `NftablesConfig::validate`.
-pub(crate) fn check_elements(set: &Set, elements: &[SetElement]) -> Result<()> {
+pub(crate) fn check_elements(set: &Set, elements: &[SetElement], write: ElementWrite) -> Result<()> {
     // Ranges are compared and incremented as big-endian numbers, which a
     // host-order key is not; `nft` byte-swaps those, nlink does not model
     // that.
@@ -2008,16 +2049,21 @@ pub(crate) fn check_elements(set: &Set, elements: &[SetElement]) -> Result<()> {
             set.name, set.key_type
         )));
     }
-    // Maps need element data on the wire; refuse rather than install
-    // data-less entries.
-    if !elements.is_empty() && set.flags.contains(SetFlags::MAP) {
+    // A map is declared with its data type, which is what its elements are
+    // checked against; one flagged MAP without it could only take
+    // elements nlink cannot check.
+    if write == ElementWrite::Add
+        && !elements.is_empty()
+        && set.flags.contains(SetFlags::MAP)
+        && set.data_type.is_none()
+    {
         return Err(Error::InvalidMessage(format!(
-            "set {}: elements of maps are not supported yet",
+            "set {}: a map's elements need its data type (`Set::map`)",
             set.name
         )));
     }
     for elem in elements {
-        elem.check_for(set)?;
+        elem.check_for(set, write == ElementWrite::Delete)?;
     }
     Ok(())
 }
@@ -2030,8 +2076,15 @@ fn append_set_elements(
     builder: &mut MessageBuilder,
     set: &Set,
     elements: &[SetElement],
+    write: ElementWrite,
 ) -> Result<()> {
-    check_elements(set, elements)?;
+    check_elements(set, elements, write)?;
+    // A delete names the element by its key (and range end); its data and
+    // timeout are the kernel's business, not the request's.
+    let carry = |e: &SetElement| match write {
+        ElementWrite::Add => (e.timeout(), e.data().cloned()),
+        ElementWrite::Delete => (None, None),
+    };
 
     let nfgenmsg = NfGenMsg::new(set.family);
     builder.append(&nfgenmsg);
@@ -2042,8 +2095,8 @@ fn append_set_elements(
     // flagged INTERVAL_END (see `interval`) — except one of concatenated
     // keys, which stores it in one element with its inclusive end
     // (KEY_END); other sets one element each.
-    // An element's timeout goes on its start: the kernel refuses one on an
-    // interval end (EINVAL).
+    // An element's timeout and map data go on its start: the kernel refuses
+    // either on an interval end (EINVAL).
     let wire: Vec<super::interval::WireElement> = if set.ranges_per_field() {
         elements
             .iter()
@@ -2051,7 +2104,8 @@ fn append_set_elements(
                 key: e.key().to_vec(),
                 key_end: e.key_end().filter(|end| *end != e.key()).map(<[u8]>::to_vec),
                 flags: 0,
-                timeout: e.timeout(),
+                timeout: carry(e).0,
+                data: carry(e).1,
             })
             .collect()
     } else if set.flags.contains(SetFlags::INTERVAL) {
@@ -2059,7 +2113,7 @@ fn append_set_elements(
             .iter()
             .flat_map(|e| {
                 let mut wire = super::interval::lower(&super::interval::range_of(e));
-                wire[0].timeout = e.timeout();
+                (wire[0].timeout, wire[0].data) = carry(e);
                 wire
             })
             .collect()
@@ -2070,7 +2124,8 @@ fn append_set_elements(
                 key: e.key().to_vec(),
                 key_end: None,
                 flags: 0,
-                timeout: e.timeout(),
+                timeout: carry(e).0,
+                data: carry(e).1,
             })
             .collect()
     };
@@ -2090,6 +2145,23 @@ fn append_set_elements(
         }
         if let Some(timeout) = elem.timeout {
             builder.append_attr_u64_be(NFTA_SET_ELEM_TIMEOUT, super::expr::millis(timeout));
+        }
+        match &elem.data {
+            None => {}
+            Some(SetElementData::Value(value)) => {
+                let nest = builder.nest_start(NFTA_SET_ELEM_DATA | 0x8000);
+                builder.append_attr(NFTA_DATA_VALUE, value);
+                builder.nest_end(nest);
+            }
+            Some(SetElementData::Verdict(verdict)) => {
+                let nest = builder.nest_start(NFTA_SET_ELEM_DATA | 0x8000);
+                super::expr::write_verdict_data(builder, verdict);
+                builder.nest_end(nest);
+            }
+            // An object map names the object outside the data nest.
+            Some(SetElementData::Object(name)) => {
+                builder.append_attr_str(NFTA_SET_ELEM_OBJREF, name);
+            }
         }
         builder.nest_end(elem_nest);
     }
@@ -2539,8 +2611,16 @@ mod transaction_tests {
         let refused = |set: &Set, elem: SetElement| {
             new_tx().add_set_elements(set, &[elem]).error.is_some()
         };
-        // Maps need element data, which is not modelled yet.
+        // A map flagged by hand, without its data type, cannot be checked.
         assert!(refused(&Set::new("t", "m").flags(SetFlags::MAP), SetElement::ipv4(v4)));
+        // A map element needs data, of the map's type and length.
+        let marks = Set::new("t", "m").map(SetDataType::Value(SetKeyType::Mark));
+        assert!(refused(&marks, SetElement::ipv4(v4)));
+        assert!(refused(&marks, SetElement::ipv4(v4).value(SetElement::port(1))));
+        assert!(refused(&marks, SetElement::ipv4(v4).verdict(Verdict::Accept)));
+        assert!(!refused(&marks, SetElement::ipv4(v4).value(SetElement::mark(1))));
+        // Data needs a map.
+        assert!(refused(&Set::new("t", "s"), SetElement::ipv4(v4).verdict(Verdict::Drop)));
         // A range needs an interval set.
         assert!(refused(&Set::new("t", "s"), SetElement::ipv4_range(v4, v4)));
         // A range that runs backwards.
@@ -2721,6 +2801,73 @@ mod transaction_tests {
     }
 
     #[test]
+    fn a_map_carries_its_data_type_and_a_value_map_its_length() {
+        let tx = new_tx()
+            .add_set(Set::new("t", "marks").map(SetDataType::Value(SetKeyType::Mark)))
+            .add_set(Set::new("t", "vm").vmap());
+        let marks = body_after_nfgenmsg(&tx.messages[0]);
+        let be = |b: Vec<u8>| u32::from_be_bytes(b.try_into().unwrap());
+        assert_eq!(be(find_attr(marks, NFTA_SET_FLAGS).unwrap()), NFT_SET_MAP);
+        assert_eq!(be(find_attr(marks, NFTA_SET_DATA_TYPE).unwrap()), 19); // TYPE_MARK
+        assert_eq!(be(find_attr(marks, NFTA_SET_DATA_LEN).unwrap()), 4);
+        let info = parse_set(marks, Family::Inet).unwrap();
+        assert_eq!((info.data_type, info.data_len), (Some(19), Some(4)));
+
+        // A verdict map's type is NFT_DATA_VERDICT; the kernel sizes it.
+        let vm = body_after_nfgenmsg(&tx.messages[1]);
+        assert_eq!(be(find_attr(vm, NFTA_SET_DATA_TYPE).unwrap()), NFT_DATA_VERDICT);
+        assert!(find_attr(vm, NFTA_SET_DATA_LEN).is_none());
+    }
+
+    #[test]
+    fn map_elements_carry_their_data_and_read_it_back() {
+        let v4 = |n| std::net::Ipv4Addr::new(10, 0, 0, n);
+        let jump = Verdict::JumpTo(ChainName::new("c2").unwrap());
+        let vm = Set::new("t", "vm").vmap();
+        let elems = [
+            SetElement::ipv4(v4(1)).verdict(Verdict::Accept),
+            SetElement::ipv4(v4(2)).verdict(jump),
+        ];
+        let tx = new_tx().add_set_elements(&vm, &elems);
+        let mut back = Vec::new();
+        super::parse_set_elements(body_after_nfgenmsg(&tx.messages[0]), &mut back);
+        assert_eq!(back, elems);
+
+        let marks = Set::new("t", "m").map(SetDataType::Value(SetKeyType::Mark));
+        let elems = [SetElement::ipv4(v4(1)).value(SetElement::mark(0x10))];
+        let tx = new_tx().add_set_elements(&marks, &elems);
+        let mut back = Vec::new();
+        super::parse_set_elements(body_after_nfgenmsg(&tx.messages[0]), &mut back);
+        assert_eq!(back, elems);
+
+        // A delete names the key only.
+        let tx = new_tx().del_set_elements(&marks, &[SetElement::ipv4(v4(1))]);
+        assert!(tx.error.is_none(), "{:?}", tx.error);
+        let mut back = Vec::new();
+        super::parse_set_elements(body_after_nfgenmsg(&tx.messages[0]), &mut back);
+        assert_eq!(back[0].data(), None);
+    }
+
+    #[test]
+    fn an_interval_map_puts_the_data_on_the_start_and_reads_it_back_on_the_range() {
+        let map = Set::new("t", "m")
+            .key_type(SetKeyType::InetService)
+            .interval()
+            .vmap();
+        let range = SetElement::port_range(1000, 2000).verdict(Verdict::Drop);
+        let tx = new_tx().add_set_elements(&map, std::slice::from_ref(&range));
+        let mut wire = Vec::new();
+        super::parse_set_elements(body_after_nfgenmsg(&tx.messages[0]), &mut wire);
+        assert_eq!(wire.len(), 2);
+        assert_eq!(wire[0].data(), Some(&SetElementData::Verdict(Verdict::Drop)));
+        assert!(wire[1].is_interval_end() && wire[1].data().is_none());
+        let paired = super::super::interval::pair_elements(&wire);
+        assert_eq!(paired.len(), 1);
+        assert_eq!(paired[0].key_end(), range.key_end());
+        assert_eq!(paired[0].data(), range.data());
+    }
+
+    #[test]
     fn tx_del_set_emits_table_and_name() {
         let tx = new_tx().del_set("filter", "allowed_v4", Family::Inet);
         let msg = &tx.messages[0];
@@ -2765,6 +2912,7 @@ mod transaction_tests {
             &mut builder,
             &set,
             &[SetElement::port(80), SetElement::port(443)],
+            super::ElementWrite::Add,
         )
         .unwrap();
         let msg = builder.finish();

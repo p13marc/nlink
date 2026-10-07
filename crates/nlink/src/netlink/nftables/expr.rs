@@ -896,6 +896,15 @@ fn write_verdict_expr(builder: &mut MessageBuilder, verdict: &Verdict) {
     let expr_data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
     builder.append_attr_u32_be(NFTA_IMMEDIATE_DREG, Register::Verdict as u32);
     let imm_data = builder.nest_start(NFTA_IMMEDIATE_DATA | 0x8000);
+    write_verdict_data(builder, verdict);
+    builder.nest_end(imm_data);
+    builder.nest_end(expr_data);
+}
+
+/// Write the `NFTA_DATA_VERDICT` nest of `verdict`: its code, and the chain
+/// of a jump or goto. Shared by the verdict expression and verdict-map
+/// elements.
+pub(crate) fn write_verdict_data(builder: &mut MessageBuilder, verdict: &Verdict) {
     let verdict_nest = builder.nest_start(NFTA_DATA_VERDICT | 0x8000);
 
     let code = match verdict {
@@ -916,8 +925,6 @@ fn write_verdict_expr(builder: &mut MessageBuilder, verdict: &Verdict) {
     }
 
     builder.nest_end(verdict_nest);
-    builder.nest_end(imm_data);
-    builder.nest_end(expr_data);
 }
 
 // =========================================================================
@@ -1229,7 +1236,7 @@ fn parse_immediate(data: &[u8]) -> Option<RuleExpr> {
 /// Decode an `NFTA_DATA_VERDICT` nest. `None` for codes outside the
 /// typed [`Verdict`] (`NFT_BREAK`, queue verdicts) or a jump/goto
 /// whose chain name fails validation.
-fn parse_verdict(nest: &[u8]) -> Option<Verdict> {
+pub(crate) fn parse_verdict(nest: &[u8]) -> Option<Verdict> {
     let mut code = None;
     let mut chain = None;
     for (attr, payload) in AttrIter::new(nest) {

@@ -4,7 +4,8 @@
 use super::super::{
     expr::Expr,
     types::{
-        ChainType, Family, Hook, Policy, Priority, Rule, Set, SetElement, SetFlags, SetKeyType,
+        ChainType, Family, Hook, Policy, Priority, Rule, Set, SetDataType, SetElement, SetFlags,
+        SetKeyType,
     },
 };
 
@@ -400,6 +401,7 @@ pub struct DeclaredSet {
     pub(crate) timeout: Option<std::time::Duration>,
     pub(crate) gc_interval: Option<std::time::Duration>,
     pub(crate) element_mode: Option<SetElementMode>,
+    pub(crate) data_type: Option<SetDataType>,
     pub(crate) elements: Vec<SetElement>,
 }
 
@@ -436,6 +438,10 @@ impl DeclaredSet {
     /// Declared maximum element count, if any.
     pub fn size(&self) -> Option<u32> {
         self.size
+    }
+    /// What a map maps its keys to; `None` for a set.
+    pub fn data_type(&self) -> Option<&SetDataType> {
+        self.data_type.as_ref()
     }
     /// Declared default element timeout, if any.
     pub fn timeout(&self) -> Option<std::time::Duration> {
@@ -481,14 +487,18 @@ impl DeclaredSet {
     /// — one of single keys. In an interval set of concatenated keys each
     /// field is a range of its own, the kernel keeps each element as
     /// written, and overlapping elements are an error.
+    ///
+    /// A map's ranges are not merged either: two touching ranges that map
+    /// to different values are two elements.
     pub(crate) fn merges_ranges(&self) -> bool {
         self.flags.contains(SetFlags::INTERVAL)
+            && self.data_type.is_none()
             && !crate::netlink::nftables::types::ranges_per_field(&self.key_type, self.flags)
     }
 
     /// The flags the kernel reports for this set once created.
     pub(crate) fn wire_flags(&self) -> SetFlags {
-        crate::netlink::nftables::types::wire_flags(&self.key_type, self.flags)
+        self.to_set("", Family::Inet).wire_flags()
     }
 
     /// The runtime [`Set`] this declaration describes, in `table`.
@@ -502,6 +512,7 @@ impl DeclaredSet {
         }
         set.timeout = self.timeout;
         set.gc_interval = self.gc_interval;
+        set.data_type = self.data_type.clone();
         set
     }
 }
@@ -516,6 +527,7 @@ pub struct DeclaredSetBuilder {
     timeout: Option<std::time::Duration>,
     gc_interval: Option<std::time::Duration>,
     element_mode: Option<SetElementMode>,
+    data_type: Option<SetDataType>,
     elements: Vec<SetElement>,
 }
 
@@ -531,8 +543,23 @@ impl DeclaredSetBuilder {
             timeout: None,
             gc_interval: None,
             element_mode: None,
+            data_type: None,
             elements: Vec::new(),
         }
+    }
+
+    /// A map — see [`Set::map`](crate::netlink::nftables::Set::map). A
+    /// changed data type recreates it; an element whose data changed is
+    /// replaced (removed and added in the same batch).
+    pub fn map(mut self, data: SetDataType) -> Self {
+        self.flags |= SetFlags::MAP;
+        self.data_type = Some(data);
+        self
+    }
+
+    /// A verdict map: `map(SetDataType::Verdict)`.
+    pub fn vmap(self) -> Self {
+        self.map(SetDataType::Verdict)
     }
 
     /// Set the key type (`SetKeyType::Ipv4Addr`, `InetService`, …).
@@ -659,6 +686,7 @@ impl DeclaredSetBuilder {
             timeout: self.timeout,
             gc_interval: self.gc_interval,
             element_mode: self.element_mode,
+            data_type: self.data_type,
             elements: self.elements,
         }
     }

@@ -25,6 +25,8 @@ pub(crate) struct WireElement {
     pub(crate) flags: u32,
     /// The element's own timeout (on a range's start only).
     pub(crate) timeout: Option<std::time::Duration>,
+    /// Map data (on a range's start only).
+    pub(crate) data: Option<super::types::SetElementData>,
 }
 
 /// `key + 1`, big-endian; `None` when `key` is the maximum value.
@@ -74,6 +76,7 @@ pub(crate) fn lower(range: &Range) -> Vec<WireElement> {
         key_end: None,
         flags: 0,
         timeout: None,
+        data: None,
     }];
     if let Some(end) = increment(&range.1) {
         out.push(WireElement {
@@ -81,6 +84,7 @@ pub(crate) fn lower(range: &Range) -> Vec<WireElement> {
             key_end: None,
             flags: NFT_SET_ELEM_INTERVAL_END,
             timeout: None,
+            data: None,
         });
     }
     out
@@ -94,35 +98,40 @@ pub(crate) fn lower(range: &Range) -> Vec<WireElement> {
 /// end runs to the maximum value. An end with no open start is dropped:
 /// that is the all-zero "null" element `nft` adds in front of a set's first
 /// range, or an orphan.
+#[cfg(test)]
 pub(crate) fn pair(elements: &[SetElement]) -> Vec<Range> {
+    pair_elements(elements).iter().map(range_of).collect()
+}
+
+/// [`pair`], keeping what each range's start element carries — map data,
+/// a timeout, the time left — on the range element.
+pub(crate) fn pair_elements(elements: &[SetElement]) -> Vec<SetElement> {
     let mut sorted: Vec<&SetElement> = elements.iter().collect();
     sorted.sort_by(|a, b| {
         a.key()
             .cmp(b.key())
             .then(b.is_interval_end().cmp(&a.is_interval_end()))
     });
-    let max_of = |len: usize| vec![0xff; len];
+    let to_top = |start: &SetElement| start.clone().ending_at(vec![0xff; start.key().len()]);
     let mut ranges = Vec::new();
-    let mut open: Option<Vec<u8>> = None;
+    let mut open: Option<&SetElement> = None;
     for element in sorted {
         if element.is_interval_end() {
             if let Some(start) = open.take()
                 && let Some(end) = decrement(element.key())
             {
-                ranges.push((start, end));
+                ranges.push(start.clone().ending_at(end));
             }
         } else {
             if let Some(start) = open.take() {
                 // Two starts in a row: the first can only run to the top.
-                let len = start.len();
-                ranges.push((start, max_of(len)));
+                ranges.push(to_top(start));
             }
-            open = Some(element.key().to_vec());
+            open = Some(element);
         }
     }
     if let Some(start) = open {
-        let len = start.len();
-        ranges.push((start, max_of(len)));
+        ranges.push(to_top(start));
     }
     ranges
 }
@@ -180,12 +189,14 @@ mod tests {
                     key_end: None,
                     flags: 0,
                     timeout: None,
+                    data: None,
                 },
                 WireElement {
                     key: 2001u16.to_be_bytes().to_vec(),
                     key_end: None,
                     flags: NFT_SET_ELEM_INTERVAL_END,
                     timeout: None,
+                    data: None,
                 },
             ]
         );

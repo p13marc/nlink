@@ -197,6 +197,11 @@ mod nftables_concat;
 #[path = "integration/nftables_timeouts.rs"]
 mod nftables_timeouts;
 
+// Maps and verdict maps on traffic; declared maps converge and replace an
+// element whose data changed.
+#[path = "integration/nftables_maps.rs"]
+mod nftables_maps;
+
 // #191-#194, #218 — psched tick conversion. The unit tests pin the
 // bytes nlink emits; these pin that the *kernel* accepts them and
 // reads back what we wrote. Needed because the pre-fix writer and
