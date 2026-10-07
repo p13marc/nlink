@@ -399,6 +399,12 @@ impl DeclaredLinkType {
 }
 
 /// Link state (up or down).
+///
+/// The default is [`Unchanged`](Self::Unchanged), as for a link declared
+/// through [`LinkBuilder`] without `.up()` or `.down()`. It used to be
+/// `Down`, which is what serde filled in for a JSON/YAML link that omits
+/// `state` — so declaring only a NIC's MTU in a document took the NIC
+/// down.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
@@ -408,9 +414,9 @@ pub enum LinkState {
     /// Interface should be up.
     Up,
     /// Interface should be down.
-    #[default]
     Down,
     /// Don't change the state.
+    #[default]
     Unchanged,
 }
 
@@ -3304,6 +3310,20 @@ mod serde_roundtrip_tests {
         assert_eq!(cfg.addresses().len(), 1);
         assert_eq!(cfg.routes().len(), 1);
         assert_eq!(cfg.links()[1].name(), "veth0");
+    }
+
+    /// A link that does not mention `state` is left as it is — what the
+    /// builder does — not taken down. Declaring a physical NIC's MTU in
+    /// JSON used to take the NIC down.
+    #[test]
+    fn a_link_without_a_state_is_left_alone() {
+        let cfg = NetworkConfig::from_json_str(
+            r#"{"links":[{"name":"eth0","link-type":"physical","mtu":9000}]}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.links()[0].state(), LinkState::Unchanged);
+        let built = NetworkConfig::new().link("eth0", |l| l.mtu(9000));
+        assert_eq!(built.links()[0].state(), cfg.links()[0].state());
     }
 
     #[test]
