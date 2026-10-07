@@ -161,7 +161,7 @@ async fn rules_install_in_declaration_order() -> nlink::Result<()> {
         conn.add_rule(
             Rule::new("ordering", "input")
                 .family(Family::Inet)
-                .comment("nlink:1-accept-ssh")
+                .comment("1-accept-ssh")
                 .match_tcp_dport(22)
                 .accept(),
         )
@@ -169,7 +169,7 @@ async fn rules_install_in_declaration_order() -> nlink::Result<()> {
         conn.add_rule(
             Rule::new("ordering", "input")
                 .family(Family::Inet)
-                .comment("nlink:2-drop-all")
+                .comment("2-drop-all")
                 .drop(),
         )
         .await?;
@@ -177,10 +177,10 @@ async fn rules_install_in_declaration_order() -> nlink::Result<()> {
         let rules = conn.list_rules("ordering", Family::Inet).await?;
         assert_eq!(rules.len(), 2, "expected exactly the two rules we added");
 
-        let order: Vec<_> = rules.iter().map(|r| r.key.as_deref()).collect();
+        let order: Vec<_> = rules.iter().map(|r| r.comment_text.as_deref()).collect();
         assert_eq!(
             order,
-            vec![Some("nlink:1-accept-ssh"), Some("nlink:2-drop-all")],
+            vec![Some("1-accept-ssh"), Some("2-drop-all")],
             "the kernel is holding the rules in REVERSE declaration order, so \
              the bare drop matches first and SSH is blocked (#195)",
         );

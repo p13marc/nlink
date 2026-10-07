@@ -1216,7 +1216,11 @@ fn parse_ruleset(contents: &str) -> Result<NftablesConfig> {
                     chain_type,
                     policy,
                 } = pc;
+                // A desired-state file owns its chains: a rule it does not
+                // declare — including the unkeyed duplicates an older
+                // `reconcile` left behind — is deleted.
                 tb = tb.chain(name, move |mut cb| {
+                    cb = cb.exclusive();
                     if let Some(h) = hook {
                         cb = cb.hook(h);
                     }
@@ -1830,6 +1834,10 @@ mod tests {
         .expect("valid ruleset");
         let qos = &cfg.tables()[0];
         assert_eq!(qos.sets()[0].size(), Some(4096));
+        assert!(
+            qos.chains().iter().all(|c| c.exclusive()),
+            "a reconcile file owns its chains",
+        );
         assert_eq!(qos.rules().len(), 2);
 
         for bad in ["size", "size 0", "size lots"] {

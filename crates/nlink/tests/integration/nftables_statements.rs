@@ -890,7 +890,7 @@ async fn rule_position_inserts_after_the_named_rule() -> nlink::Result<()> {
             .list_rules("t", Family::Ip)
             .await?
             .into_iter()
-            .map(|r| r.key.unwrap_or_default())
+            .map(|r| r.comment_text.unwrap_or_default())
             .collect();
         assert_eq!(order, ["a", "c", "b"]);
         Ok(())

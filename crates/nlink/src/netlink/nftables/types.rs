@@ -1259,6 +1259,9 @@ pub struct Rule {
     pub(crate) exprs: Vec<super::expr::Expr>,
     pub(crate) position: Option<u64>,
     pub(crate) comment: Option<String>,
+    /// The declarative identity (`nlink:<key>`), set by `NftablesDiff::apply`
+    /// from the declared rule's key. Imperative rules have none.
+    pub(crate) key: Option<String>,
 }
 
 impl Rule {
@@ -1271,6 +1274,7 @@ impl Rule {
             exprs: Vec::new(),
             position: None,
             comment: None,
+            key: None,
         }
     }
 
@@ -1292,16 +1296,14 @@ impl Rule {
         self
     }
 
-    /// Attach a comment to this rule. Encoded as
-    /// `NFTA_RULE_USERDATA` (libnftnl-compatible TLV); shows up
-    /// in `nft list ruleset` output as inline `comment "..."`.
+    /// Attach a human comment to this rule, shown by `nft list ruleset` as
+    /// `comment "..."` (`NFTA_RULE_USERDATA`, libnftnl's TLV). At most 127
+    /// bytes.
     ///
-    /// The declarative-config diff layer uses comments matching
-    /// `nlink:<key>` as the rule's reconciliation identity (Plan
-    /// 157b v2 — analogous to `LinkConfig::name`). Max 122 chars
-    /// for the user-supplied portion (128-byte libnftnl
-    /// `NFTNL_UDATA_COMMENT_MAXLEN` minus the `nlink:` prefix +
-    /// trailing NUL).
+    /// Written verbatim. In a declarative `NftablesConfig` the rule's key
+    /// goes in front of it — `nlink:<key> <comment>` — and the two share
+    /// those 127 bytes; installing a longer one is an error, not a silent
+    /// drop.
     pub fn comment(mut self, comment: &str) -> Self {
         self.comment = Some(comment.to_string());
         self

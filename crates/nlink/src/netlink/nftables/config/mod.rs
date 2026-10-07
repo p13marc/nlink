@@ -53,6 +53,7 @@
 
 mod apply;
 mod diff;
+mod rules;
 mod types;
 
 pub use apply::{ReconcileOptions, ReconcileReport};

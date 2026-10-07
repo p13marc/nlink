@@ -38,23 +38,58 @@ pub(crate) const NFTNL_UDATA_COMMENT_MAXLEN: usize = 128;
 /// externally (`iptables-nft`, hand-edited via `nft -f`, etc.).
 const NLINK_PREFIX: &str = "nlink:";
 
-/// Encode a `handle_key` as a libnftnl-compatible TLV `userdata`
-/// payload. Returns `None` if the resulting comment would exceed
-/// the 128-byte `NFTNL_UDATA_COMMENT_MAXLEN` limit.
+/// The comment text a rule carries: `nlink:<key>`, `nlink:<key> <comment>`,
+/// or — for a rule nlink does not manage — the comment verbatim.
+pub(crate) fn rule_comment_text(key: Option<&str>, comment: Option<&str>) -> Option<String> {
+    match (key, comment) {
+        (Some(key), Some(comment)) => Some(format!("{NLINK_PREFIX}{key} {comment}")),
+        (Some(key), None) => Some(format!("{NLINK_PREFIX}{key}")),
+        (None, Some(comment)) => Some(comment.to_string()),
+        (None, None) => None,
+    }
+}
+
+/// Encode a rule's key and comment as a libnftnl-compatible TLV `userdata`
+/// payload, suitable for `NFTA_RULE_USERDATA`. `Ok(None)` when the rule has
+/// neither.
 ///
-/// The output is suitable for direct use as the `NFTA_RULE_USERDATA`
-/// attribute payload.
-pub(crate) fn encode_nlink_comment(key: &str) -> Option<Vec<u8>> {
-    let body = format!("{NLINK_PREFIX}{key}\0");
+/// A comment longer than `NFTNL_UDATA_COMMENT_MAXLEN` (127 bytes and the
+/// NUL) is an error. It used to be dropped silently, installing a keyed
+/// rule with no identity — which the declarative diff then re-added on
+/// every apply.
+pub(crate) fn encode_rule_userdata(
+    key: Option<&str>,
+    comment: Option<&str>,
+) -> crate::netlink::error::Result<Option<Vec<u8>>> {
+    let Some(text) = rule_comment_text(key, comment) else {
+        return Ok(None);
+    };
+    if text.contains('\0') {
+        return Err(crate::netlink::error::Error::InvalidMessage(
+            "rule comment contains a NUL byte".into(),
+        ));
+    }
+    let body = format!("{text}\0");
     let body_bytes = body.as_bytes();
     if body_bytes.len() > NFTNL_UDATA_COMMENT_MAXLEN {
-        return None;
+        return Err(crate::netlink::error::Error::InvalidMessage(format!(
+            "rule comment `{text}` is {} bytes; the kernel keeps at most {} \
+             (`nlink:<key>` and a following comment share that space)",
+            text.len(),
+            NFTNL_UDATA_COMMENT_MAXLEN - 1,
+        )));
     }
     let mut tlv = Vec::with_capacity(2 + body_bytes.len());
     tlv.push(NFTNL_UDATA_RULE_COMMENT);
     tlv.push(body_bytes.len() as u8);
     tlv.extend_from_slice(body_bytes);
-    Some(tlv)
+    Ok(Some(tlv))
+}
+
+/// Encode a bare key, as `nlink:<key>`. Test convenience.
+#[cfg(test)]
+pub(crate) fn encode_nlink_comment(key: &str) -> Option<Vec<u8>> {
+    encode_rule_userdata(Some(key), None).ok().flatten()
 }
 
 /// Walk a libnftnl-formatted TLV `userdata` payload and extract
@@ -73,9 +108,19 @@ pub(crate) fn encode_nlink_comment(key: &str) -> Option<Vec<u8>> {
 ///
 /// [`RuleInfo::userdata_raw`]: super::types::RuleInfo
 pub(crate) fn parse_nlink_comment(userdata: &[u8]) -> Option<String> {
-    parse_comment(userdata)?
-        .strip_prefix(NLINK_PREFIX)
-        .map(str::to_string)
+    let text = parse_comment(userdata)?;
+    let rest = text.strip_prefix(NLINK_PREFIX)?;
+    // The key runs to the first space; what follows is a human comment.
+    Some(rest.split_once(' ').map_or(rest, |(key, _)| key).to_string())
+}
+
+/// The human part of an nlink comment — what follows `nlink:<key> ` — or
+/// the whole text for a comment nlink did not write.
+pub(crate) fn human_comment(comment_text: &str) -> Option<&str> {
+    match comment_text.strip_prefix(NLINK_PREFIX) {
+        Some(rest) => rest.split_once(' ').map(|(_, human)| human),
+        None => Some(comment_text),
+    }
 }
 
 /// The rule comment exactly as `nft list ruleset` shows it — the
