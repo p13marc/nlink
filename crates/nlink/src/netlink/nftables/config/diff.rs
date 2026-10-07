@@ -3,9 +3,10 @@
 use std::collections::{HashMap, HashSet};
 
 use super::types::{
-    DeclaredChain, DeclaredFlowtable, DeclaredRule, DeclaredSet, DeclaredTable, NftablesConfig,
-    SetElementMode,
+    DeclaredChain, DeclaredFlowtable, DeclaredObject, DeclaredRule, DeclaredSet, DeclaredTable,
+    NftablesConfig, SetElementMode,
 };
+use super::super::object::{ObjectConfig, ObjectType};
 use super::super::expr::RuleExpr;
 use super::super::types::{
     ChainInfo, Family, Hook, Policy, Priority, RuleInfo, Set, SetElement, SetInfo,
@@ -210,6 +211,9 @@ pub enum MoveReason {
     /// It references a set this diff deletes and recreates; the kernel
     /// refuses to delete a set a rule is bound to (`EBUSY`).
     BoundToRecreatedSet,
+    /// It uses a named object this diff deletes and recreates (a limit
+    /// whose rate changed); same `EBUSY`.
+    BoundToRecreatedObject,
     /// It is installed out of declared order.
     Reorder,
 }
@@ -315,12 +319,13 @@ pub struct NftablesDiff {
     pub rules_to_replace: Vec<(String, Family, String, RuleHandle, DeclaredRule)>,
     /// Declared rules to delete and put back in place.
     ///
-    /// A set whose key type or flags changed is deleted and recreated,
-    /// and the kernel refuses to delete a set a rule still references
-    /// (`EBUSY`). So every keyed rule referencing it is deleted ahead of
-    /// the set and re-added after the new one, immediately before the next
-    /// rule in the chain that survives, so chain order — which is policy —
-    /// is unchanged.
+    /// Rules installed out of declared order move to their place. And a set
+    /// whose key type or flags changed is deleted and recreated, as is a
+    /// limit object whose rate changed; the kernel refuses to delete either
+    /// while a rule still references it (`EBUSY`). So every keyed rule
+    /// referencing it is deleted ahead of it and re-added after the new
+    /// one, immediately before the next rule in the chain that survives, so
+    /// chain order — which is policy — is unchanged.
     pub rules_to_move: Vec<RuleMove>,
     /// Flowtables to add.
     pub flowtables_to_add: Vec<DeclaredFlowtable>,
@@ -347,6 +352,14 @@ pub struct NftablesDiff {
     /// Set elements to remove: the kernel elements not declared (full
     /// element reconcile).
     pub set_elements_to_remove: Vec<SetElementsChange>,
+    /// Stateful objects to create — (owning table, owning family, object).
+    /// A changed limit is here and in `objects_to_delete`.
+    pub objects_to_add: Vec<(String, Family, DeclaredObject)>,
+    /// Quotas whose size or `over` changed — updated in place, keeping
+    /// what they have used.
+    pub objects_to_update: Vec<(String, Family, DeclaredObject)>,
+    /// Stateful objects to delete — (table, family, name, type).
+    pub objects_to_delete: Vec<(String, Family, String, ObjectType)>,
 }
 
 impl NftablesDiff {
@@ -369,6 +382,9 @@ impl NftablesDiff {
             && self.sets_to_update.is_empty()
             && self.set_elements_to_add.is_empty()
             && self.set_elements_to_remove.is_empty()
+            && self.objects_to_add.is_empty()
+            && self.objects_to_update.is_empty()
+            && self.objects_to_delete.is_empty()
     }
 
     /// Total number of changes (sum of all add/delete counts).
@@ -390,6 +406,9 @@ impl NftablesDiff {
             + self.sets_to_update.len()
             + self.set_elements_to_add.len()
             + self.set_elements_to_remove.len()
+            + self.objects_to_add.len()
+            + self.objects_to_update.len()
+            + self.objects_to_delete.len()
     }
 
     /// Render a one-line-per-change human summary. Useful for
@@ -455,6 +474,7 @@ impl NftablesDiff {
             let key = m.rule.handle_key().unwrap_or("<anonymous>");
             let why = match m.reason {
                 MoveReason::BoundToRecreatedSet => "its set is recreated",
+                MoveReason::BoundToRecreatedObject => "its object is recreated",
                 MoveReason::Reorder => "out of declared order",
             };
             lines.push(format!(
@@ -487,6 +507,15 @@ impl NftablesDiff {
         }
         for (tbl, fam, name) in &self.sets_to_delete {
             lines.push(format!("- set {fam:?} {tbl}/{name}"));
+        }
+        for (tbl, fam, o) in &self.objects_to_add {
+            lines.push(format!("+ object {fam:?} {tbl}/{} {:?}", o.name(), o.config()));
+        }
+        for (tbl, fam, o) in &self.objects_to_update {
+            lines.push(format!("~ object {fam:?} {tbl}/{} {:?}", o.name(), o.config()));
+        }
+        for (tbl, fam, name, ty) in &self.objects_to_delete {
+            lines.push(format!("- object {fam:?} {tbl}/{name} ({ty:?})"));
         }
         for (tbl, fam, s) in &self.sets_to_update {
             let mut what = format!(
@@ -591,7 +620,11 @@ fn set_has_drifted(declared: &DeclaredSet, current: &SetInfo) -> bool {
     declared.key_type().type_id() != current.key_type
         || declared.key_type().len() != current.key_len
         || declared.wire_flags() != current.flags
-        || declared.data_type().map(|d| d.type_id()) != current.data_type
+        || declared.data_type().and_then(|d| d.type_id()) != current.data_type
+        || declared.data_type().and_then(|d| match d {
+            super::super::SetDataType::Object(object_type) => Some(*object_type as u32),
+            _ => None,
+        }) != current.object_type
         // The kernel sizes a verdict itself; only a value's length is ours.
         || declared
             .data_type()
@@ -612,6 +645,46 @@ fn references_set(rule: &RuleInfo, set: &str) -> bool {
         }
         _ => false,
     })
+}
+
+/// Does `rule` use the named object `name` of `object_type`?
+fn references_object(rule: &RuleInfo, name: &str, object_type: ObjectType) -> bool {
+    use super::super::expr::ObjrefExpr;
+    rule.expressions().iter().any(|e| {
+        matches!(
+            e,
+            RuleExpr::Objref(ObjrefExpr::Named { object_type: t, name: n })
+                if n == name && *t == object_type
+        )
+    })
+}
+
+/// What a declared object asks the diff to do with the kernel's.
+#[derive(Debug, PartialEq, Eq)]
+enum ObjectChange {
+    Nothing,
+    /// Update in place (a quota).
+    Update,
+    /// Delete and create (a limit, or a state nlink cannot read).
+    Recreate,
+}
+
+/// Compare a declared object's configuration with the kernel's — never its
+/// live state. A limit's burst of 0 is the kernel's 5, as the writer sends
+/// it.
+fn object_change(declared: &ObjectConfig, current: Option<ObjectConfig>) -> ObjectChange {
+    let normalize = |config: ObjectConfig| match config {
+        ObjectConfig::Limit(mut limit) if limit.burst == 0 => {
+            limit.burst = 5;
+            ObjectConfig::Limit(limit)
+        }
+        other => other,
+    };
+    match current.map(normalize) {
+        Some(current) if current == normalize(declared.clone()) => ObjectChange::Nothing,
+        Some(ObjectConfig::Quota(_)) => ObjectChange::Update,
+        _ => ObjectChange::Recreate,
+    }
 }
 
 /// Does a declared rule match the kernel rule with its key? Bodies are
@@ -988,6 +1061,13 @@ impl NftablesConfig {
                         });
                     }
                 }
+                for o in declared.objects() {
+                    diff.objects_to_add.push((
+                        declared.name().to_string(),
+                        declared.family(),
+                        o.clone(),
+                    ));
+                }
                 continue;
             }
 
@@ -1074,6 +1154,62 @@ impl NftablesConfig {
                         declared.name().to_string(),
                         f.name.clone(),
                     ));
+                }
+            }
+
+            // Stateful objects: identity is (name, type). Only their
+            // configuration is compared — a counter's counts and a quota's
+            // consumption are live state.
+            let current_objects = conn
+                .list_objects_in(declared.name(), declared.family())
+                .await?;
+            let mut recreated_objects: Vec<(String, ObjectType)> = Vec::new();
+            for o in declared.objects() {
+                let ty = o.config().object_type();
+                let current = current_objects
+                    .iter()
+                    .find(|c| c.name == o.name() && c.object_type() == Some(ty));
+                let push = |list: &mut Vec<(String, Family, DeclaredObject)>| {
+                    list.push((declared.name().to_string(), declared.family(), o.clone()));
+                };
+                match current.map(|c| object_change(o.config(), c.state.config())) {
+                    None => push(&mut diff.objects_to_add),
+                    Some(ObjectChange::Nothing) => {}
+                    Some(ObjectChange::Update) => push(&mut diff.objects_to_update),
+                    Some(ObjectChange::Recreate) => {
+                        diff.objects_to_delete.push((
+                            declared.name().to_string(),
+                            declared.family(),
+                            o.name().to_string(),
+                            ty,
+                        ));
+                        push(&mut diff.objects_to_add);
+                        recreated_objects.push((o.name().to_string(), ty));
+                    }
+                }
+            }
+            for c in &current_objects {
+                let declared_here = declared
+                    .objects()
+                    .iter()
+                    .any(|o| o.name() == c.name && Some(o.config().object_type()) == c.object_type());
+                if declared_here {
+                    continue;
+                }
+                match c.object_type() {
+                    Some(ty) => diff.objects_to_delete.push((
+                        declared.name().to_string(),
+                        declared.family(),
+                        c.name.clone(),
+                        ty,
+                    )),
+                    // A kind nlink cannot name it cannot delete either; say
+                    // so rather than leave it unmentioned.
+                    None => tracing::warn!(
+                        table = %declared.name(),
+                        object = %c.name,
+                        "an object of a type nlink does not model is left in a managed table",
+                    ),
                 }
             }
 
@@ -1216,7 +1352,11 @@ impl NftablesConfig {
                 let slots: Vec<super::rules::KernelSlot> = kernel_rules
                     .iter()
                     .map(|kr| {
-                        let bound = recreated.iter().any(|set| references_set(kr, set));
+                        let bound_set = recreated.iter().any(|set| references_set(kr, set));
+                        let bound_object = recreated_objects
+                            .iter()
+                            .any(|(name, ty)| references_object(kr, name, *ty));
+                        let bound = bound_set || bound_object;
                         if bound && kr.key.is_none() && !exclusive {
                             // nlink cannot put it back, so the DELSET will be
                             // EBUSY. Say why before it happens.
@@ -1224,15 +1364,20 @@ impl NftablesConfig {
                                 table = %declared.name(),
                                 chain = chain_name,
                                 handle = kr.handle,
-                                "a rule nlink does not manage references a set this diff \
-                                 recreates; the apply will fail with EBUSY until that rule \
+                                "a rule nlink does not manage references a set or object this \
+                                 diff recreates; the apply will fail with EBUSY until that rule \
                                  is removed",
                             );
                         }
                         super::rules::KernelSlot {
                             handle: kr.handle,
                             key: kr.key.clone(),
-                            forced: bound && kr.key.is_some(),
+                            forced: match (kr.key.is_some(), bound_set, bound_object) {
+                                (false, ..) => None,
+                                (true, true, _) => Some(MoveReason::BoundToRecreatedSet),
+                                (true, false, true) => Some(MoveReason::BoundToRecreatedObject),
+                                (true, false, false) => None,
+                            },
                         }
                     })
                     .collect();
@@ -1685,6 +1830,7 @@ mod tests {
             gc_interval: None,
             data_type: None,
             data_len: None,
+            object_type: None,
         }
     }
 
@@ -1759,6 +1905,22 @@ mod tests {
         assert!(!set_has_drifted(&declared, &current), "the kernel sizes a verdict");
         current.data_type = Some(19);
         assert!(set_has_drifted(&declared, &current));
+    }
+
+    #[test]
+    fn objects_compare_configuration_only_and_only_a_quota_updates_in_place() {
+        use super::super::super::expr::{LimitExpr, QuotaExpr};
+        use super::super::super::types::LimitUnit;
+        let quota = |b| ObjectConfig::Quota(QuotaExpr::new(b));
+        assert_eq!(object_change(&quota(10), Some(quota(10))), ObjectChange::Nothing);
+        assert_eq!(object_change(&quota(10), Some(quota(20))), ObjectChange::Update);
+        let limit = |r, burst| ObjectConfig::Limit(LimitExpr::packets(r, LimitUnit::Second).burst(burst));
+        // Burst 0 is sent, stored and dumped as the kernel's 5.
+        assert_eq!(object_change(&limit(10, 0), Some(limit(10, 5))), ObjectChange::Nothing);
+        assert_eq!(object_change(&limit(10, 5), Some(limit(20, 5))), ObjectChange::Recreate);
+        // A state nlink cannot read is recreated rather than trusted.
+        assert_eq!(object_change(&limit(10, 5), None), ObjectChange::Recreate);
+        assert_eq!(object_change(&ObjectConfig::Counter, Some(ObjectConfig::Counter)), ObjectChange::Nothing);
     }
 
     #[test]

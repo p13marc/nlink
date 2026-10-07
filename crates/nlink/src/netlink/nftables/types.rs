@@ -512,6 +512,7 @@ impl std::ops::BitOrAssign for CtState {
 }
 
 /// Rate limit unit.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LimitUnit {
@@ -1883,6 +1884,67 @@ impl Rule {
         self
     }
 
+    /// Count with, or check against, the named object of `object_type` —
+    /// `counter name "web"`, `quota name "q"`, `limit name "l"`. Created
+    /// with [`Connection::add_object`](crate::netlink::Connection::add_object)
+    /// or declared on the table.
+    pub fn objref(mut self, object_type: super::object::ObjectType, name: &str) -> Self {
+        self.exprs.push(
+            super::expr::ObjrefExpr::Named {
+                object_type,
+                name: name.to_string(),
+            }
+            .into(),
+        );
+        self
+    }
+
+    /// `counter name "<name>"`: count into a named counter, shared by every
+    /// rule that names it.
+    pub fn counter_named(self, name: &str) -> Self {
+        self.objref(super::object::ObjectType::Counter, name)
+    }
+
+    /// `quota name "<name>"`: match against a named quota.
+    pub fn quota_named(self, name: &str) -> Self {
+        self.objref(super::object::ObjectType::Quota, name)
+    }
+
+    /// `limit name "<name>"`: match against a named limit.
+    pub fn limit_named(self, name: &str) -> Self {
+        self.objref(super::object::ObjectType::Limit, name)
+    }
+
+    /// `counter name <field> map @<map>` (and the same for quotas and
+    /// limits): use the object the object map holds for `field` — one
+    /// counter per address, ipset's per-element `counters`. A packet whose
+    /// field is not in the map stops at this rule.
+    pub fn objref_from_map(mut self, field: PacketField, map: &str) -> Self {
+        self.push_field_load(field);
+        self.exprs.push(
+            super::expr::ObjrefExpr::Map {
+                sreg: Register::R0,
+                map: map.to_string(),
+            }
+            .into(),
+        );
+        self
+    }
+
+    /// `quota until <bytes> bytes`: match until the rule has passed `bytes`
+    /// bytes. The quota is the rule's own; share one with
+    /// [`quota_named`](Self::quota_named).
+    pub fn quota_until(mut self, bytes: u64) -> Self {
+        self.exprs.push(super::expr::QuotaExpr::new(bytes).into());
+        self
+    }
+
+    /// `quota over <bytes> bytes`: match once the rule has passed `bytes`.
+    pub fn quota_over(mut self, bytes: u64) -> Self {
+        self.exprs.push(super::expr::QuotaExpr::new(bytes).over().into());
+        self
+    }
+
     /// Look the key in `R0` up in `map`, loading what it maps to into `dreg`.
     fn push_map_lookup(&mut self, map: &str, dreg: Register) {
         self.exprs.push(
@@ -2804,15 +2866,21 @@ pub enum SetDataType {
     Verdict,
     /// A value of this type: a mark, a class id, an address, …
     Value(SetKeyType),
+    /// A named stateful object of this type: an object map, whose elements
+    /// name counters, quotas or limits ([`SetElement::object`]).
+    Object(super::object::ObjectType),
 }
 
 impl SetDataType {
     /// `NFTA_SET_DATA_TYPE`: `NFT_DATA_VERDICT` for a verdict map, else the
     /// value type's nft datatype id (the kernel stores it opaquely).
-    pub(crate) fn type_id(&self) -> u32 {
+    /// An object map has no data type; it is `NFT_SET_OBJECT` with
+    /// `NFTA_SET_OBJ_TYPE` instead.
+    pub(crate) fn type_id(&self) -> Option<u32> {
         match self {
-            Self::Verdict => super::NFT_DATA_VERDICT,
-            Self::Value(value) => value.type_id(),
+            Self::Verdict => Some(super::NFT_DATA_VERDICT),
+            Self::Value(value) => Some(value.type_id()),
+            Self::Object(_) => None,
         }
     }
 
@@ -2820,8 +2888,16 @@ impl SetDataType {
     /// itself.
     pub(crate) fn len(&self) -> Option<u32> {
         match self {
-            Self::Verdict => None,
+            Self::Verdict | Self::Object(_) => None,
             Self::Value(value) => Some(value.len()),
+        }
+    }
+
+    /// The flag that makes a set this kind of map.
+    pub(crate) fn flag(&self) -> SetFlags {
+        match self {
+            Self::Object(_) => SetFlags::OBJECT,
+            _ => SetFlags::MAP,
         }
     }
 }
@@ -2858,11 +2934,13 @@ impl Set {
         }
     }
 
-    /// Make this a map (`NFT_SET_MAP`): each element maps its key to a
-    /// value of `data` — [`SetElement::value`] or [`SetElement::verdict`].
-    /// Read it with [`Rule::set_mark_from_map`], [`Rule::vmap`] and the like.
+    /// Make this a map (`NFT_SET_MAP`, or `NFT_SET_OBJECT` for an object
+    /// map): each element maps its key to `data` — [`SetElement::value`],
+    /// [`SetElement::verdict`] or [`SetElement::object`]. Read it with
+    /// [`Rule::set_mark_from_map`], [`Rule::vmap`],
+    /// [`Rule::objref_from_map`] and the like.
     pub fn map(mut self, data: SetDataType) -> Self {
-        self.flags |= SetFlags::MAP;
+        self.flags |= data.flag();
         self.data_type = Some(data);
         self
     }
@@ -2976,10 +3054,9 @@ impl Set {
     /// a map, whatever its flags say.
     pub(crate) fn wire_flags(&self) -> SetFlags {
         let flags = wire_flags(&self.key_type, self.flags);
-        if self.data_type.is_some() {
-            flags | SetFlags::MAP
-        } else {
-            flags
+        match &self.data_type {
+            Some(data) => flags | data.flag(),
+            None => flags,
         }
     }
 
@@ -3187,6 +3264,13 @@ impl SetElement {
         self
     }
 
+    /// Map this element's key to the stateful object `name`, in an object
+    /// map: `SetElement::ipv4(a).object("web")`.
+    pub fn object(mut self, name: &str) -> Self {
+        self.data = Some(SetElementData::Object(name.to_string()));
+        self
+    }
+
     /// A class id element (`meta priority`), as [`Rule::set_priority`]
     /// writes it: host order.
     pub fn classid(class: crate::TcHandle) -> Self {
@@ -3297,7 +3381,8 @@ impl SetElement {
                     set.name
                 )));
             }
-            (Some(SetDataType::Verdict), Some(SetElementData::Verdict(_))) => {}
+            (Some(SetDataType::Verdict), Some(SetElementData::Verdict(_)))
+            | (Some(SetDataType::Object(_)), Some(SetElementData::Object(_))) => {}
             (Some(SetDataType::Value(ty)), Some(SetElementData::Value(value)))
                 if value.len() == ty.len() as usize => {}
             (Some(want), Some(got)) => {
@@ -3392,6 +3477,8 @@ pub struct SetInfo {
     pub data_type: Option<u32>,
     /// A map's data length in bytes (`NFTA_SET_DATA_LEN`).
     pub data_len: Option<u32>,
+    /// An object map's object type (`NFTA_SET_OBJ_TYPE`, `NFT_OBJECT_*`).
+    pub object_type: Option<u32>,
 }
 
 /// The inclusive range a prefix covers: `addr` with its host bits cleared,

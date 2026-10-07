@@ -39,6 +39,7 @@ pub mod connection;
 pub mod events;
 pub mod expr;
 pub(crate) mod interval;
+pub mod object;
 pub mod resync;
 pub mod types;
 pub(crate) mod userdata;
@@ -47,6 +48,7 @@ pub use connection::{RawMessage, Transaction};
 pub use events::{GenInfo, NftablesEvent, NftablesGroup, SetElementsEvent, NFNLGRP_NFTABLES};
 pub use resync::{nftables_snapshot, BorrowedResyncStream, OwnedResyncStream};
 pub use expr::*;
+pub use object::{Object, ObjectConfig, ObjectInfo, ObjectState, ObjectType};
 pub use types::*;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
@@ -86,6 +88,11 @@ pub const NFT_MSG_GETSETELEM: u8 = 13;
 pub const NFT_MSG_DELSETELEM: u8 = 14;
 pub const NFT_MSG_NEWGEN: u8 = 15;
 pub const NFT_MSG_GETGEN: u8 = 16;
+pub const NFT_MSG_NEWOBJ: u8 = 18;
+pub const NFT_MSG_GETOBJ: u8 = 19;
+pub const NFT_MSG_DELOBJ: u8 = 20;
+/// `NFT_MSG_GETOBJ_RESET` — read an object's state and reset it, atomically.
+pub const NFT_MSG_GETOBJ_RESET: u8 = 21;
 
 // Generation (`NFT_MSG_NEWGEN`, sent after every committed batch)
 pub const NFTA_GEN_ID: u16 = 1;
@@ -253,6 +260,20 @@ pub const NFTA_QUOTA_FLAGS: u16 = 2;
 pub const NFTA_QUOTA_CONSUMED: u16 = 4;
 /// `NFT_QUOTA_F_INV` — `quota over`: match once the quota is used up.
 pub const NFT_QUOTA_F_INV: u32 = 1;
+
+// Stateful object attributes (NFT_MSG_*OBJ).
+pub const NFTA_OBJ_TABLE: u16 = 1;
+pub const NFTA_OBJ_NAME: u16 = 2;
+pub const NFTA_OBJ_TYPE: u16 = 3;
+pub const NFTA_OBJ_DATA: u16 = 4;
+pub const NFTA_OBJ_USE: u16 = 5;
+pub const NFTA_OBJ_HANDLE: u16 = 6;
+
+// objref expression attributes.
+pub const NFTA_OBJREF_IMM_TYPE: u16 = 1;
+pub const NFTA_OBJREF_IMM_NAME: u16 = 2;
+pub const NFTA_OBJREF_SET_SREG: u16 = 3;
+pub const NFTA_OBJREF_SET_NAME: u16 = 4;
 /// `NFT_QUOTA_F_DEPLETED` — set by the kernel once the quota is used up;
 /// live state, never part of a declaration.
 pub const NFT_QUOTA_F_DEPLETED: u32 = 2;
@@ -391,6 +412,8 @@ pub const NFTA_SET_TIMEOUT: u16 = 11;
 /// `NFTA_SET_GC_INTERVAL` — the garbage-collection interval in
 /// milliseconds (u32), kept as given.
 pub const NFTA_SET_GC_INTERVAL: u16 = 12;
+/// `NFTA_SET_OBJ_TYPE` — an object map's object type (`NFT_OBJECT_*`).
+pub const NFTA_SET_OBJ_TYPE: u16 = 15;
 pub const NFTA_SET_HANDLE: u16 = 16;
 
 // Set element attributes

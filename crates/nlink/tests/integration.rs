@@ -202,6 +202,11 @@ mod nftables_timeouts;
 #[path = "integration/nftables_maps.rs"]
 mod nftables_maps;
 
+// Named counters, quotas and limits, object maps; declared objects keep
+// their live state across applies.
+#[path = "integration/nftables_objects.rs"]
+mod nftables_objects;
+
 // #191-#194, #218 — psched tick conversion. The unit tests pin the
 // bytes nlink emits; these pin that the *kernel* accepts them and
 // reads back what we wrote. Needed because the pre-fix writer and

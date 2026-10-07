@@ -1,5 +1,6 @@
 //! nftables connection implementation for `Connection<Nftables>`.
 
+use super::object::{Object, ObjectInfo, ObjectType};
 use super::{expr::write_expressions, types::*, *};
 use crate::netlink::{
     attr::AttrIter,
@@ -713,6 +714,101 @@ impl Connection<Nftables> {
         self.nft_request_ack(builder).await
     }
 
+    // =========================================================================
+    // Stateful objects
+    // =========================================================================
+
+    /// Create a named stateful object — a counter, quota or limit that rules
+    /// use by name ([`Rule::counter_named`] …) and object maps pick per
+    /// packet. `EEXIST` if one of that name and type is already there.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "add_object"))]
+    pub async fn add_object(&self, object: &Object) -> Result<()> {
+        let mut builder = MessageBuilder::new(
+            nft_msg_type(NFT_MSG_NEWOBJ),
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        );
+        append_object(&mut builder, object);
+        self.nft_request_ack(builder).await
+    }
+
+    /// Delete the object `name` of `object_type` — objects are named per
+    /// type, so the kernel needs both. `EBUSY` while a rule or set element
+    /// uses it.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_object"))]
+    pub async fn del_object(
+        &self,
+        table: &str,
+        name: &str,
+        object_type: ObjectType,
+        family: Family,
+    ) -> Result<()> {
+        let mut builder =
+            MessageBuilder::new(nft_msg_type(NFT_MSG_DELOBJ), NLM_F_REQUEST | NLM_F_ACK);
+        append_object_key(&mut builder, table, name, object_type, family);
+        self.nft_request_ack(builder).await
+    }
+
+    /// List the stateful objects in a family.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "list_objects"))]
+    pub async fn list_objects(&self, family: Family) -> Result<Vec<ObjectInfo>> {
+        self.dump_objects(NFT_MSG_GETOBJ, family, None).await
+    }
+
+    /// List the stateful objects in one table.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "list_objects_in"))]
+    pub async fn list_objects_in(&self, table: &str, family: Family) -> Result<Vec<ObjectInfo>> {
+        self.dump_objects(NFT_MSG_GETOBJ, family, Some(table)).await
+    }
+
+    /// Read the object `name` of `object_type` and reset it in one step —
+    /// a counter back to zero, a quota's consumption to none — returning
+    /// its state from just before (`nft reset counter`). Nothing is lost
+    /// between the read and the reset. `None` if there is no such object.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "reset_object"))]
+    pub async fn reset_object(
+        &self,
+        table: &str,
+        name: &str,
+        object_type: ObjectType,
+        family: Family,
+    ) -> Result<Option<ObjectInfo>> {
+        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_GETOBJ_RESET), NLM_F_REQUEST);
+        append_object_key(&mut builder, table, name, object_type, family);
+        match self.nft_get_one(builder).await {
+            Ok((family_byte, payload)) => {
+                let family = Family::from_u8(family_byte).unwrap_or(family);
+                Ok(super::object::parse_object(&payload, family))
+            }
+            Err(e) if e.is_not_found() => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn dump_objects(
+        &self,
+        msg: u8,
+        family: Family,
+        table: Option<&str>,
+    ) -> Result<Vec<ObjectInfo>> {
+        let mut builder = MessageBuilder::new(nft_msg_type(msg), NLM_F_REQUEST | NLM_F_DUMP);
+        builder.append(&NfGenMsg::new(family));
+        if let Some(table) = table {
+            builder.append_attr_str(NFTA_OBJ_TABLE, table);
+        }
+        let responses = self.nft_dump(builder).await?;
+        let mut objects: Vec<ObjectInfo> = responses
+            .iter()
+            .filter_map(|(family_byte, payload)| {
+                let family = Family::from_u8(*family_byte).unwrap_or(family);
+                super::object::parse_object(payload, family)
+            })
+            .collect();
+        if let Some(table) = table {
+            objects.retain(|o| o.table == table);
+        }
+        Ok(objects)
+    }
+
     /// List the current elements of a named set.
     ///
     /// Dumps `NFT_MSG_GETSETELEM` for `(table, set, family)` and
@@ -981,6 +1077,40 @@ impl Connection<Nftables> {
         builder.set_pid(self.socket().pid());
 
         self.send_batch(vec![builder.finish()]).await
+    }
+
+    /// Send a single (non-dump) GET and return its one reply:
+    /// `(nfgen_family, payload after the nfgenmsg)`.
+    async fn nft_get_one(&self, mut builder: MessageBuilder) -> Result<(u8, Vec<u8>)> {
+        let _guard = self.lock_request().await;
+        let seq = self.socket().next_seq();
+        builder.set_seq(seq);
+        builder.set_pid(self.socket().pid());
+        self.socket().send(&builder.finish()).await?;
+
+        self.with_timeout(async {
+            loop {
+                let data: Vec<u8> = self.socket().recv_msg().await?;
+                for msg_result in MessageIter::new(&data) {
+                    let (header, payload) = msg_result?;
+                    match classify(header, payload, seq) {
+                        Classification::SkipSeq | Classification::Ack => continue,
+                        Classification::Error(e) => return Err(e),
+                        Classification::Done(result) => {
+                            result?;
+                            return Err(Error::InvalidMessage(
+                                "nftables: GET answered with NLMSG_DONE and no reply".into(),
+                            ));
+                        }
+                        Classification::Data { payload } if payload.len() >= NFGENMSG_HDRLEN => {
+                            return Ok((payload[0], payload[NFGENMSG_HDRLEN..].to_vec()));
+                        }
+                        Classification::Data { .. } => continue,
+                    }
+                }
+            }
+        })
+        .await
     }
 
     /// Subscribe to one or more nftables multicast groups.
@@ -1388,6 +1518,7 @@ pub(crate) fn parse_set(data: &[u8], family: Family) -> Option<SetInfo> {
         gc_interval: None,
         data_type: None,
         data_len: None,
+        object_type: None,
     };
 
     for (attr_type, payload) in AttrIter::new(data) {
@@ -1397,6 +1528,9 @@ pub(crate) fn parse_set(data: &[u8], family: Family) -> Option<SetInfo> {
             }
             NFTA_SET_DATA_LEN if payload.len() >= 4 => {
                 set.data_len = Some(u32::from_be_bytes(payload[..4].try_into().unwrap()));
+            }
+            NFTA_SET_OBJ_TYPE if payload.len() >= 4 => {
+                set.object_type = Some(u32::from_be_bytes(payload[..4].try_into().unwrap()));
             }
             NFTA_SET_TIMEOUT if payload.len() >= 8 => {
                 let ms = u64::from_be_bytes(payload[..8].try_into().unwrap());
@@ -1909,6 +2043,43 @@ impl Transaction {
         self
     }
 
+    /// Add an object creation to the batch. Mirrors
+    /// [`Connection::<Nftables>::add_object`](Connection).
+    pub fn add_object(mut self, object: &Object) -> Self {
+        let mut builder =
+            MessageBuilder::new(nft_msg_type(NFT_MSG_NEWOBJ), NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL);
+        append_object(&mut builder, object);
+        self.messages.push(builder.finish());
+        self
+    }
+
+    /// Update an existing object in place: `NFT_MSG_NEWOBJ` without
+    /// `NLM_F_EXCL`. Only a quota can be updated — its size and `over`
+    /// change and its consumption stays. For a counter or a limit the
+    /// kernel accepts the message and changes **nothing** (they have no
+    /// update operation), so a changed limit must be deleted and created.
+    pub fn update_object(mut self, object: &Object) -> Self {
+        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_NEWOBJ), NLM_F_REQUEST);
+        append_object(&mut builder, object);
+        self.messages.push(builder.finish());
+        self
+    }
+
+    /// Add an object deletion to the batch. Mirrors
+    /// [`Connection::<Nftables>::del_object`](Connection).
+    pub fn del_object(
+        mut self,
+        table: &str,
+        name: &str,
+        object_type: ObjectType,
+        family: Family,
+    ) -> Self {
+        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_DELOBJ), NLM_F_REQUEST);
+        append_object_key(&mut builder, table, name, object_type, family);
+        self.messages.push(builder.finish());
+        self
+    }
+
     /// Add a message nlink does not model — see [`RawMessage`]. It goes in
     /// the batch like any other operation and commits atomically with it.
     pub fn raw(mut self, message: RawMessage) -> Self {
@@ -1975,12 +2146,46 @@ impl RawMessage {
     }
 }
 
+/// Append an object's table, name, type and data: a NEWOBJ's attributes.
+fn append_object(builder: &mut MessageBuilder, object: &Object) {
+    append_object_key(
+        builder,
+        &object.table,
+        &object.name,
+        object.config.object_type(),
+        object.family,
+    );
+    super::object::append_object_data(builder, &object.config);
+}
+
+/// Append what names an object: nfgenmsg, table, name and type.
+fn append_object_key(
+    builder: &mut MessageBuilder,
+    table: &str,
+    name: &str,
+    object_type: ObjectType,
+    family: Family,
+) {
+    builder.append(&NfGenMsg::new(family));
+    builder.append_attr_str(NFTA_OBJ_TABLE, table);
+    builder.append_attr_str(NFTA_OBJ_NAME, name);
+    builder.append_attr_u32_be(NFTA_OBJ_TYPE, object_type as u32);
+}
+
 /// Append a map's data type, and its data length for a value map.
 fn append_set_data_type(builder: &mut MessageBuilder, set: &Set) {
-    if let Some(data) = &set.data_type {
-        builder.append_attr_u32_be(NFTA_SET_DATA_TYPE, data.type_id());
-        if let Some(len) = data.len() {
-            builder.append_attr_u32_be(NFTA_SET_DATA_LEN, len);
+    match &set.data_type {
+        None => {}
+        Some(SetDataType::Object(object_type)) => {
+            builder.append_attr_u32_be(NFTA_SET_OBJ_TYPE, *object_type as u32);
+        }
+        Some(data) => {
+            if let Some(type_id) = data.type_id() {
+                builder.append_attr_u32_be(NFTA_SET_DATA_TYPE, type_id);
+            }
+            if let Some(len) = data.len() {
+                builder.append_attr_u32_be(NFTA_SET_DATA_LEN, len);
+            }
         }
     }
 }
@@ -2054,7 +2259,7 @@ pub(crate) fn check_elements(set: &Set, elements: &[SetElement], write: ElementW
     // elements nlink cannot check.
     if write == ElementWrite::Add
         && !elements.is_empty()
-        && set.flags.contains(SetFlags::MAP)
+        && (set.flags.contains(SetFlags::MAP) || set.flags.contains(SetFlags::OBJECT))
         && set.data_type.is_none()
     {
         return Err(Error::InvalidMessage(format!(

@@ -249,9 +249,10 @@ pub(crate) struct KernelSlot {
     pub(crate) handle: u64,
     /// nlink key, or `None` for a rule nlink did not write.
     pub(crate) key: Option<String>,
-    /// Bound to a set or object this diff recreates, so it has to be
-    /// deleted ahead of it and put back afterwards.
-    pub(crate) forced: bool,
+    /// Why it has to move whatever the order: bound to a set or object
+    /// this diff recreates, so it is deleted ahead of it and put back
+    /// afterwards.
+    pub(crate) forced: Option<MoveReason>,
 }
 
 /// A declared rule to insert, in emission order.
@@ -323,7 +324,7 @@ pub(crate) fn plan_chain(
     let mut candidates: Vec<(usize, usize)> = matched
         .iter()
         .enumerate()
-        .filter_map(|(i, pos)| pos.filter(|&p| !kernel[p].forced).map(|p| (p, i)))
+        .filter_map(|(i, pos)| pos.filter(|&p| kernel[p].forced.is_none()).map(|p| (p, i)))
         .collect();
     candidates.sort_unstable();
     let order: Vec<usize> = candidates.iter().map(|&(_, i)| i).collect();
@@ -341,10 +342,9 @@ pub(crate) fn plan_chain(
     let mut append = Vec::new();
     for i in (0..declared_keys.len()).filter(|i| !staying.contains(i)) {
         let from = matched[i].map(|p| kernel[p].handle);
-        let reason = match matched[i] {
-            Some(p) if kernel[p].forced => MoveReason::BoundToRecreatedSet,
-            _ => MoveReason::Reorder,
-        };
+        let reason = matched[i]
+            .and_then(|p| kernel[p].forced)
+            .unwrap_or(MoveReason::Reorder);
         let next = staying_sorted.iter().find(|&&j| j > i);
         let prev = staying_sorted.iter().rev().find(|&&j| j < i);
         let insert = |placement| PlannedInsert {
@@ -426,7 +426,7 @@ mod tests {
             .map(|(i, k)| KernelSlot {
                 handle: 100 + i as u64,
                 key: k.map(str::to_string),
-                forced: false,
+                forced: None,
             })
             .collect()
     }
@@ -513,7 +513,7 @@ mod tests {
     #[test]
     fn a_forced_rule_moves_back_to_its_place() {
         let mut k = slots(&[Some("a"), Some("b"), Some("c")]);
-        k[1].forced = true;
+        k[1].forced = Some(MoveReason::BoundToRecreatedSet);
         let p = plan(&k, &["a", "b", "c"]);
         assert_eq!(
             p.inserts,

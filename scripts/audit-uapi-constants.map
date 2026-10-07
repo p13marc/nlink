@@ -110,6 +110,7 @@ Register = NFT_REG
 ExthdrOp = NFT_EXTHDR_OP
     TcpOpt -> TCPOPT
 DynsetOp = NFT_DYNSET_OP
+ObjectType = NFT_OBJECT
 MetaKey = NFT_META
     IifName -> IIFNAME
     OifName -> OIFNAME
