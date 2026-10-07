@@ -190,6 +190,32 @@ All notable changes to this project will be documented in this file.
   `RuleInfo` were already non-exhaustive, so the dump-side info types now
   agree — and the next attribute worth reading back is no longer a break.
 
+- **A TBF without a queue limit is refused instead of installed as a
+  black hole (#398).** `tbf_change()` only gives the qdisc a queue when
+  `limit > 0`; with 0 its child stays `noop_qdisc` and every packet is
+  dropped. `TbfConfig::new()` defaults the limit to 0 and
+  `QdiscBuilder::tbf(rate, burst)` documented `limit_bytes` as "`None`
+  leaves the kernel default" — there is none — so the shape most callers
+  write first, a rate and a burst, installed fine, diffed clean, and
+  passed no traffic (a ping through it: 0 sent, 7 dropped).
+  `TbfConfig::write_options` now returns `Error::InvalidMessage("tbf: a
+  queue limit is required …")`, as tc(8) refuses a tbf with neither
+  `limit` nor `latency`; this covers `add_qdisc`/`replace_qdisc`, the
+  declarative `apply` and `nlink-tc`. A declared TBF without a limit also
+  no longer matches a live one, so a black hole an older version
+  installed is reported and refused rather than left looking converged.
+  An error rather than a derived default because any default is a latency
+  budget nlink would be choosing for the caller; `TbfConfig::limit` now
+  suggests `burst + rate * latency`.
+
+- **A link declared in JSON/YAML without `state` is left as it is, not
+  taken down (#399).** `LinkState`'s `Default` was `Down`, which is what
+  serde filled in for an omitted `state`, while `LinkBuilder` defaulted to
+  `Unchanged`. So `{"name": "eth0", "link-type": "physical", "mtu": 9000}`
+  set the MTU and took the NIC down, on every apply. `LinkState::default()`
+  is now `Unchanged`, matching the builder; the JSON schema's default
+  follows. Write `"state": "down"` where down is meant.
+
 ### Fixed
 
 - **Declared rule order is enforced (#387).** `apply` used to append every
@@ -268,6 +294,143 @@ All notable changes to this project will be documented in this file.
   kernel links a positioned rule after the one named — nft's `add rule ...
   position`. The doc said "before", which was only true before #195. Doc
   fixed and pinned by an integration test.
+
+- **A declared TBF was replaced on every apply at almost any rate but
+  1 mbit (#400).** The diff compared the declared burst and mtu with the
+  dump exactly, on the belief that the kernel echoes the byte-valued
+  `TCA_TBF_BURST`/`PBURST`. It does not: `tbf_change()` keeps both buckets
+  as nanoseconds and `tbf_dump()` reports them only as psched ticks, so
+  the bytes read back are a tick round trip of the ones sent — 32768 at
+  10 gbit comes back as 32719, the default mtu of 1514 at 100 mbit as
+  1513. 1 mbit, the only rate any test used, happens to survive the trip.
+  The comparison now pushes the declared values through the same trip
+  (`psched_l2t_ns` with the kernel's mult/shift, `>> PSCHED_SHIFT`, then
+  `tc_calc_xmitsize`). Found by `network_config_echo.rs`, which applies a
+  rate sweep from 512 kbit to 10 gbit twice: 36 of its 48 shapes failed.
+
+- **A declared fq_codel `quantum` below 256 or sfq `limit` above 16256 was
+  replaced on every apply (#401).** The kernel clamps both on the way in —
+  `fq_codel_change()` stores `max(256, quantum)`, `sfq_change()` caps the
+  limit at depth × flows (127 × 128 by default) — and the diff compared
+  the dump against the unclamped declaration. It now compares against the
+  value the kernel keeps; the builder setters say so.
+
+- **Editing a declared HTB root's `default_class` failed with a bare
+  `EINVAL` on every apply (#402).** `sch_htb` has no change operation, so
+  the replace the diff asks for is refused by the kernel ("Change operation
+  not supported by specified qdisc"), and the diff can never converge. The
+  only way through is delete + add, which takes every class and filter
+  under the root with it — a tree `NetworkConfig` does not describe — so
+  nlink still will not do that implicitly. `apply` now checks for a live
+  HTB root first and returns `Error::NotSupported` naming the live and
+  declared `default_class`/`r2q` and what to do (delete the qdisc and
+  apply again). **Behaviour change:** that error used to be
+  `is_invalid_argument()`; it is now `is_not_supported()`.
+
+- **An IPv6 route declared with host bits in its destination was re-added
+  on every apply (#403).** `ip6_route_info_create` masks the destination
+  to its prefix, so `2001:db8::1/48` is installed and dumped as
+  `2001:db8::/48`, and the diff — keyed on the declared address — never
+  found it. Under purge the same mismatch would have scheduled the route
+  for removal too. Both now key on the destination the kernel stores.
+  IPv4 is unchanged: the kernel refuses host bits there ("Invalid prefix
+  for given prefix length"), and the apply still reports that.
+
+- **An IPv6 route declared with `.metric(0)` was re-added on every apply
+  (#404).** #366 taught the diff that an IPv6 route with no metric comes
+  back as 1024, but `ip6_route_info_create` tests the value, not its
+  presence (`if (cfg->fc_metric == 0) cfg->fc_metric =
+  IP6_RT_PRIO_USER`), so an explicit 0 is stored as 1024 too and still
+  compared as 0. IPv4 keeps 0.
+
+- **Changing a declared route's type (unicast → blackhole, unreachable,
+  prohibit, or back) never reached the kernel (#405).** The diff matched a
+  declared route against the live ones by gateway, device and metric, not
+  type, and a blackhole has neither gateway nor device — so the old
+  unicast route "matched", the diff came back empty, and the kernel kept
+  forwarding traffic the config said to drop. The type is compared now;
+  `apply` and the diff share one `DeclaredRouteType → rtm_type` mapping.
+
+- **A bond port declared `.up()` could not be applied (#406).**
+  `bond_enslave()` refuses a port that is up ("Device can not be enslaved
+  while up", `EPERM`), and `apply` brought a new link up before enslaving
+  it — so every `.link("eth1", |l| l.dummy().master("bond0").up())`
+  failed, as did moving an up link into a bond. Links are now enslaved
+  first, and a port is taken down before joining a bond, as ifenslave and
+  systemd-networkd do. A bond also opens the port it enslaves and closes
+  the one it releases, so across a bond master change the diff now
+  re-asserts the declared state: a port released from a bond and declared
+  up used to come back down, and one declared down came back up.
+
+- **A bridge declared with an MTU took its ports' MTU instead (#407).**
+  `br_add_if()`/`br_del_if()` move a bridge to its smallest port's MTU
+  unless `BROPT_MTU_SET_BY_USER` is set, and only an `RTM_SETLINK` MTU
+  change sets it — not the `IFLA_MTU` a bridge is created with (or that
+  `ip link add … mtu` gives it). So `br0` declared at 9000 with a 1500
+  port came out at 1500, and the next apply had to fix it. After the link
+  changes, `apply` now re-asserts the declared MTU of every bridge whose
+  ports changed, which also marks it user-set so it stays.
+
+- **A MAC declared on a VRF or netkit link was dropped at creation
+  (#408).** #275 wired `LinkBuilder::address` into the create path of
+  vxlan/macvlan/ifb; the VRF, netkit and ovpn arms still ignored it, so the
+  link came up with a random MAC and the next diff set the declared one —
+  a second apply to converge. `VrfLink::address` and `NetkitLink::address`
+  are new and the create path passes the MAC. ovpn and netkit in L3 mode
+  (netkit's default) have no hardware address — the kernel answers a bare
+  `EOPNOTSUPP` — so declaring one there is now refused up front naming the
+  reason (for netkit: declare `NetkitMode::L2`), instead of being dropped
+  and then failing on every later apply.
+
+- **IPv6 addresses on a link set down, or moved into or out of a VRF or a
+  bond, were lost until the next apply (#409).** Those link changes make
+  the kernel drop the link's IPv6 addresses (`addrconf_ifdown()`, unless
+  `keep_addr_on_down`); the diff had read them as present before the link
+  step ran, so the address step skipped them and the second diff found
+  them missing. The diff now schedules the declared IPv6 addresses of
+  such a link for (re-)adding; an add that finds the address still there
+  is reported as already present, not counted and not an error. A purging
+  apply's removal of an address the link change already flushed is
+  likewise "already absent" rather than `EADDRNOTAVAIL`.
+
+- **A `WireguardConfig` private key that was not already X25519-clamped
+  was rewritten on every apply (#410).** The kernel clamps the key before
+  storing it (`curve25519_clamp_secret`) and `GET_DEVICE` returns the
+  clamped copy, so any key that did not come from `wg genkey` — a derived
+  one, a test constant — never matched. The diff now compares the declared
+  key clamped.
+
+- **A `WireguardConfig` peer with a preshared key was rewritten on every
+  apply (#411).** The diff marked a declared PSK dirty unconditionally, on
+  the premise that it cannot be read back — the same premise #281 found
+  false for the private key: `GET_DEVICE` (which needs `CAP_NET_ADMIN`)
+  returns every peer's `WGPEER_A_PRESHARED_KEY`. It is compared with the
+  dump now; a declared all-zero key means "none", as in the kernel.
+
+- **A `WireguardConfig` peer whose allowed IPs had host bits or a
+  duplicate was rewritten on every apply (#412).** The kernel's
+  allowed-IPs trie stores each prefix once, masked to its length, so
+  `AllowedIPs = 10.201.0.9/16` (as wg-quick profiles often carry) dumps as
+  `10.201.0.0/16` and a repeated prefix dumps once. The diff now compares
+  the masked, de-duplicated sets.
+
+- **Removing a rule from a `PerHostLimiter` made `reconcile()` fail with
+  `EBUSY` (#413).** Its stale-filter pass only treats priorities `1..=n`
+  and `101..=100+n` as its own, with `n` the *new* rule count, so the
+  removed rule's filter read as unmanaged and stayed bound to the class
+  being deleted — "HTB class in use". `PerPeerImpairer` had this fixed in
+  #291 by ordering; here the filter was never selected at all. A filter
+  whose target class is one the reconcile removes is now removed first,
+  whatever its priority.
+
+- **A `WireguardConfig` declaring `listen_port(0)` moved the device to a
+  new random port on every apply (#414).** 0 asks the kernel to pick a
+  port, and `GET_DEVICE` then reports the port it picked, never 0 — so the
+  diff never matched, and writing 0 again makes `set_port()` bind another
+  random port, so the device's peers lost it on each run. A declared 0 is
+  now satisfied by any port. A device-level write also sends only the
+  fields that differ, so a private-key change no longer rewrites (and
+  rebinds) an unchanged port.
 
 ## [0.29.0] - 2026-10-01
 
