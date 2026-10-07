@@ -535,19 +535,16 @@ impl LimitUnit {
 /// nftables register, encoding the kernel UAPI register IDs from
 /// `include/uapi/linux/netfilter/nf_tables.h`.
 ///
-/// The discriminants are the wire-format values; `as u32` produces
-/// the bytes the kernel stores and dumps. `#[repr(u32)]` locks the
-/// memory layout so the cast is well-defined and the size doesn't
-/// shift if the compiler changes its discriminant-sizing heuristics.
+/// The data area is 16 32-bit words. `R0..=R3` (`NFT_REG_1..=NFT_REG_4`)
+/// name it in 16-byte steps; `Reg32_00..=Reg32_15` (`NFT_REG32_00..=15`)
+/// name each word, which is what a concatenation needs: `ip saddr . tcp
+/// dport` loads the address into word 0 and the port into word 1.
 ///
-/// `R0..=R3` map to `NFT_REG_1..=NFT_REG_4` (16-byte registers).
-/// Earlier nlink used `NFT_REG32_00..=NFT_REG32_03` (`8..=11`,
-/// 4-byte registers); the kernel canonicalizes a 4-byte transfer
-/// through either form to the 16-byte register's first 4 bytes,
-/// so the stored/dumped register ID is always the `NFT_REG_x`
-/// form. Submitting in the canonical form keeps
-/// `NftablesConfig::diff` from flagging unchanged rules as
-/// `to_replace` purely on register-ID divergence. Plan 178.
+/// A word that starts a 16-byte register has two names — `Reg32_04` is
+/// `R1` — and the kernel dumps the 16-byte one. nlink writes that form too
+/// ([`Self::wire`]), so a rule built with either name reads back as it was
+/// written and `NftablesConfig::diff` does not see a change that is only a
+/// register's spelling (Plan 178).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 #[non_exhaustive]
@@ -562,13 +559,86 @@ pub enum Register {
     R2 = 3,
     /// `NFT_REG_4`. Fourth 16-byte data register.
     R3 = 4,
+    /// `NFT_REG32_00`, word 0 — the first word of `R0`.
+    Reg32_00 = 8,
+    /// `NFT_REG32_01`, word 1.
+    Reg32_01 = 9,
+    /// `NFT_REG32_02`, word 2.
+    Reg32_02 = 10,
+    /// `NFT_REG32_03`, word 3.
+    Reg32_03 = 11,
+    /// `NFT_REG32_04`, word 4 — the first word of `R1`.
+    Reg32_04 = 12,
+    /// `NFT_REG32_05`, word 5.
+    Reg32_05 = 13,
+    /// `NFT_REG32_06`, word 6.
+    Reg32_06 = 14,
+    /// `NFT_REG32_07`, word 7.
+    Reg32_07 = 15,
+    /// `NFT_REG32_08`, word 8 — the first word of `R2`.
+    Reg32_08 = 16,
+    /// `NFT_REG32_09`, word 9.
+    Reg32_09 = 17,
+    /// `NFT_REG32_10`, word 10.
+    Reg32_10 = 18,
+    /// `NFT_REG32_11`, word 11.
+    Reg32_11 = 19,
+    /// `NFT_REG32_12`, word 12 — the first word of `R3`.
+    Reg32_12 = 20,
+    /// `NFT_REG32_13`, word 13.
+    Reg32_13 = 21,
+    /// `NFT_REG32_14`, word 14.
+    Reg32_14 = 22,
+    /// `NFT_REG32_15`, word 15 — the last.
+    Reg32_15 = 23,
 }
 
 impl Register {
-    /// Reverse mapping for the expression decoder (#164). `None` for
-    /// values outside the 16-byte register set (the kernel also has
-    /// 4-byte `NFT_REG32_*` numbers 8..=20, which the write path never
-    /// emits — decodes of such rules demote to `RuleExpr::Unknown`).
+    const WORDS: [Self; 16] = [
+        Self::Reg32_00,
+        Self::Reg32_01,
+        Self::Reg32_02,
+        Self::Reg32_03,
+        Self::Reg32_04,
+        Self::Reg32_05,
+        Self::Reg32_06,
+        Self::Reg32_07,
+        Self::Reg32_08,
+        Self::Reg32_09,
+        Self::Reg32_10,
+        Self::Reg32_11,
+        Self::Reg32_12,
+        Self::Reg32_13,
+        Self::Reg32_14,
+        Self::Reg32_15,
+    ];
+
+    /// The register starting at 32-bit word `word` of the data area, in
+    /// the form the kernel dumps: `R0` for word 0, `Reg32_01` for word 1,
+    /// `R1` for word 4. `None` past word 15.
+    pub fn word(word: usize) -> Option<Self> {
+        Self::WORDS.get(word).map(|r| r.canonical())
+    }
+
+    /// The kernel's spelling of this register: a word that starts a
+    /// 16-byte register is named by that register.
+    pub fn canonical(self) -> Self {
+        match self {
+            Self::Reg32_00 => Self::R0,
+            Self::Reg32_04 => Self::R1,
+            Self::Reg32_08 => Self::R2,
+            Self::Reg32_12 => Self::R3,
+            other => other,
+        }
+    }
+
+    /// The register number nlink writes: [`Self::canonical`]'s.
+    pub fn wire(self) -> u32 {
+        self.canonical() as u32
+    }
+
+    /// Reverse mapping for the expression decoder (#164). `None` for a
+    /// number that is not a register.
     pub(crate) fn from_u32(v: u32) -> Option<Self> {
         match v {
             0 => Some(Self::Verdict),
@@ -576,6 +646,7 @@ impl Register {
             2 => Some(Self::R1),
             3 => Some(Self::R2),
             4 => Some(Self::R3),
+            8..=23 => Self::WORDS.get((v - 8) as usize).copied(),
             _ => None,
         }
     }
@@ -1740,53 +1811,69 @@ impl Rule {
         self
     }
 
+    /// Match a concatenation of fields against a set of concatenated keys:
+    /// `ip daddr . udp dport @s` — ipset `hash:ip,port`, and with an
+    /// interval set `hash:net,port`. The set's key type must be
+    /// `SetKeyType::Concat` of the fields' [`PacketField::key_type`]s, in
+    /// the same order.
+    ///
+    /// Each field's protocol guard comes first, once, then each field is
+    /// loaded into the 32-bit word after the previous one, as `nft` lays a
+    /// concatenation out. The data area holds 16 words (64 bytes — four
+    /// IPv6 addresses); a longer concatenation is refused by the kernel.
+    pub fn match_concat_in_set(mut self, fields: &[PacketField], set: &str) -> Self {
+        self.push_concat_load(fields);
+        self.exprs
+            .push(super::expr::LookupExpr::new(set, Register::R0).into());
+        self
+    }
+
+    /// Match a concatenation of fields when it is *not* in a set:
+    /// `ip saddr . tcp dport != @s`.
+    pub fn match_concat_not_in_set(mut self, fields: &[PacketField], set: &str) -> Self {
+        self.push_concat_load(fields);
+        self.exprs.push(
+            super::expr::LookupExpr::new(set, Register::R0)
+                .invert()
+                .into(),
+        );
+        self
+    }
+
     /// Load `field` into `R0` behind the protocol guard `nft` emits for it.
     pub(crate) fn push_field_load(&mut self, field: PacketField) {
-        let payload = |base, offset, len| Expr::Payload {
-            dreg: Register::R0,
-            base,
-            offset,
-            len,
-        };
-        let load = match field {
-            PacketField::Ip4Saddr | PacketField::Ip4Daddr => {
-                self.push_nfproto_ipv4();
-                let offset = if field == PacketField::Ip4Saddr { 12 } else { 16 };
-                payload(PayloadBase::Network, offset, 4)
+        self.push_field_guard(field);
+        self.exprs.push(field.load(Register::R0));
+    }
+
+    /// Load `fields` into consecutive 32-bit words from `R0`, behind their
+    /// guards — each distinct guard once, all before the first load, since
+    /// a guard compares in `R0` too.
+    fn push_concat_load(&mut self, fields: &[PacketField]) {
+        let mut guarded = Vec::new();
+        for field in fields {
+            let guard = field.guard();
+            if guard.is_some() && !guarded.contains(&guard) {
+                guarded.push(guard);
+                self.push_field_guard(*field);
             }
-            PacketField::Ip6Saddr | PacketField::Ip6Daddr => {
-                self.push_nfproto_ipv6();
-                let offset = if field == PacketField::Ip6Saddr { 8 } else { 24 };
-                payload(PayloadBase::Network, offset, 16)
-            }
-            PacketField::TcpSport | PacketField::TcpDport => {
-                self.push_meta_eq(MetaKey::L4Proto, IPPROTO_TCP);
-                let offset = if field == PacketField::TcpSport { 0 } else { 2 };
-                payload(PayloadBase::Transport, offset, 2)
-            }
-            PacketField::UdpSport | PacketField::UdpDport => {
-                self.push_meta_eq(MetaKey::L4Proto, IPPROTO_UDP);
-                let offset = if field == PacketField::UdpSport { 0 } else { 2 };
-                payload(PayloadBase::Transport, offset, 2)
-            }
-            PacketField::Mark => Expr::Meta {
-                dreg: Register::R0,
-                key: MetaKey::Mark,
-            },
-            PacketField::Iif => Expr::Meta {
-                dreg: Register::R0,
-                key: MetaKey::Iif,
-            },
-            PacketField::Oif => Expr::Meta {
-                dreg: Register::R0,
-                key: MetaKey::Oif,
-            },
-            PacketField::L4Proto => Expr::Meta {
-                dreg: Register::R0,
-                key: MetaKey::L4Proto,
-            },
-        };
-        self.exprs.push(load);
+        }
+        let mut word = 0;
+        for field in fields {
+            // Past the last word, ask for the last one: the kernel then
+            // refuses the load as out of range rather than nlink building a
+            // rule that matches something else.
+            let dreg = Register::word(word).unwrap_or(Register::Reg32_15);
+            self.exprs.push(field.load(dreg));
+            word += field.len().div_ceil(4) as usize;
+        }
+    }
+
+    /// The protocol guard `nft` puts in front of `field`.
+    fn push_field_guard(&mut self, field: PacketField) {
+        if let Some((key, value)) = field.guard() {
+            self.push_meta_eq(key, value);
+        }
     }
 
     /// Match layer-4 protocol (e.g., TCP=6, UDP=17, ICMP=1).
@@ -2369,6 +2456,8 @@ pub enum SetKeyType {
     /// Concatenated key — packs multiple component keys
     /// end-to-end with 4-byte alignment between. Common in
     /// rules like `ip saddr . tcp dport`. Plan 198 §2.1.
+    /// Build elements with [`SetElement::concat`] and match with
+    /// [`Rule::match_concat_in_set`].
     ///
     /// The vector MUST be non-empty (a single-component concat
     /// is degenerate but accepted — the kernel treats it as a
@@ -2419,9 +2508,23 @@ impl SetKeyType {
     }
 
     /// Whether keys of this type are stored in host byte order (a mark, an
-    /// ifindex), so their bytes do not compare as numbers.
+    /// ifindex), so their bytes do not compare as numbers. For a
+    /// concatenation: whether any of its fields is.
     pub fn is_host_order(&self) -> bool {
-        matches!(self, Self::Mark | Self::IfIndex)
+        match self {
+            Self::Mark | Self::IfIndex => true,
+            Self::Concat(parts) => parts.iter().any(Self::is_host_order),
+            _ => false,
+        }
+    }
+
+    /// The fields of a concatenation of two or more keys; `None` for any
+    /// other key type (a one-field `Concat` is that field).
+    pub(crate) fn concat_fields(&self) -> Option<&[SetKeyType]> {
+        match self {
+            Self::Concat(parts) if parts.len() > 1 => Some(parts),
+            _ => None,
+        }
     }
 
     /// Key length in bytes, for `NFTA_SET_KEY_LEN`.
@@ -2484,6 +2587,41 @@ pub enum PacketField {
 }
 
 impl PacketField {
+    /// The `meta` comparison `nft` guards this field with: `meta nfproto`
+    /// for an address, `meta l4proto` for a port.
+    fn guard(self) -> Option<(MetaKey, u8)> {
+        match self {
+            Self::Ip4Saddr | Self::Ip4Daddr => Some((MetaKey::NfProto, NFPROTO_IPV4)),
+            Self::Ip6Saddr | Self::Ip6Daddr => Some((MetaKey::NfProto, NFPROTO_IPV6)),
+            Self::TcpSport | Self::TcpDport => Some((MetaKey::L4Proto, IPPROTO_TCP)),
+            Self::UdpSport | Self::UdpDport => Some((MetaKey::L4Proto, IPPROTO_UDP)),
+            Self::Mark | Self::Iif | Self::Oif | Self::L4Proto => None,
+        }
+    }
+
+    /// The expression loading this field into `dreg`.
+    fn load(self, dreg: Register) -> Expr {
+        let payload = |base, offset, len| Expr::Payload {
+            dreg,
+            base,
+            offset,
+            len,
+        };
+        let meta = |key| Expr::Meta { dreg, key };
+        match self {
+            Self::Ip4Saddr => payload(PayloadBase::Network, 12, 4),
+            Self::Ip4Daddr => payload(PayloadBase::Network, 16, 4),
+            Self::Ip6Saddr => payload(PayloadBase::Network, 8, 16),
+            Self::Ip6Daddr => payload(PayloadBase::Network, 24, 16),
+            Self::TcpSport | Self::UdpSport => payload(PayloadBase::Transport, 0, 2),
+            Self::TcpDport | Self::UdpDport => payload(PayloadBase::Transport, 2, 2),
+            Self::Mark => meta(MetaKey::Mark),
+            Self::Iif => meta(MetaKey::Iif),
+            Self::Oif => meta(MetaKey::Oif),
+            Self::L4Proto => meta(MetaKey::L4Proto),
+        }
+    }
+
     /// The key type a set must have to hold this field.
     pub fn key_type(self) -> SetKeyType {
         match self {
@@ -2599,6 +2737,11 @@ impl Set {
     /// compare as numbers: addresses, ports, protocols. A mark or ifindex
     /// key is host-order (`nft` byte-swaps it first), which nlink does not
     /// model, so their elements are refused.
+    ///
+    /// With a [`SetKeyType::Concat`] key every field is a range of its own
+    /// — `10.0.0.0/24 . 1000-2000`, ipset `hash:net,port` — and the set is
+    /// also flagged `NFT_SET_CONCAT` with its field lengths, which is what
+    /// selects the kernel's `pipapo` backend.
     pub fn interval(mut self) -> Self {
         self.flags |= SetFlags::INTERVAL;
         self
@@ -2632,6 +2775,34 @@ impl Set {
     pub fn flags(mut self, flags: SetFlags) -> Self {
         self.flags = flags;
         self
+    }
+
+    /// The flags as written; see [`wire_flags`].
+    pub(crate) fn wire_flags(&self) -> SetFlags {
+        wire_flags(&self.key_type, self.flags)
+    }
+
+    /// See [`ranges_per_field`].
+    pub(crate) fn ranges_per_field(&self) -> bool {
+        ranges_per_field(&self.key_type, self.flags)
+    }
+}
+
+/// Whether a set holds ranges as a start and an inclusive end in one
+/// element (`NFTA_SET_ELEM_KEY_END`) — an interval set of concatenated keys
+/// — rather than as a start and an end-plus-one element.
+pub(crate) fn ranges_per_field(key_type: &SetKeyType, flags: SetFlags) -> bool {
+    flags.contains(SetFlags::INTERVAL) && key_type.concat_fields().is_some()
+}
+
+/// A set's flags as written: an interval set of concatenated keys also
+/// carries `NFT_SET_CONCAT`, which the kernel requires alongside the field
+/// lengths, and reports back.
+pub(crate) fn wire_flags(key_type: &SetKeyType, flags: SetFlags) -> SetFlags {
+    if ranges_per_field(key_type, flags) {
+        flags | SetFlags::CONCAT
+    } else {
+        flags
     }
 }
 
@@ -2757,6 +2928,34 @@ impl SetElement {
         Ok(Self::range(start, end))
     }
 
+    /// An element of a set of concatenated keys ([`SetKeyType::Concat`]):
+    /// one element per field, in the key's order — `10.0.0.1 . 443` is
+    /// `concat([SetElement::ipv4(a), SetElement::port(443)])`. Each field is
+    /// padded to 4 bytes, as the kernel lays the fields out in registers.
+    ///
+    /// In an interval set ([`Set::interval`]) a field can be a range or a
+    /// prefix of its own: `concat([SetElement::ipv4_prefix(net, 24)?,
+    /// SetElement::port_range(1000, 2000)])` is `10.0.0.0/24 . 1000-2000`.
+    /// Only the parts' keys and range ends are used.
+    pub fn concat(parts: impl IntoIterator<Item = SetElement>) -> Self {
+        let parts: Vec<SetElement> = parts.into_iter().collect();
+        let padded = |bytes: &[u8]| {
+            let mut field = bytes.to_vec();
+            field.resize(bytes.len().next_multiple_of(4), 0);
+            field
+        };
+        let key: Vec<u8> = parts.iter().flat_map(|p| padded(&p.key)).collect();
+        let key_end: Vec<u8> = parts
+            .iter()
+            .flat_map(|p| padded(p.key_end.as_deref().unwrap_or(&p.key)))
+            .collect();
+        // Ranges that are each one value make a single key.
+        Self {
+            key_end: (key_end != key).then_some(key_end),
+            ..Self::new(key)
+        }
+    }
+
     /// The key bytes (the range start, for a range).
     pub fn key(&self) -> &[u8] {
         &self.key
@@ -2799,9 +2998,11 @@ impl SetElement {
     }
 
     /// What the declarative diff compares: the key, the range end and
-    /// catch-all-ness — never live state such as the expiration.
+    /// catch-all-ness — never live state such as the expiration. A range
+    /// `[k, k]` is the key `k`: that is how it is written, and read back.
     pub(crate) fn identity(&self) -> (&[u8], Option<&[u8]>, bool) {
-        (&self.key, self.key_end.as_deref(), self.is_catchall())
+        let end = self.key_end.as_deref().filter(|end| *end != self.key);
+        (&self.key, end, self.is_catchall())
     }
 
     /// Validate this element against the set it is written to. Only what
@@ -2824,11 +3025,23 @@ impl SetElement {
                     set.name
                 )));
             }
-            if end.len() != self.key.len() || *end < self.key {
-                return Err(Error::InvalidMessage(format!(
-                    "set {}: range end {end:02x?} is not at or after its start {:02x?}",
-                    set.name, self.key
-                )));
+            // A concatenation is a range per field, so each field's end
+            // must be at or after its start; the key as a whole proves
+            // nothing (`10.0.0.9 . 100` to `10.0.0.10 . 50` sorts fine).
+            let widths: Vec<usize> = match set.key_type.concat_fields() {
+                Some(fields) => fields.iter().map(|f| f.len().next_multiple_of(4) as usize).collect(),
+                None => vec![self.key.len()],
+            };
+            let mut at = 0;
+            for width in widths {
+                let field = at..at + width;
+                at += width;
+                if end.len() != self.key.len() || end[field.clone()] < self.key[field] {
+                    return Err(Error::InvalidMessage(format!(
+                        "set {}: range end {end:02x?} is not at or after its start {:02x?}",
+                        set.name, self.key
+                    )));
+                }
             }
         }
         if self.data.is_some() {
@@ -2852,6 +3065,14 @@ impl SetElement {
             flags,
             ..Self::new(key)
         }
+    }
+
+    /// With the range end read back (`NFTA_SET_ELEM_KEY_END`). An end equal
+    /// to the key is a single key — what `nft` writes for one — so it reads
+    /// back as one.
+    pub(crate) fn with_key_end(mut self, key_end: Option<Vec<u8>>) -> Self {
+        self.key_end = key_end.filter(|end| *end != self.key);
+        self
     }
 }
 
@@ -2958,6 +3179,98 @@ mod tests {
         // Invalid name surfaces as Err rather than a bad wire frame.
         assert!(Chain::new("", "input").is_err());
         assert!(Chain::new("filter", "a\0b").is_err());
+    }
+
+    // -------- Registers and concatenations --------
+
+    #[test]
+    fn a_word_that_starts_a_16_byte_register_is_written_as_that_register() {
+        assert_eq!(Register::Reg32_00.wire(), 1); // NFT_REG_1
+        assert_eq!(Register::Reg32_04.wire(), 2); // NFT_REG_2
+        assert_eq!(Register::Reg32_01.wire(), 9); // NFT_REG32_01
+        assert_eq!(Register::word(0), Some(Register::R0));
+        assert_eq!(Register::word(1), Some(Register::Reg32_01));
+        assert_eq!(Register::word(4), Some(Register::R1));
+        assert_eq!(Register::word(15), Some(Register::Reg32_15));
+        assert_eq!(Register::word(16), None);
+        for v in 8..=23 {
+            assert_eq!(Register::from_u32(v).map(|r| r as u32), Some(v));
+        }
+        assert_eq!(Register::from_u32(5), None);
+        assert_eq!(Register::from_u32(24), None);
+    }
+
+    #[test]
+    fn concatenated_elements_pad_each_field_to_a_register_word() {
+        let e = SetElement::concat([
+            SetElement::ipv4(Ipv4Addr::new(10, 0, 0, 1)),
+            SetElement::port(443),
+        ]);
+        assert_eq!(e.key(), [10, 0, 0, 1, 0x01, 0xbb, 0, 0]);
+        assert!(!e.is_range());
+        // One ranged field makes the element a range; the single field's
+        // end is its key.
+        let e = SetElement::concat([
+            SetElement::ipv4(Ipv4Addr::new(10, 0, 0, 1)),
+            SetElement::port_range(80, 90),
+        ]);
+        assert_eq!(e.key(), [10, 0, 0, 1, 0, 80, 0, 0]);
+        assert_eq!(e.key_end(), Some(&[10, 0, 0, 1, 0, 90, 0, 0][..]));
+        // Ranges of one value each are a single key.
+        let e = SetElement::concat([
+            SetElement::ipv4_range(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 1)),
+            SetElement::port_range(80, 80),
+        ]);
+        assert!(!e.is_range());
+        assert_eq!(
+            SetElement::range(vec![1], vec![1]).identity(),
+            SetElement::new(vec![1]).identity()
+        );
+        // A MAC is 6 bytes, padded to 8 in a concatenation.
+        let e = SetElement::concat([SetElement::ether([1, 2, 3, 4, 5, 6]), SetElement::inet_proto(6)]);
+        assert_eq!(e.key(), [1, 2, 3, 4, 5, 6, 0, 0, 6, 0, 0, 0]);
+        let key = SetKeyType::Concat(vec![SetKeyType::EtherAddr, SetKeyType::InetProto]);
+        assert_eq!(e.key().len(), key.len() as usize);
+    }
+
+    #[test]
+    fn a_concat_lookup_guards_first_then_loads_word_by_word() {
+        use super::super::expr::{Expr, LookupExpr};
+        let rule = Rule::new("t", "c").match_concat_in_set(
+            &[PacketField::Ip6Saddr, PacketField::TcpDport, PacketField::TcpSport],
+            "s",
+        );
+        let guard = |key, value| {
+            [
+                Expr::Meta {
+                    dreg: Register::R0,
+                    key,
+                },
+                Expr::Cmp {
+                    sreg: Register::R0,
+                    op: CmpOp::Eq,
+                    data: vec![value],
+                },
+            ]
+        };
+        let load = |dreg, base, offset, len| Expr::Payload {
+            dreg,
+            base,
+            offset,
+            len,
+        };
+        let mut want: Vec<Expr> = Vec::new();
+        want.extend(guard(MetaKey::NfProto, NFPROTO_IPV6));
+        // One l4proto guard for both TCP ports.
+        want.extend(guard(MetaKey::L4Proto, IPPROTO_TCP));
+        // 16 bytes in words 0-3, then a port in word 4 (`R1`, as the kernel
+        // dumps it) and one in word 5.
+        want.push(load(Register::R0, PayloadBase::Network, 8, 16));
+        want.push(load(Register::R1, PayloadBase::Transport, 2, 2));
+        want.push(load(Register::Reg32_05, PayloadBase::Transport, 0, 2));
+        want.push(LookupExpr::new("s", Register::R0).into());
+        // `Expr` has no `PartialEq`; its `Debug` form names every field.
+        assert_eq!(format!("{:?}", rule.exprs), format!("{want:?}"));
     }
 
     // -------- SetKeyType wire contract (#207) --------

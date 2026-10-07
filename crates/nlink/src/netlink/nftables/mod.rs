@@ -374,6 +374,13 @@ pub const NFTA_SET_DESC: u16 = 9;
 /// `NFTA_SET_DESC_SIZE` — inside the `NFTA_SET_DESC` nest: maximum
 /// number of elements (`nft add set ... { size N; }`).
 pub const NFTA_SET_DESC_SIZE: u16 = 1;
+/// `NFTA_SET_DESC_CONCAT` — inside `NFTA_SET_DESC`: one `NFTA_LIST_ELEM`
+/// per field of a concatenated key, each carrying `NFTA_SET_FIELD_LEN`.
+pub const NFTA_SET_DESC_CONCAT: u16 = 2;
+/// `NFTA_SET_FIELD_LEN` — a concatenation field's length **in bytes**. The
+/// UAPI header documents it as bits; `nft_set_desc_concat_parse` reads it
+/// as bytes (`DIV_ROUND_UP(len, sizeof(u32))` registers, at most `U8_MAX`).
+pub const NFTA_SET_FIELD_LEN: u16 = 1;
 pub const NFTA_SET_ID: u16 = 10;
 pub const NFTA_SET_HANDLE: u16 = 16;
 
@@ -385,6 +392,9 @@ pub const NFTA_SET_ELEM_LIST_ELEMENTS: u16 = 3;
 pub const NFTA_SET_ELEM_KEY: u16 = 1;
 pub const NFTA_SET_ELEM_DATA: u16 = 2;
 pub const NFTA_SET_ELEM_FLAGS: u16 = 3;
+/// `NFTA_SET_ELEM_KEY_END` — the inclusive end of a range, in the same
+/// element: how an interval set of concatenated keys stores one.
+pub const NFTA_SET_ELEM_KEY_END: u16 = 10;
 /// `NFT_SET_ELEM_INTERVAL_END` — an interval set's range-end element.
 pub const NFT_SET_ELEM_INTERVAL_END: u32 = 1;
 /// `NFT_SET_ELEM_CATCHALL` — the catch-all (`*`) element.

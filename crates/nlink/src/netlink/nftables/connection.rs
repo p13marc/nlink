@@ -608,7 +608,7 @@ impl Connection<Nftables> {
         builder.append_attr_str(NFTA_SET_NAME, &set.name);
         builder.append_attr_u32_be(NFTA_SET_KEY_TYPE, set.key_type.type_id());
         builder.append_attr_u32_be(NFTA_SET_KEY_LEN, set.key_type.len());
-        builder.append_attr_u32_be(NFTA_SET_FLAGS, set.flags.bits());
+        builder.append_attr_u32_be(NFTA_SET_FLAGS, set.wire_flags().bits());
         append_set_desc(&mut builder, &set);
         // Set ID (arbitrary, used for referencing in same batch)
         builder.append_attr_u32_be(NFTA_SET_ID, 1);
@@ -737,12 +737,16 @@ impl Connection<Nftables> {
         for (_family_byte, payload) in &responses {
             parse_set_elements(payload, &mut elements);
         }
-        let interval = self
+        // An interval set of concatenated keys (`NFT_SET_CONCAT`) holds each
+        // range in one element already; another interval set holds starts
+        // and end-plus-ones to pair.
+        let flags = self
             .list_sets_in(table, family)
             .await?
             .iter()
-            .any(|s| s.name == set && s.flags.contains(SetFlags::INTERVAL));
-        if interval {
+            .find(|s| s.name == set)
+            .map_or(SetFlags::empty(), |s| s.flags);
+        if flags.contains(SetFlags::INTERVAL) && !flags.contains(SetFlags::CONCAT) {
             elements = super::interval::pair(&elements)
                 .iter()
                 .map(super::interval::element_of)
@@ -1450,16 +1454,17 @@ pub(crate) fn parse_set_elements(data: &[u8], out: &mut Vec<SetElement>) {
 /// only when it is the catch-all element.
 fn parse_set_elem(elem: &[u8]) -> Option<SetElement> {
     let mut key = None;
+    let mut key_end = None;
     let mut flags = 0;
+    let value = |payload: &[u8]| {
+        AttrIter::new(payload)
+            .find(|(data_type, _)| data_type & 0x7FFF == NFTA_DATA_VALUE)
+            .map(|(_, data)| data.to_vec())
+    };
     for (attr_type, payload) in AttrIter::new(elem) {
         match attr_type & 0x7FFF {
-            NFTA_SET_ELEM_KEY => {
-                for (data_type, data_payload) in AttrIter::new(payload) {
-                    if data_type & 0x7FFF == NFTA_DATA_VALUE {
-                        key = Some(data_payload.to_vec());
-                    }
-                }
-            }
+            NFTA_SET_ELEM_KEY => key = value(payload),
+            NFTA_SET_ELEM_KEY_END => key_end = value(payload),
             NFTA_SET_ELEM_FLAGS if payload.len() >= 4 => {
                 flags = u32::from_be_bytes(payload[..4].try_into().unwrap());
             }
@@ -1467,7 +1472,7 @@ fn parse_set_elem(elem: &[u8]) -> Option<SetElement> {
         }
     }
     match key {
-        Some(key) => Some(SetElement::from_wire(key, flags)),
+        Some(key) => Some(SetElement::from_wire(key, flags).with_key_end(key_end)),
         None if flags & NFT_SET_ELEM_CATCHALL != 0 => Some(SetElement::from_wire(Vec::new(), flags)),
         None => None,
     }
@@ -1812,7 +1817,7 @@ impl Transaction {
         builder.append_attr_str(NFTA_SET_NAME, &set.name);
         builder.append_attr_u32_be(NFTA_SET_KEY_TYPE, set.key_type.type_id());
         builder.append_attr_u32_be(NFTA_SET_KEY_LEN, set.key_type.len());
-        builder.append_attr_u32_be(NFTA_SET_FLAGS, set.flags.bits());
+        builder.append_attr_u32_be(NFTA_SET_FLAGS, set.wire_flags().bits());
         append_set_desc(&mut builder, &set);
         builder.append_attr_u32_be(NFTA_SET_ID, set_id);
         self.messages.push(builder.finish());
@@ -1921,14 +1926,33 @@ impl RawMessage {
     }
 }
 
-/// Append the `NFTA_SET_DESC` nest carrying the set size, if any.
-/// Shared by the imperative and `Transaction` set creation paths.
+/// Append the `NFTA_SET_DESC` nest: the set size, if any, and for an
+/// interval set of concatenated keys the length of each field in bytes
+/// (`NFTA_SET_DESC_CONCAT`), which the kernel requires with
+/// `NFT_SET_CONCAT` and which selects the `pipapo` backend. Shared by the
+/// imperative and `Transaction` set creation paths.
 fn append_set_desc(builder: &mut MessageBuilder, set: &Set) {
-    if let Some(size) = set.size {
-        let desc = builder.nest_start(NFTA_SET_DESC);
-        builder.append_attr_u32_be(NFTA_SET_DESC_SIZE, size);
-        builder.nest_end(desc);
+    let fields = set
+        .ranges_per_field()
+        .then(|| set.key_type.concat_fields())
+        .flatten();
+    if set.size.is_none() && fields.is_none() {
+        return;
     }
+    let desc = builder.nest_start(NFTA_SET_DESC);
+    if let Some(size) = set.size {
+        builder.append_attr_u32_be(NFTA_SET_DESC_SIZE, size);
+    }
+    if let Some(fields) = fields {
+        let concat = builder.nest_start(NFTA_SET_DESC_CONCAT);
+        for field in fields {
+            let elem = builder.nest_start(NFTA_LIST_ELEM);
+            builder.append_attr_u32_be(NFTA_SET_FIELD_LEN, field.len());
+            builder.nest_end(elem);
+        }
+        builder.nest_end(concat);
+    }
+    builder.nest_end(desc);
 }
 
 /// Check `elements` against the set they go into: everything the writer
@@ -1937,20 +1961,15 @@ fn append_set_desc(builder: &mut MessageBuilder, set: &Set) {
 pub(crate) fn check_elements(set: &Set, elements: &[SetElement]) -> Result<()> {
     // Ranges are compared and incremented as big-endian numbers, which a
     // host-order key is not; `nft` byte-swaps those, nlink does not model
-    // that. Concatenated ranges need KEY_END (not modelled yet either).
-    if !elements.is_empty() && set.flags.contains(SetFlags::INTERVAL) {
-        if set.key_type.is_host_order() {
-            return Err(Error::InvalidMessage(format!(
-                "set {}: interval sets of {:?} keys are not modelled (host byte order)",
-                set.name, set.key_type
-            )));
-        }
-        if matches!(set.key_type, SetKeyType::Concat(_)) {
-            return Err(Error::InvalidMessage(format!(
-                "set {}: interval sets of concatenated keys are not supported yet",
-                set.name
-            )));
-        }
+    // that.
+    if !elements.is_empty()
+        && set.flags.contains(SetFlags::INTERVAL)
+        && set.key_type.is_host_order()
+    {
+        return Err(Error::InvalidMessage(format!(
+            "set {}: interval sets of {:?} keys are not modelled (host byte order)",
+            set.name, set.key_type
+        )));
     }
     // Maps need element data on the wire; refuse rather than install
     // data-less entries.
@@ -1983,8 +2002,19 @@ fn append_set_elements(
     builder.append_attr_str(NFTA_SET_ELEM_LIST_SET, &set.name);
 
     // An interval set stores a range as a start and an end-plus-one
-    // flagged INTERVAL_END (see `interval`); other sets one element each.
-    let wire: Vec<super::interval::WireElement> = if set.flags.contains(SetFlags::INTERVAL) {
+    // flagged INTERVAL_END (see `interval`) — except one of concatenated
+    // keys, which stores it in one element with its inclusive end
+    // (KEY_END); other sets one element each.
+    let wire: Vec<super::interval::WireElement> = if set.ranges_per_field() {
+        elements
+            .iter()
+            .map(|e| super::interval::WireElement {
+                key: e.key().to_vec(),
+                key_end: e.key_end().filter(|end| *end != e.key()).map(<[u8]>::to_vec),
+                flags: 0,
+            })
+            .collect()
+    } else if set.flags.contains(SetFlags::INTERVAL) {
         elements
             .iter()
             .flat_map(|e| super::interval::lower(&super::interval::range_of(e)))
@@ -1994,6 +2024,7 @@ fn append_set_elements(
             .iter()
             .map(|e| super::interval::WireElement {
                 key: e.key().to_vec(),
+                key_end: None,
                 flags: 0,
             })
             .collect()
@@ -2004,6 +2035,11 @@ fn append_set_elements(
         let key_nest = builder.nest_start(NFTA_SET_ELEM_KEY | 0x8000);
         builder.append_attr(NFTA_DATA_VALUE, &elem.key);
         builder.nest_end(key_nest);
+        if let Some(end) = &elem.key_end {
+            let end_nest = builder.nest_start(NFTA_SET_ELEM_KEY_END | 0x8000);
+            builder.append_attr(NFTA_DATA_VALUE, end);
+            builder.nest_end(end_nest);
+        }
         if elem.flags != 0 {
             builder.append_attr_u32_be(NFTA_SET_ELEM_FLAGS, elem.flags);
         }
@@ -2476,6 +2512,118 @@ mod transaction_tests {
         assert!(flags.contains(SetFlags::TIMEOUT));
         assert!(!flags.contains(SetFlags::MAP));
         assert_eq!(SetFlags::default(), SetFlags::empty());
+    }
+
+    fn ip_port() -> SetKeyType {
+        SetKeyType::Concat(vec![SetKeyType::Ipv4Addr, SetKeyType::InetService])
+    }
+
+    /// The field lengths, in bytes, out of a NEWSET's DESC_CONCAT nest.
+    fn concat_field_lens(body: &[u8]) -> Option<Vec<u32>> {
+        let desc = find_attr(body, NFTA_SET_DESC)?;
+        let concat = find_attr(&desc, NFTA_SET_DESC_CONCAT)?;
+        Some(
+            crate::netlink::attr::AttrIter::new(&concat)
+                .map(|(_, field)| {
+                    let len = find_attr(field, NFTA_SET_FIELD_LEN).expect("NFTA_SET_FIELD_LEN");
+                    u32::from_be_bytes(len.try_into().unwrap())
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn an_interval_set_of_concatenated_keys_carries_concat_and_its_field_lengths() {
+        let tx = new_tx().add_set(Set::new("t", "s").key_type(ip_port()).interval().size(64));
+        let body = body_after_nfgenmsg(&tx.messages[0]);
+        let flags = find_attr(body, NFTA_SET_FLAGS).expect("NFTA_SET_FLAGS");
+        assert_eq!(
+            u32::from_be_bytes(flags.try_into().unwrap()),
+            NFT_SET_INTERVAL | NFT_SET_CONCAT
+        );
+        // Bytes, not bits, and unpadded: the kernel rounds each up to a
+        // register itself and checks the sum against the 8-byte key.
+        assert_eq!(concat_field_lens(body), Some(vec![4, 2]));
+        let kl = find_attr(body, NFTA_SET_KEY_LEN).expect("NFTA_SET_KEY_LEN");
+        assert_eq!(u32::from_be_bytes(kl.try_into().unwrap()), 8);
+        // The size shares the nest.
+        let desc = find_attr(body, NFTA_SET_DESC).unwrap();
+        assert!(find_attr(&desc, NFTA_SET_DESC_SIZE).is_some());
+    }
+
+    #[test]
+    fn a_hash_set_of_concatenated_keys_has_no_concat_flag() {
+        // As nft: without the interval flag the kernel hashes the whole
+        // key, and NFT_SET_CONCAT without a DESC_CONCAT is EINVAL.
+        let tx = new_tx().add_set(Set::new("t", "s").key_type(ip_port()));
+        let body = body_after_nfgenmsg(&tx.messages[0]);
+        let flags = find_attr(body, NFTA_SET_FLAGS).expect("NFTA_SET_FLAGS");
+        assert_eq!(u32::from_be_bytes(flags.try_into().unwrap()), 0);
+        assert!(find_attr(body, NFTA_SET_DESC).is_none());
+    }
+
+    #[test]
+    fn concatenated_ranges_go_out_as_one_element_with_its_inclusive_end() {
+        let set = Set::new("t", "s").key_type(ip_port()).interval();
+        let net = SetElement::ipv4_prefix(std::net::Ipv4Addr::new(10, 0, 0, 0), 24).unwrap();
+        let one = SetElement::concat([
+            SetElement::ipv4(std::net::Ipv4Addr::new(192, 0, 2, 7)),
+            SetElement::port(53),
+        ]);
+        let tx = new_tx().add_set_elements(
+            &set,
+            &[SetElement::concat([net, SetElement::port_range(1000, 2000)]), one.clone()],
+        );
+        assert!(tx.error.is_none(), "{:?}", tx.error);
+        let mut wire = Vec::new();
+        super::parse_set_elements(body_after_nfgenmsg(&tx.messages[0]), &mut wire);
+        assert_eq!(wire.len(), 2, "no end-plus-one elements: {wire:?}");
+        assert!(wire.iter().all(|e| !e.is_interval_end()));
+        assert_eq!(wire[0].key(), [10, 0, 0, 0, 0x03, 0xe8, 0, 0]);
+        assert_eq!(wire[0].key_end(), Some(&[10, 0, 0, 255, 0x07, 0xd0, 0, 0][..]));
+        // A single key has no KEY_END.
+        assert_eq!(wire[1], one);
+    }
+
+    #[test]
+    fn a_key_end_equal_to_the_key_reads_back_as_a_single_key() {
+        // What nft writes for a single key in a concatenated interval set.
+        let mut builder = MessageBuilder::new(0, 0);
+        let list = builder.nest_start(NFTA_SET_ELEM_LIST_ELEMENTS);
+        let elem = builder.nest_start(NFTA_LIST_ELEM);
+        for attr in [NFTA_SET_ELEM_KEY, NFTA_SET_ELEM_KEY_END] {
+            let nest = builder.nest_start(attr);
+            builder.append_attr(NFTA_DATA_VALUE, &[1, 2, 3, 4, 0, 53, 0, 0]);
+            builder.nest_end(nest);
+        }
+        builder.nest_end(elem);
+        builder.nest_end(list);
+        let mut out = Vec::new();
+        super::parse_set_elements(&builder.as_bytes()[16..], &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(!out[0].is_range());
+    }
+
+    #[test]
+    fn a_concatenated_range_is_checked_field_by_field() {
+        let set = Set::new("t", "s").key_type(ip_port()).interval();
+        // As one 8-byte number the end is after the start; as fields the
+        // port range runs backwards.
+        let backwards = SetElement::concat([
+            SetElement::ipv4_range(
+                std::net::Ipv4Addr::new(10, 0, 0, 9),
+                std::net::Ipv4Addr::new(10, 0, 0, 10),
+            ),
+            SetElement::port_range(100, 50),
+        ]);
+        let err = new_tx().add_set_elements(&set, &[backwards]).error.unwrap();
+        assert!(err.to_string().contains("is not at or after its start"), "{err}");
+        // Host-order fields do not compare as numbers in a range either.
+        let mark_port = Set::new("t", "s")
+            .key_type(SetKeyType::Concat(vec![SetKeyType::Mark, SetKeyType::InetService]))
+            .interval();
+        let elem = SetElement::concat([SetElement::mark(1), SetElement::port(1)]);
+        assert!(new_tx().add_set_elements(&mark_port, &[elem]).error.is_some());
     }
 
     #[test]

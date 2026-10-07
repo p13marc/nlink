@@ -296,6 +296,7 @@ def parse_map() -> dict[str, tuple[str, dict[str, str]]]:
         RustEnumName = KERNEL_PREFIX
             RustVariant -> KERNEL_SUFFIX      # when the names don't line up
             RustVariant -> !skip              # nlink-only variant in a UAPI enum
+            RustVariant -> =KERNEL_NAME       # a constant outside the prefix
     """
     mapping: dict[str, tuple[str, dict[str, str]]] = {}
     current: str | None = None
@@ -370,8 +371,11 @@ def main() -> int:
             override = overrides.get(variant)
             if override == "!skip":
                 continue
-            suffix = override if override else camel_to_upper_snake(variant)
-            kernel_name = f"{prefix}_{suffix}" if suffix else prefix
+            if override and override.startswith("="):
+                kernel_name = override[1:]
+            else:
+                suffix = override if override else camel_to_upper_snake(variant)
+                kernel_name = f"{prefix}_{suffix}" if suffix else prefix
 
             if kernel_name not in kernel:
                 # nlink deliberately supports kernels newer than its build host,

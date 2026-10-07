@@ -188,6 +188,10 @@ mod nftables_lookups;
 #[path = "integration/nftables_intervals.rs"]
 mod nftables_intervals;
 
+// Sets of concatenated keys (ipset hash:ip,port / hash:net,port) on traffic.
+#[path = "integration/nftables_concat.rs"]
+mod nftables_concat;
+
 // #191-#194, #218 — psched tick conversion. The unit tests pin the
 // bytes nlink emits; these pin that the *kernel* accepts them and
 // reads back what we wrote. Needed because the pre-fix writer and
