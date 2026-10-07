@@ -1274,7 +1274,13 @@ impl Rule {
         self
     }
 
-    /// Insert at a specific position (before the rule with this handle).
+    /// Place the rule right **after** the rule with kernel handle `pos`
+    /// (nft's `add rule ... position <handle>`).
+    ///
+    /// `add_rule` always sends `NLM_F_APPEND` — without it the kernel
+    /// prepends, and rules land in reverse order (#195) — and with it the
+    /// kernel links a positioned rule after the one named. This said
+    /// "before" until 0.30, which was true only before #195.
     pub fn position(mut self, pos: u64) -> Self {
         self.position = Some(pos);
         self

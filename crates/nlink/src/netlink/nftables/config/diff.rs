@@ -5,7 +5,10 @@ use std::collections::HashSet;
 use super::types::{
     DeclaredChain, DeclaredFlowtable, DeclaredRule, DeclaredSet, DeclaredTable, NftablesConfig,
 };
-use super::super::types::{ChainInfo, Family, Hook, Policy, Priority, SetElement, SetInfo};
+use super::super::expr::RuleExpr;
+use super::super::types::{
+    ChainInfo, Family, Hook, Policy, Priority, RuleInfo, SetElement, SetInfo,
+};
 use crate::netlink::{
     builder::MessageBuilder, connection::Connection, error::Result, protocol::Nftables,
 };
@@ -230,6 +233,18 @@ pub struct NftablesDiff {
     /// keyed rule matches a kernel rule by `NFTA_RULE_USERDATA`
     /// comment but the expression bytes differ. Plan 157b v2.
     pub rules_to_replace: Vec<(String, Family, String, RuleHandle, DeclaredRule)>,
+    /// Declared rules to delete and put back in place — (owning table,
+    /// owning family, chain, kernel handle being deleted, insert-before
+    /// anchor, rule).
+    ///
+    /// A set whose key type or flags changed is deleted and recreated,
+    /// and the kernel refuses to delete a set a rule still references
+    /// (`EBUSY`). So every keyed rule referencing it is deleted ahead of
+    /// the set and re-added after the new one, immediately before the next
+    /// rule in the chain that survives (`None`: at the end), so chain
+    /// order — which is policy — is unchanged.
+    pub rules_to_reinsert:
+        Vec<(String, Family, String, RuleHandle, Option<RuleHandle>, DeclaredRule)>,
     /// Flowtables to add.
     pub flowtables_to_add: Vec<DeclaredFlowtable>,
     /// Flowtables to delete — (family, table, name).
@@ -266,6 +281,7 @@ impl NftablesDiff {
             && self.rules_to_add.is_empty()
             && self.rules_to_delete.is_empty()
             && self.rules_to_replace.is_empty()
+            && self.rules_to_reinsert.is_empty()
             && self.flowtables_to_add.is_empty()
             && self.flowtables_to_delete.is_empty()
             && self.sets_to_add.is_empty()
@@ -286,6 +302,7 @@ impl NftablesDiff {
             + self.rules_to_add.len()
             + self.rules_to_delete.len()
             + self.rules_to_replace.len()
+            + self.rules_to_reinsert.len()
             + self.flowtables_to_add.len()
             + self.flowtables_to_delete.len()
             + self.sets_to_add.len()
@@ -349,6 +366,13 @@ impl NftablesDiff {
             let key = r.handle_key().unwrap_or("<anonymous>");
             lines.push(format!(
                 "~ rule {fam:?} {tbl}/{chain} (handle={} key={key})",
+                h.0
+            ));
+        }
+        for (tbl, fam, chain, h, _, r) in &self.rules_to_reinsert {
+            let key = r.handle_key().unwrap_or("<anonymous>");
+            lines.push(format!(
+                "~ rule {fam:?} {tbl}/{chain} (handle={} key={key}, re-added: its set is recreated)",
                 h.0
             ));
         }
@@ -456,6 +480,87 @@ fn set_has_drifted(declared: &DeclaredSet, current: &SetInfo) -> bool {
     declared.key_type().type_id() != current.key_type
         || declared.key_type().len() != current.key_len
         || declared.flags() != current.flags
+}
+
+/// Does `rule` reference the set `set`? A plain lookup decodes typed; an
+/// inverted or map lookup, and a `dynset`, stay `Unknown` but carry the set
+/// name as their first attribute (`NFTA_LOOKUP_SET`, `NFTA_DYNSET_SET_NAME`).
+fn references_set(rule: &RuleInfo, set: &str) -> bool {
+    use crate::netlink::attr::{AttrIter, get};
+    rule.expressions().iter().any(|e| match e {
+        RuleExpr::Lookup { set: s, .. } => s == set,
+        RuleExpr::Unknown { name, data } if name == "lookup" || name == "dynset" => {
+            AttrIter::new(data)
+                .any(|(attr, payload)| attr == 1 && get::string(payload).ok() == Some(set))
+        }
+        _ => false,
+    })
+}
+
+/// Schedule every keyed rule that references a set in `recreated` for
+/// delete + re-insert (see [`NftablesDiff::rules_to_reinsert`]). Rules
+/// already scheduled for deletion are left to that; a pending in-place
+/// replace is turned into the re-insert, since a replace runs after the
+/// DELSET it would have had to precede.
+fn reinsert_rules_bound_to(
+    diff: &mut NftablesDiff,
+    table: &str,
+    family: Family,
+    recreated: &HashSet<&str>,
+    kernel_in_chain: &std::collections::HashMap<String, Vec<&RuleInfo>>,
+    declared_in_chain: &std::collections::HashMap<&str, Vec<&DeclaredRule>>,
+) {
+    let deleted: HashSet<u64> = diff
+        .rules_to_delete
+        .iter()
+        .filter(|(t, f, _, _)| t == table && *f == family)
+        .map(|(_, _, _, h)| h.0)
+        .collect();
+    for (chain, kernel_rules) in kernel_in_chain {
+        let bound: Vec<bool> = kernel_rules
+            .iter()
+            .map(|kr| recreated.iter().any(|set| references_set(kr, set)))
+            .collect();
+        for (i, kr) in kernel_rules.iter().enumerate() {
+            if !bound[i] || deleted.contains(&kr.handle) {
+                continue;
+            }
+            let declared_rule = kr.comment.as_deref().and_then(|key| {
+                declared_in_chain
+                    .get(chain.as_str())
+                    .and_then(|rules| rules.iter().find(|r| r.handle_key() == Some(key)))
+            });
+            let Some(declared_rule) = declared_rule else {
+                // Foreign or anonymous: nlink cannot put it back, so the
+                // DELSET will be EBUSY. Say why before it happens.
+                tracing::warn!(
+                    table,
+                    chain = chain.as_str(),
+                    handle = kr.handle,
+                    "a rule nlink does not manage references a set this diff recreates; \
+                     the apply will fail with EBUSY until that rule is removed",
+                );
+                continue;
+            };
+            // The first later rule that stays where it is.
+            let anchor = kernel_rules[i + 1..]
+                .iter()
+                .zip(&bound[i + 1..])
+                .find(|(r, b)| !**b && !deleted.contains(&r.handle))
+                .map(|(r, _)| RuleHandle(r.handle));
+            diff.rules_to_replace.retain(|(t, f, _, h, _)| {
+                !(t == table && *f == family && h.0 == kr.handle)
+            });
+            diff.rules_to_reinsert.push((
+                table.to_string(),
+                family,
+                chain.clone(),
+                RuleHandle(kr.handle),
+                anchor,
+                (*declared_rule).clone(),
+            ));
+        }
+    }
 }
 
 /// Has a declared set's size drifted? Unlike the key and flags, a size
@@ -937,11 +1042,14 @@ impl NftablesConfig {
             let current_set_names: HashSet<&str> =
                 current_sets.iter().map(|s| s.name.as_str()).collect();
 
+            // Sets this diff deletes and recreates (key type / flags drift).
+            let mut recreated: HashSet<&str> = HashSet::new();
             for s in declared.sets() {
                 let current_set = current_sets.iter().find(|c| c.name == s.name());
                 if let Some(current) = current_set
                     && set_has_drifted(s, current)
                 {
+                    recreated.insert(s.name());
                     // Recreate: delete first, then add with the
                     // declared shape and all of its elements.
                     diff.sets_to_delete.push((
@@ -1030,6 +1138,22 @@ impl NftablesConfig {
                         ));
                     }
                 }
+            }
+
+            // A recreated set must first lose every rule bound to it:
+            // DELSET on a set with bindings is EBUSY, and the rule has not
+            // changed, so nothing above scheduled it. Delete each keyed rule
+            // that references one ahead of the DELSET and put it back after
+            // the new set, before the next rule that survives.
+            if !recreated.is_empty() {
+                reinsert_rules_bound_to(
+                    &mut diff,
+                    declared.name(),
+                    declared.family(),
+                    &recreated,
+                    &kernel_in_chain,
+                    &declared_in_chain,
+                );
             }
 
             // Kernel sets we no longer declare → delete (full
@@ -1473,6 +1597,52 @@ mod tests {
         // A size is changed in place, not by recreating the set.
         current.size = Some(16);
         assert!(!set_has_drifted(&declared, &current));
+    }
+
+    fn rule_info(expression_bytes: Vec<u8>) -> RuleInfo {
+        RuleInfo {
+            table: "t".to_string(),
+            chain: "c".to_string(),
+            family: Family::Ip,
+            handle: 7,
+            position: None,
+            comment: None,
+            userdata_raw: None,
+            expression_bytes,
+        }
+    }
+
+    #[test]
+    fn references_set_sees_plain_inverted_and_dynset_references() {
+        use crate::netlink::builder::MessageBuilder;
+        use crate::netlink::nftables::{
+            Expr, NFTA_EXPR_DATA, NFTA_EXPR_NAME, NFTA_LIST_ELEM, NFTA_LOOKUP_FLAGS,
+            NFTA_LOOKUP_SET, NFTA_LOOKUP_SREG, Register, Rule,
+        };
+
+        let plain = Rule::new("t", "c").match_daddr_in_set("s");
+        let plain = rule_info(lower_to_expression_bytes(&plain));
+        assert!(references_set(&plain, "s"));
+        assert!(!references_set(&plain, "other"));
+
+        // `ip daddr != @s` decodes as Unknown (an inverted lookup is not
+        // `RuleExpr::Lookup`), and still pins the set.
+        let mut b = MessageBuilder::new(0, 0);
+        let elem = b.nest_start(NFTA_LIST_ELEM | 0x8000);
+        b.append_attr_str(NFTA_EXPR_NAME, "lookup");
+        let data = b.nest_start(NFTA_EXPR_DATA | 0x8000);
+        b.append_attr_str(NFTA_LOOKUP_SET, "s");
+        b.append_attr_u32_be(NFTA_LOOKUP_SREG, Register::R0 as u32);
+        b.append_attr_u32_be(NFTA_LOOKUP_FLAGS, 1);
+        b.nest_end(data);
+        b.nest_end(elem);
+        let inverted = rule_info(b.as_bytes()[16..].to_vec());
+        assert!(references_set(&inverted, "s"));
+
+        let unrelated = rule_info(lower_to_expression_bytes(
+            &Rule::new("t", "c").expressions(vec![Expr::Counter]),
+        ));
+        assert!(!references_set(&unrelated, "s"));
     }
 
     #[test]

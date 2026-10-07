@@ -796,3 +796,108 @@ async fn declared_set_resize_is_in_place_and_admits_new_elements() -> nlink::Res
     })
     .await
 }
+
+/// A set whose key type or flags change has to be deleted and recreated —
+/// and a rule that still references it pins it: `DELSET` on a set with
+/// bindings is EBUSY. The rule itself has not changed, so the diff left it
+/// alone and the whole apply failed, every time.
+#[tokio::test]
+async fn recreating_a_set_a_rule_references_converges() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let ns = TestNamespace::new("nft-recreate")?;
+    let conn = nft_in_ns(&ns)?;
+
+    // Rules bound to the set first, last, two in a row, and between plain
+    // ones; `mark` is the value one bound rule sets, so a second config can
+    // also change that rule's body.
+    let cfg = |flags: u32, mark: u32| {
+        NftablesConfig::new().table("t", Family::Ip, move |t| {
+            t.set("s", move |s| {
+                s.key_type(SetKeyType::Ipv4Addr)
+                    .flags(flags)
+                    .ipv4(Ipv4Addr::new(10, 45, 0, 1))
+            })
+            .chain("post", |c| {
+                c.hook(Hook::Postrouting)
+                    .priority(Priority::Mangle)
+                    .chain_type(ChainType::Filter)
+            })
+            .rule_keyed("post", "bound-first", |r| r.match_saddr_in_set("s").counter())
+            .rule_keyed("post", "plain-1", |r| r.match_tcp_dport(1).counter())
+            .rule_keyed("post", "bound-a", move |r| {
+                r.match_daddr_in_set("s").set_mark(mark).counter()
+            })
+            .rule_keyed("post", "bound-b", |r| r.match_daddr_in_set("s").counter())
+            .rule_keyed("post", "plain-2", |r| r.match_tcp_dport(2).counter())
+            .rule_keyed("post", "bound-last", |r| r.match_saddr_in_set("s").drop())
+        })
+    };
+    let order = ["bound-first", "plain-1", "bound-a", "bound-b", "plain-2", "bound-last"];
+
+    with_timeout(async {
+        cfg(0, 1).diff(&conn).await?.apply(&conn).await?;
+
+        // Constant now, and `bound-a` sets a different mark: its pending
+        // in-place replace has to become a re-insert too.
+        let constant = cfg(nlink::netlink::nftables::NFT_SET_CONSTANT, 2);
+        let diff = constant.diff(&conn).await?;
+        assert_eq!(diff.sets_to_delete.len(), 1, "flags drift recreates: {diff}");
+        assert_eq!(diff.rules_to_reinsert.len(), 4, "{diff}");
+        assert!(diff.rules_to_replace.is_empty(), "{diff}");
+        diff.apply(&conn).await?;
+
+        let sets = conn.list_sets_in("t", Family::Ip).await?;
+        assert_eq!(sets[0].flags, nlink::netlink::nftables::NFT_SET_CONSTANT);
+        // Rule order survives the recreate.
+        let keys: Vec<_> = conn
+            .list_rules("t", Family::Ip)
+            .await?
+            .into_iter()
+            .map(|r| r.comment.unwrap_or_default())
+            .collect();
+        assert_eq!(keys, order);
+
+        let again = constant.diff(&conn).await?;
+        assert!(again.is_empty(), "the recreate must converge: {again}");
+        Ok(())
+    })
+    .await
+}
+
+/// `Rule::position(h)` places the rule right *after* rule `h`:
+/// `add_rule` always sends NLM_F_APPEND (#195), and with it the kernel
+/// links a positioned rule after the one named.
+#[tokio::test]
+async fn rule_position_inserts_after_the_named_rule() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let ns = TestNamespace::new("nft-position")?;
+    let conn = nft_in_ns(&ns)?;
+
+    with_timeout(async {
+        add_mangle_chain(&conn, Hook::Postrouting).await?;
+        let rule = |port: u16, comment: &str| {
+            Rule::new("t", "c")
+                .family(Family::Ip)
+                .match_tcp_dport(port)
+                .comment(comment)
+        };
+        conn.add_rule(rule(1, "a")).await?;
+        conn.add_rule(rule(2, "b")).await?;
+        let a = conn.list_rules("t", Family::Ip).await?[0].handle;
+        conn.add_rule(rule(3, "c").position(a)).await?;
+
+        let order: Vec<_> = conn
+            .list_rules("t", Family::Ip)
+            .await?
+            .into_iter()
+            .map(|r| r.comment.unwrap_or_default())
+            .collect();
+        assert_eq!(order, ["a", "c", "b"]);
+        Ok(())
+    })
+    .await
+}
