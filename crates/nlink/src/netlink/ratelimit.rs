@@ -63,8 +63,8 @@ use super::{
     tc_handle::{FilterPriority, TcHandle},
     tc_recipe::{ReconcileOptions, ReconcileReport, StaleObject, UnmanagedObject},
     tc_recipe_internals::{
-        DEFAULT_CLASS_MINOR, DEFAULT_LEAF_MAJOR, LiveTree, dump_live_tree, flower_matches,
-        fq_codel_target_matches, htb_class_rates_match, root_htb_options,
+        DEFAULT_CLASS_MINOR, DEFAULT_LEAF_MAJOR, LiveTree, dump_live_tree, flower_classid,
+        flower_matches, fq_codel_target_matches, htb_class_rates_match, root_htb_options,
     },
 };
 
@@ -1673,9 +1673,41 @@ impl PerHostLimiter {
         // companions (priority i+1+100 for Port matches). To stay
         // conservative, only treat priority `1..=n` and `101..=100+n`
         // as managed; anything else is unmanaged.
+        // Stale classes in major 1: — computed first, because a filter
+        // bound to one has to go before it, whatever band it sits in.
+        let mut stale_classes: Vec<TcHandle> = Vec::new();
+        for handle in tree.classes.keys() {
+            if handle.major() != 1 {
+                continue;
+            }
+            let minor = handle.minor();
+            if minor == 0 || minor == 1 {
+                continue;
+            }
+            if (minor >= 2 && minor <= max_minor) || minor == DEFAULT_CLASS_MINOR {
+                continue;
+            }
+            stale_classes.push(*handle);
+        }
+
         let mut stale_filters: Vec<(u16, u16, TcHandle)> = Vec::new();
         for f in &tree.root_filters {
             let prio = f.priority();
+            // A filter that sends traffic to a class this reconcile
+            // removes is the removed rule's own filter. The bands below
+            // are sized by the *current* rule count, so a removed rule's
+            // priority falls outside them and read as "unmanaged": it was
+            // left bound, and deleting its class failed with EBUSY, "HTB
+            // class in use" (#TBD — the PerPeerImpairer half was #291).
+            if flower_classid(f).is_some_and(|c| stale_classes.contains(&c)) {
+                let seen = stale_filters
+                    .iter()
+                    .any(|(p, proto, _)| *p == prio && *proto == f.protocol());
+                if !seen {
+                    stale_filters.push((prio, f.protocol(), f.parent()));
+                }
+                continue;
+            }
             // Managed bands.
             let in_low = prio >= 1 && (prio as usize) <= n;
             let in_high = prio >= 101 && (prio as usize) <= 100 + n;
@@ -1714,21 +1746,6 @@ impl PerHostLimiter {
                 handle: parent,
                 priority: Some(FilterPriority::new(prio)),
             });
-        }
-        // Stale classes in major 1:.
-        let mut stale_classes: Vec<TcHandle> = Vec::new();
-        for handle in tree.classes.keys() {
-            if handle.major() != 1 {
-                continue;
-            }
-            let minor = handle.minor();
-            if minor == 0 || minor == 1 {
-                continue;
-            }
-            if (minor >= 2 && minor <= max_minor) || minor == DEFAULT_CLASS_MINOR {
-                continue;
-            }
-            stale_classes.push(*handle);
         }
         for handle in &stale_classes {
             if let Some(q) = tree.leaf_for(*handle) {

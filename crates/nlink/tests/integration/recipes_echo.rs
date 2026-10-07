@@ -240,6 +240,16 @@ async fn per_host_limiter_shapes_converge() -> nlink::Result<()> {
                     .latency(Duration::from_millis(5)),
             )],
         ),
+        case(
+            "host-rule-removed",
+            vec![
+                Recipe::Host(
+                    ph().limit_ip(v4(10, 0, 0, 1), Rate::mbit(100))
+                        .limit_ip(v6("fd00::5"), Rate::mbit(100)),
+                ),
+                Recipe::Host(ph().limit_ip(v4(10, 0, 0, 1), Rate::mbit(100))),
+            ],
+        ),
     ];
     assert_converges("rce-ph", cases).await
 }
