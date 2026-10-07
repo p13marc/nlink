@@ -424,6 +424,21 @@ impl DeclaredSet {
         &self.elements
     }
 
+    /// The elements as they are written: for an interval set, the declared
+    /// ranges sorted and merged where they overlap or touch (sending
+    /// overlapping ranges is an error from the kernel).
+    pub(crate) fn wire_elements(&self) -> Vec<SetElement> {
+        use crate::netlink::nftables::interval;
+        if self.flags.contains(SetFlags::INTERVAL) {
+            interval::canonicalize(self.elements.iter().map(interval::range_of).collect())
+                .iter()
+                .map(interval::element_of)
+                .collect()
+        } else {
+            self.elements.clone()
+        }
+    }
+
     /// The runtime [`Set`] this declaration describes, in `table`.
     pub(crate) fn to_set(&self, table: &str, family: Family) -> Set {
         let mut set = Set::new(table, &self.name)
@@ -485,6 +500,15 @@ impl DeclaredSetBuilder {
     /// counts as drift, whatever the kernel holds.
     pub fn size(mut self, size: u32) -> Self {
         self.size = Some(size);
+        self
+    }
+
+    /// An interval set, holding ranges and prefixes — see
+    /// [`Set::interval`](crate::netlink::nftables::Set::interval).
+    /// Declared ranges that overlap or touch are merged, as the kernel's
+    /// lookups would see them.
+    pub fn interval(mut self) -> Self {
+        self.flags |= SetFlags::INTERVAL;
         self
     }
 

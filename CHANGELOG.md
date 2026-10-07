@@ -15,6 +15,29 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Interval sets: ranges and prefixes (ipset `hash:net`).**
+  `Set::interval()` / `DeclaredSetBuilder::interval()`, and
+  `SetElement::{range, ipv4_prefix, ipv6_prefix, ipv4_range, ipv6_range,
+  port_range}`. A range `[a, b]` is written the way the kernel's rbtree
+  stores it: `a`, then `b + 1` flagged `NFT_SET_ELEM_INTERVAL_END` (no end
+  element for a range that runs to the maximum value); a single key in an
+  interval set is the range `[k, k]`. `list_set_elements` pairs an interval
+  set's wire elements back into ranges, in whatever order the kernel dumps
+  them. The declarative diff compares ranges merged where they overlap or
+  touch — so `10.0.0.0/25` + `10.0.0.128/25` is one `/24` and converges —
+  and changes one range by removing and adding only that range. Host-order
+  keys (mark, ifindex) on interval sets are refused rather than ordered
+  wrongly. `nlink-nft` sets take `flags interval`, and elements take
+  `10.0.0.0/24` and `1000-2000`.
+
+  Tested on traffic: `udp dport @r` with `r = 1000-2000` matches 1000 and
+  2000 and not 999 or 2001 (mutation-checked: an end element of `2000`
+  instead of `2001` loses port 2000); a `/30` matches its addresses and not
+  its neighbours; a single address matches only itself. Until this, nlink
+  wrote an interval-set element as a bare start — which the kernel reads as
+  a range to the top of the key space — and 0.30 refused interval elements
+  outright.
+
 - **Set lookups by packet field, and an escape hatch.**
   - `Rule::match_in_set(PacketField, set)` and `match_not_in_set` (`!= @set`,
     iptables `! --match-set`) for IPv4 and IPv6 addresses, TCP/UDP ports,

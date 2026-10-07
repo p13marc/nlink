@@ -38,6 +38,7 @@ pub mod config;
 pub mod connection;
 pub mod events;
 pub mod expr;
+pub(crate) mod interval;
 pub mod resync;
 pub mod types;
 pub(crate) mod userdata;

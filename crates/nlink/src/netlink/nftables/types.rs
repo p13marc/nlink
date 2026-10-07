@@ -2418,6 +2418,12 @@ impl SetKeyType {
         }
     }
 
+    /// Whether keys of this type are stored in host byte order (a mark, an
+    /// ifindex), so their bytes do not compare as numbers.
+    pub fn is_host_order(&self) -> bool {
+        matches!(self, Self::Mark | Self::IfIndex)
+    }
+
     /// Key length in bytes, for `NFTA_SET_KEY_LEN`.
     ///
     /// For `Concat`, the sum of each component's length padded to 4-byte
@@ -2588,6 +2594,16 @@ impl Set {
         self
     }
 
+    /// Make this an interval set (`NFT_SET_INTERVAL`), holding ranges and
+    /// prefixes — ipset `hash:net`. Its key type must be one whose bytes
+    /// compare as numbers: addresses, ports, protocols. A mark or ifindex
+    /// key is host-order (`nft` byte-swaps it first), which nlink does not
+    /// model, so their elements are refused.
+    pub fn interval(mut self) -> Self {
+        self.flags |= SetFlags::INTERVAL;
+        self
+    }
+
     /// Maximum number of elements (`nft add set ... { size N; }`).
     ///
     /// Adding an element to a full set fails with `ENFILE`
@@ -2702,6 +2718,45 @@ impl SetElement {
         Self::new(addr.to_vec())
     }
 
+    /// A range `[start, end]`, both inclusive, as raw keys in the set's key
+    /// layout. Only an interval set ([`Set::interval`]) takes ranges.
+    pub fn range(start: Vec<u8>, end_inclusive: Vec<u8>) -> Self {
+        Self {
+            key_end: Some(end_inclusive),
+            ..Self::new(start)
+        }
+    }
+
+    /// An IPv4 address range, inclusive.
+    pub fn ipv4_range(start: Ipv4Addr, end: Ipv4Addr) -> Self {
+        Self::range(start.octets().to_vec(), end.octets().to_vec())
+    }
+
+    /// An IPv6 address range, inclusive.
+    pub fn ipv6_range(start: std::net::Ipv6Addr, end: std::net::Ipv6Addr) -> Self {
+        Self::range(start.octets().to_vec(), end.octets().to_vec())
+    }
+
+    /// A port range, inclusive (`1000-2000`).
+    pub fn port_range(start: u16, end: u16) -> Self {
+        Self::range(start.to_be_bytes().to_vec(), end.to_be_bytes().to_vec())
+    }
+
+    /// An IPv4 prefix (`10.0.0.0/8`) as the range it covers. Host bits in
+    /// `addr` are masked off, as `nft` does; a prefix length over 32 is an
+    /// error.
+    pub fn ipv4_prefix(addr: Ipv4Addr, prefix: u8) -> Result<Self> {
+        let (start, end) = prefix_range(&addr.octets(), prefix)?;
+        Ok(Self::range(start, end))
+    }
+
+    /// An IPv6 prefix (`2001:db8::/32`) as the range it covers. Host bits
+    /// are masked off; a prefix length over 128 is an error.
+    pub fn ipv6_prefix(addr: std::net::Ipv6Addr, prefix: u8) -> Result<Self> {
+        let (start, end) = prefix_range(&addr.octets(), prefix)?;
+        Ok(Self::range(start, end))
+    }
+
     /// The key bytes (the range start, for a range).
     pub fn key(&self) -> &[u8] {
         &self.key
@@ -2762,11 +2817,19 @@ impl SetElement {
                 set.key_type,
             )));
         }
-        if self.key_end.is_some() {
-            return Err(Error::InvalidMessage(format!(
-                "set {}: range elements are not supported on this set",
-                set.name
-            )));
+        if let Some(end) = &self.key_end {
+            if !set.flags.contains(SetFlags::INTERVAL) {
+                return Err(Error::InvalidMessage(format!(
+                    "set {}: a range element needs an interval set (`Set::interval`)",
+                    set.name
+                )));
+            }
+            if end.len() != self.key.len() || *end < self.key {
+                return Err(Error::InvalidMessage(format!(
+                    "set {}: range end {end:02x?} is not at or after its start {:02x?}",
+                    set.name, self.key
+                )));
+            }
         }
         if self.data.is_some() {
             return Err(Error::InvalidMessage(format!(
@@ -2817,6 +2880,21 @@ pub struct SetInfo {
     /// The kernel can report one nobody declared: a set a `dynset`
     /// expression writes to is given 65535.
     pub size: Option<u32>,
+}
+
+/// The inclusive range a prefix covers: `addr` with its host bits cleared,
+/// and with them set.
+fn prefix_range(addr: &[u8], prefix: u8) -> Result<(Vec<u8>, Vec<u8>)> {
+    let bits = addr.len() * 8;
+    if usize::from(prefix) > bits {
+        return Err(Error::InvalidMessage(format!(
+            "prefix length {prefix} is longer than the {bits}-bit address"
+        )));
+    }
+    let mask = prefix_to_mask(addr.len(), prefix);
+    let start = addr.iter().zip(&mask).map(|(a, m)| a & m).collect();
+    let end = addr.iter().zip(&mask).map(|(a, m)| a | !m).collect();
+    Ok((start, end))
 }
 
 /// Convert a prefix length to a network mask of `width` bytes.

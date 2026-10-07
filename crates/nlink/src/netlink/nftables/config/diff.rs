@@ -624,6 +624,58 @@ fn rule_matches(declared: &DeclaredRule, kernel: &RuleInfo) -> bool {
     declared.body.comment.as_deref() == kernel_comment
 }
 
+/// The elements to add to and remove from an existing set.
+///
+/// A plain set compares element identities (key, range end, catch-all). An
+/// interval set compares ranges: if the kernel's ranges, merged where they
+/// touch, are the declared ones merged the same way, nothing changes —
+/// however the kernel happens to split them. Otherwise the kernel ranges
+/// that are not declared go, and the declared ones the kernel does not hold
+/// come — the removals are sent first, so a range that grows is replaced
+/// in one batch.
+fn element_changes(
+    declared: &DeclaredSet,
+    current: &[SetElement],
+) -> (Vec<SetElement>, Vec<SetElement>) {
+    use super::super::interval;
+    if declared.flags().contains(super::super::SetFlags::INTERVAL) {
+        let wanted: Vec<interval::Range> = declared
+            .wire_elements()
+            .iter()
+            .map(interval::range_of)
+            .collect();
+        let held: Vec<interval::Range> = current.iter().map(interval::range_of).collect();
+        if interval::canonicalize(held.clone()) == wanted {
+            return (Vec::new(), Vec::new());
+        }
+        let to_add = wanted
+            .iter()
+            .filter(|r| !held.contains(r))
+            .map(interval::element_of)
+            .collect();
+        let to_remove = held
+            .iter()
+            .filter(|r| !wanted.contains(r))
+            .map(interval::element_of)
+            .collect();
+        return (to_add, to_remove);
+    }
+    let declared_ids: HashSet<_> = declared.elements().iter().map(SetElement::identity).collect();
+    let current_ids: HashSet<_> = current.iter().map(SetElement::identity).collect();
+    let to_add = declared
+        .elements()
+        .iter()
+        .filter(|e| !current_ids.contains(&e.identity()))
+        .cloned()
+        .collect();
+    let to_remove = current
+        .iter()
+        .filter(|e| !declared_ids.contains(&e.identity()))
+        .cloned()
+        .collect();
+    (to_add, to_remove)
+}
+
 /// Has a declared set's size drifted? Unlike the key and flags, a size
 /// can be changed in place, so this is reported separately. An
 /// undeclared size is not a claim: the kernel gives every set a `dynset`
@@ -874,7 +926,7 @@ impl NftablesConfig {
                     if !s.elements().is_empty() {
                         diff.set_elements_to_add.push(SetElementsChange {
                             set: s.to_set(declared.name(), declared.family()),
-                            elements: s.elements().to_vec(),
+                            elements: s.wire_elements(),
                         });
                     }
                 }
@@ -1002,7 +1054,7 @@ impl NftablesConfig {
                     if !s.elements().is_empty() {
                         diff.set_elements_to_add.push(SetElementsChange {
                             set: s.to_set(declared.name(), declared.family()),
-                            elements: s.elements().to_vec(),
+                            elements: s.wire_elements(),
                         });
                     }
                     continue;
@@ -1023,17 +1075,7 @@ impl NftablesConfig {
                     let current_elems = conn
                         .list_set_elements(declared.name(), s.name(), declared.family())
                         .await?;
-                    let declared_ids: HashSet<_> =
-                        s.elements().iter().map(SetElement::identity).collect();
-                    let current_ids: HashSet<_> =
-                        current_elems.iter().map(SetElement::identity).collect();
-
-                    let to_add: Vec<SetElement> = s
-                        .elements()
-                        .iter()
-                        .filter(|e| !current_ids.contains(&e.identity()))
-                        .cloned()
-                        .collect();
+                    let (to_add, to_remove) = element_changes(s, &current_elems);
                     if !to_add.is_empty() {
                         diff.set_elements_to_add.push(SetElementsChange {
                             set: s.to_set(declared.name(), declared.family()),
@@ -1041,11 +1083,6 @@ impl NftablesConfig {
                         });
                     }
 
-                    let to_remove: Vec<SetElement> = current_elems
-                        .iter()
-                        .filter(|e| !declared_ids.contains(&e.identity()))
-                        .cloned()
-                        .collect();
                     if !to_remove.is_empty() {
                         diff.set_elements_to_remove.push(SetElementsChange {
                             set: s.to_set(declared.name(), declared.family()),
@@ -1063,7 +1100,7 @@ impl NftablesConfig {
                     if !s.elements().is_empty() {
                         diff.set_elements_to_add.push(SetElementsChange {
                             set: s.to_set(declared.name(), declared.family()),
-                            elements: s.elements().to_vec(),
+                            elements: s.wire_elements(),
                         });
                     }
                 }

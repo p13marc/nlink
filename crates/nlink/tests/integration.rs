@@ -183,6 +183,11 @@ mod nftables_rules;
 #[path = "integration/nftables_lookups.rs"]
 mod nftables_lookups;
 
+// Interval sets (ranges, prefixes) on traffic: a range matches its ends and
+// nothing past them; declared ranges converge and change one at a time.
+#[path = "integration/nftables_intervals.rs"]
+mod nftables_intervals;
+
 // #191-#194, #218 — psched tick conversion. The unit tests pin the
 // bytes nlink emits; these pin that the *kernel* accepts them and
 // reads back what we wrote. Needed because the pre-fix writer and

@@ -720,8 +720,10 @@ impl Connection<Nftables> {
     /// undeclared ones); also useful standalone to read a set's
     /// contents.
     ///
-    /// The key and the element flags are read; map data, timeouts and
-    /// range ends are not decoded yet.
+    /// The key and the element flags are read; map data and timeouts are
+    /// not decoded yet. For an interval set the wire elements are paired
+    /// back into ranges ([`SetElement::key_end`]) — which takes one more
+    /// round-trip to learn the set's flags.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "list_set_elements"))]
     pub async fn list_set_elements(
         &self,
@@ -734,6 +736,17 @@ impl Connection<Nftables> {
         let mut elements = Vec::new();
         for (_family_byte, payload) in &responses {
             parse_set_elements(payload, &mut elements);
+        }
+        let interval = self
+            .list_sets_in(table, family)
+            .await?
+            .iter()
+            .any(|s| s.name == set && s.flags.contains(SetFlags::INTERVAL));
+        if interval {
+            elements = super::interval::pair(&elements)
+                .iter()
+                .map(super::interval::element_of)
+                .collect();
         }
         Ok(elements)
     }
@@ -1922,16 +1935,25 @@ fn append_set_desc(builder: &mut MessageBuilder, set: &Set) {
 /// cannot encode is an error, never something dropped. Shared by the
 /// element writers and `NftablesConfig::validate`.
 pub(crate) fn check_elements(set: &Set, elements: &[SetElement]) -> Result<()> {
-    // Interval sets and maps need range ends and element data on the wire.
-    // Writing their elements as plain keys would install open-ended
-    // intervals or data-less map entries, so refuse until they are
-    // modelled.
+    // Ranges are compared and incremented as big-endian numbers, which a
+    // host-order key is not; `nft` byte-swaps those, nlink does not model
+    // that. Concatenated ranges need KEY_END (not modelled yet either).
     if !elements.is_empty() && set.flags.contains(SetFlags::INTERVAL) {
-        return Err(Error::InvalidMessage(format!(
-            "set {}: elements of interval sets are not supported yet",
-            set.name
-        )));
+        if set.key_type.is_host_order() {
+            return Err(Error::InvalidMessage(format!(
+                "set {}: interval sets of {:?} keys are not modelled (host byte order)",
+                set.name, set.key_type
+            )));
+        }
+        if matches!(set.key_type, SetKeyType::Concat(_)) {
+            return Err(Error::InvalidMessage(format!(
+                "set {}: interval sets of concatenated keys are not supported yet",
+                set.name
+            )));
+        }
     }
+    // Maps need element data on the wire; refuse rather than install
+    // data-less entries.
     if !elements.is_empty() && set.flags.contains(SetFlags::MAP) {
         return Err(Error::InvalidMessage(format!(
             "set {}: elements of maps are not supported yet",
@@ -1960,12 +1982,31 @@ fn append_set_elements(
     builder.append_attr_str(NFTA_SET_ELEM_LIST_TABLE, &set.table);
     builder.append_attr_str(NFTA_SET_ELEM_LIST_SET, &set.name);
 
+    // An interval set stores a range as a start and an end-plus-one
+    // flagged INTERVAL_END (see `interval`); other sets one element each.
+    let wire: Vec<super::interval::WireElement> = if set.flags.contains(SetFlags::INTERVAL) {
+        elements
+            .iter()
+            .flat_map(|e| super::interval::lower(&super::interval::range_of(e)))
+            .collect()
+    } else {
+        elements
+            .iter()
+            .map(|e| super::interval::WireElement {
+                key: e.key().to_vec(),
+                flags: 0,
+            })
+            .collect()
+    };
     let elems_nest = builder.nest_start(NFTA_SET_ELEM_LIST_ELEMENTS | 0x8000);
-    for elem in elements {
+    for elem in &wire {
         let elem_nest = builder.nest_start(NFTA_LIST_ELEM | 0x8000);
         let key_nest = builder.nest_start(NFTA_SET_ELEM_KEY | 0x8000);
-        builder.append_attr(NFTA_DATA_VALUE, elem.key());
+        builder.append_attr(NFTA_DATA_VALUE, &elem.key);
         builder.nest_end(key_nest);
+        if elem.flags != 0 {
+            builder.append_attr_u32_be(NFTA_SET_ELEM_FLAGS, elem.flags);
+        }
         builder.nest_end(elem_nest);
     }
     builder.nest_end(elems_nest);
@@ -2371,13 +2412,61 @@ mod transaction_tests {
     }
 
     #[test]
-    fn interval_and_map_elements_are_refused_until_modelled() {
-        for flags in [SetFlags::INTERVAL, SetFlags::MAP] {
-            let set = Set::new("t", "s").flags(flags);
-            let elem = SetElement::ipv4(std::net::Ipv4Addr::new(10, 0, 0, 1));
-            let tx = new_tx().add_set_elements(&set, &[elem]);
-            assert!(tx.error.is_some(), "{flags:?} elements must not be written as plain keys");
-        }
+    fn interval_elements_go_out_as_start_and_flagged_end_plus_one() {
+        let set = Set::new("t", "s").interval();
+        let tx = new_tx().add_set_elements(
+            &set,
+            &[
+                SetElement::ipv4_prefix(std::net::Ipv4Addr::new(10, 0, 0, 0), 24).unwrap(),
+                // A single address in an interval set is the range [a, a].
+                SetElement::ipv4(std::net::Ipv4Addr::new(192, 0, 2, 7)),
+            ],
+        );
+        assert!(tx.error.is_none(), "{:?}", tx.error);
+        let mut wire = Vec::new();
+        super::parse_set_elements(body_after_nfgenmsg(&tx.messages[0]), &mut wire);
+        let got: Vec<(Vec<u8>, bool)> = wire
+            .iter()
+            .map(|e| (e.key().to_vec(), e.is_interval_end()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (vec![10, 0, 0, 0], false),
+                (vec![10, 0, 1, 0], true),
+                (vec![192, 0, 2, 7], false),
+                (vec![192, 0, 2, 8], true),
+            ]
+        );
+        // And they pair back into the ranges that were sent.
+        let ranges: Vec<_> = super::super::interval::pair(&wire);
+        assert_eq!(
+            ranges,
+            [
+                (vec![10, 0, 0, 0], vec![10, 0, 0, 255]),
+                (vec![192, 0, 2, 7], vec![192, 0, 2, 7]),
+            ]
+        );
+    }
+
+    #[test]
+    fn element_shapes_the_set_cannot_take_are_refused() {
+        let v4 = std::net::Ipv4Addr::new(10, 0, 0, 1);
+        let refused = |set: &Set, elem: SetElement| {
+            new_tx().add_set_elements(set, &[elem]).error.is_some()
+        };
+        // Maps need element data, which is not modelled yet.
+        assert!(refused(&Set::new("t", "m").flags(SetFlags::MAP), SetElement::ipv4(v4)));
+        // A range needs an interval set.
+        assert!(refused(&Set::new("t", "s"), SetElement::ipv4_range(v4, v4)));
+        // A range that runs backwards.
+        let back = SetElement::ipv4_range(v4, std::net::Ipv4Addr::new(10, 0, 0, 0));
+        assert!(refused(&Set::new("t", "s").interval(), back));
+        // Host-order keys do not compare as numbers.
+        let marks = Set::new("t", "s").key_type(SetKeyType::Mark).interval();
+        assert!(refused(&marks, SetElement::mark(1)));
+        // A prefix longer than the address.
+        assert!(SetElement::ipv4_prefix(v4, 33).is_err());
     }
 
     #[test]
