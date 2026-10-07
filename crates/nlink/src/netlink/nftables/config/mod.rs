@@ -56,7 +56,10 @@ mod diff;
 mod types;
 
 pub use apply::{ReconcileOptions, ReconcileReport};
-pub use diff::{NftDiffOptions, NftablesDiff, RuleHandle};
+pub use diff::{
+    MoveReason, NftDiffOptions, NftablesDiff, RuleAdd, RuleHandle, RuleMove, RulePlacement,
+    SetElementsChange,
+};
 // DeclaredSet/DeclaredSetBuilder are the type of the *public* field
 // `NftablesDiff::sets_to_add`, so leaving them unexported made that field
 // unnameable — a caller could not destructure or construct it (#210).

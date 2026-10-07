@@ -34,10 +34,10 @@
 
 use std::time::Duration;
 
-use super::diff::NftablesDiff;
-use super::types::{DeclaredChain, DeclaredRule, DeclaredSet};
+use super::diff::{NftablesDiff, RulePlacement};
+use super::types::{DeclaredChain, DeclaredRule};
 use super::super::connection::Transaction;
-use super::super::types::{Chain, Family, Rule, Set};
+use super::super::types::{Chain, Family, Rule};
 use crate::netlink::{
     connection::Connection,
     error::{Error, Result},
@@ -56,16 +56,16 @@ fn keyed_body(rule: &DeclaredRule) -> Rule {
     body
 }
 
-/// Re-build a runtime [`Set`] from a [`DeclaredSet`].
-fn runtime_set(table: &str, family: Family, declared: &DeclaredSet) -> Set {
-    let mut set = Set::new(table, declared.name())
-        .family(family)
-        .key_type(declared.key_type().clone())
-        .flags(declared.flags());
-    if let Some(size) = declared.size() {
-        set = set.size(size);
+/// Push a rule at its planned place: right before or after an anchor
+/// rule, or at the end of the chain.
+fn place_rule(tx: Transaction, body: Rule, placement: RulePlacement) -> Transaction {
+    match placement {
+        RulePlacement::Before(before) => tx.insert_rule_before(body, before.0),
+        // `add_rule` sends NLM_F_APPEND, which with a position puts the
+        // rule right after the named one.
+        RulePlacement::After(after) => tx.add_rule(body.position(after.0)),
+        _ => tx.add_rule(body),
     }
-    set
 }
 
 /// Re-build a runtime `Chain` from a `DeclaredChain`.
@@ -119,7 +119,7 @@ impl NftablesDiff {
         //    new elements would refuse them (ENFILE) and fail the apply,
         //    every time. Changing a limit is the one change that is safe
         //    to make ahead of the rest.
-        if !self.sets_to_resize.is_empty() {
+        if !self.sets_to_update.is_empty() {
             self.resize_sets(conn).await?;
         }
 
@@ -137,16 +137,16 @@ impl NftablesDiff {
         }
         // ...and the rules bound to a set being recreated, which must be
         // gone before its DELSET (EBUSY otherwise). Re-added in step 8.
-        for (table, family, chain, handle, _, _) in &self.rules_to_reinsert {
-            tx = tx.del_rule(table, chain, *family, handle.0);
+        for m in &self.rules_to_move {
+            tx = tx.del_rule(&m.table, &m.chain, m.family, m.from.0);
         }
 
         // 2. Set-element removes — must precede set/table deletes
         //    and follow rule deletes (a rule referencing the set by
         //    `@name` is released above). Only for sets that persist;
         //    whole-set deletes (step 3) drop their elements.
-        for (table, family, set, elems) in &self.set_elements_to_remove {
-            tx = tx.del_set_elements(table, set, *family, elems);
+        for change in &self.set_elements_to_remove {
+            tx = tx.del_set_elements(&change.set, &change.elements);
         }
 
         // 3. Set deletes — after the rules that reference them are
@@ -193,13 +193,13 @@ impl NftablesDiff {
         //    rules (step 11) that reference them by `@name`. Re-build
         //    a runtime `Set` from `DeclaredSet`.
         for (table_name, family, declared) in &self.sets_to_add {
-            tx = tx.add_set(runtime_set(table_name, *family, declared));
+            tx = tx.add_set(declared.to_set(table_name, *family));
         }
 
         // 9. Set-element adds — after their set is created (step 8 or
         //    a prior apply), before the rules that match on them.
-        for (table, family, set, elems) in &self.set_elements_to_add {
-            tx = tx.add_set_elements(table, set, *family, elems);
+        for change in &self.set_elements_to_add {
+            tx = tx.add_set_elements(&change.set, &change.elements);
         }
 
         // 6. Chain adds, then chain property updates. Both emit
@@ -240,25 +240,15 @@ impl NftablesDiff {
 
         // 8a. Rules put back after their set was recreated, each right
         //     before the next rule that stayed, so chain order holds.
-        for (_table, _family, _chain, _handle, anchor, rule) in &self.rules_to_reinsert {
-            let body = keyed_body(rule);
-            tx = match anchor {
-                Some(before) => tx.insert_rule_before(body, before.0),
-                None => tx.add_rule(body),
-            };
+        for m in &self.rules_to_move {
+            tx = place_rule(tx, keyed_body(&m.rule), m.placement);
         }
 
         // 8. Rule adds. Wire `handle_key` → `body.comment` so the
         //    kernel round-trips it as `NFTA_RULE_USERDATA`
         //    (Plan 157b v2 — drives per-rule diff identity).
-        for rule in &self.rules_to_add {
-            let mut body = rule.body.clone();
-            if let Some(key) = rule.handle_key()
-                && body.comment.is_none()
-            {
-                body.comment = Some(key.to_string());
-            }
-            tx = tx.add_rule(body);
+        for add in &self.rules_to_add {
+            tx = place_rule(tx, keyed_body(&add.rule), add.placement);
         }
 
         // 7b. Rule in-place replaces — emits
@@ -266,30 +256,24 @@ impl NftablesDiff {
         //     Kernel atomically swaps the body at that handle
         //     (preserves position, no flush). Plan 157b v2.
         for (_table, _family, _chain, handle, declared) in &self.rules_to_replace {
-            let mut body = declared.body.clone();
-            if let Some(key) = declared.handle_key()
-                && body.comment.is_none()
-            {
-                body.comment = Some(key.to_string());
-            }
-            tx = tx.replace_rule(body, handle.0);
+            tx = tx.replace_rule(keyed_body(declared), handle.0);
         }
 
         tx.commit(conn).await?;
         Ok(total)
     }
 
-    /// Commit [`Self::sets_to_resize`] as one batch, then read the sets back:
+    /// Commit [`Self::sets_to_update`] as one batch, then read the sets back:
     /// a kernel older than 6.5 accepts the update and keeps the old size,
     /// and saying so beats a diff that reports the same resize forever.
     async fn resize_sets(&self, conn: &Connection<Nftables>) -> Result<()> {
         let mut tx = conn.transaction();
-        for (table, family, declared) in &self.sets_to_resize {
-            tx = tx.update_set(runtime_set(table, *family, declared));
+        for (table, family, declared) in &self.sets_to_update {
+            tx = tx.update_set(declared.to_set(table, *family));
         }
         tx.commit(conn).await?;
 
-        for (table, family, declared) in &self.sets_to_resize {
+        for (table, family, declared) in &self.sets_to_update {
             let current = conn
                 .list_sets_in(table, *family)
                 .await?

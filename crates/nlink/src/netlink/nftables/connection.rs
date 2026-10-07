@@ -608,7 +608,7 @@ impl Connection<Nftables> {
         builder.append_attr_str(NFTA_SET_NAME, &set.name);
         builder.append_attr_u32_be(NFTA_SET_KEY_TYPE, set.key_type.type_id());
         builder.append_attr_u32_be(NFTA_SET_KEY_LEN, set.key_type.len());
-        builder.append_attr_u32_be(NFTA_SET_FLAGS, set.flags);
+        builder.append_attr_u32_be(NFTA_SET_FLAGS, set.flags.bits());
         append_set_desc(&mut builder, &set);
         // Set ID (arbitrary, used for referencing in same batch)
         builder.append_attr_u32_be(NFTA_SET_ID, 1);
@@ -686,34 +686,28 @@ impl Connection<Nftables> {
     }
 
     /// Add elements to a set.
+    ///
+    /// Takes the [`Set`] itself — the same value `add_set` was given, or one
+    /// describing the existing set — because how an element is written
+    /// depends on the set's key type and flags. Elements that do not fit
+    /// the set are an error, not something dropped.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_set_elements"))]
-    pub async fn add_set_elements(
-        &self,
-        table: &str,
-        set: &str,
-        family: Family,
-        elements: &[SetElement],
-    ) -> Result<()> {
+    pub async fn add_set_elements(&self, set: &Set, elements: &[SetElement]) -> Result<()> {
         let mut builder = MessageBuilder::new(
             nft_msg_type(NFT_MSG_NEWSETELEM),
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE,
         );
-        append_set_elements(&mut builder, table, set, family, elements);
+        append_set_elements(&mut builder, set, elements)?;
         self.nft_request_ack(builder).await
     }
 
-    /// Delete elements from a set.
+    /// Delete elements from a set. See [`add_set_elements`](Self::add_set_elements)
+    /// for why it takes the [`Set`].
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_set_elements"))]
-    pub async fn del_set_elements(
-        &self,
-        table: &str,
-        set: &str,
-        family: Family,
-        elements: &[SetElement],
-    ) -> Result<()> {
+    pub async fn del_set_elements(&self, set: &Set, elements: &[SetElement]) -> Result<()> {
         let mut builder =
             MessageBuilder::new(nft_msg_type(NFT_MSG_DELSETELEM), NLM_F_REQUEST | NLM_F_ACK);
-        append_set_elements(&mut builder, table, set, family, elements);
+        append_set_elements(&mut builder, set, elements)?;
         self.nft_request_ack(builder).await
     }
 
@@ -726,9 +720,8 @@ impl Connection<Nftables> {
     /// undeclared ones); also useful standalone to read a set's
     /// contents.
     ///
-    /// Only the element **key** is parsed — map/`element : value`
-    /// data (`NFTA_SET_ELEM_DATA`) is ignored, matching
-    /// [`SetElement`]'s key-only shape.
+    /// The key and the element flags are read; map data, timeouts and
+    /// range ends are not decoded yet.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "list_set_elements"))]
     pub async fn list_set_elements(
         &self,
@@ -1326,7 +1319,8 @@ pub(crate) fn parse_rule(data: &[u8], family: Family) -> Option<RuleInfo> {
         family,
         handle: 0,
         position: None,
-        comment: None,
+        key: None,
+        comment_text: None,
         userdata_raw: None,
         expression_bytes: Vec::new(),
     };
@@ -1350,7 +1344,8 @@ pub(crate) fn parse_rule(data: &[u8], family: Family) -> Option<RuleInfo> {
             }
             NFTA_RULE_USERDATA => {
                 rule.userdata_raw = Some(payload.to_vec());
-                rule.comment = super::userdata::parse_nlink_comment(payload);
+                rule.key = super::userdata::parse_nlink_comment(payload);
+                rule.comment_text = super::userdata::parse_comment(payload);
             }
             _ => {}
         }
@@ -1368,7 +1363,7 @@ pub(crate) fn parse_set(data: &[u8], family: Family) -> Option<SetInfo> {
         table: String::new(),
         name: String::new(),
         family,
-        flags: 0,
+        flags: SetFlags::empty(),
         key_type: 0,
         key_len: 0,
         handle: 0,
@@ -1393,7 +1388,7 @@ pub(crate) fn parse_set(data: &[u8], family: Family) -> Option<SetInfo> {
                 set.name = attr_str(payload).unwrap_or_default();
             }
             NFTA_SET_FLAGS if payload.len() >= 4 => {
-                set.flags = u32::from_be_bytes(payload[..4].try_into().unwrap());
+                set.flags = SetFlags(u32::from_be_bytes(payload[..4].try_into().unwrap()));
             }
             NFTA_SET_KEY_TYPE if payload.len() >= 4 => {
                 set.key_type = u32::from_be_bytes(payload[..4].try_into().unwrap());
@@ -1430,27 +1425,39 @@ pub(crate) fn parse_set_elements(data: &[u8], out: &mut Vec<SetElement>) {
             if elem_type & 0x7FFF != NFTA_LIST_ELEM {
                 continue;
             }
-            if let Some(key) = parse_set_elem_key(elem_payload) {
-                out.push(SetElement::new(key));
+            if let Some(elem) = parse_set_elem(elem_payload) {
+                out.push(elem);
             }
         }
     }
 }
 
-/// Extract the `NFTA_SET_ELEM_KEY` → `NFTA_DATA_VALUE` key bytes
-/// from a single element nest. Returns `None` if the key attribute
-/// is absent (e.g. an interval end-marker we don't model).
-fn parse_set_elem_key(elem: &[u8]) -> Option<Vec<u8>> {
+/// Decode one element nest: the `NFTA_SET_ELEM_KEY` → `NFTA_DATA_VALUE`
+/// key bytes and `NFTA_SET_ELEM_FLAGS`. An element without a key is kept
+/// only when it is the catch-all element.
+fn parse_set_elem(elem: &[u8]) -> Option<SetElement> {
+    let mut key = None;
+    let mut flags = 0;
     for (attr_type, payload) in AttrIter::new(elem) {
-        if attr_type & 0x7FFF == NFTA_SET_ELEM_KEY {
-            for (data_type, data_payload) in AttrIter::new(payload) {
-                if data_type & 0x7FFF == NFTA_DATA_VALUE {
-                    return Some(data_payload.to_vec());
+        match attr_type & 0x7FFF {
+            NFTA_SET_ELEM_KEY => {
+                for (data_type, data_payload) in AttrIter::new(payload) {
+                    if data_type & 0x7FFF == NFTA_DATA_VALUE {
+                        key = Some(data_payload.to_vec());
+                    }
                 }
             }
+            NFTA_SET_ELEM_FLAGS if payload.len() >= 4 => {
+                flags = u32::from_be_bytes(payload[..4].try_into().unwrap());
+            }
+            _ => {}
         }
     }
-    None
+    match key {
+        Some(key) => Some(SetElement::from_wire(key, flags)),
+        None if flags & NFT_SET_ELEM_CATCHALL != 0 => Some(SetElement::from_wire(Vec::new(), flags)),
+        None => None,
+    }
 }
 
 /// Extract a null-terminated string from attribute payload.
@@ -1488,6 +1495,10 @@ pub struct Transaction {
     /// window and mid-batch kernel errors were silently discarded.
     /// `send_batch` now assigns every `nlmsg_seq` itself.
     set_id_counter: u32,
+    /// The first error a builder method could not return (they return
+    /// `Self`): an element that does not fit its set, say. `commit` reports
+    /// it instead of sending the batch, so nothing is dropped silently.
+    error: Option<Error>,
 }
 
 impl Transaction {
@@ -1495,7 +1506,13 @@ impl Transaction {
         Self {
             messages: Vec::new(),
             set_id_counter: 1,
+            error: None,
         }
+    }
+
+    /// Keep the first deferred error.
+    fn defer(&mut self, error: Error) {
+        self.error.get_or_insert(error);
     }
 
     /// Allocate a batch-local `NFTA_SET_ID`.
@@ -1776,7 +1793,7 @@ impl Transaction {
         builder.append_attr_str(NFTA_SET_NAME, &set.name);
         builder.append_attr_u32_be(NFTA_SET_KEY_TYPE, set.key_type.type_id());
         builder.append_attr_u32_be(NFTA_SET_KEY_LEN, set.key_type.len());
-        builder.append_attr_u32_be(NFTA_SET_FLAGS, set.flags);
+        builder.append_attr_u32_be(NFTA_SET_FLAGS, set.flags.bits());
         append_set_desc(&mut builder, &set);
         builder.append_attr_u32_be(NFTA_SET_ID, set_id);
         self.messages.push(builder.finish());
@@ -1796,39 +1813,36 @@ impl Transaction {
     }
 
     /// Add set-element insertions to the batch. Mirrors the
-    /// imperative [`Connection::<Nftables>::add_set_elements`](Connection).
-    pub fn add_set_elements(
-        mut self,
-        table: &str,
-        set: &str,
-        family: Family,
-        elements: &[SetElement],
-    ) -> Self {
+    /// imperative [`Connection::<Nftables>::add_set_elements`](Connection);
+    /// an element that does not fit the set fails [`commit`](Self::commit).
+    pub fn add_set_elements(mut self, set: &Set, elements: &[SetElement]) -> Self {
         let mut builder =
             MessageBuilder::new(nft_msg_type(NFT_MSG_NEWSETELEM), NLM_F_REQUEST | NLM_F_CREATE);
-        append_set_elements(&mut builder, table, set, family, elements);
-        self.messages.push(builder.finish());
+        match append_set_elements(&mut builder, set, elements) {
+            Ok(()) => self.messages.push(builder.finish()),
+            Err(e) => self.defer(e),
+        }
         self
     }
 
     /// Add set-element removals to the batch. Mirrors the
     /// imperative [`Connection::<Nftables>::del_set_elements`](Connection).
-    pub fn del_set_elements(
-        mut self,
-        table: &str,
-        set: &str,
-        family: Family,
-        elements: &[SetElement],
-    ) -> Self {
+    pub fn del_set_elements(mut self, set: &Set, elements: &[SetElement]) -> Self {
         let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_DELSETELEM), NLM_F_REQUEST);
-        append_set_elements(&mut builder, table, set, family, elements);
-        self.messages.push(builder.finish());
+        match append_set_elements(&mut builder, set, elements) {
+            Ok(()) => self.messages.push(builder.finish()),
+            Err(e) => self.defer(e),
+        }
         self
     }
 
-    /// Commit the transaction atomically.
+    /// Commit the transaction atomically. If a builder method recorded an
+    /// error, that error is returned and nothing is sent.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "commit"))]
     pub async fn commit(self, conn: &Connection<Nftables>) -> Result<()> {
+        if let Some(error) = self.error {
+            return Err(error);
+        }
         conn.send_batch(self.messages).await
     }
 }
@@ -1849,25 +1863,44 @@ fn append_set_desc(builder: &mut MessageBuilder, set: &Set) {
 /// the wire shape stays identical.
 fn append_set_elements(
     builder: &mut MessageBuilder,
-    table: &str,
-    set: &str,
-    family: Family,
+    set: &Set,
     elements: &[SetElement],
-) {
-    let nfgenmsg = NfGenMsg::new(family);
+) -> Result<()> {
+    // Interval sets and maps need range ends and element data on the wire.
+    // Writing their elements as plain keys would install open-ended
+    // intervals or data-less map entries, so refuse until they are
+    // modelled.
+    if set.flags.contains(SetFlags::INTERVAL) {
+        return Err(Error::InvalidMessage(format!(
+            "set {}: elements of interval sets are not supported yet",
+            set.name
+        )));
+    }
+    if set.flags.contains(SetFlags::MAP) {
+        return Err(Error::InvalidMessage(format!(
+            "set {}: elements of maps are not supported yet",
+            set.name
+        )));
+    }
+    for elem in elements {
+        elem.check_for(set)?;
+    }
+
+    let nfgenmsg = NfGenMsg::new(set.family);
     builder.append(&nfgenmsg);
-    builder.append_attr_str(NFTA_SET_ELEM_LIST_TABLE, table);
-    builder.append_attr_str(NFTA_SET_ELEM_LIST_SET, set);
+    builder.append_attr_str(NFTA_SET_ELEM_LIST_TABLE, &set.table);
+    builder.append_attr_str(NFTA_SET_ELEM_LIST_SET, &set.name);
 
     let elems_nest = builder.nest_start(NFTA_SET_ELEM_LIST_ELEMENTS | 0x8000);
     for elem in elements {
         let elem_nest = builder.nest_start(NFTA_LIST_ELEM | 0x8000);
         let key_nest = builder.nest_start(NFTA_SET_ELEM_KEY | 0x8000);
-        builder.append_attr(NFTA_DATA_VALUE, &elem.key);
+        builder.append_attr(NFTA_DATA_VALUE, elem.key());
         builder.nest_end(key_nest);
         builder.nest_end(elem_nest);
     }
     builder.nest_end(elems_nest);
+    Ok(())
 }
 
 /// Parse a flowtable from `NFT_MSG_GETFLOWTABLE` response payload.
@@ -2253,6 +2286,41 @@ mod transaction_tests {
     }
 
     #[test]
+    fn tx_element_that_does_not_fit_the_set_is_deferred_not_dropped() {
+        // A port (2 bytes) into an IPv4 set (4-byte keys).
+        let set = Set::new("t", "s").key_type(SetKeyType::Ipv4Addr);
+        let tx = new_tx().add_set_elements(&set, &[SetElement::port(80)]);
+        assert!(tx.messages.is_empty(), "nothing must be queued");
+        let err = tx.error.expect("the mismatch must be recorded for commit");
+        assert!(err.to_string().contains("element key is 2 bytes"), "{err}");
+
+        // Only the first error is kept.
+        let tx = new_tx()
+            .add_set_elements(&set, &[SetElement::port(80)])
+            .del_set_elements(&set, &[SetElement::mark(1), SetElement::port(1)]);
+        assert!(tx.error.unwrap().to_string().contains("2 bytes"));
+    }
+
+    #[test]
+    fn interval_and_map_elements_are_refused_until_modelled() {
+        for flags in [SetFlags::INTERVAL, SetFlags::MAP] {
+            let set = Set::new("t", "s").flags(flags);
+            let elem = SetElement::ipv4(std::net::Ipv4Addr::new(10, 0, 0, 1));
+            let tx = new_tx().add_set_elements(&set, &[elem]);
+            assert!(tx.error.is_some(), "{flags:?} elements must not be written as plain keys");
+        }
+    }
+
+    #[test]
+    fn set_flags_combine_like_the_kernel_bits() {
+        let flags = SetFlags::INTERVAL | SetFlags::TIMEOUT;
+        assert_eq!(flags.bits(), NFT_SET_INTERVAL | NFT_SET_TIMEOUT);
+        assert!(flags.contains(SetFlags::TIMEOUT));
+        assert!(!flags.contains(SetFlags::MAP));
+        assert_eq!(SetFlags::default(), SetFlags::empty());
+    }
+
+    #[test]
     fn tx_del_set_emits_table_and_name() {
         let tx = new_tx().del_set("filter", "allowed_v4", Family::Inet);
         let msg = &tx.messages[0];
@@ -2270,7 +2338,8 @@ mod transaction_tests {
             SetElement::ipv4(std::net::Ipv4Addr::new(10, 0, 0, 1)),
             SetElement::ipv4(std::net::Ipv4Addr::new(10, 0, 0, 2)),
         ];
-        let tx = new_tx().add_set_elements("filter", "allowed_v4", Family::Inet, &elems);
+        let set = Set::new("filter", "allowed_v4");
+        let tx = new_tx().add_set_elements(&set, &elems);
         let msg = &tx.messages[0];
         assert_header(
             msg,
@@ -2291,20 +2360,20 @@ mod transaction_tests {
         // Build a minimal ELEMENTS nest by hand via the shared writer,
         // then confirm the parser pulls exactly the key bytes.
         let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_NEWSETELEM), NLM_F_REQUEST);
+        let set = Set::new("t", "s").key_type(SetKeyType::InetService);
         super::append_set_elements(
             &mut builder,
-            "t",
-            "s",
-            Family::Inet,
+            &set,
             &[SetElement::port(80), SetElement::port(443)],
-        );
+        )
+        .unwrap();
         let msg = builder.finish();
         let body = body_after_nfgenmsg(&msg);
         let mut out = Vec::new();
         super::parse_set_elements(body, &mut out);
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0].key, 80u16.to_be_bytes());
-        assert_eq!(out[1].key, 443u16.to_be_bytes());
+        assert_eq!(out[0].key(), 80u16.to_be_bytes());
+        assert_eq!(out[1].key(), 443u16.to_be_bytes());
 
         // Truncated / garbage payload must not panic and yields nothing.
         let mut none = Vec::new();
@@ -2734,7 +2803,7 @@ mod userdata_roundtrip_tests {
         assert_eq!(parsed.table, "filter");
         assert_eq!(parsed.chain, "input");
         assert_eq!(
-            parsed.comment.as_deref(),
+            parsed.key.as_deref(),
             Some("ssh-accept"),
             "comment should round-trip from emit through parse",
         );
@@ -2750,7 +2819,7 @@ mod userdata_roundtrip_tests {
         let tx = Transaction::new().add_rule(rule);
         let body = body_after_nfgenmsg(&tx.messages[0]);
         let parsed = super::parse_rule(body, Family::Inet).expect("parse");
-        assert!(parsed.comment.is_none());
+        assert!(parsed.key.is_none());
         assert!(parsed.userdata_raw.is_none());
     }
 
@@ -2763,6 +2832,6 @@ mod userdata_roundtrip_tests {
         let body = body_after_nfgenmsg(&tx.messages[0]);
         let parsed = super::parse_rule(body, Family::Inet).expect("parse");
         assert_eq!(parsed.handle, 42);
-        assert_eq!(parsed.comment.as_deref(), Some("ssh-accept"));
+        assert_eq!(parsed.key.as_deref(), Some("ssh-accept"));
     }
 }

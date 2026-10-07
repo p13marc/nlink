@@ -177,7 +177,7 @@ async fn rules_install_in_declaration_order() -> nlink::Result<()> {
         let rules = conn.list_rules("ordering", Family::Inet).await?;
         assert_eq!(rules.len(), 2, "expected exactly the two rules we added");
 
-        let order: Vec<_> = rules.iter().map(|r| r.comment.as_deref()).collect();
+        let order: Vec<_> = rules.iter().map(|r| r.key.as_deref()).collect();
         assert_eq!(
             order,
             vec![Some("nlink:1-accept-ssh"), Some("nlink:2-drop-all")],

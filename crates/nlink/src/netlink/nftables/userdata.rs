@@ -73,6 +73,15 @@ pub(crate) fn encode_nlink_comment(key: &str) -> Option<Vec<u8>> {
 ///
 /// [`RuleInfo::userdata_raw`]: super::types::RuleInfo
 pub(crate) fn parse_nlink_comment(userdata: &[u8]) -> Option<String> {
+    parse_comment(userdata)?
+        .strip_prefix(NLINK_PREFIX)
+        .map(str::to_string)
+}
+
+/// The rule comment exactly as `nft list ruleset` shows it — the
+/// `NFTNL_UDATA_RULE_COMMENT` string with its NUL removed — whoever set
+/// it. `None` when there is no comment or the TLVs are malformed.
+pub(crate) fn parse_comment(userdata: &[u8]) -> Option<String> {
     let mut cursor = userdata;
     while cursor.len() >= 2 {
         let ty = cursor[0];
@@ -87,7 +96,7 @@ pub(crate) fn parse_nlink_comment(userdata: &[u8]) -> Option<String> {
             let s = std::str::from_utf8(payload)
                 .ok()?
                 .trim_end_matches('\0');
-            return s.strip_prefix(NLINK_PREFIX).map(str::to_string);
+            return Some(s.to_string());
         }
         cursor = &cursor[2 + len..];
     }
@@ -165,5 +174,34 @@ mod tests {
         // Type-0 TLV with non-UTF-8 bytes.
         let tlv = [NFTNL_UDATA_RULE_COMMENT, 2, 0xff, 0xfe];
         assert_eq!(parse_nlink_comment(&tlv), None);
+    }
+}
+
+#[cfg(test)]
+mod comment_tests {
+    use super::*;
+
+    fn tlv(comment: &str) -> Vec<u8> {
+        let body = format!("{comment}\0");
+        let mut tlv = vec![NFTNL_UDATA_RULE_COMMENT, body.len() as u8];
+        tlv.extend_from_slice(body.as_bytes());
+        tlv
+    }
+
+    #[test]
+    fn a_foreign_comment_has_text_but_no_key() {
+        let foreign = tlv("allow ssh from the office");
+        assert_eq!(parse_nlink_comment(&foreign), None);
+        assert_eq!(
+            parse_comment(&foreign).as_deref(),
+            Some("allow ssh from the office")
+        );
+    }
+
+    #[test]
+    fn an_nlink_comment_has_both() {
+        let ours = encode_nlink_comment("k").unwrap();
+        assert_eq!(parse_nlink_comment(&ours).as_deref(), Some("k"));
+        assert_eq!(parse_comment(&ours).as_deref(), Some("nlink:k"));
     }
 }

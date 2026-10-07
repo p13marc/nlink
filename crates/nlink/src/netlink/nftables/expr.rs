@@ -63,18 +63,15 @@ pub enum Expr {
     Verdict(Verdict),
     /// Packet counter.
     Counter,
-    /// Rate limit.
-    Limit {
-        rate: u64,
-        unit: LimitUnit,
-        burst: u32,
-    },
-    /// Masquerade (source NAT).
-    Masquerade,
+    /// Rate limit — see [`LimitExpr`].
+    Limit(LimitExpr),
+    /// Masquerade (source NAT to the outgoing interface's address) — see
+    /// [`MasqExpr`].
+    Masquerade(MasqExpr),
     /// NAT (snat/dnat) with optional address and port.
     Nat(NatExpr),
-    /// Redirect (redirect to local machine, dnat to localhost).
-    Redirect { port: Option<u16> },
+    /// Redirect to the local machine — see [`RedirExpr`].
+    Redirect(RedirExpr),
     /// Reject the packet — send an ICMP unreachable or a TCP RST, then drop.
     ///
     /// Distinct from [`Verdict::Drop`], which black-holes the packet silently
@@ -92,11 +89,8 @@ pub enum Expr {
         /// ICMP code to send. Ignored for `NFT_REJECT_TCP_RST`.
         icmp_code: u8,
     },
-    /// Log packet.
-    Log {
-        prefix: Option<String>,
-        group: Option<u16>,
-    },
+    /// Log the packet — see [`LogExpr`].
+    Log(LogExpr),
     /// Connection tracking.
     Ct { dreg: Register, key: CtKey },
     /// Write a register into the packet's conntrack entry
@@ -115,8 +109,8 @@ pub enum Expr {
         len: u32,
         size: u32,
     },
-    /// Lookup in a named set.
-    Lookup { set: String, sreg: Register },
+    /// Look a register up in a named set or map — see [`LookupExpr`].
+    Lookup(LookupExpr),
     /// Bitwise operation.
     Bitwise {
         sreg: Register,
@@ -133,8 +127,192 @@ pub enum Expr {
     FlowOffload {
         /// Name of the flowtable. Must resolve to a flowtable in
         /// the same owning table as this rule.
-        table: String,
+        flowtable: String,
     },
+}
+
+// The expressions most likely to grow carry a `#[non_exhaustive]` payload
+// struct — built with `new()` and setters, and turned into an `Expr` with
+// `From`/`.into()` or pushed with `Rule::expr` — so that a field added later
+// (a byte-rate limit, a log level, masquerade ports) is not a breaking
+// change. The stable expressions stay plain struct variants.
+
+/// `lookup`: look a register up in a named set (`ip saddr @s`), optionally
+/// inverted (`ip saddr != @s`), or in a map, loading the mapped value into
+/// [`dreg`](Self::dreg) (`Register::Verdict` for a verdict map, `vmap`).
+///
+/// The kernel rejects an inverted map lookup (`EINVAL`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LookupExpr {
+    /// Set or map name.
+    pub set: String,
+    /// Register holding the key.
+    pub sreg: Register,
+    /// Destination register of a map lookup; `None` for a set membership
+    /// test.
+    pub dreg: Option<Register>,
+    /// Match when the key is *not* in the set (`NFT_LOOKUP_F_INV`).
+    pub invert: bool,
+}
+
+impl LookupExpr {
+    /// A membership test of `sreg` in `set`.
+    pub fn new(set: impl Into<String>, sreg: Register) -> Self {
+        Self {
+            set: set.into(),
+            sreg,
+            dreg: None,
+            invert: false,
+        }
+    }
+
+    /// Make this a map lookup, loading the value into `dreg`.
+    pub fn dreg(mut self, dreg: Register) -> Self {
+        self.dreg = Some(dreg);
+        self
+    }
+
+    /// Match keys that are *not* in the set.
+    pub fn invert(mut self) -> Self {
+        self.invert = true;
+        self
+    }
+}
+
+impl From<LookupExpr> for Expr {
+    fn from(e: LookupExpr) -> Self {
+        Expr::Lookup(e)
+    }
+}
+
+/// `limit`: a packet-rate limit, matching while under the rate (or, with
+/// [`over`](Self::over), once over it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LimitExpr {
+    /// Packets per [`unit`](Self::unit).
+    pub rate: u64,
+    /// Time unit of the rate.
+    pub unit: LimitUnit,
+    /// Burst in packets. The kernel stores 0 as its default, 5, and nlink
+    /// sends 5 for it so the declared rule matches the dump.
+    pub burst: u32,
+    /// Match once the rate is exceeded (`limit rate over`,
+    /// `NFT_LIMIT_F_INV`).
+    pub over: bool,
+}
+
+impl LimitExpr {
+    /// `limit rate <rate>/<unit>`, burst 5.
+    pub fn packets(rate: u64, unit: LimitUnit) -> Self {
+        Self {
+            rate,
+            unit,
+            burst: 5,
+            over: false,
+        }
+    }
+
+    /// Set the burst, in packets.
+    pub fn burst(mut self, burst: u32) -> Self {
+        self.burst = burst;
+        self
+    }
+
+    /// Match packets over the rate instead of under it.
+    pub fn over(mut self) -> Self {
+        self.over = true;
+        self
+    }
+}
+
+impl From<LimitExpr> for Expr {
+    fn from(e: LimitExpr) -> Self {
+        Expr::Limit(e)
+    }
+}
+
+/// `log`: to syslog (no group), or to an `nflog` group.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LogExpr {
+    /// Prefix prepended to the log line.
+    pub prefix: Option<String>,
+    /// `nflog` group; `None` logs to syslog at the kernel's default level.
+    pub group: Option<u16>,
+}
+
+impl LogExpr {
+    /// A syslog `log` with no prefix.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the prefix.
+    pub fn prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.prefix = Some(prefix.into());
+        self
+    }
+
+    /// Log to an `nflog` group instead of syslog.
+    pub fn group(mut self, group: u16) -> Self {
+        self.group = Some(group);
+        self
+    }
+}
+
+impl From<LogExpr> for Expr {
+    fn from(e: LogExpr) -> Self {
+        Expr::Log(e)
+    }
+}
+
+/// `masquerade`. No options are modelled yet.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MasqExpr {}
+
+impl MasqExpr {
+    /// Plain `masquerade`.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl From<MasqExpr> for Expr {
+    fn from(e: MasqExpr) -> Self {
+        Expr::Masquerade(e)
+    }
+}
+
+/// `redirect`, optionally to a port. The port is loaded into `R0` by an
+/// `Immediate` that [`Rule::redirect`](super::types::Rule::redirect) pushes
+/// ahead of this expression.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RedirExpr {
+    /// Destination port, if any.
+    pub port: Option<u16>,
+}
+
+impl RedirExpr {
+    /// `redirect` to the original port.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Redirect to `port`.
+    pub fn port(mut self, port: u16) -> Self {
+        self.port = Some(port);
+        self
+    }
+}
+
+impl From<RedirExpr> for Expr {
+    fn from(e: RedirExpr) -> Self {
+        Expr::Redirect(e)
+    }
 }
 
 /// Write a list of expressions into a rule's NFTA_RULE_EXPRESSIONS attribute.
@@ -257,7 +435,12 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             builder.append_attr_u64_be(NFTA_COUNTER_PACKETS, 0);
             builder.nest_end(data);
         }
-        Expr::Limit { rate, unit, burst } => {
+        Expr::Limit(LimitExpr {
+            rate,
+            unit,
+            burst,
+            over,
+        }) => {
             builder.append_attr_str(NFTA_EXPR_NAME, "limit");
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
             builder.append_attr_u64_be(NFTA_LIMIT_RATE, *rate);
@@ -270,10 +453,10 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             // `nft_limit_dump` always emits FLAGS, 0 included. Without it a
             // declared `limit` rendered one attribute short of the echo and
             // was replaced on every apply.
-            builder.append_attr_u32_be(NFTA_LIMIT_FLAGS, 0);
+            builder.append_attr_u32_be(NFTA_LIMIT_FLAGS, if *over { NFT_LIMIT_F_INV } else { 0 });
             builder.nest_end(data);
         }
-        Expr::Masquerade => {
+        Expr::Masquerade(MasqExpr {}) => {
             builder.append_attr_str(NFTA_EXPR_NAME, "masq");
             // Basic masquerade has no attributes *inside* the data nest,
             // but the nest itself is not optional: `nft_expr_dump` opens
@@ -324,7 +507,7 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             }
             builder.nest_end(data);
         }
-        Expr::Redirect { port } => {
+        Expr::Redirect(RedirExpr { port }) => {
             builder.append_attr_str(NFTA_EXPR_NAME, "redir");
             if port.is_some() {
                 // The port value itself is loaded into R0 by an Immediate that
@@ -373,7 +556,7 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             }
             builder.nest_end(data);
         }
-        Expr::Log { prefix, group } => {
+        Expr::Log(LogExpr { prefix, group }) => {
             builder.append_attr_str(NFTA_EXPR_NAME, "log");
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
             if let Some(prefix) = prefix {
@@ -426,15 +609,24 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             builder.append_attr_u32_be(NFTA_BYTEORDER_SIZE, *size);
             builder.nest_end(data);
         }
-        Expr::Lookup { set, sreg } => {
+        Expr::Lookup(LookupExpr {
+            set,
+            sreg,
+            dreg,
+            invert,
+        }) => {
             builder.append_attr_str(NFTA_EXPR_NAME, "lookup");
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
             builder.append_attr_str(NFTA_LOOKUP_SET, set);
             builder.append_attr_u32_be(NFTA_LOOKUP_SREG, *sreg as u32);
+            if let Some(dreg) = dreg {
+                builder.append_attr_u32_be(NFTA_LOOKUP_DREG, *dreg as u32);
+            }
             // `nft_lookup_dump` always emits FLAGS (NFT_LOOKUP_F_INV or 0).
             // Without it every declared rule matching `@set` was replaced on
             // every apply.
-            builder.append_attr_u32_be(NFTA_LOOKUP_FLAGS, 0);
+            let flags = if *invert { NFT_LOOKUP_F_INV } else { 0 };
+            builder.append_attr_u32_be(NFTA_LOOKUP_FLAGS, flags);
             builder.nest_end(data);
         }
         Expr::Bitwise {
@@ -460,7 +652,7 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             builder.nest_end(xor_nest);
             builder.nest_end(data);
         }
-        Expr::FlowOffload { table } => {
+        Expr::FlowOffload { flowtable } => {
             builder.append_attr_str(NFTA_EXPR_NAME, "flow_offload");
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
             // The flow_offload expression carries a single string
@@ -470,7 +662,7 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             // write NFTA_FLOWTABLE_NAME (2), the flowtable *object*'s name
             // attribute: above the expression's NFTA_FLOW_MAX, so ignored,
             // and the rule failed with EINVAL — every one of them.
-            builder.append_attr_str(NFTA_FLOW_TABLE_NAME, table);
+            builder.append_attr_str(NFTA_FLOW_TABLE_NAME, flowtable);
             builder.nest_end(data);
         }
     }
@@ -551,6 +743,7 @@ use crate::netlink::attr::{AttrIter, get};
 pub enum RuleExpr {
     /// `counter` — cumulative packet/byte counts as maintained by the
     /// kernel (live values in dumps, zeros right after rule creation).
+    #[non_exhaustive]
     Counter {
         /// Packets matched.
         packets: u64,
@@ -561,6 +754,7 @@ pub enum RuleExpr {
     /// (accept / drop / continue / return / jump / goto).
     Verdict(Verdict),
     /// `meta` load into a data register.
+    #[non_exhaustive]
     Meta {
         /// Destination register.
         dreg: Register,
@@ -568,6 +762,7 @@ pub enum RuleExpr {
         key: MetaKey,
     },
     /// `meta` set: write a register into packet metadata.
+    #[non_exhaustive]
     MetaSet {
         /// Metadata key being written.
         key: MetaKey,
@@ -575,6 +770,7 @@ pub enum RuleExpr {
         sreg: Register,
     },
     /// `exthdr` load of an extension header / option field.
+    #[non_exhaustive]
     Exthdr {
         /// Destination register.
         dreg: Register,
@@ -588,6 +784,7 @@ pub enum RuleExpr {
         len: u32,
     },
     /// `exthdr` set: overwrite an extension header / option field.
+    #[non_exhaustive]
     ExthdrSet {
         /// Source register.
         sreg: Register,
@@ -601,6 +798,7 @@ pub enum RuleExpr {
         len: u32,
     },
     /// `cmp` of a register against a value.
+    #[non_exhaustive]
     Cmp {
         /// Source register.
         sreg: Register,
@@ -610,6 +808,7 @@ pub enum RuleExpr {
         data: Vec<u8>,
     },
     /// `immediate` value load into a data register.
+    #[non_exhaustive]
     Immediate {
         /// Destination register.
         dreg: Register,
@@ -617,6 +816,7 @@ pub enum RuleExpr {
         data: Vec<u8>,
     },
     /// `payload` load into a data register.
+    #[non_exhaustive]
     Payload {
         /// Destination register.
         dreg: Register,
@@ -628,6 +828,7 @@ pub enum RuleExpr {
         len: u32,
     },
     /// `ct` load into a data register (no direction).
+    #[non_exhaustive]
     Ct {
         /// Destination register.
         dreg: Register,
@@ -635,6 +836,7 @@ pub enum RuleExpr {
         key: CtKey,
     },
     /// `ct` set: write a register into the conntrack entry.
+    #[non_exhaustive]
     CtSet {
         /// Conntrack key being written.
         key: CtKey,
@@ -642,6 +844,7 @@ pub enum RuleExpr {
         sreg: Register,
     },
     /// `rt` load of routing data.
+    #[non_exhaustive]
     Rt {
         /// Destination register.
         dreg: Register,
@@ -649,6 +852,7 @@ pub enum RuleExpr {
         key: RtKey,
     },
     /// `byteorder` conversion.
+    #[non_exhaustive]
     Byteorder {
         /// Source register.
         sreg: Register,
@@ -663,6 +867,7 @@ pub enum RuleExpr {
     },
     /// `bitwise` mask-and-xor (`(reg & mask) ^ xor`). The shift and
     /// register-operand forms decode as [`Unknown`](Self::Unknown).
+    #[non_exhaustive]
     Bitwise {
         /// Source register.
         sreg: Register,
@@ -675,17 +880,25 @@ pub enum RuleExpr {
         /// XOR value (as on the wire).
         xor: Vec<u8>,
     },
-    /// `lookup` of a register in a named set (`@set`). Inverted lookups
-    /// and map lookups decode as [`Unknown`](Self::Unknown).
+    /// `lookup` of a register in a named set or map (`@set`,
+    /// `!= @set`, `map @m`, `vmap @m`). Lookups with flags other than
+    /// `NFT_LOOKUP_F_INV` decode as [`Unknown`](Self::Unknown).
+    #[non_exhaustive]
     Lookup {
         /// Set name.
         set: String,
         /// Source register.
         sreg: Register,
+        /// Destination register of a map lookup (`Register::Verdict` for a
+        /// verdict map); `None` for a membership test.
+        dreg: Option<Register>,
+        /// `!= @set` (`NFT_LOOKUP_F_INV`).
+        invert: bool,
     },
     /// Expression not (or not fully) decodable: kind name plus the raw
     /// `NFTA_EXPR_DATA` payload, preserved verbatim (empty for
     /// data-less expressions like `masq`).
+    #[non_exhaustive]
     Unknown {
         /// `NFTA_EXPR_NAME` (e.g. `"quota"`, `"limit"`, `"nat"`).
         name: String,
@@ -984,20 +1197,27 @@ fn parse_bitwise(data: &[u8]) -> Option<RuleExpr> {
 fn parse_lookup(data: &[u8]) -> Option<RuleExpr> {
     let mut set = None;
     let mut sreg = None;
+    let mut dreg = None;
+    let mut invert = false;
     for (attr, payload) in AttrIter::new(data) {
         match attr {
             NFTA_LOOKUP_SET => set = get::string(payload).ok().map(str::to_string),
             NFTA_LOOKUP_SREG => sreg = Register::from_u32(get::u32_be(payload).ok()?),
-            // A map lookup (DREG) or an inverted one (`!= @set`) is not what
-            // `Lookup { set, sreg }` describes.
-            NFTA_LOOKUP_DREG => return None,
-            NFTA_LOOKUP_FLAGS if get::u32_be(payload).ok()? != 0 => return None,
+            NFTA_LOOKUP_DREG => dreg = Some(Register::from_u32(get::u32_be(payload).ok()?)?),
+            NFTA_LOOKUP_FLAGS => match get::u32_be(payload).ok()? {
+                0 => {}
+                NFT_LOOKUP_F_INV => invert = true,
+                // A flag this decoder does not know: never guess.
+                _ => return None,
+            },
             _ => {}
         }
     }
     Some(RuleExpr::Lookup {
         set: set?,
         sreg: sreg?,
+        dreg,
+        invert,
     })
 }
 
@@ -1067,7 +1287,7 @@ impl super::types::RuleInfo {
     /// expression in this rule, if any.
     ///
     /// The common "per-rule hit counters" shortcut: dump rules, join
-    /// on [`comment`](Self::comment)/handle, read `counter()`. Rules
+    /// on [`key`](Self::key)/handle, read `counter()`. Rules
     /// can legally carry several counter expressions; this returns the
     /// first (position order = evaluation order).
     pub fn counter(&self) -> Option<(u64, u64)> {
@@ -1202,7 +1422,7 @@ mod decode_tests {
                 dreg: Register::R0,
                 data: 3128u16.to_be_bytes().to_vec(),
             },
-            Expr::Redirect { port: Some(3128) },
+            RedirExpr::new().port(3128).into(),
         ];
 
         let attrs = attrs_of(&expr_data(&exprs, "redir"));
@@ -1230,7 +1450,7 @@ mod decode_tests {
     /// A redirect with no port rewrites nothing and needs no data nest.
     #[test]
     fn redirect_without_a_port_emits_no_data() {
-        let data = expr_data(&[Expr::Redirect { port: None }], "redir");
+        let data = expr_data(&[Expr::Redirect(RedirExpr::new())], "redir");
         assert!(data.is_empty());
     }
 
@@ -1410,7 +1630,7 @@ mod decode_tests {
     #[test]
     fn dataless_expr_yields_unknown_with_empty_data() {
         // `masq` writes an NFTA_EXPR_DATA nest with nothing in it.
-        let bytes = encode(&[Expr::Masquerade]);
+        let bytes = encode(&[Expr::Masquerade(MasqExpr::new())]);
         assert_eq!(
             parse_expressions(&bytes),
             vec![RuleExpr::Unknown {
@@ -1441,7 +1661,7 @@ mod decode_tests {
             v.extend_from_slice(&(NFTA_EXPR_DATA | 0x8000).to_ne_bytes());
             v
         };
-        for expr in [Expr::Masquerade, Expr::Redirect { port: None }] {
+        for expr in [Expr::Masquerade(MasqExpr::new()), Expr::Redirect(RedirExpr::new())] {
             let bytes = encode(std::slice::from_ref(&expr));
             assert!(
                 bytes.ends_with(&empty_nest),
@@ -1450,7 +1670,7 @@ mod decode_tests {
         }
         // A redirect *with* a port carries real attributes, so the nest
         // is non-empty and this must not match.
-        let with_port = encode(&[Expr::Redirect { port: Some(8080) }]);
+        let with_port = encode(&[Expr::Redirect(RedirExpr::new().port(8080))]);
         assert!(!with_port.ends_with(&empty_nest), "{with_port:02x?}");
     }
 
@@ -1557,7 +1777,8 @@ mod decode_tests {
             family: Family::Inet,
             handle: 1,
             position: None,
-            comment: None,
+            key: None,
+            comment_text: None,
             userdata_raw: None,
             expression_bytes,
         };
@@ -1790,45 +2011,28 @@ mod decode_tests {
 
     #[test]
     fn lookup_sends_the_flags_the_kernel_always_dumps() {
-        let attrs = data_attrs(&[Expr::Lookup {
-            set: "s".into(),
-            sreg: Register::R0,
-        }]);
+        let attrs = data_attrs(&[LookupExpr::new("s", Register::R0).into()]);
         assert_eq!(attrs[&NFTA_LOOKUP_FLAGS], 0u32.to_be_bytes());
     }
 
     #[test]
     fn limit_sends_flags_and_the_burst_the_kernel_stores() {
-        let attrs = data_attrs(&[Expr::Limit {
-            rate: 10,
-            unit: LimitUnit::Second,
-            burst: 0,
-        }]);
+        let attrs = data_attrs(&[LimitExpr::packets(10, LimitUnit::Second).burst(0).into()]);
         assert_eq!(attrs[&NFTA_LIMIT_FLAGS], 0u32.to_be_bytes());
         // A packet limit's burst 0 becomes NFT_LIMIT_PKT_BURST_DEFAULT.
         assert_eq!(attrs[&NFTA_LIMIT_BURST], 5u32.to_be_bytes());
-        let explicit = data_attrs(&[Expr::Limit {
-            rate: 10,
-            unit: LimitUnit::Second,
-            burst: 20,
-        }]);
+        let explicit = data_attrs(&[LimitExpr::packets(10, LimitUnit::Second).burst(20).into()]);
         assert_eq!(explicit[&NFTA_LIMIT_BURST], 20u32.to_be_bytes());
     }
 
     #[test]
     fn syslog_log_sends_the_default_level_and_group_log_does_not() {
-        let syslog = data_attrs(&[Expr::Log {
-            prefix: Some("p".into()),
-            group: None,
-        }]);
+        let syslog = data_attrs(&[LogExpr::new().prefix("p").into()]);
         assert_eq!(syslog[&NFTA_LOG_LEVEL], NFT_LOGLEVEL_WARNING.to_be_bytes());
         assert!(!syslog.contains_key(&NFTA_LOG_GROUP));
 
         // A group makes it NF_LOG_TYPE_ULOG, whose dump has no level.
-        let group = data_attrs(&[Expr::Log {
-            prefix: None,
-            group: Some(5),
-        }]);
+        let group = data_attrs(&[LogExpr::new().group(5).into()]);
         assert!(!group.contains_key(&NFTA_LOG_LEVEL));
         assert_eq!(group[&NFTA_LOG_GROUP], 5u16.to_be_bytes());
     }
@@ -1853,7 +2057,7 @@ mod decode_tests {
 
     #[test]
     fn flow_offload_names_the_flowtable_with_the_expression_attribute() {
-        let attrs = data_attrs(&[Expr::FlowOffload { table: "ft".into() }]);
+        let attrs = data_attrs(&[Expr::FlowOffload { flowtable: "ft".into() }]);
         // NFTA_FLOW_TABLE_NAME (1), not NFTA_FLOWTABLE_NAME (2) — the
         // latter is above the expression's NFTA_FLOW_MAX.
         assert_eq!(attrs.keys().copied().collect::<Vec<_>>(), [NFTA_FLOW_TABLE_NAME]);
@@ -1917,10 +2121,9 @@ mod decode_tests {
                 mask: vec![0xff, 0, 0, 0],
                 xor: vec![1, 0, 0, 0],
             },
-            Expr::Lookup {
-                set: "s".into(),
-                sreg: Register::R0,
-            },
+            LookupExpr::new("s", Register::R0).into(),
+            LookupExpr::new("s", Register::R1).invert().into(),
+            LookupExpr::new("m", Register::R2).dreg(Register::Verdict).into(),
         ];
         assert_eq!(
             parse_expressions(&encode(&exprs)),
@@ -1954,6 +2157,20 @@ mod decode_tests {
                 RuleExpr::Lookup {
                     set: "s".into(),
                     sreg: Register::R0,
+                    dreg: None,
+                    invert: false,
+                },
+                RuleExpr::Lookup {
+                    set: "s".into(),
+                    sreg: Register::R1,
+                    dreg: None,
+                    invert: true,
+                },
+                RuleExpr::Lookup {
+                    set: "m".into(),
+                    sreg: Register::R2,
+                    dreg: Some(Register::Verdict),
+                    invert: false,
                 },
             ]
         );
@@ -1967,11 +2184,11 @@ mod decode_tests {
             b.append_attr_u32_be(NFTA_CT_KEY, 0);
             b.append_attr_u8(NFTA_CT_DIRECTION, 0);
         });
-        // `ip saddr != @s`: NFT_LOOKUP_F_INV.
-        let inverted = build_attrs(|b| {
+        // A lookup flag this decoder does not know.
+        let unknown_flag = build_attrs(|b| {
             b.append_attr_str(NFTA_LOOKUP_SET, "s");
             b.append_attr_u32_be(NFTA_LOOKUP_SREG, 1);
-            b.append_attr_u32_be(NFTA_LOOKUP_FLAGS, 1);
+            b.append_attr_u32_be(NFTA_LOOKUP_FLAGS, 2);
         });
         // `meta mark >> 8`: NFT_BITWISE_RSHIFT (2) with a data operand.
         let shift = build_attrs(|b| {
@@ -1980,7 +2197,7 @@ mod decode_tests {
             b.append_attr_u32_be(NFTA_BITWISE_LEN, 4);
             b.append_attr_u32_be(NFTA_BITWISE_OP, 2);
         });
-        for (name, data) in [("ct", directional), ("lookup", inverted), ("bitwise", shift)] {
+        for (name, data) in [("ct", directional), ("lookup", unknown_flag), ("bitwise", shift)] {
             let decoded = parse_expressions(&build_elem(name, &data));
             assert!(
                 matches!(decoded.as_slice(), [RuleExpr::Unknown { name: n, .. }] if n == name),
@@ -2144,5 +2361,37 @@ mod decode_tests {
                 },
             ]
         );
+    }
+
+    // ---- 0.30 payload structs: what each setter puts on the wire.
+
+    #[test]
+    fn lookup_invert_and_map_write_their_attributes() {
+        let inverted = data_attrs(&[LookupExpr::new("s", Register::R0).invert().into()]);
+        assert_eq!(inverted[&NFTA_LOOKUP_FLAGS], NFT_LOOKUP_F_INV.to_be_bytes());
+        assert!(!inverted.contains_key(&NFTA_LOOKUP_DREG));
+
+        let map = data_attrs(&[LookupExpr::new("m", Register::R0)
+            .dreg(Register::Verdict)
+            .into()]);
+        assert_eq!(map[&NFTA_LOOKUP_DREG], 0u32.to_be_bytes());
+        assert_eq!(map[&NFTA_LOOKUP_FLAGS], 0u32.to_be_bytes());
+    }
+
+    #[test]
+    fn limit_over_sends_the_inverse_flag() {
+        let over = data_attrs(&[LimitExpr::packets(10, LimitUnit::Second).over().into()]);
+        assert_eq!(over[&NFTA_LIMIT_FLAGS], NFT_LIMIT_F_INV.to_be_bytes());
+    }
+
+    #[test]
+    fn rule_expr_pushes_payload_structs() {
+        let rule = Rule::new("t", "c")
+            .expr(LogExpr::new().group(3))
+            .expr(MasqExpr::new());
+        assert!(matches!(
+            rule.exprs.as_slice(),
+            [Expr::Log(LogExpr { group: Some(3), .. }), Expr::Masquerade(_)]
+        ));
     }
 }

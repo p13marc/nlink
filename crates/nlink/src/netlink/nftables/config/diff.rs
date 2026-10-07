@@ -7,7 +7,7 @@ use super::types::{
 };
 use super::super::expr::RuleExpr;
 use super::super::types::{
-    ChainInfo, Family, Hook, Policy, Priority, RuleInfo, SetElement, SetInfo,
+    ChainInfo, Family, Hook, Policy, Priority, RuleInfo, Set, SetElement, SetInfo,
 };
 use crate::netlink::{
     builder::MessageBuilder, connection::Connection, error::Result, protocol::Nftables,
@@ -171,6 +171,75 @@ fn lower_to_expression_bytes(rule: &super::super::types::Rule) -> Vec<u8> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RuleHandle(pub u64);
 
+/// Where an added or moved rule goes in its chain. Rule order is policy
+/// (first match wins), so the diff says exactly where each rule lands.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RulePlacement {
+    /// At the end of the chain.
+    Append,
+    /// Immediately before the rule with this handle.
+    Before(RuleHandle),
+    /// Immediately after the rule with this handle.
+    After(RuleHandle),
+}
+
+/// A declared rule to add, and where it goes.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct RuleAdd {
+    /// The rule.
+    pub rule: DeclaredRule,
+    /// Where it goes.
+    pub placement: RulePlacement,
+}
+
+/// Why the diff deletes a rule and puts it back.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MoveReason {
+    /// It references a set this diff deletes and recreates; the kernel
+    /// refuses to delete a set a rule is bound to (`EBUSY`).
+    BoundToRecreatedSet,
+}
+
+/// A rule the diff deletes and re-inserts, keeping (or restoring) its place
+/// in the chain.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct RuleMove {
+    /// Owning table.
+    pub table: String,
+    /// Owning family.
+    pub family: Family,
+    /// Chain.
+    pub chain: String,
+    /// Kernel handle of the rule being deleted.
+    pub from: RuleHandle,
+    /// Where the re-inserted rule goes.
+    pub placement: RulePlacement,
+    /// The rule to re-insert.
+    pub rule: DeclaredRule,
+    /// Why it moves.
+    pub reason: MoveReason,
+}
+
+/// Elements to add to, or remove from, one set — with the [`Set`] they
+/// belong to, since how an element is written depends on the set.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct SetElementsChange {
+    /// The set.
+    pub set: Set,
+    /// The elements.
+    pub elements: Vec<SetElement>,
+}
+
 /// The result of comparing a declared [`NftablesConfig`] against
 /// the kernel's current state. Apply via
 /// [`Self::apply`](super::NftablesDiff::apply).
@@ -214,8 +283,8 @@ pub struct NftablesDiff {
     pub chains_to_modify: Vec<(String, Family, DeclaredChain)>,
     /// Chains to delete — (table, family, name).
     pub chains_to_delete: Vec<(String, Family, String)>,
-    /// Rules to add — paired with owning table/chain/family.
-    pub rules_to_add: Vec<DeclaredRule>,
+    /// Rules to add, each with its placement in the chain.
+    pub rules_to_add: Vec<RuleAdd>,
     /// Rules to delete — `(table, family, chain, kernel_handle)`.
     /// Chain is carried explicitly because the kernel rejects a
     /// `NFT_MSG_DELRULE` with an empty `NFTA_RULE_CHAIN` even when
@@ -233,18 +302,15 @@ pub struct NftablesDiff {
     /// keyed rule matches a kernel rule by `NFTA_RULE_USERDATA`
     /// comment but the expression bytes differ. Plan 157b v2.
     pub rules_to_replace: Vec<(String, Family, String, RuleHandle, DeclaredRule)>,
-    /// Declared rules to delete and put back in place — (owning table,
-    /// owning family, chain, kernel handle being deleted, insert-before
-    /// anchor, rule).
+    /// Declared rules to delete and put back in place.
     ///
     /// A set whose key type or flags changed is deleted and recreated,
     /// and the kernel refuses to delete a set a rule still references
     /// (`EBUSY`). So every keyed rule referencing it is deleted ahead of
     /// the set and re-added after the new one, immediately before the next
-    /// rule in the chain that survives (`None`: at the end), so chain
-    /// order — which is policy — is unchanged.
-    pub rules_to_reinsert:
-        Vec<(String, Family, String, RuleHandle, Option<RuleHandle>, DeclaredRule)>,
+    /// rule in the chain that survives, so chain order — which is policy —
+    /// is unchanged.
+    pub rules_to_move: Vec<RuleMove>,
     /// Flowtables to add.
     pub flowtables_to_add: Vec<DeclaredFlowtable>,
     /// Flowtables to delete — (family, table, name).
@@ -260,13 +326,13 @@ pub struct NftablesDiff {
     /// of everything else: the kernel checks element adds against the
     /// size the set has *before* the commit, so a grown set could not
     /// take its new elements in the same batch.
-    pub sets_to_resize: Vec<(String, Family, DeclaredSet)>,
-    /// Set elements to add — (table, family, set, elements). The
-    /// declared keys not yet present in the kernel set.
-    pub set_elements_to_add: Vec<(String, Family, String, Vec<SetElement>)>,
-    /// Set elements to remove — (table, family, set, elements). The
-    /// kernel keys not declared (full element reconcile).
-    pub set_elements_to_remove: Vec<(String, Family, String, Vec<SetElement>)>,
+    pub sets_to_update: Vec<(String, Family, DeclaredSet)>,
+    /// Set elements to add: the declared elements not yet in the kernel
+    /// set.
+    pub set_elements_to_add: Vec<SetElementsChange>,
+    /// Set elements to remove: the kernel elements not declared (full
+    /// element reconcile).
+    pub set_elements_to_remove: Vec<SetElementsChange>,
 }
 
 impl NftablesDiff {
@@ -281,12 +347,12 @@ impl NftablesDiff {
             && self.rules_to_add.is_empty()
             && self.rules_to_delete.is_empty()
             && self.rules_to_replace.is_empty()
-            && self.rules_to_reinsert.is_empty()
+            && self.rules_to_move.is_empty()
             && self.flowtables_to_add.is_empty()
             && self.flowtables_to_delete.is_empty()
             && self.sets_to_add.is_empty()
             && self.sets_to_delete.is_empty()
-            && self.sets_to_resize.is_empty()
+            && self.sets_to_update.is_empty()
             && self.set_elements_to_add.is_empty()
             && self.set_elements_to_remove.is_empty()
     }
@@ -302,12 +368,12 @@ impl NftablesDiff {
             + self.rules_to_add.len()
             + self.rules_to_delete.len()
             + self.rules_to_replace.len()
-            + self.rules_to_reinsert.len()
+            + self.rules_to_move.len()
             + self.flowtables_to_add.len()
             + self.flowtables_to_delete.len()
             + self.sets_to_add.len()
             + self.sets_to_delete.len()
-            + self.sets_to_resize.len()
+            + self.sets_to_update.len()
             + self.set_elements_to_add.len()
             + self.set_elements_to_remove.len()
     }
@@ -349,14 +415,16 @@ impl NftablesDiff {
         for (tbl, fam, name) in &self.chains_to_delete {
             lines.push(format!("- chain {fam:?} {tbl}/{name}"));
         }
-        for r in &self.rules_to_add {
+        for add in &self.rules_to_add {
+            let r = &add.rule;
             let key = r.handle_key().unwrap_or("<anonymous>");
             lines.push(format!(
-                "+ rule {:?} {}/{} [{}]",
+                "+ rule {:?} {}/{} [{}]{}",
                 r.family(),
                 r.table(),
                 r.chain(),
-                key
+                key,
+                placement_suffix(add.placement),
             ));
         }
         for (tbl, fam, chain, h) in &self.rules_to_delete {
@@ -369,11 +437,18 @@ impl NftablesDiff {
                 h.0
             ));
         }
-        for (tbl, fam, chain, h, _, r) in &self.rules_to_reinsert {
-            let key = r.handle_key().unwrap_or("<anonymous>");
+        for m in &self.rules_to_move {
+            let key = m.rule.handle_key().unwrap_or("<anonymous>");
+            let why = match m.reason {
+                MoveReason::BoundToRecreatedSet => "its set is recreated",
+            };
             lines.push(format!(
-                "~ rule {fam:?} {tbl}/{chain} (handle={} key={key}, re-added: its set is recreated)",
-                h.0
+                "~ rule {:?} {}/{} (handle={} key={key}, re-added: {why}){}",
+                m.family,
+                m.table,
+                m.chain,
+                m.from.0,
+                placement_suffix(m.placement),
             ));
         }
         for f in &self.flowtables_to_add {
@@ -398,25 +473,31 @@ impl NftablesDiff {
         for (tbl, fam, name) in &self.sets_to_delete {
             lines.push(format!("- set {fam:?} {tbl}/{name}"));
         }
-        for (tbl, fam, s) in &self.sets_to_resize {
+        for (tbl, fam, s) in &self.sets_to_update {
             lines.push(format!(
                 "~ set {fam:?} {tbl}/{} (size={})",
                 s.name(),
                 s.size().map_or_else(|| "-".to_string(), |n| n.to_string()),
             ));
         }
-        for (tbl, fam, set, elems) in &self.set_elements_to_add {
+        for c in &self.set_elements_to_add {
             lines.push(format!(
-                "+ {} element{} {fam:?} {tbl}/{set}",
-                elems.len(),
-                if elems.len() == 1 { "" } else { "s" },
+                "+ {} element{} {:?} {}/{}",
+                c.elements.len(),
+                if c.elements.len() == 1 { "" } else { "s" },
+                c.set.family,
+                c.set.table(),
+                c.set.name(),
             ));
         }
-        for (tbl, fam, set, elems) in &self.set_elements_to_remove {
+        for c in &self.set_elements_to_remove {
             lines.push(format!(
-                "- {} element{} {fam:?} {tbl}/{set}",
-                elems.len(),
-                if elems.len() == 1 { "" } else { "s" },
+                "- {} element{} {:?} {}/{}",
+                c.elements.len(),
+                if c.elements.len() == 1 { "" } else { "s" },
+                c.set.family,
+                c.set.table(),
+                c.set.name(),
             ));
         }
         if lines.is_empty() {
@@ -441,6 +522,15 @@ impl std::fmt::Display for NftablesDiff {
         // allowed; users are on the Display path.
         #[allow(deprecated)]
         f.write_str(&self.summary())
+    }
+}
+
+/// ` (before handle=N)` / ` (after handle=N)` for a positioned rule.
+fn placement_suffix(placement: RulePlacement) -> String {
+    match placement {
+        RulePlacement::Append => String::new(),
+        RulePlacement::Before(h) => format!(" (before handle={})", h.0),
+        RulePlacement::After(h) => format!(" (after handle={})", h.0),
     }
 }
 
@@ -498,7 +588,7 @@ fn references_set(rule: &RuleInfo, set: &str) -> bool {
 }
 
 /// Schedule every keyed rule that references a set in `recreated` for
-/// delete + re-insert (see [`NftablesDiff::rules_to_reinsert`]). Rules
+/// delete + re-insert (see [`NftablesDiff::rules_to_move`]). Rules
 /// already scheduled for deletion are left to that; a pending in-place
 /// replace is turned into the re-insert, since a replace runs after the
 /// DELSET it would have had to precede.
@@ -525,7 +615,7 @@ fn reinsert_rules_bound_to(
             if !bound[i] || deleted.contains(&kr.handle) {
                 continue;
             }
-            let declared_rule = kr.comment.as_deref().and_then(|key| {
+            let declared_rule = kr.key.as_deref().and_then(|key| {
                 declared_in_chain
                     .get(chain.as_str())
                     .and_then(|rules| rules.iter().find(|r| r.handle_key() == Some(key)))
@@ -551,14 +641,15 @@ fn reinsert_rules_bound_to(
             diff.rules_to_replace.retain(|(t, f, _, h, _)| {
                 !(t == table && *f == family && h.0 == kr.handle)
             });
-            diff.rules_to_reinsert.push((
-                table.to_string(),
+            diff.rules_to_move.push(RuleMove {
+                table: table.to_string(),
                 family,
-                chain.clone(),
-                RuleHandle(kr.handle),
-                anchor,
-                (*declared_rule).clone(),
-            ));
+                chain: chain.clone(),
+                from: RuleHandle(kr.handle),
+                placement: anchor.map_or(RulePlacement::Append, RulePlacement::Before),
+                rule: (*declared_rule).clone(),
+                reason: MoveReason::BoundToRecreatedSet,
+            });
         }
     }
 }
@@ -762,7 +853,10 @@ impl NftablesConfig {
                     ));
                 }
                 for r in declared.rules() {
-                    diff.rules_to_add.push(r.clone());
+                    diff.rules_to_add.push(RuleAdd {
+                        rule: r.clone(),
+                        placement: RulePlacement::Append,
+                    });
                 }
                 for f in declared.flowtables() {
                     diff.flowtables_to_add.push(f.clone());
@@ -774,12 +868,10 @@ impl NftablesConfig {
                         s.clone(),
                     ));
                     if !s.elements().is_empty() {
-                        diff.set_elements_to_add.push((
-                            declared.name().to_string(),
-                            declared.family(),
-                            s.name().to_string(),
-                            s.elements().to_vec(),
-                        ));
+                        diff.set_elements_to_add.push(SetElementsChange {
+                            set: s.to_set(declared.name(), declared.family()),
+                            elements: s.elements().to_vec(),
+                        });
                     }
                 }
                 continue;
@@ -873,7 +965,7 @@ impl NftablesConfig {
                 // comment.
                 let kernel_by_key: _HashMap<&str, &super::super::types::RuleInfo> = kernel_rules
                     .iter()
-                    .filter_map(|r| r.comment.as_deref().map(|c| (c, *r)))
+                    .filter_map(|r| r.key.as_deref().map(|c| (c, *r)))
                     .collect();
 
                 // Track which kernel keys we've claimed so we can
@@ -891,7 +983,10 @@ impl NftablesConfig {
                              will be added on every apply (use \
                              rule_keyed for idempotent reconcile)",
                         );
-                        diff.rules_to_add.push((*declared_rule).clone());
+                        diff.rules_to_add.push(RuleAdd {
+                            rule: (*declared_rule).clone(),
+                            placement: RulePlacement::Append,
+                        });
                         continue;
                     };
                     declared_keys.insert(key);
@@ -938,7 +1033,10 @@ impl NftablesConfig {
                         }
                         None => {
                             // Not in kernel: add.
-                            diff.rules_to_add.push((*declared_rule).clone());
+                            diff.rules_to_add.push(RuleAdd {
+                                rule: (*declared_rule).clone(),
+                                placement: RulePlacement::Append,
+                            });
                         }
                     }
                 }
@@ -948,7 +1046,7 @@ impl NftablesConfig {
                 // be there). Kernel rules without an nlink-prefix
                 // comment (foreign / external) are left alone.
                 for kr in kernel_rules {
-                    let Some(key) = kr.comment.as_deref() else { continue };
+                    let Some(key) = kr.key.as_deref() else { continue };
                     if !declared_keys.contains(key) {
                         diff.rules_to_delete.push((
                             declared.name().to_string(),
@@ -979,7 +1077,7 @@ impl NftablesConfig {
                 }
                 if let Some(krs) = kernel_in_chain.get(kchain_name) {
                     for kr in krs {
-                        if kr.comment.is_some() {
+                        if kr.key.is_some() {
                             diff.rules_to_delete.push((
                                 declared.name().to_string(),
                                 declared.family(),
@@ -1063,19 +1161,17 @@ impl NftablesConfig {
                         s.clone(),
                     ));
                     if !s.elements().is_empty() {
-                        diff.set_elements_to_add.push((
-                            declared.name().to_string(),
-                            declared.family(),
-                            s.name().to_string(),
-                            s.elements().to_vec(),
-                        ));
+                        diff.set_elements_to_add.push(SetElementsChange {
+                            set: s.to_set(declared.name(), declared.family()),
+                            elements: s.elements().to_vec(),
+                        });
                     }
                     continue;
                 }
                 if let Some(current) = current_set
                     && set_size_has_drifted(s, current)
                 {
-                    diff.sets_to_resize.push((
+                    diff.sets_to_update.push((
                         declared.name().to_string(),
                         declared.family(),
                         s.clone(),
@@ -1088,38 +1184,34 @@ impl NftablesConfig {
                     let current_elems = conn
                         .list_set_elements(declared.name(), s.name(), declared.family())
                         .await?;
-                    let declared_keys: HashSet<&[u8]> =
-                        s.elements().iter().map(|e| e.key.as_slice()).collect();
-                    let current_keys: HashSet<&[u8]> =
-                        current_elems.iter().map(|e| e.key.as_slice()).collect();
+                    let declared_ids: HashSet<_> =
+                        s.elements().iter().map(SetElement::identity).collect();
+                    let current_ids: HashSet<_> =
+                        current_elems.iter().map(SetElement::identity).collect();
 
                     let to_add: Vec<SetElement> = s
                         .elements()
                         .iter()
-                        .filter(|e| !current_keys.contains(e.key.as_slice()))
+                        .filter(|e| !current_ids.contains(&e.identity()))
                         .cloned()
                         .collect();
                     if !to_add.is_empty() {
-                        diff.set_elements_to_add.push((
-                            declared.name().to_string(),
-                            declared.family(),
-                            s.name().to_string(),
-                            to_add,
-                        ));
+                        diff.set_elements_to_add.push(SetElementsChange {
+                            set: s.to_set(declared.name(), declared.family()),
+                            elements: to_add,
+                        });
                     }
 
                     let to_remove: Vec<SetElement> = current_elems
                         .iter()
-                        .filter(|e| !declared_keys.contains(e.key.as_slice()))
+                        .filter(|e| !declared_ids.contains(&e.identity()))
                         .cloned()
                         .collect();
                     if !to_remove.is_empty() {
-                        diff.set_elements_to_remove.push((
-                            declared.name().to_string(),
-                            declared.family(),
-                            s.name().to_string(),
-                            to_remove,
-                        ));
+                        diff.set_elements_to_remove.push(SetElementsChange {
+                            set: s.to_set(declared.name(), declared.family()),
+                            elements: to_remove,
+                        });
                     }
                 } else {
                     // Set is new in an existing table → create it +
@@ -1130,12 +1222,10 @@ impl NftablesConfig {
                         s.clone(),
                     ));
                     if !s.elements().is_empty() {
-                        diff.set_elements_to_add.push((
-                            declared.name().to_string(),
-                            declared.family(),
-                            s.name().to_string(),
-                            s.elements().to_vec(),
-                        ));
+                        diff.set_elements_to_add.push(SetElementsChange {
+                            set: s.to_set(declared.name(), declared.family()),
+                            elements: s.elements().to_vec(),
+                        });
                     }
                 }
             }
@@ -1178,7 +1268,7 @@ impl NftablesConfig {
 #[allow(deprecated)] // Plan 188 §2.6 — test the deprecated `summary()` shape during its window
 mod tests {
     use super::*;
-    use crate::netlink::nftables::SetKeyType;
+    use crate::netlink::nftables::{SetFlags, SetKeyType};
     use crate::netlink::nftables::config::types::DeclaredSet;
 
     #[test]
@@ -1246,7 +1336,7 @@ mod tests {
         let set = &cfg.tables()[0].sets()[0];
         assert_eq!(set.name(), "allowed_v4");
         assert_eq!(*set.key_type(), SetKeyType::Ipv4Addr);
-        assert_ne!(set.flags(), 0, "constant() must set a flag bit");
+        assert_eq!(set.flags(), SetFlags::CONSTANT, "constant() must set the flag");
         assert_eq!(set.elements().len(), 2);
     }
 
@@ -1263,18 +1353,15 @@ mod tests {
             .push(("filter".to_string(), Family::Inet, declared));
         d.sets_to_delete
             .push(("filter".to_string(), Family::Inet, "stale".to_string()));
-        d.set_elements_to_add.push((
-            "filter".to_string(),
-            Family::Inet,
-            "s".to_string(),
-            vec![SetElement::port(80)],
-        ));
-        d.set_elements_to_remove.push((
-            "filter".to_string(),
-            Family::Inet,
-            "s".to_string(),
-            vec![SetElement::port(81), SetElement::port(82)],
-        ));
+        let set = d.sets_to_add[0].2.to_set("filter", Family::Inet);
+        d.set_elements_to_add.push(SetElementsChange {
+            set: set.clone(),
+            elements: vec![SetElement::port(80)],
+        });
+        d.set_elements_to_remove.push(SetElementsChange {
+            set,
+            elements: vec![SetElement::port(81), SetElement::port(82)],
+        });
 
         assert!(!d.is_empty());
         assert_eq!(d.change_count(), 4);
@@ -1555,6 +1642,7 @@ mod tests {
     // ====================================================================
 
     fn set_info(key_type: &SetKeyType, flags: u32) -> SetInfo {
+        let flags = SetFlags(flags);
         SetInfo {
             table: "t".to_string(),
             name: "s".to_string(),
@@ -1568,6 +1656,7 @@ mod tests {
     }
 
     fn declared_set(key_type: SetKeyType, flags: u32) -> DeclaredSet {
+        let flags = SetFlags(flags);
         DeclaredSet {
             name: "s".to_string(),
             key_type,
@@ -1606,7 +1695,8 @@ mod tests {
             family: Family::Ip,
             handle: 7,
             position: None,
-            comment: None,
+            key: None,
+            comment_text: None,
             userdata_raw: None,
             expression_bytes,
         }
@@ -1650,7 +1740,7 @@ mod tests {
         let mut d = NftablesDiff::default();
         let mut s = declared_set(SetKeyType::Ipv4Addr, 0);
         s.size = Some(4096);
-        d.sets_to_resize.push(("t".to_string(), Family::Ip, s));
+        d.sets_to_update.push(("t".to_string(), Family::Ip, s));
         assert!(!d.is_empty());
         assert_eq!(d.change_count(), 1);
         assert!(d.to_string().contains("~ set Ip t/s (size=4096)"), "{d}");
