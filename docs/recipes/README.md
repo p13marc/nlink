@@ -71,6 +71,15 @@ to the hand-rolled netlink primitives if you want to go deeper.
 - [**Watch nftables with resync**](nftables-watch-with-resync.md) —
   subscribe to nftables multicast events and recover from ENOBUFS
   via a resync redump (`into_events_with_resync`).
+- [**Sets, maps and stateful objects**](nftables-sets-maps.md) —
+  match fields against sets of addresses, prefixes, ports and
+  concatenations; let rules fill sets with timeouts (`update @seen`);
+  verdict and value maps; named counters, quotas and limits, and object
+  maps for per-address counters. Imperative and declarative.
+- [**ipset → nftables**](ipset-to-nftables.md) — each ipset type,
+  option and `-m set` / `-j SET` iptables construct mapped to its nlink
+  call, and a typical ipset + iptables setup migrated to one declared
+  ruleset.
 
 ### Observability & orchestration
 
