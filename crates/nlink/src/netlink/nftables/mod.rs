@@ -280,6 +280,8 @@ pub const NFTA_LIMIT_TYPE: u16 = 4;
 /// `NFTA_LIMIT_FLAGS` — `NFT_LIMIT_F_INV`. `nft_limit_dump` emits it on
 /// every dump, 0 included, so the writer always sends it.
 pub const NFTA_LIMIT_FLAGS: u16 = 5;
+/// `NFT_LIMIT_F_INV` — `limit rate over`: match once the rate is exceeded.
+pub const NFT_LIMIT_F_INV: u32 = 1;
 
 // NAT
 pub const NFTA_NAT_TYPE: u16 = 1;
@@ -367,6 +369,10 @@ pub const NFTA_SET_ELEM_LIST_ELEMENTS: u16 = 3;
 pub const NFTA_SET_ELEM_KEY: u16 = 1;
 pub const NFTA_SET_ELEM_DATA: u16 = 2;
 pub const NFTA_SET_ELEM_FLAGS: u16 = 3;
+/// `NFT_SET_ELEM_INTERVAL_END` — an interval set's range-end element.
+pub const NFT_SET_ELEM_INTERVAL_END: u32 = 1;
+/// `NFT_SET_ELEM_CATCHALL` — the catch-all (`*`) element.
+pub const NFT_SET_ELEM_CATCHALL: u32 = 2;
 
 // Lookup expression
 pub const NFTA_LOOKUP_SET: u16 = 1;
@@ -374,12 +380,19 @@ pub const NFTA_LOOKUP_SREG: u16 = 2;
 pub const NFTA_LOOKUP_DREG: u16 = 3;
 pub const NFTA_LOOKUP_SET_ID: u16 = 4;
 pub const NFTA_LOOKUP_FLAGS: u16 = 5;
+/// `NFT_LOOKUP_F_INV` — match keys *not* in the set (`!= @set`).
+pub const NFT_LOOKUP_F_INV: u32 = 1;
 
 // Set flags
 pub const NFT_SET_ANONYMOUS: u32 = 0x1;
 pub const NFT_SET_CONSTANT: u32 = 0x2;
 pub const NFT_SET_INTERVAL: u32 = 0x4;
 pub const NFT_SET_MAP: u32 = 0x8;
+pub const NFT_SET_TIMEOUT: u32 = 0x10;
+pub const NFT_SET_EVAL: u32 = 0x20;
+pub const NFT_SET_OBJECT: u32 = 0x40;
+pub const NFT_SET_CONCAT: u32 = 0x80;
+pub const NFT_SET_EXPR: u32 = 0x100;
 
 // Verdict codes — verified against `include/uapi/linux/netfilter/nf_tables.h`
 // enum `nft_verdicts`. Plan 204 (0.19) corrected `NFT_JUMP` and `NFT_GOTO`,

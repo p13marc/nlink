@@ -3,7 +3,9 @@
 
 use super::super::{
     expr::Expr,
-    types::{ChainType, Family, Hook, Policy, Priority, Rule, SetElement, SetKeyType},
+    types::{
+        ChainType, Family, Hook, Policy, Priority, Rule, Set, SetElement, SetFlags, SetKeyType,
+    },
 };
 
 /// A complete declarative nftables ruleset. Construct via
@@ -376,7 +378,7 @@ impl DeclaredChainBuilder {
 pub struct DeclaredSet {
     pub(crate) name: String,
     pub(crate) key_type: SetKeyType,
-    pub(crate) flags: u32,
+    pub(crate) flags: SetFlags,
     pub(crate) size: Option<u32>,
     pub(crate) elements: Vec<SetElement>,
 }
@@ -390,8 +392,8 @@ impl DeclaredSet {
     pub fn key_type(&self) -> &SetKeyType {
         &self.key_type
     }
-    /// Flags bitmask (`NFT_SET_*` constants).
-    pub fn flags(&self) -> u32 {
+    /// Flags.
+    pub fn flags(&self) -> SetFlags {
         self.flags
     }
     /// Declared maximum element count, if any.
@@ -402,6 +404,18 @@ impl DeclaredSet {
     pub fn elements(&self) -> &[SetElement] {
         &self.elements
     }
+
+    /// The runtime [`Set`] this declaration describes, in `table`.
+    pub(crate) fn to_set(&self, table: &str, family: Family) -> Set {
+        let mut set = Set::new(table, &self.name)
+            .family(family)
+            .key_type(self.key_type.clone())
+            .flags(self.flags);
+        if let Some(size) = self.size {
+            set = set.size(size);
+        }
+        set
+    }
 }
 
 /// Closure-style builder for [`DeclaredSet`]. Returned by the
@@ -409,7 +423,7 @@ impl DeclaredSet {
 pub struct DeclaredSetBuilder {
     name: String,
     key_type: SetKeyType,
-    flags: u32,
+    flags: SetFlags,
     size: Option<u32>,
     elements: Vec<SetElement>,
 }
@@ -421,7 +435,7 @@ impl DeclaredSetBuilder {
             // Match `Set::new`'s default so an unconfigured set is
             // still well-formed.
             key_type: SetKeyType::Ipv4Addr,
-            flags: 0,
+            flags: SetFlags::empty(),
             size: None,
             elements: Vec::new(),
         }
@@ -433,8 +447,8 @@ impl DeclaredSetBuilder {
         self
     }
 
-    /// Set the flags bitmask directly (`NFT_SET_*` constants).
-    pub fn flags(mut self, flags: u32) -> Self {
+    /// Set the flags directly ([`SetFlags`], combined with `|`).
+    pub fn flags(mut self, flags: SetFlags) -> Self {
         self.flags = flags;
         self
     }
@@ -457,7 +471,7 @@ impl DeclaredSetBuilder {
 
     /// Convenience: mark the set constant (`NFT_SET_CONSTANT`).
     pub fn constant(mut self) -> Self {
-        self.flags |= super::super::NFT_SET_CONSTANT;
+        self.flags |= SetFlags::CONSTANT;
         self
     }
 

@@ -107,7 +107,7 @@ async fn main() -> nlink::Result<()> {
         "expected exactly one set_elements_to_add op (only the new key)",
     );
     assert_eq!(
-        mut_diff.set_elements_to_add[0].3.len(),
+        mut_diff.set_elements_to_add[0].elements.len(),
         1,
         "element diff should add just the single new key, not the whole set",
     );

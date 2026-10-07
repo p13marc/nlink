@@ -20,7 +20,9 @@ use nlink::netlink::nftables::config::NftablesConfig;
 use nlink::netlink::nftables::types::{
     ChainName, ChainType, CtState, Family, Hook, LimitUnit, Priority, SetKeyType, TcpFlags,
 };
-use nlink::netlink::nftables::{Expr, NFT_REJECT_TCP_RST, Verdict};
+use nlink::netlink::nftables::{
+    CmpOp, Expr, LogExpr, LookupExpr, MetaKey, NFT_REJECT_TCP_RST, PayloadBase, Register, Verdict,
+};
 use nlink::netlink::{Connection, Nftables, namespace};
 use nlink::TcHandle;
 
@@ -114,6 +116,28 @@ async fn every_filter_rule_shape_reconciles() -> nlink::Result<()> {
             .rule_keyed("input", "daddr-in-set", |r| {
                 r.match_daddr_in_set("allow4").accept()
             })
+            // `ip saddr != @allow4`: NFT_LOOKUP_F_INV round-trips.
+            .rule_keyed("input", "saddr-not-in-set", |r| {
+                r.expressions(vec![
+                    Expr::Meta {
+                        dreg: Register::R0,
+                        key: MetaKey::NfProto,
+                    },
+                    Expr::Cmp {
+                        sreg: Register::R0,
+                        op: CmpOp::Eq,
+                        data: vec![2],
+                    },
+                    Expr::Payload {
+                        dreg: Register::R0,
+                        base: PayloadBase::Network,
+                        offset: 12,
+                        len: 4,
+                    },
+                    LookupExpr::new("allow4", Register::R0).invert().into(),
+                ])
+                .drop()
+            })
             // Meta / conntrack.
             .rule_keyed("input", "iif", |r| r.match_iif("lo").accept())
             .rule_keyed("input", "oif", |r| r.match_oif("lo").accept())
@@ -132,10 +156,7 @@ async fn every_filter_rule_shape_reconciles() -> nlink::Result<()> {
             })
             .rule_keyed("input", "log-bare", |r| r.match_tcp_dport(83).log(None))
             .rule_keyed("input", "log-group", |r| {
-                r.expressions(vec![Expr::Log {
-                    prefix: Some("nlink-group: ".into()),
-                    group: Some(5),
-                }])
+                r.expr(LogExpr::new().prefix("nlink-group: ").group(5))
             })
             .rule_keyed("input", "set-mark", |r| r.match_tcp_dport(84).set_mark(1))
             .rule_keyed("input", "set-mark-masked", |r| {

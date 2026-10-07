@@ -8,8 +8,8 @@ use clap::{Parser, Subcommand};
 use nlink::netlink::{
     Connection, Nftables, Result,
     nftables::{
-        Chain, ChainType, Family, Hook, Policy, Priority, Rule, Set, SetElement, SetKeyType,
-        Transaction,
+        Chain, ChainType, Family, Hook, Policy, Priority, Rule, Set, SetElement, SetFlags,
+        SetKeyType, Transaction,
         config::{NftablesConfig, ReconcileOptions},
     },
 };
@@ -701,7 +701,8 @@ async fn main() -> Result<()> {
                                     "chain": r.chain,
                                     "handle": r.handle,
                                     "position": r.position,
-                                    "comment": r.comment,
+                                    "key": r.key,
+                                    "comment": r.comment_text,
                                     // The library keeps rule expressions as
                                     // raw bytes (no disassembler); expose the
                                     // payload length so callers can tell
@@ -718,7 +719,7 @@ async fn main() -> Result<()> {
                             if let Some(pos) = r.position {
                                 line.push_str(&format!(" position {pos}"));
                             }
-                            if let Some(ref c) = r.comment {
+                            if let Some(ref c) = r.comment_text {
                                 line.push_str(&format!(" comment \"{c}\""));
                             }
                             if !r.expression_bytes.is_empty() {
@@ -739,12 +740,12 @@ async fn main() -> Result<()> {
                     print_json(
                         &sets
                             .iter()
-                            .map(|s| serde_json::json!({"table": s.table, "name": s.name, "flags": s.flags}))
+                            .map(|s| serde_json::json!({"table": s.table, "name": s.name, "flags": s.flags.bits()}))
                             .collect(),
                     );
                 } else {
                     for s in &sets {
-                        println!("set {} {} ({})", s.table, s.name, s.flags);
+                        println!("set {} {} ({:#x})", s.table, s.name, s.flags.bits());
                     }
                 }
             }
@@ -816,7 +817,10 @@ async fn main() -> Result<()> {
             } => {
                 let family = parse_family(&family)?;
                 let elems = parse_elements(&elements, &key_type)?;
-                conn.add_set_elements(&table, &set, family, &elems).await?;
+                let spec = Set::new(&table, &set)
+                    .family(family)
+                    .key_type(parse_key_type(&key_type)?);
+                conn.add_set_elements(&spec, &elems).await?;
                 eprintln!("Elements added to set {set}");
             }
         },
@@ -1007,7 +1011,7 @@ fn parse_ruleset(contents: &str) -> Result<NftablesConfig> {
     struct PendingSet {
         name: String,
         key_type: SetKeyType,
-        flags: u32,
+        flags: SetFlags,
         size: Option<u32>,
         elements: Vec<SetElement>,
     }
@@ -1100,7 +1104,7 @@ fn parse_ruleset(contents: &str) -> Result<NftablesConfig> {
                 let fam = parse_family(family)?;
                 // `type <keytype>` is required; `flags const` and
                 // `size <n>` optional.
-                let (mut key_type, mut flags, mut size) = (None, 0u32, None);
+                let (mut key_type, mut flags, mut size) = (None, SetFlags::empty(), None);
                 let mut i = 0;
                 while i < rest.len() {
                     match rest[i] {
@@ -1116,9 +1120,7 @@ fn parse_ruleset(contents: &str) -> Result<NftablesConfig> {
                                 loc("set option `flags` requires a value".to_string())
                             })?;
                             match *val {
-                                "const" | "constant" => {
-                                    flags |= nlink::netlink::nftables::NFT_SET_CONSTANT
-                                }
+                                "const" | "constant" => flags |= SetFlags::CONSTANT,
                                 other => {
                                     return Err(loc(format!(
                                         "unknown set flag `{other}` (only `const` is modelled)"
@@ -1345,12 +1347,14 @@ fn apply_line(txn: Transaction, tokens: &[&str]) -> Result<Transaction> {
         ["add", "element", family, table, set, "type", kt, elems @ ..] => {
             let fam = parse_family(family)?;
             let parsed = build_elements(kt, elems)?;
-            Ok(txn.add_set_elements(table, set, fam, &parsed))
+            let spec = Set::new(table, set).family(fam).key_type(parse_key_type(kt)?);
+            Ok(txn.add_set_elements(&spec, &parsed))
         }
         ["delete", "element", family, table, set, "type", kt, elems @ ..] => {
             let fam = parse_family(family)?;
             let parsed = build_elements(kt, elems)?;
-            Ok(txn.del_set_elements(table, set, fam, &parsed))
+            let spec = Set::new(table, set).family(fam).key_type(parse_key_type(kt)?);
+            Ok(txn.del_set_elements(&spec, &parsed))
         }
         _ => Err(err(format!(
             "unrecognized operation `{}` (expected `add|delete table|chain|rule|set|element …`)",
@@ -1878,7 +1882,7 @@ mod tests {
         let set = &cfg.tables()[0].sets()[0];
         assert_eq!(set.name(), "allowed");
         assert_eq!(*set.key_type(), SetKeyType::Ipv4Addr);
-        assert_ne!(set.flags(), 0, "`flags const` must set a flag bit");
+        assert_eq!(set.flags(), SetFlags::CONSTANT, "`flags const` must set the constant flag");
         assert_eq!(set.elements().len(), 4, "all 4 IPs collected");
     }
 

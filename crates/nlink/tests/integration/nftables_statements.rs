@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use nlink::netlink::nftables::config::NftablesConfig;
 use nlink::netlink::nftables::types::{
-    Chain, ChainType, ExthdrOp, Family, Hook, MetaKey, Priority, Rule, Set, SetElement, SetKeyType,
-    TCPOPT_MAXSEG, TcpFlags,
+    Chain, ChainType, ExthdrOp, Family, Hook, MetaKey, Priority, Rule, Set, SetElement, SetFlags,
+    SetKeyType, TCPOPT_MAXSEG, TcpFlags,
 };
 use nlink::netlink::nftables::{CmpOp, Expr, Register, RuleExpr};
 use nlink::netlink::addr::Ipv4Address;
@@ -249,10 +249,14 @@ async fn meta_mark_set_round_trips_through_the_kernel() -> nlink::Result<()> {
         let rules = conn.list_rules("t", Family::Ip).await?;
         let exprs = rules[0].expressions();
         assert!(
-            exprs.contains(&RuleExpr::MetaSet {
-                key: MetaKey::Mark,
-                sreg: Register::R0,
-            }),
+            exprs.iter().any(|e| matches!(
+                e,
+                RuleExpr::MetaSet {
+                    key: MetaKey::Mark,
+                    sreg: Register::R0,
+                    ..
+                }
+            )),
             "kernel did not echo `meta mark set`: {exprs:?}",
         );
         Ok(())
@@ -282,21 +286,25 @@ async fn tcp_mss_clamp_round_trips_through_the_kernel() -> nlink::Result<()> {
 
         let rules = conn.list_rules("t", Family::Ip).await?;
         let exprs = rules[0].expressions();
-        assert_eq!(
-            exprs[exprs.len() - 2..],
-            [
-                RuleExpr::Immediate {
-                    dreg: Register::R0,
-                    data: 1360u16.to_be_bytes().to_vec(),
-                },
-                RuleExpr::ExthdrSet {
-                    sreg: Register::R0,
-                    op: ExthdrOp::TcpOpt,
-                    exthdr_type: TCPOPT_MAXSEG,
-                    offset: 2,
-                    len: 2,
-                },
-            ],
+        assert!(
+            matches!(
+                &exprs[exprs.len() - 2..],
+                [
+                    RuleExpr::Immediate {
+                        dreg: Register::R0,
+                        data,
+                        ..
+                    },
+                    RuleExpr::ExthdrSet {
+                        sreg: Register::R0,
+                        op: ExthdrOp::TcpOpt,
+                        exthdr_type: TCPOPT_MAXSEG,
+                        offset: 2,
+                        len: 2,
+                        ..
+                    },
+                ] if data.as_slice() == 1360u16.to_be_bytes()
+            ),
             "kernel did not echo the maxseg write: {exprs:?}",
         );
         Ok(())
@@ -399,27 +407,15 @@ async fn set_size_is_enforced_by_the_kernel() -> nlink::Result<()> {
 
     with_timeout(async {
         conn.add_table("t", Family::Ip).await?;
-        conn.add_set(
-            Set::new("t", "s")
-                .family(Family::Ip)
-                .key_type(SetKeyType::Ipv4Addr)
-                .size(1),
-        )
-        .await?;
-        conn.add_set_elements(
-            "t",
-            "s",
-            Family::Ip,
-            &[SetElement::ipv4(Ipv4Addr::new(10, 0, 0, 1))],
-        )
-        .await?;
+        let set = Set::new("t", "s")
+            .family(Family::Ip)
+            .key_type(SetKeyType::Ipv4Addr)
+            .size(1);
+        conn.add_set(set.clone()).await?;
+        conn.add_set_elements(&set, &[SetElement::ipv4(Ipv4Addr::new(10, 0, 0, 1))])
+            .await?;
         let full = conn
-            .add_set_elements(
-                "t",
-                "s",
-                Family::Ip,
-                &[SetElement::ipv4(Ipv4Addr::new(10, 0, 0, 2))],
-            )
+            .add_set_elements(&set, &[SetElement::ipv4(Ipv4Addr::new(10, 0, 0, 2))])
             .await;
         let err = full.expect_err("a size(1) set accepted a second element");
         assert_eq!(
@@ -769,7 +765,7 @@ async fn declared_set_resize_is_in_place_and_admits_new_elements() -> nlink::Res
 
         let grown = throttle_cfg(4, &addrs(4));
         let diff = grown.diff(&conn).await?;
-        assert_eq!(diff.sets_to_resize.len(), 1, "{diff}");
+        assert_eq!(diff.sets_to_update.len(), 1, "{diff}");
         assert!(
             diff.sets_to_delete.is_empty() && diff.sets_to_add.is_empty(),
             "a size change must not recreate the set: {diff}"
@@ -812,7 +808,7 @@ async fn recreating_a_set_a_rule_references_converges() -> nlink::Result<()> {
     // Rules bound to the set first, last, two in a row, and between plain
     // ones; `mark` is the value one bound rule sets, so a second config can
     // also change that rule's body.
-    let cfg = |flags: u32, mark: u32| {
+    let cfg = |flags: SetFlags, mark: u32| {
         NftablesConfig::new().table("t", Family::Ip, move |t| {
             t.set("s", move |s| {
                 s.key_type(SetKeyType::Ipv4Addr)
@@ -837,25 +833,25 @@ async fn recreating_a_set_a_rule_references_converges() -> nlink::Result<()> {
     let order = ["bound-first", "plain-1", "bound-a", "bound-b", "plain-2", "bound-last"];
 
     with_timeout(async {
-        cfg(0, 1).diff(&conn).await?.apply(&conn).await?;
+        cfg(SetFlags::empty(), 1).diff(&conn).await?.apply(&conn).await?;
 
         // Constant now, and `bound-a` sets a different mark: its pending
         // in-place replace has to become a re-insert too.
-        let constant = cfg(nlink::netlink::nftables::NFT_SET_CONSTANT, 2);
+        let constant = cfg(SetFlags::CONSTANT, 2);
         let diff = constant.diff(&conn).await?;
         assert_eq!(diff.sets_to_delete.len(), 1, "flags drift recreates: {diff}");
-        assert_eq!(diff.rules_to_reinsert.len(), 4, "{diff}");
+        assert_eq!(diff.rules_to_move.len(), 4, "{diff}");
         assert!(diff.rules_to_replace.is_empty(), "{diff}");
         diff.apply(&conn).await?;
 
         let sets = conn.list_sets_in("t", Family::Ip).await?;
-        assert_eq!(sets[0].flags, nlink::netlink::nftables::NFT_SET_CONSTANT);
+        assert_eq!(sets[0].flags, SetFlags::CONSTANT);
         // Rule order survives the recreate.
         let keys: Vec<_> = conn
             .list_rules("t", Family::Ip)
             .await?
             .into_iter()
-            .map(|r| r.comment.unwrap_or_default())
+            .map(|r| r.key.unwrap_or_default())
             .collect();
         assert_eq!(keys, order);
 
@@ -894,7 +890,7 @@ async fn rule_position_inserts_after_the_named_rule() -> nlink::Result<()> {
             .list_rules("t", Family::Ip)
             .await?
             .into_iter()
-            .map(|r| r.comment.unwrap_or_default())
+            .map(|r| r.key.unwrap_or_default())
             .collect();
         assert_eq!(order, ["a", "c", "b"]);
         Ok(())

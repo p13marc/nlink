@@ -159,13 +159,14 @@ can be added/extended live):
 # };
 # use nlink::netlink::Nftables;
 # let conn = Connection::<Nftables>::new()?;
-conn.add_set(
-    Set::new("filter", "blocklist")
-        .family(Family::Inet)
-        .key_type(SetKeyType::Ipv4Addr),
-).await?;
+let blocklist = Set::new("filter", "blocklist")
+    .family(Family::Inet)
+    .key_type(SetKeyType::Ipv4Addr);
+conn.add_set(blocklist.clone()).await?;
 
-conn.add_set_elements("filter", "blocklist", Family::Inet, &[
+// Element calls take the `Set`: how an element is written depends on the
+// set's key type and flags.
+conn.add_set_elements(&blocklist, &[
     SetElement::ipv4(Ipv4Addr::new(198, 51, 100, 7)),
     SetElement::ipv4(Ipv4Addr::new(203, 0, 113, 42)),
 ]).await?;
@@ -182,9 +183,9 @@ conn.add_rule(
 # }
 ```
 
-To extend the blocklist later, call `add_set_elements` again with the
-new entries — duplicates are tolerated by the kernel. To remove an
-entry, use `del_set_elements`.
+To extend the blocklist later, call `add_set_elements(&blocklist, ..)`
+again with the new entries — duplicates are tolerated by the kernel. To
+remove an entry, use `del_set_elements`.
 
 ## Verifying state via conntrack
 

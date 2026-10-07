@@ -222,6 +222,8 @@ impl Policy {
 /// Round-trip note: `ChainName` is `Display` for natural use in
 /// log messages and `AsRef<str>` so it slots into existing
 /// `&str`-shaped APIs.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(transparent))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChainName(String);
 
@@ -404,7 +406,8 @@ impl std::str::FromStr for TableName {
 ///
 /// (The 0.20.1 `Verdict::Jump(String)` / `Verdict::Goto(String)`
 /// variants were removed in 0.21.)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Verdict {
     Accept,
@@ -935,6 +938,7 @@ impl NatAddr {
 
 /// NAT expression data.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct NatExpr {
     pub nat_type: NatType,
     pub family: Family,
@@ -1017,6 +1021,7 @@ impl NatExpr {
 /// # }
 /// ```
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Flowtable {
     /// Owning table family (typically `Inet`, `Ip`, `Ip6`).
     pub family: Family,
@@ -1105,6 +1110,7 @@ impl Flowtable {
 
 /// An nftables table.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Table {
     /// Table name.
     pub name: String,
@@ -1580,19 +1586,18 @@ impl Rule {
         self
     }
 
-    /// Rate limit.
+    /// Rate limit: `limit rate <rate>/<unit>` (burst 5). For a burst or
+    /// `over`, push a [`LimitExpr`](super::expr::LimitExpr) with
+    /// [`expr`](Self::expr).
     pub fn limit(mut self, rate: u64, unit: LimitUnit) -> Self {
-        self.exprs.push(super::expr::Expr::Limit {
-            rate,
-            unit,
-            burst: 5,
-        });
+        self.exprs
+            .push(super::expr::LimitExpr::packets(rate, unit).into());
         self
     }
 
     /// Masquerade (source NAT using outgoing interface address).
     pub fn masquerade(mut self) -> Self {
-        self.exprs.push(super::expr::Expr::Masquerade);
+        self.exprs.push(super::expr::MasqExpr::new().into());
         self
     }
 
@@ -1679,16 +1684,18 @@ impl Rule {
                 data: p.to_be_bytes().to_vec(),
             });
         }
-        self.exprs.push(Expr::Redirect { port });
+        self.exprs.push(Expr::Redirect(super::expr::RedirExpr { port }));
         self
     }
 
-    /// Log packet with optional prefix.
+    /// Log packet with optional prefix. For an `nflog` group, push a
+    /// [`LogExpr`](super::expr::LogExpr) with [`expr`](Self::expr).
     pub fn log(mut self, prefix: Option<&str>) -> Self {
-        self.exprs.push(super::expr::Expr::Log {
-            prefix: prefix.map(String::from),
-            group: None,
-        });
+        let mut log = super::expr::LogExpr::new();
+        if let Some(prefix) = prefix {
+            log = log.prefix(prefix);
+        }
+        self.exprs.push(log.into());
         self
     }
 
@@ -1707,10 +1714,8 @@ impl Rule {
             offset: 12,
             len: 4,
         });
-        self.exprs.push(Expr::Lookup {
-            set: set.to_string(),
-            sreg: Register::R0,
-        });
+        self.exprs
+            .push(super::expr::LookupExpr::new(set, Register::R0).into());
         self
     }
 
@@ -1727,10 +1732,8 @@ impl Rule {
             offset: 16,
             len: 4,
         });
-        self.exprs.push(Expr::Lookup {
-            set: set.to_string(),
-            sreg: Register::R0,
-        });
+        self.exprs
+            .push(super::expr::LookupExpr::new(set, Register::R0).into());
         self
     }
 
@@ -2230,8 +2233,16 @@ impl Rule {
     /// `match_ct_state(CtState::ESTABLISHED)`.
     pub fn flow_offload(mut self, flowtable: &str) -> Self {
         self.exprs.push(super::expr::Expr::FlowOffload {
-            table: flowtable.to_string(),
+            flowtable: flowtable.to_string(),
         });
+        self
+    }
+
+    /// Append one expression: a payload struct such as
+    /// [`LookupExpr`](super::expr::LookupExpr) or
+    /// [`LimitExpr`](super::expr::LimitExpr), or any [`Expr`].
+    pub fn expr(mut self, expr: impl Into<Expr>) -> Self {
+        self.exprs.push(expr.into());
         self
     }
 
@@ -2256,12 +2267,13 @@ pub struct RuleInfo {
     pub handle: u64,
     /// Position in chain.
     pub position: Option<u64>,
-    /// `nlink:<key>` comment extracted from `NFTA_RULE_USERDATA`,
-    /// if any. `Some(key)` when this rule was created by nlink
-    /// (and carries an `nlink:`-prefixed comment); `None` when
-    /// the rule has no comment or a foreign-prefixed one. Plan
-    /// 157b v2 — drives per-rule reconciliation identity.
-    pub comment: Option<String>,
+    /// The declarative identity nlink stored in the rule's comment
+    /// (`nlink:<key>`), if this rule was installed by nlink. Drives the
+    /// per-rule reconciliation of `NftablesConfig`.
+    pub key: Option<String>,
+    /// The rule's comment exactly as `nft list ruleset` shows it, whoever
+    /// set it (nlink's `nlink:<key>` included).
+    pub comment_text: Option<String>,
     /// Raw `NFTA_RULE_USERDATA` payload, preserved verbatim. Lets
     /// callers round-trip foreign comments (set by `iptables-nft`,
     /// `nft -f` users, or other tools) without dropping them, even
@@ -2381,7 +2393,53 @@ impl SetKeyType {
     }
 }
 
+/// Set flags — `NFTA_SET_FLAGS`, the `NFT_SET_*` bits, in the shape of
+/// [`CtState`] and [`TcpFlags`]. Combine with `|`.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct SetFlags(pub u32);
+
+impl SetFlags {
+    pub const ANONYMOUS: Self = Self(super::NFT_SET_ANONYMOUS);
+    pub const CONSTANT: Self = Self(super::NFT_SET_CONSTANT);
+    pub const INTERVAL: Self = Self(super::NFT_SET_INTERVAL);
+    pub const MAP: Self = Self(super::NFT_SET_MAP);
+    pub const TIMEOUT: Self = Self(super::NFT_SET_TIMEOUT);
+    pub const EVAL: Self = Self(super::NFT_SET_EVAL);
+    pub const OBJECT: Self = Self(super::NFT_SET_OBJECT);
+    pub const CONCAT: Self = Self(super::NFT_SET_CONCAT);
+    pub const EXPR: Self = Self(super::NFT_SET_EXPR);
+
+    /// No flags.
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    pub fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// Whether every bit of `other` is set.
+    pub fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+
+impl std::ops::BitOr for SetFlags {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOrAssign for SetFlags {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
 /// Set builder.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless used"]
 pub struct Set {
@@ -2389,7 +2447,7 @@ pub struct Set {
     pub(crate) name: String,
     pub(crate) family: Family,
     pub(crate) key_type: SetKeyType,
-    pub(crate) flags: u32,
+    pub(crate) flags: SetFlags,
     pub(crate) size: Option<u32>,
 }
 
@@ -2401,7 +2459,7 @@ impl Set {
             name: name.to_string(),
             family: Family::Inet,
             key_type: SetKeyType::Ipv4Addr,
-            flags: 0,
+            flags: SetFlags::empty(),
             size: None,
         }
     }
@@ -2420,7 +2478,7 @@ impl Set {
 
     /// Mark as constant (immutable after creation).
     pub fn constant(mut self) -> Self {
-        self.flags |= super::NFT_SET_CONSTANT;
+        self.flags |= SetFlags::CONSTANT;
         self
     }
 
@@ -2436,48 +2494,194 @@ impl Set {
         self
     }
 
-    /// Set the flags bitmask directly (`NFT_SET_*` constants).
-    /// Overwrites any previously set flags (including
-    /// [`Self::constant`]); combine bits yourself if you need
+    /// Owning table.
+    pub fn table(&self) -> &str {
+        &self.table
+    }
+
+    /// Set name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Set the flags directly. Overwrites any previously set flags
+    /// (including [`Self::constant`]); combine them with `|` if you need
     /// several.
-    pub fn flags(mut self, flags: u32) -> Self {
+    pub fn flags(mut self, flags: SetFlags) -> Self {
         self.flags = flags;
         self
     }
 }
 
-/// A set element (key + optional data).
+/// A set element: a key, or a range of keys, with what goes with it.
+///
+/// The fields are private so an element can grow — a range end, map data,
+/// a timeout — without a breaking change; build one with the constructors
+/// and read it back with the accessors. How an element is written depends
+/// on the set it goes into (an interval set stores a range as two wire
+/// elements, for one), which is why the element operations take the
+/// [`Set`] rather than its name.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SetElement {
-    /// Element key data.
-    pub key: Vec<u8>,
+    key: Vec<u8>,
+    /// Inclusive end of a range element.
+    key_end: Option<Vec<u8>>,
+    data: Option<SetElementData>,
+    timeout: Option<std::time::Duration>,
+    /// Time left before the element expires, as the kernel reports it.
+    expiration: Option<std::time::Duration>,
+    /// `NFTA_SET_ELEM_FLAGS` as read back (`NFT_SET_ELEM_*`).
+    flags: u32,
+}
+
+/// What a map element maps its key to.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SetElementData {
+    /// A value, in the map's data type (`NFTA_DATA_VALUE`).
+    Value(Vec<u8>),
+    /// A verdict, in a verdict map (`NFTA_DATA_VERDICT`).
+    Verdict(Verdict),
+    /// The name of a stateful object, in an object map.
+    Object(String),
 }
 
 impl SetElement {
-    /// Create from raw bytes.
+    /// Create from raw key bytes, in the set's key layout.
     pub fn new(key: Vec<u8>) -> Self {
-        Self { key }
+        Self {
+            key,
+            key_end: None,
+            data: None,
+            timeout: None,
+            expiration: None,
+            flags: 0,
+        }
     }
 
-    /// Create an IPv4 address element.
+    /// An IPv4 address element.
     pub fn ipv4(addr: Ipv4Addr) -> Self {
-        Self {
-            key: addr.octets().to_vec(),
-        }
+        Self::new(addr.octets().to_vec())
     }
 
-    /// Create an IPv6 address element.
+    /// An IPv6 address element.
     pub fn ipv6(addr: std::net::Ipv6Addr) -> Self {
-        Self {
-            key: addr.octets().to_vec(),
-        }
+        Self::new(addr.octets().to_vec())
     }
 
-    /// Create a port number element.
+    /// A port element (`inet_service`, network byte order).
     pub fn port(port: u16) -> Self {
+        Self::new(port.to_be_bytes().to_vec())
+    }
+
+    /// A mark element (host byte order, like `meta mark`).
+    pub fn mark(mark: u32) -> Self {
+        Self::new(mark.to_ne_bytes().to_vec())
+    }
+
+    /// An interface-index element (host byte order, like `meta iif`).
+    pub fn ifindex(ifindex: u32) -> Self {
+        Self::new(ifindex.to_ne_bytes().to_vec())
+    }
+
+    /// An IP protocol element (`inet_proto`, e.g. 6 for TCP).
+    pub fn inet_proto(proto: u8) -> Self {
+        Self::new(vec![proto])
+    }
+
+    /// An Ethernet address element.
+    pub fn ether(addr: [u8; 6]) -> Self {
+        Self::new(addr.to_vec())
+    }
+
+    /// The key bytes (the range start, for a range).
+    pub fn key(&self) -> &[u8] {
+        &self.key
+    }
+
+    /// The inclusive end of a range element.
+    pub fn key_end(&self) -> Option<&[u8]> {
+        self.key_end.as_deref()
+    }
+
+    /// Whether this element is a range.
+    pub fn is_range(&self) -> bool {
+        self.key_end.is_some()
+    }
+
+    /// The data a map element maps to.
+    pub fn data(&self) -> Option<&SetElementData> {
+        self.data.as_ref()
+    }
+
+    /// The element's own timeout, if it has one.
+    pub fn timeout(&self) -> Option<std::time::Duration> {
+        self.timeout
+    }
+
+    /// Time left before the element expires, as read back from the kernel.
+    pub fn expiration(&self) -> Option<std::time::Duration> {
+        self.expiration
+    }
+
+    /// Whether this is a raw interval-end marker (`NFT_SET_ELEM_INTERVAL_END`),
+    /// as an element event reports it.
+    pub fn is_interval_end(&self) -> bool {
+        self.flags & super::NFT_SET_ELEM_INTERVAL_END != 0
+    }
+
+    /// Whether this is the catch-all element (`NFT_SET_ELEM_CATCHALL`).
+    pub fn is_catchall(&self) -> bool {
+        self.flags & super::NFT_SET_ELEM_CATCHALL != 0
+    }
+
+    /// What the declarative diff compares: the key, the range end and
+    /// catch-all-ness — never live state such as the expiration.
+    pub(crate) fn identity(&self) -> (&[u8], Option<&[u8]>, bool) {
+        (&self.key, self.key_end.as_deref(), self.is_catchall())
+    }
+
+    /// Validate this element against the set it is written to. Only what
+    /// the writer can encode passes; anything else is an error rather
+    /// than something silently dropped.
+    pub(crate) fn check_for(&self, set: &Set) -> Result<()> {
+        let want = set.key_type.len() as usize;
+        if self.key.len() != want {
+            return Err(Error::InvalidMessage(format!(
+                "set {}: element key is {} bytes, but key type {:?} is {want}",
+                set.name,
+                self.key.len(),
+                set.key_type,
+            )));
+        }
+        if self.key_end.is_some() {
+            return Err(Error::InvalidMessage(format!(
+                "set {}: range elements are not supported on this set",
+                set.name
+            )));
+        }
+        if self.data.is_some() {
+            return Err(Error::InvalidMessage(format!(
+                "set {}: element data needs a map",
+                set.name
+            )));
+        }
+        if self.timeout.is_some() {
+            return Err(Error::InvalidMessage(format!(
+                "set {}: element timeouts are not supported on this set",
+                set.name
+            )));
+        }
+        Ok(())
+    }
+
+    /// An element as read back from the kernel.
+    pub(crate) fn from_wire(key: Vec<u8>, flags: u32) -> Self {
         Self {
-            key: port.to_be_bytes().to_vec(),
+            flags,
+            ..Self::new(key)
         }
     }
 }
@@ -2496,7 +2700,7 @@ pub struct SetInfo {
     /// Address family.
     pub family: Family,
     /// Flags.
-    pub flags: u32,
+    pub flags: SetFlags,
     /// Key type ID.
     pub key_type: u32,
     /// Key length.

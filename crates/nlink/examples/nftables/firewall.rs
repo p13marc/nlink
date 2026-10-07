@@ -149,18 +149,15 @@ async fn run_demo(conn: &Connection<Nftables>) -> nlink::netlink::Result<()> {
     .await?;
     println!("Added rule: accept marked packets (0x42)");
 
-    // Create a set of allowed IPs
-    conn.add_set(
-        Set::new("example", "allowed_ips")
-            .family(Family::Inet)
-            .key_type(SetKeyType::Ipv4Addr),
-    )
-    .await?;
+    // Create a set of allowed IPs. The element calls take the `Set`, since
+    // how an element is written depends on the set's key type and flags.
+    let allowed = Set::new("example", "allowed_ips")
+        .family(Family::Inet)
+        .key_type(SetKeyType::Ipv4Addr);
+    conn.add_set(allowed.clone()).await?;
 
     conn.add_set_elements(
-        "example",
-        "allowed_ips",
-        Family::Inet,
+        &allowed,
         &[
             SetElement::ipv4(Ipv4Addr::new(10, 0, 0, 1)),
             SetElement::ipv4(Ipv4Addr::new(192, 168, 1, 0)),

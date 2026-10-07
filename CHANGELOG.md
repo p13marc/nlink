@@ -4,10 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-> **One compile break:** `SetInfo` gained a public field, `size`, and is now
-> `#[non_exhaustive]`, so a struct literal of it no longer builds. Nothing
-> outside the crate needs to build one — it comes from `list_sets` and the
-> set events. Hence 0.30.0.
+> **A breaking nftables release.** The public nftables types are reshaped once
+> so that sets, maps, timeouts and the rest of this cycle's features — and
+> later ones — can grow without another major bump: growing `Expr` variants
+> carry payload structs, `RuleExpr` variants and `SetInfo`/`Table`/`Flowtable`
+> are `#[non_exhaustive]`, `SetElement` has private fields and the element
+> calls take the `Set`, set flags are `SetFlags`, `RuleInfo::comment` splits
+> into `key` + `comment_text`, and the `NftablesDiff` collections are typed.
+> See [`docs/migration_guide/0.29.0-to-0.30.0.md`](docs/migration_guide/0.29.0-to-0.30.0.md).
 
 ### Added
 
@@ -84,7 +88,7 @@ All notable changes to this project will be documented in this file.
   `DeclaredSet::size()`, so `NftablesConfig` can bound a set too, and
   `SetInfo::size` reads the kernel's back. A changed size is applied in
   place — the set keeps its elements and the rules bound to it keep their
-  handles — through the new `NftablesDiff::sets_to_resize`, committed in
+  handles — through the new `NftablesDiff::sets_to_update`, committed in
   a batch of its own ahead of the rest of the apply: the kernel checks an
   element add against the size a set has *before* the commit, so growing
   a set and filling it in one batch is `ENFILE`. An in-place resize needs
@@ -99,6 +103,34 @@ All notable changes to this project will be documented in this file.
   not be installed at all (see Fixed, #375).
 
 ### Changed
+
+- **Breaking: the nftables API reshape for 0.30.** One pass, so this cycle's
+  features (and later ones) are additive:
+  - `Expr::{Lookup, Limit, Log, Masquerade, Redirect}` wrap the new
+    `#[non_exhaustive]` payload structs `LookupExpr` (new: `dreg` for map
+    lookups, `invert` for `!= @set`), `LimitExpr` (new: `over`, settable
+    burst), `LogExpr`, `MasqExpr`, `RedirExpr`; build them with `new()` +
+    setters and push them with the new `Rule::expr`. `Expr::FlowOffload`'s
+    field is `flowtable`. `NatExpr` is `#[non_exhaustive]`.
+  - Every struct-like `RuleExpr` variant is `#[non_exhaustive]`;
+    `RuleExpr::Lookup` gains `dreg`/`invert`, so inverted and map lookups
+    decode typed.
+  - `SetElement` has private fields (key, inclusive range end, map data,
+    timeout, expiration, flags) with constructors — new: `mark`, `ifindex`,
+    `inet_proto`, `ether` — and accessors. `add_set_elements` /
+    `del_set_elements` (on `Connection` and `Transaction`) take the `&Set`
+    and check each element against it: a mismatch is an error before
+    anything is sent (a `Transaction` reports it from `commit`), and elements
+    of interval sets and maps are refused until those encodings land.
+  - Set flags are `SetFlags(pub u32)` (the `CtState` pattern) on `Set`,
+    `DeclaredSet` and `SetInfo`; new `NFT_SET_{TIMEOUT,EVAL,OBJECT,CONCAT,EXPR}`.
+  - `Table` and `Flowtable` are `#[non_exhaustive]`, like `ChainInfo`,
+    `RuleInfo` and `SetInfo`.
+  - `RuleInfo::comment` splits into `key` (nlink's identity) and
+    `comment_text` (the comment as `nft` shows it, whoever set it).
+  - `NftablesDiff`: `rules_to_add` is `Vec<RuleAdd { rule, placement }>`
+    (new `RulePlacement`), and element changes are `Vec<SetElementsChange
+    { set, elements }>`.
 
 - **Breaking: `SetInfo` is `#[non_exhaustive]` and has a `size:
   Option<u32>` field.** Code that builds a `SetInfo` with a struct literal
@@ -145,7 +177,7 @@ All notable changes to this project will be documented in this file.
   exists to be referenced. Each keyed rule bound to a recreated set is now
   deleted ahead of the `DELSET` and re-inserted after the new set, right
   before the next rule that stayed, so chain order is unchanged (new
-  `NftablesDiff::rules_to_reinsert`). A pending in-place replace of such a
+  `NftablesDiff::rules_to_move`). A pending in-place replace of such a
   rule becomes the re-insert. A rule nlink does not manage still pins the
   set; the diff now warns about it.
 

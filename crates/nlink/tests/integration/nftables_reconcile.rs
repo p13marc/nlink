@@ -1041,7 +1041,7 @@ async fn reconcile_empty_to_set_with_elements_applies() -> nlink::Result<()> {
         assert_eq!(diff.sets_to_add.len(), 1, "one new set");
         // Elements of a brand-new set are installed wholesale.
         assert_eq!(diff.set_elements_to_add.len(), 1, "one element batch");
-        assert_eq!(diff.set_elements_to_add[0].3.len(), 2, "two elements");
+        assert_eq!(diff.set_elements_to_add[0].elements.len(), 2, "two elements");
 
         diff.apply(&nft).await?;
 
@@ -1102,7 +1102,7 @@ async fn reconcile_add_one_set_element() -> nlink::Result<()> {
             "exactly one element-add batch"
         );
         assert_eq!(
-            diff.set_elements_to_add[0].3.len(),
+            diff.set_elements_to_add[0].elements.len(),
             1,
             "only the single new element is added (element-level diff)"
         );
@@ -1146,7 +1146,7 @@ async fn reconcile_remove_one_set_element() -> nlink::Result<()> {
             "exactly one element-remove batch"
         );
         assert_eq!(
-            diff.set_elements_to_remove[0].3.len(),
+            diff.set_elements_to_remove[0].elements.len(),
             1,
             "only the undeclared element is removed"
         );

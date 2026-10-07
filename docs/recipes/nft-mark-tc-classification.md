@@ -245,7 +245,7 @@ path-MTU form is only valid in `forward`, `output` and `postrouting`.
 # async fn example(nft: Connection<Nftables>, tc: Connection<Route>) -> nlink::Result<()> {
 // What the firewall matched (rules need a `.counter()`).
 for rule in nft.list_rules("qos", Family::Ip).await? {
-    println!("{:?}: {:?}", rule.comment, rule.counter());
+    println!("{:?}: {:?}", rule.key, rule.counter());
 }
 // What the shaper got.
 for class in tc.get_classes_by_name("eth0").await? {
