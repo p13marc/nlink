@@ -797,6 +797,40 @@ sets are checked: `cargo test -p nlink --doc` in the `test` job and
 
 ## Active work
 
+**0.30.0 is ready to cut** (workspace at 0.30.0; `scripts/cut-release.sh
+0.30.0 --dry-run` clean). Narrative in `CHANGELOG.md ## [Unreleased]` +
+`docs/migration_guide/0.29.0-to-0.30.0.md`. It started from external PR #246
+(`meta mark set`, TCP MSS clamping, set size) and grew into the ipset
+release. nftables gained:
+- lookups by any field;
+- interval and concatenated sets (rbtree and pipapo);
+- timeouts and `dynset`;
+- maps and verdict maps;
+- named counters, quotas and limits with object maps.
+
+Recipes: `nftables-sets-maps`, `ipset-to-nftables`. The public nftables types
+were reshaped once (PR #386) so that all of it, and what comes next, is
+additive. And the apply-twice discipline from 0.27 was finally applied to
+every declarative layer: `network_config_echo.rs`, `wireguard_echo.rs` and
+`recipes_echo.rs` found 20 bugs outside nftables (#398–#418); the nftables
+diff got order enforcement, derived keys and live-state-blind comparison
+(#387–#390).
+
+Lessons to carry:
+- **Kernel source beats its headers.** `NFTA_SET_FIELD_LEN` is documented
+  as bits and read as bytes.
+- **A request is not the echo.** A dynset's `TIMEOUT`, a quota's `CONSUMED`
+  and a limit's burst 0 → 5 all differ between what is sent and what is
+  dumped; `WireForm::Echo` is where each asymmetry is recorded.
+- **Timeouts live in jiffies.** They round down both ways; compare in 20 ms
+  steps, which are whole jiffies at every `HZ`.
+- **A sweep finds what one value hides.** TBF converged only at 1 mbit, the
+  one rate every earlier test used.
+- **Traffic, not just the dump.** Every new set kind is tested by counting
+  packets through a namespace; a set that lists correctly can still match the
+  wrong thing (an interval start with no end matches to the top of the key
+  space).
+
 **0.29.0 shipped 2026-10-01** (`0.29.0` tagged — bare, no `v`; both crates
 on crates.io). Headline narrative in `CHANGELOG.md ## [0.29.0]` +
 `docs/migration_guide/0.28.0-to-0.29.0.md`. A netem release, found
@@ -835,8 +869,8 @@ because nothing could set a value. Both bugs sat behind a green suite.
 
 **The next cycle is open on `master`** — new work lands in
 `CHANGELOG.md ## [Unreleased]` and is promoted to the next `## [X.Y.0]` at
-cut time. The workspace version stays at the released 0.29.0 until the
-cycle's first breaking PR bumps it (the cargo-semver-checks convention).
+cut time. The workspace version stays at the last release until a cycle's
+first breaking PR bumps it (the cargo-semver-checks convention).
 
 0.27.0 was the declarative-configuration cycle, and its lesson is narrower
 than 0.26.0's but worth carrying: **almost every bug in it needed a second

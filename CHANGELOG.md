@@ -4,14 +4,34 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-> **A breaking nftables release.** The public nftables types are reshaped once
-> so that sets, maps, timeouts and the rest of this cycle's features — and
-> later ones — can grow without another major bump: growing `Expr` variants
-> carry payload structs, `RuleExpr` variants and `SetInfo`/`Table`/`Flowtable`
-> are `#[non_exhaustive]`, `SetElement` has private fields and the element
-> calls take the `Set`, set flags are `SetFlags`, `RuleInfo::comment` splits
-> into `key` + `comment_text`, and the `NftablesDiff` collections are typed.
-> See [`docs/migration_guide/0.29.0-to-0.30.0.md`](docs/migration_guide/0.29.0-to-0.30.0.md).
+> **The ipset release, and every declarative layer converges.**
+>
+> nftables gains what ipset users need: lookups by any packet field and
+> `!= @set`, interval sets (prefixes and ranges), concatenated keys, set
+> timeouts and rules that fill sets (`dynset`), maps and verdict maps, and
+> named counters, quotas and limits with object maps. Each is imperative and
+> declarative, and each was tested on traffic through a namespace. The
+> [ipset → nftables](docs/recipes/ipset-to-nftables.md) recipe maps one onto
+> the other.
+>
+> To make room, the public nftables types are reshaped once. This is a
+> breaking change, but a mechanical one:
+> - the growing `Expr` variants carry payload structs;
+> - `RuleExpr` variants, `SetInfo`, `Table` and `Flowtable` are
+>   `#[non_exhaustive]`;
+> - `SetElement` has private fields, and the element calls take the `Set`;
+> - set flags are `SetFlags`;
+> - `RuleInfo::comment` splits into `key` and `comment_text`;
+> - the `NftablesDiff` collections are typed.
+>
+> Every declarative layer was then checked by applying twice and asserting
+> the second apply does nothing. That found 20 bugs outside nftables
+> (#398–#418) — TBF never converged at most rates, bond ports could not be
+> applied, WireGuard keys were rewritten on every run, a changed VNI or VLAN
+> id never reached the kernel, among others — and a dozen inside it
+> (#374–#377, #387–#390, #395, #396). Several runtime
+> behaviours change; read
+> [`docs/migration_guide/0.29.0-to-0.30.0.md`](docs/migration_guide/0.29.0-to-0.30.0.md).
 
 ### Added
 
