@@ -120,6 +120,12 @@ async fn every_wireguard_shape_converges() -> nlink::Result<()> {
     nlink::require_modules!("wireguard");
 
     let cases = vec![
+        // The kernel clamps the private key before storing it, and dumps
+        // the clamped one.
+        case(
+            "private-key-unclamped",
+            vec![WireguardConfig::new().device("wg0", |d| d.private_key(UNCLAMPED))],
+        ),
         case(
             "private-key-clamped",
             vec![WireguardConfig::new().device("wg0", |d| d.private_key(clamped(UNCLAMPED)))],
@@ -137,6 +143,22 @@ async fn every_wireguard_shape_converges() -> nlink::Result<()> {
             vec![WireguardConfig::new().device("wg0", |d| d.fwmark(0))],
         ),
         case(
+            "device-fields-together",
+            vec![WireguardConfig::new().device("wg0", |d| {
+                d.private_key(UNCLAMPED).listen_port(51821).fwmark(7)
+            })],
+        ),
+        case(
+            "peer-v4",
+            vec![WireguardConfig::new().device("wg0", |d| {
+                d.private_key(UNCLAMPED).peer(peer_key(0xb1), |p| {
+                    p.endpoint(v4_endpoint())
+                        .persistent_keepalive(Duration::from_secs(25))
+                        .allowed_ip(AllowedIp::v4(Ipv4Addr::new(10, 0, 0, 0), 24))
+                })
+            })],
+        ),
+        case(
             "peer-v6-endpoint-and-allowed-ips",
             vec![WireguardConfig::new().device("wg0", |d| {
                 d.peer(peer_key(0xb3), |p| {
@@ -144,6 +166,24 @@ async fn every_wireguard_shape_converges() -> nlink::Result<()> {
                         .allowed_ip(AllowedIp::v6("fd00:1::".parse().unwrap(), 64))
                         .allowed_ip(AllowedIp::v6(Ipv6Addr::UNSPECIFIED, 0))
                 })
+            })],
+        ),
+        case(
+            "multiple-peers",
+            vec![WireguardConfig::new().device("wg0", |d| {
+                d.private_key(UNCLAMPED)
+                    .listen_port(51822)
+                    .peer(peer_key(0xc1), |p| {
+                        p.endpoint(v4_endpoint())
+                            .allowed_ip(AllowedIp::v4(Ipv4Addr::new(10, 1, 1, 0), 24))
+                    })
+                    .peer(peer_key(0xc2), |p| {
+                        p.endpoint("203.0.113.2:51820".parse().unwrap())
+                            .allowed_ip(AllowedIp::v4(Ipv4Addr::new(10, 1, 2, 0), 24))
+                    })
+                    .peer(peer_key(0xc3), |p| {
+                        p.allowed_ip(AllowedIp::v6("fd00:3::".parse().unwrap(), 64))
+                    })
             })],
         ),
         case(

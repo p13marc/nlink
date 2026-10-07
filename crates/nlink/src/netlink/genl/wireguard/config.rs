@@ -738,6 +738,19 @@ fn parse_fwmark(s: &str) -> Result<u32> {
     parsed.map_err(|_| Error::InvalidMessage(format!("wireguard config: invalid FwMark `{s}`")))
 }
 
+/// A private key as the kernel keeps it: X25519-clamped.
+///
+/// `wg_noise_set_static_identity_private_key()` copies the key and runs
+/// `curve25519_clamp_secret()` on it — clear the low three bits and the
+/// top bit, set bit 254 — and `GET_DEVICE` returns that copy. A key from
+/// `wg genkey` is already clamped; any other 32 bytes are not.
+fn clamp_private_key(mut key: [u8; WG_KEY_LEN]) -> [u8; WG_KEY_LEN] {
+    key[0] &= 248;
+    key[31] &= 127;
+    key[31] |= 64;
+    key
+}
+
 // =============================================================================
 // Declared types
 // =============================================================================
@@ -774,8 +787,13 @@ impl DeclaredWgDevice {
         // If the kernel does withhold it — an unprivileged GET, say —
         // `current.private_key` is `None` and the key is written, which
         // is the old behaviour for exactly the case that justified it.
+        //
+        // Compared clamped: the kernel stores (and dumps) the key after
+        // X25519 clamping, so an unclamped declared key — any 32 bytes
+        // that did not come from `wg genkey` — never matched and was
+        // rewritten on every apply (#TBD).
         if let Some(declared) = self.private_key
-            && current.private_key != Some(declared)
+            && current.private_key != Some(clamp_private_key(declared))
         {
             changes.private_key_set = true;
         }
@@ -1370,6 +1388,24 @@ mod tests {
         assert_eq!(peer.public_key, key(0xbb));
         assert_eq!(peer.persistent_keepalive, Some(Duration::from_secs(25)));
         assert_eq!(peer.allowed_ips.len(), 1);
+    }
+
+    /// The kernel dumps the clamped key, so an unclamped declaration
+    /// matches its clamped echo and a different key still does not.
+    #[test]
+    fn diff_private_key_compares_clamped() {
+        let declared = DeclaredWgDeviceBuilder::new("wg0".into())
+            .private_key([0xaa; WG_KEY_LEN])
+            .build();
+        let mut curr = empty_device("wg0");
+        let mut echo = [0xaa; WG_KEY_LEN];
+        echo[0] = 0xa8;
+        echo[31] = 0x6a;
+        curr.private_key = Some(echo);
+        assert!(!declared.diff_against(&curr).private_key_set);
+
+        curr.private_key = Some(clamp_private_key([0xbb; WG_KEY_LEN]));
+        assert!(declared.diff_against(&curr).private_key_set);
     }
 
     #[test]
