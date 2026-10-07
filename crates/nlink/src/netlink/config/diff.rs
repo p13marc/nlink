@@ -454,10 +454,25 @@ fn diff_links(
     // Note: desired_names would be used for purge mode to find links to remove
     let _desired_names: HashSet<&str> = config.links.iter().map(|l| l.name.as_str()).collect();
 
+    // Every bond, live or about to be created — a port changing to or from
+    // one of these changes state as a side effect (see compute_link_changes).
+    let bonds: HashSet<&str> = current
+        .iter()
+        .filter(|(_, l)| l.kind() == Some("bond"))
+        .map(|(name, _)| *name)
+        .chain(
+            config
+                .links
+                .iter()
+                .filter(|l| matches!(l.link_type, DeclaredLinkType::Bond { .. }))
+                .map(|l| l.name.as_str()),
+        )
+        .collect();
+
     for declared in &config.links {
         if let Some(existing) = current.get(declared.name.as_str()) {
             // Link exists, check if it needs modification
-            let changes = compute_link_changes(declared, existing, ifindex_to_name);
+            let changes = compute_link_changes(declared, existing, ifindex_to_name, &bonds);
             if !changes.is_empty() {
                 diff.links_to_modify.push((declared.name.clone(), changes));
             }
@@ -562,6 +577,7 @@ fn compute_link_changes(
     declared: &DeclaredLink,
     existing: &LinkMessage,
     ifindex_to_name: &HashMap<u32, &str>,
+    bonds: &HashSet<&str>,
 ) -> LinkChanges {
     let mut changes = LinkChanges::default();
 
@@ -634,6 +650,24 @@ fn compute_link_changes(
         (None, None) => {
             // Both no-master — no change.
         }
+    }
+
+    // A bond opens the port it enslaves and closes the one it releases —
+    // `bond_enslave()` ends in `dev_open()`, `__bond_release_one()` in
+    // `dev_close()` — whatever state the port had. Across a bond master
+    // change the state read above is therefore stale, and the declared one
+    // has to be re-asserted after the change: a port declared up and
+    // released from a bond came back down, and the next diff said `up`.
+    let master_changes = changes.unset_master || changes.set_master.is_some();
+    let leaves_bond = master_changes && existing_master_name.is_some_and(|m| bonds.contains(m));
+    let joins_bond = changes
+        .set_master
+        .as_deref()
+        .is_some_and(|m| bonds.contains(m));
+    match declared.state {
+        LinkState::Up if leaves_bond && !joins_bond => changes.set_up = true,
+        LinkState::Down if joins_bond => changes.set_down = true,
+        _ => {}
     }
 
     changes

@@ -188,6 +188,17 @@ async fn every_link_kind_converges() -> nlink::Result<()> {
             })],
         ),
         case(
+            "bond+slaves-declared-up",
+            vec![
+                NetworkConfig::new()
+                    .link("bond0", |l| {
+                        l.bond().bond_mode(BondMode::ActiveBackup).miimon(100).up()
+                    })
+                    .link("d0", |l| l.dummy().master("bond0").up())
+                    .link("d1", |l| l.dummy().master("bond0").up()),
+            ],
+        ),
+        case(
             "bond+slaves-state-unchanged",
             vec![
                 NetworkConfig::new()
@@ -255,6 +266,45 @@ async fn link_modifiers_converge() -> nlink::Result<()> {
                 NetworkConfig::new()
                     .link("br0", |l| l.bridge().up())
                     .link("d0", |l| l.dummy().up()),
+            ],
+        ),
+        case(
+            "existing-up-link-into-bond",
+            vec![
+                dummy_up("d0"),
+                NetworkConfig::new()
+                    .link("bond0", |l| l.bond().up())
+                    .link("d0", |l| l.dummy().master("bond0").up()),
+            ],
+        ),
+        // A bond closes the port it releases, so a port declared up has
+        // to be brought up after it leaves.
+        case(
+            "bond-port-released",
+            vec![
+                NetworkConfig::new()
+                    .link("bond0", |l| l.bond().up())
+                    .link("d0", |l| l.dummy().master("bond0").up()),
+                NetworkConfig::new()
+                    .link("bond0", |l| l.bond().up())
+                    .link("d0", |l| l.dummy().up()),
+            ],
+        ),
+        // …and opens the one it enslaves, so a port declared down has to
+        // be taken down after it joins.
+        case(
+            "bond-port-declared-down",
+            vec![
+                // Created into the bond.
+                NetworkConfig::new()
+                    .link("bond0", |l| l.bond().up())
+                    .link("d0", |l| l.dummy().master("bond0").down())
+                    .link("d1", |l| l.dummy().down()),
+                // An existing link, already down, moved into it.
+                NetworkConfig::new()
+                    .link("bond0", |l| l.bond().up())
+                    .link("d0", |l| l.dummy().master("bond0").down())
+                    .link("d1", |l| l.dummy().master("bond0").down()),
             ],
         ),
         case(

@@ -667,20 +667,34 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
         }
     }
 
-    // Set interface up if requested
-    if link.state == super::types::LinkState::Up {
-        conn.set_link_up(&link.name).await?;
+    // Enslave before bringing up: a bond refuses a port that is already
+    // up (see `enslave`).
+    if let Some(master) = &link.master {
+        enslave(conn, &link.name, master).await?;
     }
 
-    // Set master if requested
-    if let Some(master) = &link.master {
-        conn.set_link_master(&link.name, master).await?;
+    match link.state {
+        super::types::LinkState::Up => conn.set_link_up(&link.name).await?,
+        // Created down, but a bond opens the port it enslaves.
+        super::types::LinkState::Down if link.master.is_some() => {
+            conn.set_link_down(&link.name).await?;
+        }
+        _ => {}
     }
 
     Ok(())
 }
 
 async fn modify_link(conn: &Connection<Route>, name: &str, changes: &LinkChanges) -> Result<()> {
+    // Master changes first: enslaving to a bond needs the port down, and
+    // a bond closes the port it releases, so the declared up/down state
+    // is only settled after them.
+    if let Some(master) = &changes.set_master {
+        enslave(conn, name, master).await?;
+    }
+    if changes.unset_master {
+        conn.set_link_nomaster(name).await?;
+    }
     if changes.set_up {
         conn.set_link_up(name).await?;
     }
@@ -693,13 +707,32 @@ async fn modify_link(conn: &Connection<Route>, name: &str, changes: &LinkChanges
     if let Some(address) = changes.set_address {
         conn.set_link_address(name, address).await?;
     }
-    if let Some(master) = &changes.set_master {
-        conn.set_link_master(name, master).await?;
-    }
-    if changes.unset_master {
-        conn.set_link_nomaster(name).await?;
-    }
     Ok(())
+}
+
+/// Make `master` the master of `name`.
+///
+/// A bond refuses a port that is up — `bond_enslave()` (drivers/net/
+/// bonding/bond_main.c) answers EPERM, "Device can not be enslaved while
+/// up" — and opens the port itself once it is enslaved. `create_link`
+/// used to bring a link up before enslaving it, so every bond port
+/// declared `.up()` failed the apply, and so did moving an up link into
+/// a bond. For a bond master the port goes down first, as ifenslave and
+/// systemd-networkd do; other masters take an up port as it is.
+async fn enslave(conn: &Connection<Route>, name: &str, master: &str) -> Result<()> {
+    let master_is_bond = conn
+        .get_link_by_name(master)
+        .await?
+        .is_some_and(|m| m.kind() == Some("bond"));
+    if master_is_bond
+        && conn
+            .get_link_by_name(name)
+            .await?
+            .is_some_and(|port| port.is_up())
+    {
+        conn.set_link_down(name).await?;
+    }
+    conn.set_link_master(name, master).await
 }
 
 async fn add_address(conn: &Connection<Route>, addr: &DeclaredAddress) -> Result<()> {
