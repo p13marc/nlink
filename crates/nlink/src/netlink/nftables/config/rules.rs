@@ -169,8 +169,9 @@ pub(crate) fn validate_key(table: &str, chain: &str, key: &str) -> Result<()> {
 /// output; anything that does not walk as TLVs is left as it is.
 pub(crate) fn canonicalize_for_compare(mut bytes: Vec<u8>) -> Vec<u8> {
     use crate::netlink::nftables::{
-        NFTA_COUNTER_BYTES, NFTA_COUNTER_PACKETS, NFTA_EXPR_DATA, NFTA_EXPR_NAME,
-        NFTA_LIST_ELEM, NFTA_QUOTA_CONSUMED, NFTA_QUOTA_FLAGS, NFT_QUOTA_F_DEPLETED,
+        NFTA_COUNTER_BYTES, NFTA_COUNTER_PACKETS, NFTA_DYNSET_TIMEOUT, NFTA_EXPR_DATA,
+        NFTA_EXPR_NAME, NFTA_LIST_ELEM, NFTA_QUOTA_CONSUMED, NFTA_QUOTA_FLAGS,
+        NFT_QUOTA_F_DEPLETED,
     };
     for (ty, elem_at, elem_len) in tlvs(&bytes, 0, bytes.len()) {
         if ty != NFTA_LIST_ELEM {
@@ -198,11 +199,29 @@ pub(crate) fn canonicalize_for_compare(mut bytes: Vec<u8>) -> Vec<u8> {
                     let flags = flags & !NFT_QUOTA_F_DEPLETED;
                     bytes[at..at + 4].copy_from_slice(&flags.to_be_bytes());
                 }
+                (b"dynset", NFTA_DYNSET_TIMEOUT) if len == 8 => {
+                    let ms = u64::from_be_bytes(bytes[at..at + 8].try_into().unwrap());
+                    bytes[at..at + 8].copy_from_slice(&timeout_step(ms).to_be_bytes());
+                }
                 _ => {}
             }
         }
     }
     bytes
+}
+
+/// A timeout in milliseconds as the kernel can read it back, at any `HZ`:
+/// rounded down to a multiple of 20 ms.
+///
+/// The kernel keeps timeouts in jiffies, converting with
+/// `nsecs_to_jiffies64` (rounding down) and back with `jiffies64_to_msecs`
+/// (rounding down again), so `1001 ms` reads back as `1000 ms` at `HZ=250`
+/// and `1003 ms` at `HZ=300`. 20 ms is a whole number of jiffies at every
+/// `HZ` Linux offers (100, 250, 300, 1000), so a value and its read-back
+/// always fall in the same 20 ms step — and nlink cannot know the kernel's
+/// `HZ`.
+pub(crate) fn timeout_step(ms: u64) -> u64 {
+    ms - ms % 20
 }
 
 /// The attributes in `buf[at..at + len]`: `(type, payload offset, payload
@@ -387,6 +406,18 @@ fn longest_increasing(seq: &[usize]) -> HashSet<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_timeout_and_its_read_back_share_a_20ms_step_at_every_hz() {
+        // The kernel's round trip: msecs -> jiffies (down) -> msecs (down).
+        for hz in [100u64, 250, 300, 1000] {
+            for ms in [1u64, 19, 20, 999, 1001, 1500, 3_600_000] {
+                let jiffies = (ms * 1_000_000 / (1_000_000_000 / hz)).max(1);
+                let read_back = jiffies * 1000 / hz;
+                assert_eq!(timeout_step(ms), timeout_step(read_back), "HZ={hz} ms={ms}");
+            }
+        }
+    }
 
     fn slots(keys: &[Option<&str>]) -> Vec<KernelSlot> {
         keys.iter()

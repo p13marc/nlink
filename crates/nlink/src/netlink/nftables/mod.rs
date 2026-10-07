@@ -382,6 +382,12 @@ pub const NFTA_SET_DESC_CONCAT: u16 = 2;
 /// as bytes (`DIV_ROUND_UP(len, sizeof(u32))` registers, at most `U8_MAX`).
 pub const NFTA_SET_FIELD_LEN: u16 = 1;
 pub const NFTA_SET_ID: u16 = 10;
+/// `NFTA_SET_TIMEOUT` — the default element timeout in milliseconds (u64),
+/// kept by the kernel in jiffies, so it reads back rounded down to one.
+pub const NFTA_SET_TIMEOUT: u16 = 11;
+/// `NFTA_SET_GC_INTERVAL` — the garbage-collection interval in
+/// milliseconds (u32), kept as given.
+pub const NFTA_SET_GC_INTERVAL: u16 = 12;
 pub const NFTA_SET_HANDLE: u16 = 16;
 
 // Set element attributes
@@ -392,6 +398,11 @@ pub const NFTA_SET_ELEM_LIST_ELEMENTS: u16 = 3;
 pub const NFTA_SET_ELEM_KEY: u16 = 1;
 pub const NFTA_SET_ELEM_DATA: u16 = 2;
 pub const NFTA_SET_ELEM_FLAGS: u16 = 3;
+/// `NFTA_SET_ELEM_TIMEOUT` — the element's own timeout in milliseconds
+/// (u64). Dumped only when it differs from the set's default.
+pub const NFTA_SET_ELEM_TIMEOUT: u16 = 4;
+/// `NFTA_SET_ELEM_EXPIRATION` — milliseconds the element has left (u64).
+pub const NFTA_SET_ELEM_EXPIRATION: u16 = 5;
 /// `NFTA_SET_ELEM_KEY_END` — the inclusive end of a range, in the same
 /// element: how an interval set of concatenated keys stores one.
 pub const NFTA_SET_ELEM_KEY_END: u16 = 10;
@@ -408,6 +419,26 @@ pub const NFTA_LOOKUP_SET_ID: u16 = 4;
 pub const NFTA_LOOKUP_FLAGS: u16 = 5;
 /// `NFT_LOOKUP_F_INV` — match keys *not* in the set (`!= @set`).
 pub const NFT_LOOKUP_F_INV: u32 = 1;
+
+// Dynset expression attributes (`add|update|delete @set { ... }`).
+pub const NFTA_DYNSET_SET_NAME: u16 = 1;
+pub const NFTA_DYNSET_OP: u16 = 3;
+pub const NFTA_DYNSET_SREG_KEY: u16 = 4;
+pub const NFTA_DYNSET_SREG_DATA: u16 = 5;
+/// `NFTA_DYNSET_TIMEOUT` — milliseconds (u64), kept in jiffies. Always
+/// dumped, 0 when the expression has none; refused (`EOPNOTSUPP`) in a
+/// request for a set without `NFT_SET_TIMEOUT`.
+pub const NFTA_DYNSET_TIMEOUT: u16 = 6;
+/// `NFTA_DYNSET_EXPR` — one per-element expression (not modelled).
+pub const NFTA_DYNSET_EXPR: u16 = 7;
+/// `NFTA_DYNSET_FLAGS` — always dumped.
+pub const NFTA_DYNSET_FLAGS: u16 = 9;
+/// `NFTA_DYNSET_EXPRESSIONS` — several per-element expressions (not
+/// modelled).
+pub const NFTA_DYNSET_EXPRESSIONS: u16 = 10;
+/// `NFT_DYNSET_F_INV` — the rule matches when the update *fails* (a full
+/// set), instead of when it succeeds.
+pub const NFT_DYNSET_F_INV: u32 = 1;
 
 // Set flags
 pub const NFT_SET_ANONYMOUS: u32 = 0x1;

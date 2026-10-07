@@ -110,14 +110,14 @@ impl NftablesDiff {
             return Ok(0);
         }
 
-        // 0. Set resizes, in a batch of their own committed first. The
-        //    kernel checks an element add against the size the set has
-        //    before the commit, so a set grown in the same batch as its
-        //    new elements would refuse them (ENFILE) and fail the apply,
-        //    every time. Changing a limit is the one change that is safe
-        //    to make ahead of the rest.
+        // 0. In-place set updates (size, timeout, GC interval), in a batch
+        //    of their own committed first. The kernel checks an element add
+        //    against the size the set has before the commit, so a set grown
+        //    in the same batch as its new elements would refuse them
+        //    (ENFILE) and fail the apply, every time. Changing a limit is
+        //    the one change that is safe to make ahead of the rest.
         if !self.sets_to_update.is_empty() {
-            self.resize_sets(conn).await?;
+            self.update_sets(conn).await?;
         }
 
         let mut tx: Transaction = conn.transaction();
@@ -268,8 +268,8 @@ impl NftablesDiff {
 
     /// Commit [`Self::sets_to_update`] as one batch, then read the sets back:
     /// a kernel older than 6.5 accepts the update and keeps the old size,
-    /// and saying so beats a diff that reports the same resize forever.
-    async fn resize_sets(&self, conn: &Connection<Nftables>) -> Result<()> {
+    /// and saying so beats a diff that reports the same update forever.
+    async fn update_sets(&self, conn: &Connection<Nftables>) -> Result<()> {
         let mut tx = conn.transaction();
         for (table, family, declared) in &self.sets_to_update {
             tx = tx.update_set(declared.to_set(table, *family));
@@ -277,19 +277,40 @@ impl NftablesDiff {
         tx.commit(conn).await?;
 
         for (table, family, declared) in &self.sets_to_update {
-            let current = conn
+            let Some(current) = conn
                 .list_sets_in(table, *family)
                 .await?
                 .into_iter()
                 .find(|s| s.name == declared.name())
-                .and_then(|s| s.size);
-            if current != declared.size() {
+            else {
+                continue;
+            };
+            let ms = |d: Option<std::time::Duration>| d.map_or(0, super::super::expr::millis);
+            let kept = if declared.size().is_some_and(|size| current.size != Some(size)) {
+                Some(format!("a size of {:?} (asked {:?})", current.size, declared.size()))
+            } else if super::rules::timeout_step(ms(declared.timeout()))
+                != super::rules::timeout_step(ms(current.timeout))
+            {
+                Some(format!(
+                    "a timeout of {:?} (asked {:?})",
+                    current.timeout,
+                    declared.timeout()
+                ))
+            } else if ms(declared.gc_interval()) != ms(current.gc_interval) {
+                Some(format!(
+                    "a GC interval of {:?} (asked {:?})",
+                    current.gc_interval,
+                    declared.gc_interval()
+                ))
+            } else {
+                None
+            };
+            if let Some(kept) = kept {
                 return Err(Error::not_supported(format!(
-                    "set {table}/{}: the kernel accepted a resize to {:?} but kept {current:?} \
-                     (an in-place set size update needs Linux 6.5+); delete the set and \
-                     re-apply to recreate it at the new size",
+                    "set {table}/{}: the kernel accepted an in-place update but kept {kept} \
+                     (an in-place set update needs Linux 6.5+); delete the set and \
+                     re-apply to recreate it",
                     declared.name(),
-                    declared.size(),
                 )));
             }
         }

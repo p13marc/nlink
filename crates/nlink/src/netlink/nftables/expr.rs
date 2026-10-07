@@ -111,6 +111,9 @@ pub enum Expr {
     },
     /// Look a register up in a named set or map — see [`LookupExpr`].
     Lookup(LookupExpr),
+    /// Add, refresh or delete a set element from the packet path — see
+    /// [`DynsetExpr`].
+    Dynset(DynsetExpr),
     /// Bitwise operation.
     Bitwise {
         sreg: Register,
@@ -242,6 +245,100 @@ impl LookupExpr {
 impl From<LookupExpr> for Expr {
     fn from(e: LookupExpr) -> Self {
         Expr::Lookup(e)
+    }
+}
+
+/// What a [`DynsetExpr`] does to its set: `NFT_DYNSET_OP_*`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+#[non_exhaustive]
+pub enum DynsetOp {
+    /// `add @set { key }`: insert the key unless it is there.
+    Add = 0,
+    /// `update @set { key }`: insert it, or restart its timeout.
+    Update = 1,
+    /// `delete @set { key }`: remove it.
+    Delete = 2,
+}
+
+impl DynsetOp {
+    pub(crate) fn from_u32(v: u32) -> Option<Self> {
+        match v {
+            0 => Some(Self::Add),
+            1 => Some(Self::Update),
+            2 => Some(Self::Delete),
+            _ => None,
+        }
+    }
+}
+
+/// `dynset`: add, refresh or delete a set element from the packet path —
+/// `add @seen { ip saddr timeout 60s }`, ipset `SET --add-set`, and the
+/// building block of "recently seen", port knocking and per-source state.
+///
+/// The set must be one the kernel can update from the packet path: give it
+/// [`Set::dynamic`](super::types::Set::dynamic) (`NFT_SET_EVAL`, which
+/// selects the resizable hash backend; interval sets cannot be updated),
+/// and [`Set::timeout`](super::types::Set::timeout) or
+/// [`Set::per_element_timeouts`](super::types::Set::per_element_timeouts)
+/// for an element timeout. The rule continues when the update succeeds,
+/// and stops when it cannot (the set is full) — or the other way round
+/// with [`invert`](Self::invert).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DynsetExpr {
+    /// Set name.
+    pub set: String,
+    /// What to do.
+    pub op: DynsetOp,
+    /// Register holding the key.
+    pub sreg_key: Register,
+    /// Register holding the value, for a map; `None` for a set.
+    pub sreg_data: Option<Register>,
+    /// Timeout of the element added; `None` for the set's default.
+    pub timeout: Option<std::time::Duration>,
+    /// Match when the update fails rather than when it succeeds
+    /// (`NFT_DYNSET_F_INV`).
+    pub invert: bool,
+}
+
+impl DynsetExpr {
+    /// `op` the key in `sreg_key` on `set`.
+    pub fn new(op: DynsetOp, set: impl Into<String>, sreg_key: Register) -> Self {
+        Self {
+            set: set.into(),
+            op,
+            sreg_key,
+            sreg_data: None,
+            timeout: None,
+            invert: false,
+        }
+    }
+
+    /// Give the element this timeout instead of the set's default. The set
+    /// needs timeouts; the kernel keeps it in jiffies, so it is rounded
+    /// down to one (and reads back that way).
+    pub fn timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// For a map: the register holding the value to store with the key.
+    pub fn sreg_data(mut self, sreg: Register) -> Self {
+        self.sreg_data = Some(sreg);
+        self
+    }
+
+    /// Match when the update fails instead.
+    pub fn invert(mut self) -> Self {
+        self.invert = true;
+        self
+    }
+}
+
+impl From<DynsetExpr> for Expr {
+    fn from(e: DynsetExpr) -> Self {
+        Expr::Dynset(e)
     }
 }
 
@@ -688,6 +785,33 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             builder.append_attr_u32_be(NFTA_LOOKUP_FLAGS, flags);
             builder.nest_end(data);
         }
+        Expr::Dynset(DynsetExpr {
+            set,
+            op,
+            sreg_key,
+            sreg_data,
+            timeout,
+            invert,
+        }) => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "dynset");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_str(NFTA_DYNSET_SET_NAME, set);
+            builder.append_attr_u32_be(NFTA_DYNSET_OP, *op as u32);
+            builder.append_attr_u32_be(NFTA_DYNSET_SREG_KEY, sreg_key.wire());
+            if let Some(sreg) = sreg_data {
+                builder.append_attr_u32_be(NFTA_DYNSET_SREG_DATA, sreg.wire());
+            }
+            // `nft_dynset_dump` always emits TIMEOUT, 0 for none — but a
+            // request carrying it is EOPNOTSUPP on a set without timeouts.
+            match (timeout, form) {
+                (Some(t), _) => builder.append_attr_u64_be(NFTA_DYNSET_TIMEOUT, millis(*t)),
+                (None, WireForm::Echo) => builder.append_attr_u64_be(NFTA_DYNSET_TIMEOUT, 0),
+                (None, WireForm::Request) => {}
+            }
+            let flags = if *invert { NFT_DYNSET_F_INV } else { 0 };
+            builder.append_attr_u32_be(NFTA_DYNSET_FLAGS, flags);
+            builder.nest_end(data);
+        }
         Expr::Bitwise {
             sreg,
             dreg,
@@ -739,6 +863,11 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
     }
 
     builder.nest_end(elem);
+}
+
+/// A duration in whole milliseconds, as nftables timeouts are written.
+pub(crate) fn millis(d: std::time::Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Attributes shared by the load and set forms of `exthdr`. `FLAGS` is
@@ -966,6 +1095,24 @@ pub enum RuleExpr {
         /// `!= @set` (`NFT_LOOKUP_F_INV`).
         invert: bool,
     },
+    /// `dynset` — `add|update|delete @set { <key> [timeout T] }`. A dynset
+    /// carrying per-element expressions (`NFTA_DYNSET_EXPR`) or unknown
+    /// flags decodes as [`Unknown`](Self::Unknown).
+    #[non_exhaustive]
+    Dynset {
+        /// Set name.
+        set: String,
+        /// Add, update or delete.
+        op: DynsetOp,
+        /// Register holding the key.
+        sreg_key: Register,
+        /// Register holding the value, for a map.
+        sreg_data: Option<Register>,
+        /// The element timeout; `None` for the set's default (dumped as 0).
+        timeout: Option<std::time::Duration>,
+        /// `NFT_DYNSET_F_INV`.
+        invert: bool,
+    },
     /// Expression not (or not fully) decodable: kind name plus the raw
     /// `NFTA_EXPR_DATA` payload, preserved verbatim (empty for
     /// data-less expressions like `masq`).
@@ -1021,6 +1168,7 @@ fn parse_expr(name: &str, data: &[u8]) -> RuleExpr {
         "byteorder" => parse_byteorder(data),
         "bitwise" => parse_bitwise(data),
         "lookup" => parse_lookup(data),
+        "dynset" => parse_dynset(data),
         _ => None,
     };
     decoded.unwrap_or_else(|| RuleExpr::Unknown {
@@ -1288,6 +1436,45 @@ fn parse_lookup(data: &[u8]) -> Option<RuleExpr> {
         set: set?,
         sreg: sreg?,
         dreg,
+        invert,
+    })
+}
+
+fn parse_dynset(data: &[u8]) -> Option<RuleExpr> {
+    let mut set = None;
+    let mut op = None;
+    let mut sreg_key = None;
+    let mut sreg_data = None;
+    let mut timeout = None;
+    let mut invert = false;
+    for (attr, payload) in AttrIter::new(data) {
+        match attr {
+            NFTA_DYNSET_SET_NAME => set = get::string(payload).ok().map(str::to_string),
+            NFTA_DYNSET_OP => op = DynsetOp::from_u32(get::u32_be(payload).ok()?),
+            NFTA_DYNSET_SREG_KEY => sreg_key = Register::from_u32(get::u32_be(payload).ok()?),
+            NFTA_DYNSET_SREG_DATA => {
+                sreg_data = Some(Register::from_u32(get::u32_be(payload).ok()?)?);
+            }
+            NFTA_DYNSET_TIMEOUT => {
+                let ms = get::u64_be(payload).ok()?;
+                timeout = (ms != 0).then(|| std::time::Duration::from_millis(ms));
+            }
+            NFTA_DYNSET_FLAGS => match get::u32_be(payload).ok()? {
+                0 => {}
+                NFT_DYNSET_F_INV => invert = true,
+                _ => return None,
+            },
+            // Per-element expressions are not modelled: never half-decode.
+            NFTA_DYNSET_EXPR | NFTA_DYNSET_EXPRESSIONS => return None,
+            _ => {}
+        }
+    }
+    Some(RuleExpr::Dynset {
+        set: set?,
+        op: op?,
+        sreg_key: sreg_key?,
+        sreg_data,
+        timeout,
         invert,
     })
 }
@@ -1931,6 +2118,63 @@ mod decode_tests {
             .find(|(attr, _)| *attr == NFTA_EXPR_DATA)
             .expect("NFTA_EXPR_DATA");
         assert_eq!(attrs_of(data)[&NFTA_EXTHDR_FLAGS], 0u32.to_be_bytes());
+    }
+
+    /// [`data_attrs`], in `form`.
+    fn data_attrs_as(exprs: &[Expr], form: WireForm) -> std::collections::BTreeMap<u16, Vec<u8>> {
+        let mut b = MessageBuilder::new(0, 0);
+        write_expressions_as(&mut b, exprs, form);
+        let bytes = b.as_bytes()[20..].to_vec();
+        let (_, elem) = AttrIter::new(&bytes).next().expect("one LIST_ELEM");
+        let (_, data) = AttrIter::new(elem)
+            .find(|(attr, _)| *attr == NFTA_EXPR_DATA)
+            .expect("NFTA_EXPR_DATA");
+        attrs_of(data)
+    }
+
+    /// `nft_dynset_dump` always emits TIMEOUT (0 for none) and FLAGS, but a
+    /// request with a TIMEOUT is EOPNOTSUPP for a set without timeouts.
+    #[test]
+    fn dynset_sends_a_timeout_only_when_it_has_one_and_echoes_zero() {
+        let plain = [DynsetExpr::new(DynsetOp::Update, "seen", Register::R0).into()];
+        let request = data_attrs_as(&plain, WireForm::Request);
+        assert!(!request.contains_key(&NFTA_DYNSET_TIMEOUT));
+        assert_eq!(request[&NFTA_DYNSET_FLAGS], 0u32.to_be_bytes());
+        assert_eq!(request[&NFTA_DYNSET_OP], 1u32.to_be_bytes());
+        let echo = data_attrs_as(&plain, WireForm::Echo);
+        assert_eq!(echo[&NFTA_DYNSET_TIMEOUT], 0u64.to_be_bytes());
+
+        let timed = [DynsetExpr::new(DynsetOp::Add, "seen", Register::R0)
+            .timeout(std::time::Duration::from_secs(60))
+            .invert()
+            .into()];
+        for form in [WireForm::Request, WireForm::Echo] {
+            let attrs = data_attrs_as(&timed, form);
+            assert_eq!(attrs[&NFTA_DYNSET_TIMEOUT], 60_000u64.to_be_bytes());
+            assert_eq!(attrs[&NFTA_DYNSET_FLAGS], NFT_DYNSET_F_INV.to_be_bytes());
+        }
+    }
+
+    #[test]
+    fn dynset_decodes_typed_and_a_zero_timeout_is_none() {
+        let exprs = [
+            DynsetExpr::new(DynsetOp::Delete, "s", Register::R0).into(),
+            DynsetExpr::new(DynsetOp::Update, "s", Register::R0)
+                .timeout(std::time::Duration::from_millis(1500))
+                .into(),
+        ];
+        let mut b = MessageBuilder::new(0, 0);
+        write_expressions_as(&mut b, &exprs, WireForm::Echo);
+        let decoded = parse_expressions(&b.as_bytes()[20..]);
+        assert!(matches!(
+            &decoded[0],
+            RuleExpr::Dynset { op: DynsetOp::Delete, timeout: None, invert: false, .. }
+        ));
+        assert!(matches!(
+            &decoded[1],
+            RuleExpr::Dynset { op: DynsetOp::Update, timeout: Some(t), .. }
+                if *t == std::time::Duration::from_millis(1500)
+        ));
     }
 
     #[test]

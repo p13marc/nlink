@@ -376,21 +376,19 @@ impl DeclaredChainBuilder {
 // DeclaredSet
 // =============================================================================
 
-/// A declared named set — name, key type, flags, optional size, and its
-/// declared elements.
+/// A declared named set — name, key type, flags, optional size and
+/// timeouts, and its declared elements.
 ///
 /// Reconciled by **name** (created if absent in the kernel, deleted
 /// if removed from the config). A changed `key_type` or `flags` cannot
 /// be applied to an existing set, so the set is deleted and recreated
-/// with its declared elements. A changed `size` is applied in place
-/// (kernel 6.5+). The declared `elements` are reconciled
-/// **element-by-element** against the kernel: missing keys are added,
-/// undeclared keys are removed.
-///
-/// Note for dynamic/timeout sets (`NFT_SET_TIMEOUT` etc.): the
-/// kernel adds elements at runtime, so declaring `elements` on such
-/// a set will churn on every apply. Declare such sets with no
-/// elements (let rules populate them) or mark them constant.
+/// with its declared elements. A changed `size`, `timeout` or
+/// `gc_interval` is applied in place (kernel 6.5+). The declared
+/// `elements` are reconciled per the set's [`SetElementMode`]: by default
+/// exactly for a plain set — missing keys added, undeclared ones removed —
+/// and only added for a set rules write to ([`DeclaredSetBuilder::dynamic`])
+/// or whose elements time out, so that what the packet path put there
+/// stays.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone)]
@@ -399,7 +397,27 @@ pub struct DeclaredSet {
     pub(crate) key_type: SetKeyType,
     pub(crate) flags: SetFlags,
     pub(crate) size: Option<u32>,
+    pub(crate) timeout: Option<std::time::Duration>,
+    pub(crate) gc_interval: Option<std::time::Duration>,
+    pub(crate) element_mode: Option<SetElementMode>,
     pub(crate) elements: Vec<SetElement>,
+}
+
+/// How a declared set's elements are reconciled with the kernel's.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SetElementMode {
+    /// The set holds the declared elements and nothing else: undeclared
+    /// elements are removed. The default for a set nothing else writes to.
+    Exact,
+    /// The declared elements are added if missing; elements the declaration
+    /// does not name are left. The default for a dynamic set
+    /// (`NFT_SET_EVAL`) and one whose elements time out (`NFT_SET_TIMEOUT`):
+    /// their elements come from the packet path, and removing them on every
+    /// apply would undo what the rules did.
+    Ensure,
 }
 
 impl DeclaredSet {
@@ -418,6 +436,26 @@ impl DeclaredSet {
     /// Declared maximum element count, if any.
     pub fn size(&self) -> Option<u32> {
         self.size
+    }
+    /// Declared default element timeout, if any.
+    pub fn timeout(&self) -> Option<std::time::Duration> {
+        self.timeout
+    }
+    /// Declared garbage-collection interval, if any.
+    pub fn gc_interval(&self) -> Option<std::time::Duration> {
+        self.gc_interval
+    }
+    /// How the elements are reconciled: the declared mode, else
+    /// [`SetElementMode::Ensure`] for a dynamic or timeout set and
+    /// [`SetElementMode::Exact`] for any other.
+    pub fn element_mode(&self) -> SetElementMode {
+        self.element_mode.unwrap_or(
+            if self.flags.contains(SetFlags::EVAL) || self.flags.contains(SetFlags::TIMEOUT) {
+                SetElementMode::Ensure
+            } else {
+                SetElementMode::Exact
+            },
+        )
     }
     /// Declared elements.
     pub fn elements(&self) -> &[SetElement] {
@@ -462,6 +500,8 @@ impl DeclaredSet {
         if let Some(size) = self.size {
             set = set.size(size);
         }
+        set.timeout = self.timeout;
+        set.gc_interval = self.gc_interval;
         set
     }
 }
@@ -473,6 +513,9 @@ pub struct DeclaredSetBuilder {
     key_type: SetKeyType,
     flags: SetFlags,
     size: Option<u32>,
+    timeout: Option<std::time::Duration>,
+    gc_interval: Option<std::time::Duration>,
+    element_mode: Option<SetElementMode>,
     elements: Vec<SetElement>,
 }
 
@@ -485,6 +528,9 @@ impl DeclaredSetBuilder {
             key_type: SetKeyType::Ipv4Addr,
             flags: SetFlags::empty(),
             size: None,
+            timeout: None,
+            gc_interval: None,
+            element_mode: None,
             elements: Vec::new(),
         }
     }
@@ -523,6 +569,48 @@ impl DeclaredSetBuilder {
     /// lookups would see them.
     pub fn interval(mut self) -> Self {
         self.flags |= SetFlags::INTERVAL;
+        self
+    }
+
+    /// A set rules write to — see
+    /// [`Set::dynamic`](crate::netlink::nftables::Set::dynamic). Its
+    /// elements default to [`SetElementMode::Ensure`].
+    pub fn dynamic(mut self) -> Self {
+        self.flags |= SetFlags::EVAL;
+        self
+    }
+
+    /// Default element timeout — see
+    /// [`Set::timeout`](crate::netlink::nftables::Set::timeout). Compared
+    /// with the kernel's in multiples of 20 ms (the kernel keeps it in
+    /// jiffies, and 20 ms is a whole number of jiffies at every `HZ`), and
+    /// changed in place. Leaving it undeclared never counts as drift.
+    pub fn timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.flags |= SetFlags::TIMEOUT;
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Elements may carry their own timeouts — see
+    /// [`Set::per_element_timeouts`](crate::netlink::nftables::Set::per_element_timeouts).
+    pub fn per_element_timeouts(mut self) -> Self {
+        self.flags |= SetFlags::TIMEOUT;
+        self
+    }
+
+    /// Garbage-collection interval — see
+    /// [`Set::gc_interval`](crate::netlink::nftables::Set::gc_interval).
+    /// Changed in place; leaving it undeclared never counts as drift.
+    pub fn gc_interval(mut self, interval: std::time::Duration) -> Self {
+        self.flags |= SetFlags::TIMEOUT;
+        self.gc_interval = Some(interval);
+        self
+    }
+
+    /// How the declared elements are reconciled; see [`SetElementMode`] for
+    /// the default.
+    pub fn element_mode(mut self, mode: SetElementMode) -> Self {
+        self.element_mode = Some(mode);
         self
     }
 
@@ -568,6 +656,9 @@ impl DeclaredSetBuilder {
             key_type: self.key_type,
             flags: self.flags,
             size: self.size,
+            timeout: self.timeout,
+            gc_interval: self.gc_interval,
+            element_mode: self.element_mode,
             elements: self.elements,
         }
     }

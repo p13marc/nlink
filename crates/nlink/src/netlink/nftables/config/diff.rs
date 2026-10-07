@@ -4,6 +4,7 @@ use std::collections::HashSet;
 
 use super::types::{
     DeclaredChain, DeclaredFlowtable, DeclaredRule, DeclaredSet, DeclaredTable, NftablesConfig,
+    SetElementMode,
 };
 use super::super::expr::RuleExpr;
 use super::super::types::{
@@ -329,13 +330,16 @@ pub struct NftablesDiff {
     pub sets_to_add: Vec<(String, Family, DeclaredSet)>,
     /// Sets to delete — (table, family, name).
     pub sets_to_delete: Vec<(String, Family, String)>,
-    /// Sets whose declared size differs from the kernel's — (owning table,
-    /// owning family, set). Applied in place (`NFT_MSG_NEWSET` without
-    /// `NLM_F_EXCL`, kernel 6.5+), keeping the set's elements and the
-    /// rules bound to it, in a batch [`apply`](Self::apply) commits ahead
-    /// of everything else: the kernel checks element adds against the
-    /// size the set has *before* the commit, so a grown set could not
-    /// take its new elements in the same batch.
+    /// Sets whose declared size, timeout or GC interval differs from the
+    /// kernel's — (owning table, owning family, set). Applied in place
+    /// (`NFT_MSG_NEWSET` without `NLM_F_EXCL`, kernel 6.5+), keeping the
+    /// set's elements and the rules bound to it, in a batch
+    /// [`apply`](Self::apply) commits ahead of everything else: the kernel
+    /// checks element adds against the size the set has *before* the
+    /// commit, so a grown set could not take its new elements in the same
+    /// batch. An update overwrites the timeout and GC interval with what it
+    /// carries, so the set here carries the kernel's where the declaration
+    /// has none.
     pub sets_to_update: Vec<(String, Family, DeclaredSet)>,
     /// Set elements to add: the declared elements not yet in the kernel
     /// set.
@@ -485,11 +489,17 @@ impl NftablesDiff {
             lines.push(format!("- set {fam:?} {tbl}/{name}"));
         }
         for (tbl, fam, s) in &self.sets_to_update {
-            lines.push(format!(
-                "~ set {fam:?} {tbl}/{} (size={})",
-                s.name(),
-                s.size().map_or_else(|| "-".to_string(), |n| n.to_string()),
-            ));
+            let mut what = format!(
+                "size={}",
+                s.size().map_or_else(|| "-".to_string(), |n| n.to_string())
+            );
+            if let Some(t) = s.timeout() {
+                what.push_str(&format!(", timeout={t:?}"));
+            }
+            if let Some(gc) = s.gc_interval() {
+                what.push_str(&format!(", gc-interval={gc:?}"));
+            }
+            lines.push(format!("~ set {fam:?} {tbl}/{} ({what})", s.name()));
         }
         for c in &self.set_elements_to_add {
             lines.push(format!(
@@ -589,7 +599,7 @@ fn set_has_drifted(declared: &DeclaredSet, current: &SetInfo) -> bool {
 fn references_set(rule: &RuleInfo, set: &str) -> bool {
     use crate::netlink::attr::{AttrIter, get};
     rule.expressions().iter().any(|e| match e {
-        RuleExpr::Lookup { set: s, .. } => s == set,
+        RuleExpr::Lookup { set: s, .. } | RuleExpr::Dynset { set: s, .. } => s == set,
         RuleExpr::Unknown { name, data } if name == "lookup" || name == "dynset" => {
             AttrIter::new(data)
                 .any(|(attr, payload)| attr == 1 && get::string(payload).ok() == Some(set))
@@ -624,7 +634,8 @@ fn rule_matches(declared: &DeclaredRule, kernel: &RuleInfo) -> bool {
     declared.body.comment.as_deref() == kernel_comment
 }
 
-/// The elements to add to and remove from an existing set.
+/// The elements to add to and remove from an existing set. In
+/// [`SetElementMode::Ensure`] nothing is removed.
 ///
 /// A plain set compares element identities (key, range end, catch-all), and
 /// so does an interval set of concatenated keys, whose elements the kernel
@@ -639,6 +650,7 @@ fn element_changes(
     current: &[SetElement],
 ) -> (Vec<SetElement>, Vec<SetElement>) {
     use super::super::interval;
+    let ensure = declared.element_mode() == SetElementMode::Ensure;
     if declared.merges_ranges() {
         let wanted: Vec<interval::Range> = declared
             .wire_elements()
@@ -654,11 +666,14 @@ fn element_changes(
             .filter(|r| !held.contains(r))
             .map(interval::element_of)
             .collect();
-        let to_remove = held
-            .iter()
-            .filter(|r| !wanted.contains(r))
-            .map(interval::element_of)
-            .collect();
+        let to_remove = if ensure {
+            Vec::new()
+        } else {
+            held.iter()
+                .filter(|r| !wanted.contains(r))
+                .map(interval::element_of)
+                .collect()
+        };
         return (to_add, to_remove);
     }
     let declared_ids: HashSet<_> = declared.elements().iter().map(SetElement::identity).collect();
@@ -669,11 +684,15 @@ fn element_changes(
         .filter(|e| !current_ids.contains(&e.identity()))
         .cloned()
         .collect();
-    let to_remove = current
-        .iter()
-        .filter(|e| !declared_ids.contains(&e.identity()))
-        .cloned()
-        .collect();
+    let to_remove = if ensure {
+        Vec::new()
+    } else {
+        current
+            .iter()
+            .filter(|e| !declared_ids.contains(&e.identity()))
+            .cloned()
+            .collect()
+    };
     (to_add, to_remove)
 }
 
@@ -683,6 +702,32 @@ fn element_changes(
 /// writes to a size of 65535, and that is not the config's business.
 fn set_size_has_drifted(declared: &DeclaredSet, current: &SetInfo) -> bool {
     declared.size().is_some_and(|size| current.size != Some(size))
+}
+
+/// Has a declared set's default timeout or GC interval drifted? Like the
+/// size, both change in place and an undeclared one is not a claim. The
+/// timeout is compared in 20 ms steps, as the kernel keeps it in jiffies
+/// ([`super::rules::timeout_step`]); the GC interval it keeps as given.
+fn set_timers_have_drifted(declared: &DeclaredSet, current: &SetInfo) -> bool {
+    use super::rules::timeout_step;
+    let ms = |d: Option<std::time::Duration>| d.map_or(0, super::super::expr::millis);
+    let timeout = declared
+        .timeout()
+        .is_some_and(|t| timeout_step(ms(Some(t))) != timeout_step(ms(current.timeout)));
+    let gc = declared
+        .gc_interval()
+        .is_some_and(|gc| ms(Some(gc)) != ms(current.gc_interval));
+    timeout || gc
+}
+
+/// The update a drifted set gets: the declaration, with the kernel's
+/// timeout and GC interval where it has none — an update overwrites both
+/// with what it carries, so leaving them out would zero them.
+fn set_update(declared: &DeclaredSet, current: &SetInfo) -> DeclaredSet {
+    let mut update = declared.clone();
+    update.timeout = update.timeout.or(current.timeout);
+    update.gc_interval = update.gc_interval.or(current.gc_interval);
+    update
 }
 
 /// Options controlling [`NftablesConfig::diff_with_options`].
@@ -1061,15 +1106,21 @@ impl NftablesConfig {
                     continue;
                 }
                 if let Some(current) = current_set
-                    && set_size_has_drifted(s, current)
+                    && (set_size_has_drifted(s, current) || set_timers_have_drifted(s, current))
                 {
                     diff.sets_to_update.push((
                         declared.name().to_string(),
                         declared.family(),
-                        s.clone(),
+                        set_update(s, current),
                     ));
                 }
-                if current_set_names.contains(s.name()) {
+                if current_set_names.contains(s.name())
+                    && s.element_mode() == SetElementMode::Ensure
+                    && s.elements().is_empty()
+                {
+                    // Nothing declared and nothing to remove: no need to
+                    // read what the packet path has put there.
+                } else if current_set_names.contains(s.name()) {
                     // Set exists on both sides → element-level diff.
                     // Read the kernel's current elements and compute
                     // the symmetric difference on raw key bytes.
@@ -1618,6 +1669,8 @@ mod tests {
             key_len: key_type.len(),
             handle: 1,
             size: None,
+            timeout: None,
+            gc_interval: None,
         }
     }
 
@@ -1628,8 +1681,65 @@ mod tests {
             key_type,
             flags,
             size: None,
+            timeout: None,
+            gc_interval: None,
+            element_mode: None,
             elements: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_declared_timeout_drifts_by_whole_20ms_steps_and_an_update_keeps_the_kernels() {
+        use crate::netlink::nftables::NFT_SET_TIMEOUT;
+        use std::time::Duration;
+        let ms = Duration::from_millis;
+        let mut declared = declared_set(SetKeyType::Ipv4Addr, NFT_SET_TIMEOUT);
+        let mut current = set_info(&SetKeyType::Ipv4Addr, NFT_SET_TIMEOUT);
+        current.timeout = Some(ms(30_000));
+        current.gc_interval = Some(ms(5_000));
+        // Undeclared timers are no claim.
+        assert!(!set_timers_have_drifted(&declared, &current));
+
+        // 1001 ms reads back as 1000 at HZ=250 and 1003 at HZ=300.
+        declared.timeout = Some(ms(1001));
+        for read_back in [1000, 1003] {
+            current.timeout = Some(ms(read_back));
+            assert!(!set_timers_have_drifted(&declared, &current), "{read_back}");
+        }
+        current.timeout = Some(ms(980));
+        assert!(set_timers_have_drifted(&declared, &current));
+
+        // A resize carries the kernel's timers where none is declared:
+        // the update would zero them otherwise (B6).
+        declared.timeout = None;
+        declared.size = Some(10);
+        current.timeout = Some(ms(30_000));
+        let update = set_update(&declared, &current);
+        assert_eq!(update.timeout(), Some(ms(30_000)));
+        assert_eq!(update.gc_interval(), Some(ms(5_000)));
+        assert_eq!(update.size(), Some(10));
+    }
+
+    #[test]
+    fn a_dynamic_or_timeout_set_only_ensures_its_declared_elements() {
+        use crate::netlink::nftables::{NFT_SET_EVAL, NFT_SET_TIMEOUT};
+        let runtime = [SetElement::ipv4(std::net::Ipv4Addr::new(10, 0, 0, 9))];
+        for flags in [NFT_SET_EVAL, NFT_SET_TIMEOUT] {
+            let declared = declared_set(SetKeyType::Ipv4Addr, flags);
+            assert_eq!(declared.element_mode(), SetElementMode::Ensure);
+            let (add, remove) = element_changes(&declared, &runtime);
+            assert!(add.is_empty() && remove.is_empty(), "flags {flags:#x}");
+        }
+        // A plain set is exact, unless told otherwise.
+        let mut declared = declared_set(SetKeyType::Ipv4Addr, 0);
+        assert_eq!(declared.element_mode(), SetElementMode::Exact);
+        assert_eq!(element_changes(&declared, &runtime).1.len(), 1);
+        declared.element_mode = Some(SetElementMode::Ensure);
+        assert!(element_changes(&declared, &runtime).1.is_empty());
+        // And a dynamic set can be made exact.
+        let mut declared = declared_set(SetKeyType::Ipv4Addr, NFT_SET_EVAL);
+        declared.element_mode = Some(SetElementMode::Exact);
+        assert_eq!(element_changes(&declared, &runtime).1.len(), 1);
     }
 
     #[test]
