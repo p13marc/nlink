@@ -6,10 +6,10 @@ use std::net::IpAddr;
 
 use super::{
     diff::{ConfigDiff, DiffOptions, LinkChanges, compute_diff_with_options},
+    kind::{KindAttr, KindUpdate, kernel_bond_mode, kernel_macvlan_mode},
     types::{
-        BondMode, DeclaredAddress, DeclaredLink, DeclaredLinkType, DeclaredQdisc,
-        DeclaredQdiscType, DeclaredRoute, MacvlanMode, NetworkConfig,
-        QdiscParent,
+        DeclaredAddress, DeclaredLink, DeclaredLinkType, DeclaredQdisc, DeclaredQdiscType,
+        DeclaredRoute, NetworkConfig, QdiscParent,
     },
 };
 use crate::netlink::{
@@ -204,12 +204,67 @@ pub async fn apply_diff(
     }
 
     // Apply changes in the correct order:
+    // 0. Delete links to be recreated (a kind parameter the kernel cannot
+    //    change in place)
     // 1. Create new links (so they exist for addresses/routes)
     // 2. Modify existing links (state, MTU, master)
     // 3. Add addresses
     // 4. Add routes
     // 5. Configure qdiscs
     // 6. Remove old resources (if purge enabled)
+
+    // 0. Delete the links to be recreated. A refused recreate — one that
+    //    would destroy what the config does not declare — fails here,
+    //    before anything has changed. The links the kernel deletes along
+    //    with a recreated one are listed too, after it, and are already gone
+    //    by the time they come up.
+    for recreate in &diff.links_to_recreate {
+        if recreate.is_refused() {
+            let error = Error::NotSupported(format!(
+                "link {}: {} cannot be changed on the live link, and recreating it would \
+                 destroy what this config does not declare: {}. Declare them, or remove them \
+                 (or the link), and apply again.",
+                recreate.name,
+                recreate.reason,
+                recreate.blocked_by.join(", ")
+            ));
+            if options.continue_on_error {
+                result.errors.push(ApplyError {
+                    operation: format!("recreate link {}", recreate.name),
+                    error,
+                });
+                continue;
+            }
+            return Err(error);
+        }
+        let op = format!("delete link {} to recreate it ({})", recreate.name, recreate.reason);
+        if options.dry_run {
+            result.summary.push(format!("Would {op}"));
+            result.changes_made += 1;
+            continue;
+        }
+        match conn.del_link_if_exists(recreate.name.as_str()).await {
+            Ok(true) => {
+                result.summary.push(format!(
+                    "Deleted link {} to recreate it ({})",
+                    recreate.name, recreate.reason
+                ));
+                result.changes_made += 1;
+            }
+            // Deleted with the link it is stacked on.
+            Ok(false) => {}
+            Err(e) => {
+                if options.continue_on_error {
+                    result.errors.push(ApplyError {
+                        operation: op,
+                        error: e,
+                    });
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+    }
 
     // 1. Create new links
     for link in &diff.links_to_add {
@@ -625,7 +680,7 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
         }
         DeclaredLinkType::Macvlan { parent, mode } => {
             let mut config = MacvlanLink::new(&link.name, parent);
-            config = config.mode(convert_macvlan_mode(*mode));
+            config = config.mode(kernel_macvlan_mode(*mode));
             if let Some(mtu) = link.mtu {
                 config = config.mtu(mtu);
             }
@@ -645,7 +700,7 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             updelay,
             resend_igmp,
         } => {
-            let mut config = BondLink::new(&link.name).mode(convert_bond_mode(*mode));
+            let mut config = BondLink::new(&link.name).mode(kernel_bond_mode(*mode));
             if let Some(ms) = miimon {
                 config = config.miimon(*ms);
             }
@@ -764,6 +819,9 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
 }
 
 async fn modify_link(conn: &Connection<Route>, name: &str, changes: &LinkChanges) -> Result<()> {
+    if let Some(update) = &changes.kind_update {
+        change_kind_params(conn, name, update).await?;
+    }
     // Master changes first: enslaving to a bond needs the port down, and
     // a bond closes the port it releases, so the declared up/down state
     // is only settled after them.
@@ -786,6 +844,46 @@ async fn modify_link(conn: &Connection<Route>, name: &str, changes: &LinkChanges
         conn.set_link_address(name, address).await?;
     }
     Ok(())
+}
+
+/// Change a live link's kind parameters in place: only the attributes
+/// that differ, in one `RTM_NEWLINK` its kind's `changelink` takes.
+async fn change_kind_params(
+    conn: &Connection<Route>,
+    name: &str,
+    update: &KindUpdate,
+) -> Result<()> {
+    let ifindex = conn
+        .get_link_by_name(name)
+        .await?
+        .ok_or_else(|| Error::interface_not_found(name))?
+        .ifindex();
+    // Links named by an attribute (a VXLAN underlay) resolve now: they
+    // may have been created by this apply.
+    let mut ifindexes = Vec::new();
+    for attr in &update.attrs {
+        if let KindAttr::Ifindex(t, dev) = attr {
+            let link = conn
+                .get_link_by_name(dev)
+                .await?
+                .ok_or_else(|| Error::interface_not_found(dev))?;
+            ifindexes.push((*t, link.ifindex()));
+        }
+    }
+    conn.change_link_info_data(ifindex, update.kind, |b| {
+        for attr in &update.attrs {
+            match attr {
+                KindAttr::U8(t, v) => b.append_attr_u8(*t, *v),
+                KindAttr::U32(t, v) => b.append_attr_u32(*t, *v),
+                KindAttr::Bytes(t, v) => b.append_attr(*t, v),
+                KindAttr::Ifindex(..) => {}
+            }
+        }
+        for (t, idx) in ifindexes {
+            b.append_attr_u32(t, idx);
+        }
+    })
+    .await
 }
 
 /// Make `master` the master of `name`.
@@ -1155,28 +1253,6 @@ async fn atomic_replace(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Resu
         }
         // Ingress/Clsact already handled above.
         DeclaredQdiscType::Ingress | DeclaredQdiscType::Clsact => unreachable!(),
-    }
-}
-
-fn convert_macvlan_mode(mode: MacvlanMode) -> crate::netlink::link::MacvlanMode {
-    match mode {
-        MacvlanMode::Private => crate::netlink::link::MacvlanMode::Private,
-        MacvlanMode::Vepa => crate::netlink::link::MacvlanMode::Vepa,
-        MacvlanMode::Bridge => crate::netlink::link::MacvlanMode::Bridge,
-        MacvlanMode::Passthru => crate::netlink::link::MacvlanMode::Passthru,
-        MacvlanMode::Source => crate::netlink::link::MacvlanMode::Source,
-    }
-}
-
-fn convert_bond_mode(mode: BondMode) -> crate::netlink::link::BondMode {
-    match mode {
-        BondMode::BalanceRr => crate::netlink::link::BondMode::BalanceRr,
-        BondMode::ActiveBackup => crate::netlink::link::BondMode::ActiveBackup,
-        BondMode::BalanceXor => crate::netlink::link::BondMode::BalanceXor,
-        BondMode::Broadcast => crate::netlink::link::BondMode::Broadcast,
-        BondMode::Ieee802_3ad => crate::netlink::link::BondMode::Lacp,
-        BondMode::BalanceTlb => crate::netlink::link::BondMode::BalanceTlb,
-        BondMode::BalanceAlb => crate::netlink::link::BondMode::BalanceAlb,
     }
 }
 

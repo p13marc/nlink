@@ -873,7 +873,7 @@ pub struct VlanLink {
 }
 
 /// VLAN-specific attributes (IFLA_VLAN_*)
-mod vlan {
+pub(crate) mod vlan {
     pub const IFLA_VLAN_ID: u16 = 1;
     pub const IFLA_VLAN_FLAGS: u16 = 2;
     pub const IFLA_VLAN_PROTOCOL: u16 = 5;
@@ -1165,7 +1165,7 @@ pub struct VxlanLink {
 }
 
 /// VXLAN-specific attributes (IFLA_VXLAN_*)
-mod vxlan {
+pub(crate) mod vxlan {
     pub const IFLA_VXLAN_ID: u16 = 1;
     pub const IFLA_VXLAN_GROUP: u16 = 2;
     pub const IFLA_VXLAN_LINK: u16 = 3;
@@ -1261,7 +1261,9 @@ impl VxlanLink {
         self
     }
 
-    /// Set the UDP port (default 4789).
+    /// Set the UDP destination port. Left unset, the kernel uses the
+    /// `vxlan` module's `udp_port` parameter, which is 8472 unless set —
+    /// set 4789 for the IANA port.
     pub fn port(mut self, port: u16) -> Self {
         self.port = Some(port);
         self
@@ -1471,7 +1473,7 @@ pub struct MacvlanLink {
 }
 
 /// Macvlan-specific attributes
-mod macvlan {
+pub(crate) mod macvlan {
     pub const IFLA_MACVLAN_MODE: u16 = 1;
 }
 
@@ -2415,7 +2417,7 @@ pub enum NetkitScrub {
 }
 
 /// Netkit-specific attributes (IFLA_NETKIT_*)
-mod netkit {
+pub(crate) mod netkit {
     pub const IFLA_NETKIT_PEER_INFO: u16 = 1;
     /// Unused by nlink, listed so the enum is contiguous — omitting it is
     /// what shifted MODE/POLICY/SCRUB by one (#265).
@@ -3509,7 +3511,7 @@ pub enum AdSelect {
 
 /// IFLA_BOND_* attribute constants (verified against linux/if_link.h, kernel 6.19.6).
 #[allow(dead_code)]
-mod bond_attr {
+pub(crate) mod bond_attr {
     pub const IFLA_BOND_MODE: u16 = 1;
     pub const IFLA_BOND_ACTIVE_SLAVE: u16 = 2;
     pub const IFLA_BOND_MIIMON: u16 = 3;
@@ -3960,7 +3962,7 @@ impl LinkConfig for BondLink {
 // ============================================================================
 
 /// VRF attribute constants.
-mod vrf_attr {
+pub(crate) mod vrf_attr {
     pub const IFLA_VRF_TABLE: u16 = 1;
 }
 
@@ -5273,6 +5275,38 @@ impl Connection<Route> {
         self.send_ack(builder)
             .await
             .map_err(|e| e.with_context("set_link_master"))
+    }
+
+    /// Change a live link's kind parameters in place.
+    ///
+    /// Sends `RTM_NEWLINK` for the existing ifindex with only
+    /// `IFLA_LINKINFO { IFLA_INFO_KIND, IFLA_INFO_DATA }`. `rtnl_newlink`
+    /// hands `IFLA_INFO_DATA` for an existing device to its kind's
+    /// `changelink` (and answers EOPNOTSUPP for a kind without one), so the
+    /// attributes `write_data` puts in the nest are exactly the parameters
+    /// that change. Whether a kind's `changelink` honours, refuses or
+    /// silently ignores a given parameter differs per kind — the
+    /// declarative diff decides which ones it sends here.
+    pub(crate) async fn change_link_info_data(
+        &self,
+        ifindex: u32,
+        kind: &str,
+        write_data: impl FnOnce(&mut MessageBuilder),
+    ) -> Result<()> {
+        use super::connection::ack_request;
+
+        let mut builder = ack_request(NlMsgType::RTM_NEWLINK);
+        builder.append(&IfInfoMsg::new().with_index(ifindex as i32));
+        let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
+        builder.append_attr_str(IflaInfo::Kind as u16, kind);
+        let data = builder.nest_start(IflaInfo::Data as u16);
+        write_data(&mut builder);
+        builder.nest_end(data);
+        builder.nest_end(linkinfo);
+
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context(format!("change {kind} parameters (ifindex {ifindex})")))
     }
 
     /// Enslave an interface to a bond or bridge.

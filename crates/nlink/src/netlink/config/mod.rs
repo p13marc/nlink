@@ -48,6 +48,7 @@
 
 mod apply;
 mod diff;
+mod kind;
 mod types;
 
 // `ApplyError` is a field of `ApplyResult` and `LinkChanges` a field of
@@ -57,6 +58,7 @@ mod types;
 // was in the JSON ABI while being unnameable in Rust.
 pub use apply::{ApplyError, ApplyOptions, ApplyResult};
 pub use diff::{ConfigDiff, DiffOptions, LinkChanges};
+pub use kind::LinkRecreate;
 pub use types::*;
 
 use super::{connection::Connection, error::Result, protocol::Route};

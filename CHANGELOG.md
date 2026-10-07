@@ -432,6 +432,28 @@ All notable changes to this project will be documented in this file.
   fields that differ, so a private-key change no longer rewrites (and
   rebinds) an unchanged port.
 
+- **Changing a declared link's kind parameters did nothing (#417).** The
+  link diff compared MTU, MAC, master and state, and nothing about the
+  kind: a changed VXLAN VNI, VLAN id or protocol, or bond mode on an
+  existing link was an empty diff, and the kernel kept the old value. The
+  diff now reads the kind's `IFLA_INFO_DATA` back and compares the kind
+  itself, VLAN id/protocol/parent, VXLAN VNI/port/remote/local/underlay,
+  macvlan mode/parent, bond mode, `miimon`, delays, `xmit_hash_policy`,
+  `min_links`, `resend_igmp`, `lacp_rate` and `ad_select`, VRF table and
+  netkit mode/policies/scrubbing. Each was checked against the kernel's
+  `changelink` for that kind: what it takes is changed in place
+  (`LinkChanges::set_kind_params`); what it refuses or ignores —
+  `vlan_changelink` silently ignores a new id or protocol, `vxlan_nl2conf`
+  refuses a new VNI or port, bond mode needs a down bond with no ports, VRF
+  has no `changelink` — makes the apply delete the link and create it again
+  (`ConfigDiff::links_to_recreate`), putting back the addresses, routes,
+  qdiscs, ports and stacked links the config declares on it. A recreate
+  that would destroy something the config does not declare is refused with
+  `Error::NotSupported` naming it, as is any netkit mode or scrub change. A
+  bond delay is compared as the kernel stores it, rounded down to a
+  multiple of `miimon`. The VXLAN port's doc comments said the default is
+  4789; the kernel's default is the `vxlan` module's `udp_port`, 8472.
+
 ## [0.29.0] - 2026-10-01
 
 > Upgrading from 0.28.x? See

@@ -292,6 +292,30 @@ impl DeclaredLink {
 }
 
 /// Link type for declared configuration.
+///
+/// # Changing a live link's kind or parameters
+///
+/// The diff compares the kind and every parameter here that the kernel
+/// reports back in the link dump. What a live link can take is changed in
+/// place: a VXLAN's remote, local address and underlay, a bond's
+/// `miimon`, delays, `xmit_hash_policy`, `min_links` and `resend_igmp`, a
+/// macvlan's mode (except into or out of passthru), netkit policies. The
+/// rest — the kind itself, a VLAN's id, protocol or parent, a VXLAN's VNI
+/// or port, a bond's mode, `lacp_rate` or `ad_select`, a macvlan's parent,
+/// a VRF's table — the kernel cannot change on a live link, so the apply
+/// deletes the link and creates it again, putting back what the config
+/// declares on it (see [`ConfigDiff::links_to_recreate`]). It refuses
+/// instead if the link carries something the config does not declare.
+/// A netkit pair's mode and scrubbing are never changed: recreating the
+/// pair would delete a peer that usually lives in another namespace.
+///
+/// An optional parameter left out is compared against the kernel's
+/// default where the kernel fixes one (a VLAN is 802.1Q; a VXLAN has no
+/// remote, local address or underlay; netkit is L3 and forwards), and not
+/// compared where the default is a module parameter (the VXLAN port, every
+/// bond option).
+///
+/// [`ConfigDiff::links_to_recreate`]: super::ConfigDiff::links_to_recreate
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
@@ -320,7 +344,9 @@ pub enum DeclaredLinkType {
         /// `IFLA_VXLAN_LOCAL6`). IPv4 only at the imperative
         /// layer today — IPv6 source addresses ignored.
         local: Option<IpAddr>,
-        /// UDP encap port (`IFLA_VXLAN_PORT`, default 4789).
+        /// UDP destination port (`IFLA_VXLAN_PORT`). Left out, the
+        /// kernel uses the `vxlan` module's `udp_port` parameter — 8472
+        /// unless set, not the IANA 4789.
         port: Option<u16>,
         /// Underlay parent device by name
         /// (`IFLA_VXLAN_LINK`).
@@ -561,8 +587,10 @@ impl LinkBuilder {
         self
     }
 
-    /// Set the VXLAN UDP encap port (`IFLA_VXLAN_PORT`,
-    /// default 4789). Plan 190 §2.1.
+    /// Set the VXLAN UDP destination port (`IFLA_VXLAN_PORT`). Left
+    /// unset, the kernel uses the `vxlan` module's `udp_port` parameter,
+    /// which is 8472 unless set — declare 4789 for the IANA port.
+    /// Plan 190 §2.1.
     pub fn vxlan_port(mut self, udp_port: u16) -> Self {
         if let DeclaredLinkType::Vxlan { port, .. } = &mut self.link_type {
             *port = Some(udp_port);
