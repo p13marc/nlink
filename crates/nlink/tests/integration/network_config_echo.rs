@@ -22,7 +22,8 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use nlink::netlink::config::{
-    BondMode, MacvlanMode, NetkitMode, NetworkConfig, QdiscBuilder, RouteBuilder, VlanProtocol,
+    ApplyOptions, BondMode, DiffOptions, MacvlanMode, NetkitMode, NetworkConfig, QdiscBuilder,
+    RouteBuilder, VlanProtocol,
 };
 use nlink::netlink::tc::{NetemLossModel, TbfConfig};
 use nlink::netlink::{Connection, Route};
@@ -372,6 +373,12 @@ async fn routes_converge() -> nlink::Result<()> {
         case("v6-via", vec![with_route("2001:db8:30::/48", |r| r.via("fd00:3::fe"))]),
         case("v6-dev", vec![with_route("2001:db8:31::/48", |r| r.dev("d0"))]),
         case("v6-default", vec![with_route("::/0", |r| r.via("fd00:3::fe"))]),
+        // The kernel masks an IPv6 destination to its prefix; IPv4
+        // rejects one with host bits instead.
+        case(
+            "v6-destination-host-bits",
+            vec![with_route("2001:db8:32::1/48", |r| r.dev("d0"))],
+        ),
         case(
             "v6-metric-1024",
             vec![with_route("2001:db8:34::/48", |r| r.dev("d0").metric(1024))],
@@ -400,6 +407,31 @@ async fn routes_converge() -> nlink::Result<()> {
         ),
     ];
     assert_converges("nce-routes", cases).await
+}
+
+/// A purge keys "is it declared" on the same destination the add path
+/// does, so an IPv6 route declared with host bits must not be purged as
+/// undeclared — and re-added — on every purging apply.
+#[tokio::test]
+async fn v6_route_with_host_bits_survives_a_purge() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy");
+
+    let ns = TestNamespace::new("nce-v6-purge")?;
+    let conn = ns.connection()?;
+    let cfg = dummy_up("d0")
+        .address("d0", "fd00:3::1/64")?
+        .route("2001:db8:3c::7/48", |r| r.dev("d0"))?;
+    let purging = ApplyOptions::default().with_purge(true);
+    let first = cfg.apply_with_options(&conn, purging.clone()).await?;
+    assert!(first.is_success(), "{first:?}");
+    let diff = cfg
+        .diff_with_options(&conn, DiffOptions::default().purge(true))
+        .await?;
+    assert!(diff.is_empty(), "a purging diff after a purging apply: {diff}");
+    let second = cfg.apply_with_options(&conn, purging).await?;
+    assert_eq!(second.changes_made, 0, "{second:?}");
+    Ok(())
 }
 
 // ============================================================================

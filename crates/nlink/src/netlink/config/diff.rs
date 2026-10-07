@@ -709,6 +709,27 @@ fn diff_addresses(
     }
 }
 
+/// The destination the kernel stores for a declared route.
+///
+/// IPv6 masks a route's destination to its prefix
+/// (`ipv6_addr_prefix(&rt->fib6_dst.addr, &cfg->fc_dst, cfg->fc_dst_len)`
+/// in `ip6_route_info_create`), so `2001:db8::1/32` is installed — and
+/// dumped — as `2001:db8::/32`. IPv4 refuses host bits instead
+/// (`fib_table_insert`: "Invalid prefix for given prefix length"), so an
+/// IPv4 destination is left as declared and the apply reports that error,
+/// as `ip route` does.
+fn kernel_destination(addr: IpAddr, prefix_len: u8) -> IpAddr {
+    match addr {
+        IpAddr::V4(_) => addr,
+        IpAddr::V6(v6) => {
+            let mask = u128::MAX
+                .checked_shl(128 - u32::from(prefix_len.min(128)))
+                .unwrap_or(0);
+            IpAddr::V6(std::net::Ipv6Addr::from(u128::from(v6) & mask))
+        }
+    }
+}
+
 /// The metric the kernel gives an IPv6 route added without one
 /// (`IP6_RT_PRIO_USER`, include/net/ip6_route.h). IPv4 leaves an
 /// unspecified metric at 0; IPv6 does not, and a diff that assumes it
@@ -774,7 +795,15 @@ fn diff_routes(
     // no-op. If not, queue for add (which uses NLM_F_REPLACE).
     for declared in &config.routes {
         let table = declared.table.unwrap_or(254);
-        let key = (declared.destination, declared.prefix_len, table);
+        // Keyed on the destination the kernel stores, not the declared
+        // one: a declared IPv6 `2001:db8:32::1/48` is dumped as
+        // `2001:db8:32::/48`, and keying on the host bits matched nothing,
+        // so the route was re-added (a replace) on every apply (#TBD).
+        let key = (
+            kernel_destination(declared.destination, declared.prefix_len),
+            declared.prefix_len,
+            table,
+        );
         // `name_to_ifindex` comes from the *pre-apply* link dump, so a
         // config that declares both a link and a route out of it
         // resolves to `None` on the first pass. That mattered: the
@@ -866,7 +895,13 @@ fn diff_routes(
     let desired_keys: HashSet<(IpAddr, u8, u32)> = config
         .routes
         .iter()
-        .map(|r| (r.destination, r.prefix_len, r.table.unwrap_or(254)))
+        .map(|r| {
+            (
+                kernel_destination(r.destination, r.prefix_len),
+                r.prefix_len,
+                r.table.unwrap_or(254),
+            )
+        })
         .collect();
     let tables = opts.purge_table_scope(config);
 
@@ -1694,6 +1729,19 @@ mod tests {
         assert!(qdisc_params_match(&sfq(20_000), &echo));
         assert!(qdisc_params_match(&sfq(16_256), &echo));
         assert!(!qdisc_params_match(&sfq(16_000), &echo));
+    }
+
+    /// IPv6 stores the masked destination; IPv4 refuses host bits, so its
+    /// destination is left for the kernel to reject.
+    #[test]
+    fn route_keys_use_the_destination_the_kernel_stores() {
+        let v6 = |s: &str| IpAddr::V6(s.parse().unwrap());
+        assert_eq!(kernel_destination(v6("2001:db8:32::1"), 48), v6("2001:db8:32::"));
+        assert_eq!(kernel_destination(v6("2001:db8:32::1"), 128), v6("2001:db8:32::1"));
+        assert_eq!(kernel_destination(v6("2001:db8::1"), 0), v6("::"));
+        assert_eq!(kernel_destination(v6("2001:db8:ffff::"), 33), v6("2001:db8:8000::"));
+        let v4 = IpAddr::V4(std::net::Ipv4Addr::new(10, 1, 2, 3));
+        assert_eq!(kernel_destination(v4, 16), v4);
     }
 
     // ---- Plan 188 §2.2 — ApplyOptions builders ----
