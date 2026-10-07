@@ -1201,6 +1201,18 @@ impl DeclaredRouteType {
     fn is_unicast(&self) -> bool {
         matches!(self, Self::Unicast)
     }
+
+    /// The `rtm_type` this declares — what `apply` sends and the diff
+    /// compares the dump against.
+    pub(crate) fn kernel_type(self) -> crate::netlink::types::route::RouteType {
+        use crate::netlink::types::route::RouteType;
+        match self {
+            Self::Unicast => RouteType::Unicast,
+            Self::Blackhole => RouteType::Blackhole,
+            Self::Unreachable => RouteType::Unreachable,
+            Self::Prohibit => RouteType::Prohibit,
+        }
+    }
 }
 
 /// Error parsing a route.

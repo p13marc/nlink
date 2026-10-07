@@ -8,7 +8,7 @@ use super::{
     diff::{ConfigDiff, DiffOptions, LinkChanges, compute_diff_with_options},
     types::{
         BondMode, DeclaredAddress, DeclaredLink, DeclaredLinkType, DeclaredQdisc,
-        DeclaredQdiscType, DeclaredRoute, DeclaredRouteType, MacvlanMode, NetworkConfig,
+        DeclaredQdiscType, DeclaredRoute, MacvlanMode, NetworkConfig,
         QdiscParent,
     },
 };
@@ -740,19 +740,8 @@ async fn add_route(conn: &Connection<Route>, route: &DeclaredRoute) -> Result<()
                 config = config.table(table);
             }
 
-            // Set route type
-            config = match route.route_type {
-                DeclaredRouteType::Unicast => config,
-                DeclaredRouteType::Blackhole => {
-                    config.route_type(crate::netlink::types::route::RouteType::Blackhole)
-                }
-                DeclaredRouteType::Unreachable => {
-                    config.route_type(crate::netlink::types::route::RouteType::Unreachable)
-                }
-                DeclaredRouteType::Prohibit => {
-                    config.route_type(crate::netlink::types::route::RouteType::Prohibit)
-                }
-            };
+            // Set route type — the same mapping the diff compares with.
+            config = config.route_type(route.route_type.kernel_type());
 
             // Plan 207d H3 — use NLM_F_REPLACE so a change to
             // gateway/dev/metric on the same `(dst, prefix, table)`
@@ -781,18 +770,7 @@ async fn add_route(conn: &Connection<Route>, route: &DeclaredRoute) -> Result<()
                 config = config.table(table);
             }
 
-            config = match route.route_type {
-                DeclaredRouteType::Unicast => config,
-                DeclaredRouteType::Blackhole => {
-                    config.route_type(crate::netlink::types::route::RouteType::Blackhole)
-                }
-                DeclaredRouteType::Unreachable => {
-                    config.route_type(crate::netlink::types::route::RouteType::Unreachable)
-                }
-                DeclaredRouteType::Prohibit => {
-                    config.route_type(crate::netlink::types::route::RouteType::Prohibit)
-                }
-            };
+            config = config.route_type(route.route_type.kernel_type());
 
             // Plan 207d H3 — use NLM_F_REPLACE so a change to
             // gateway/dev/metric on the same `(dst, prefix, table)`

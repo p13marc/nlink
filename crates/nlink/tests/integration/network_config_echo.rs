@@ -680,6 +680,50 @@ async fn tbf_without_a_limit_is_refused() -> nlink::Result<()> {
     Ok(())
 }
 
+/// Changing a route's type at the same destination has to reach the
+/// kernel. The diff's match ignores the type, so `unicast → blackhole`
+/// diffs clean while the unicast route stays.
+#[tokio::test]
+async fn route_type_change_reaches_the_kernel() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy");
+
+    for (v6, dst) in [(false, "10.38.0.0/16"), (true, "2001:db8:3b::/48")] {
+        let ns = TestNamespace::new("nce-rtype")?;
+        let conn = ns.connection()?;
+        let base = || {
+            dummy_up("d0")
+                .address("d0", "10.3.0.1/24")
+                .unwrap()
+                .address("d0", "fd00:3::1/64")
+                .unwrap()
+        };
+        let unicast = base().route(dst, |r| r.dev("d0"))?.apply(&conn).await?;
+        assert!(unicast.is_success(), "{unicast:?}");
+        let blackholed = base().route(dst, |r| r.blackhole())?;
+        let applied = blackholed.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+
+        let routes = conn.get_routes().await?;
+        let prefix: u8 = if v6 { 48 } else { 16 };
+        let at_dst: Vec<_> = routes
+            .iter()
+            .filter(|r| r.dst_len() == prefix && r.is_ipv6() == v6 && r.table_id() == 254)
+            .filter(|r| r.destination().is_some_and(|d| dst.starts_with(&d.to_string())))
+            .collect();
+        assert!(
+            at_dst
+                .iter()
+                .any(|r| r.route_type() == nlink::netlink::types::route::RouteType::Blackhole),
+            "{dst}: declared blackhole, kernel has {:?}",
+            at_dst.iter().map(|r| r.route_type()).collect::<Vec<_>>()
+        );
+        let again = blackholed.diff(&conn).await?;
+        assert!(again.is_empty(), "{dst}: {again}");
+    }
+    Ok(())
+}
+
 /// Editing an HTB root's `default_class` cannot be done in place: `htb`
 /// has no change operation, so a same-kind replace is refused. The only
 /// way through is delete + add, which takes every class and filter under

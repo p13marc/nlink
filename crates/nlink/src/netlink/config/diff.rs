@@ -876,7 +876,14 @@ fn diff_routes(
                 // and comparing it as 0 re-added the route on every apply
                 // (#TBD).
                 let metric_match = kernel_metric(declared) == r.priority().unwrap_or(0);
-                gw_match && dev_match && metric_match
+                // Type. The key above admits unicast, blackhole,
+                // unreachable and prohibit alike, and a declared blackhole
+                // has neither gateway nor dev, so without this a declared
+                // `unicast → blackhole` change matched the old unicast
+                // route: the diff came back empty and the kernel kept
+                // forwarding (#TBD).
+                let type_match = r.route_type() == declared.route_type.kernel_type();
+                gw_match && dev_match && metric_match && type_match
             })
             });
 
