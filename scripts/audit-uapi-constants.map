@@ -91,6 +91,25 @@ Register = NFT_REG
     R3 -> 4
 ExthdrOp = NFT_EXTHDR_OP
     TcpOpt -> TCPOPT
+MetaKey = NFT_META
+    IifName -> IIFNAME
+    OifName -> OIFNAME
+    SkUid -> SKUID
+    SkGid -> SKGID
+    NfProto -> NFPROTO
+    L4Proto -> L4PROTO
+    CGroup -> CGROUP
+CtKey = NFT_CT
+    L3Protocol -> L3PROTOCOL
+CmpOp = NFT_CMP
+PayloadBase = NFT_PAYLOAD
+    LinkLayer -> LL_HEADER
+    Network -> NETWORK_HEADER
+    Transport -> TRANSPORT_HEADER
+NatType = NFT_NAT
+RtKey = NFT_RT
+    TcpMss -> TCPMSS
+ByteorderOp = NFT_BYTEORDER
 
 # -------------------------------------------------------------------- ethtool
 EthtoolCmd = ETHTOOL_MSG

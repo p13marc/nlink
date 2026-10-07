@@ -99,6 +99,22 @@ pub enum Expr {
     },
     /// Connection tracking.
     Ct { dreg: Register, key: CtKey },
+    /// Write a register into the packet's conntrack entry
+    /// (`ct mark set ...`). The kernel accepts `Mark`, `Secmark` and a
+    /// few keys [`CtKey`] does not model (labels, zone, event mask).
+    /// Needs the `nft_ct` module.
+    CtSet { key: CtKey, sreg: Register },
+    /// Load routing data into a register (`rt mtu`, `rt classid`, …).
+    Rt { dreg: Register, key: RtKey },
+    /// Convert `len` bytes of `sreg`, in `size`-byte (2, 4 or 8) units,
+    /// between host and network byte order into `dreg`.
+    Byteorder {
+        sreg: Register,
+        dreg: Register,
+        op: ByteorderOp,
+        len: u32,
+        size: u32,
+    },
     /// Lookup in a named set.
     Lookup { set: String, sreg: Register },
     /// Bitwise operation.
@@ -380,6 +396,36 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             builder.append_attr_u32_be(NFTA_CT_KEY, *key as u32);
             builder.nest_end(data);
         }
+        Expr::CtSet { key, sreg } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "ct");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_u32_be(NFTA_CT_SREG, *sreg as u32);
+            builder.append_attr_u32_be(NFTA_CT_KEY, *key as u32);
+            builder.nest_end(data);
+        }
+        Expr::Rt { dreg, key } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "rt");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_u32_be(NFTA_RT_DREG, *dreg as u32);
+            builder.append_attr_u32_be(NFTA_RT_KEY, *key as u32);
+            builder.nest_end(data);
+        }
+        Expr::Byteorder {
+            sreg,
+            dreg,
+            op,
+            len,
+            size,
+        } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "byteorder");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_u32_be(NFTA_BYTEORDER_SREG, *sreg as u32);
+            builder.append_attr_u32_be(NFTA_BYTEORDER_DREG, *dreg as u32);
+            builder.append_attr_u32_be(NFTA_BYTEORDER_OP, *op as u32);
+            builder.append_attr_u32_be(NFTA_BYTEORDER_LEN, *len);
+            builder.append_attr_u32_be(NFTA_BYTEORDER_SIZE, *size);
+            builder.nest_end(data);
+        }
         Expr::Lookup { set, sreg } => {
             builder.append_attr_str(NFTA_EXPR_NAME, "lookup");
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
@@ -581,6 +627,62 @@ pub enum RuleExpr {
         /// Number of bytes loaded.
         len: u32,
     },
+    /// `ct` load into a data register (no direction).
+    Ct {
+        /// Destination register.
+        dreg: Register,
+        /// Conntrack key being loaded.
+        key: CtKey,
+    },
+    /// `ct` set: write a register into the conntrack entry.
+    CtSet {
+        /// Conntrack key being written.
+        key: CtKey,
+        /// Source register.
+        sreg: Register,
+    },
+    /// `rt` load of routing data.
+    Rt {
+        /// Destination register.
+        dreg: Register,
+        /// Routing key being loaded.
+        key: RtKey,
+    },
+    /// `byteorder` conversion.
+    Byteorder {
+        /// Source register.
+        sreg: Register,
+        /// Destination register.
+        dreg: Register,
+        /// Conversion direction.
+        op: ByteorderOp,
+        /// Bytes converted.
+        len: u32,
+        /// Unit size in bytes (2, 4 or 8).
+        size: u32,
+    },
+    /// `bitwise` mask-and-xor (`(reg & mask) ^ xor`). The shift and
+    /// register-operand forms decode as [`Unknown`](Self::Unknown).
+    Bitwise {
+        /// Source register.
+        sreg: Register,
+        /// Destination register.
+        dreg: Register,
+        /// Bytes operated on.
+        len: u32,
+        /// AND mask (as on the wire).
+        mask: Vec<u8>,
+        /// XOR value (as on the wire).
+        xor: Vec<u8>,
+    },
+    /// `lookup` of a register in a named set (`@set`). Inverted lookups
+    /// and map lookups decode as [`Unknown`](Self::Unknown).
+    Lookup {
+        /// Set name.
+        set: String,
+        /// Source register.
+        sreg: Register,
+    },
     /// Expression not (or not fully) decodable: kind name plus the raw
     /// `NFTA_EXPR_DATA` payload, preserved verbatim (empty for
     /// data-less expressions like `masq`).
@@ -630,6 +732,11 @@ fn parse_expr(name: &str, data: &[u8]) -> RuleExpr {
         "cmp" => parse_cmp(data),
         "payload" => parse_payload(data),
         "exthdr" => parse_exthdr(data),
+        "ct" => parse_ct(data),
+        "rt" => parse_rt(data),
+        "byteorder" => parse_byteorder(data),
+        "bitwise" => parse_bitwise(data),
+        "lookup" => parse_lookup(data),
         _ => None,
     };
     decoded.unwrap_or_else(|| RuleExpr::Unknown {
@@ -773,6 +880,125 @@ fn parse_exthdr(data: &[u8]) -> Option<RuleExpr> {
         }),
         _ => None,
     }
+}
+
+fn parse_ct(data: &[u8]) -> Option<RuleExpr> {
+    let mut dreg = None;
+    let mut sreg = None;
+    let mut key = None;
+    for (attr, payload) in AttrIter::new(data) {
+        match attr {
+            NFTA_CT_DREG => dreg = Some(Register::from_u32(get::u32_be(payload).ok()?)?),
+            NFTA_CT_SREG => sreg = Some(Register::from_u32(get::u32_be(payload).ok()?)?),
+            NFTA_CT_KEY => key = CtKey::from_u32(get::u32_be(payload).ok()?),
+            // `Expr::Ct` has no direction: never guess which one was meant.
+            NFTA_CT_DIRECTION => return None,
+            _ => {}
+        }
+    }
+    let key = key?;
+    match (dreg, sreg) {
+        (Some(dreg), None) => Some(RuleExpr::Ct { dreg, key }),
+        (None, Some(sreg)) => Some(RuleExpr::CtSet { key, sreg }),
+        _ => None,
+    }
+}
+
+fn parse_rt(data: &[u8]) -> Option<RuleExpr> {
+    let mut dreg = None;
+    let mut key = None;
+    for (attr, payload) in AttrIter::new(data) {
+        match attr {
+            NFTA_RT_DREG => dreg = Register::from_u32(get::u32_be(payload).ok()?),
+            NFTA_RT_KEY => key = RtKey::from_u32(get::u32_be(payload).ok()?),
+            _ => {}
+        }
+    }
+    Some(RuleExpr::Rt {
+        dreg: dreg?,
+        key: key?,
+    })
+}
+
+fn parse_byteorder(data: &[u8]) -> Option<RuleExpr> {
+    let mut sreg = None;
+    let mut dreg = None;
+    let mut op = None;
+    let mut len = None;
+    let mut size = None;
+    for (attr, payload) in AttrIter::new(data) {
+        match attr {
+            NFTA_BYTEORDER_SREG => sreg = Register::from_u32(get::u32_be(payload).ok()?),
+            NFTA_BYTEORDER_DREG => dreg = Register::from_u32(get::u32_be(payload).ok()?),
+            NFTA_BYTEORDER_OP => op = ByteorderOp::from_u32(get::u32_be(payload).ok()?),
+            NFTA_BYTEORDER_LEN => len = Some(get::u32_be(payload).ok()?),
+            NFTA_BYTEORDER_SIZE => size = Some(get::u32_be(payload).ok()?),
+            _ => {}
+        }
+    }
+    Some(RuleExpr::Byteorder {
+        sreg: sreg?,
+        dreg: dreg?,
+        op: op?,
+        len: len?,
+        size: size?,
+    })
+}
+
+/// The `NFTA_DATA_VALUE` inside an `NFTA_DATA_*` nest.
+fn data_value(nest: &[u8]) -> Option<Vec<u8>> {
+    AttrIter::new(nest)
+        .find(|(attr, _)| *attr == NFTA_DATA_VALUE)
+        .map(|(_, value)| value.to_vec())
+}
+
+fn parse_bitwise(data: &[u8]) -> Option<RuleExpr> {
+    let mut sreg = None;
+    let mut dreg = None;
+    let mut len = None;
+    let mut mask = None;
+    let mut xor = None;
+    for (attr, payload) in AttrIter::new(data) {
+        match attr {
+            NFTA_BITWISE_SREG => sreg = Register::from_u32(get::u32_be(payload).ok()?),
+            NFTA_BITWISE_DREG => dreg = Register::from_u32(get::u32_be(payload).ok()?),
+            NFTA_BITWISE_LEN => len = Some(get::u32_be(payload).ok()?),
+            // Only the mask/xor boolean form is modelled; shifts and the
+            // register-operand ops carry other attributes.
+            NFTA_BITWISE_OP if get::u32_be(payload).ok()? != NFT_BITWISE_BOOL => return None,
+            NFTA_BITWISE_MASK => mask = data_value(payload),
+            NFTA_BITWISE_XOR => xor = data_value(payload),
+            NFTA_BITWISE_OP => {}
+            _ => return None,
+        }
+    }
+    Some(RuleExpr::Bitwise {
+        sreg: sreg?,
+        dreg: dreg?,
+        len: len?,
+        mask: mask?,
+        xor: xor?,
+    })
+}
+
+fn parse_lookup(data: &[u8]) -> Option<RuleExpr> {
+    let mut set = None;
+    let mut sreg = None;
+    for (attr, payload) in AttrIter::new(data) {
+        match attr {
+            NFTA_LOOKUP_SET => set = get::string(payload).ok().map(str::to_string),
+            NFTA_LOOKUP_SREG => sreg = Register::from_u32(get::u32_be(payload).ok()?),
+            // A map lookup (DREG) or an inverted one (`!= @set`) is not what
+            // `Lookup { set, sreg }` describes.
+            NFTA_LOOKUP_DREG => return None,
+            NFTA_LOOKUP_FLAGS if get::u32_be(payload).ok()? != 0 => return None,
+            _ => {}
+        }
+    }
+    Some(RuleExpr::Lookup {
+        set: set?,
+        sreg: sreg?,
+    })
 }
 
 fn parse_cmp(data: &[u8]) -> Option<RuleExpr> {
@@ -1657,5 +1883,266 @@ mod decode_tests {
                 "an IPv4 set match in an inet chain needs `meta nfproto ipv4`"
             );
         }
+    }
+
+    // ---- ct / rt / byteorder / bitwise / lookup decode, and the mark,
+    // priority, connmark and path-MTU helpers built from them.
+
+    #[test]
+    fn roundtrip_ct_rt_byteorder_bitwise_lookup() {
+        let exprs = [
+            Expr::Ct {
+                dreg: Register::R0,
+                key: CtKey::Mark,
+            },
+            Expr::CtSet {
+                key: CtKey::Mark,
+                sreg: Register::R1,
+            },
+            Expr::Rt {
+                dreg: Register::R2,
+                key: RtKey::TcpMss,
+            },
+            Expr::Byteorder {
+                sreg: Register::R2,
+                dreg: Register::R3,
+                op: ByteorderOp::Hton,
+                len: 2,
+                size: 2,
+            },
+            Expr::Bitwise {
+                sreg: Register::R0,
+                dreg: Register::R0,
+                len: 4,
+                mask: vec![0xff, 0, 0, 0],
+                xor: vec![1, 0, 0, 0],
+            },
+            Expr::Lookup {
+                set: "s".into(),
+                sreg: Register::R0,
+            },
+        ];
+        assert_eq!(
+            parse_expressions(&encode(&exprs)),
+            [
+                RuleExpr::Ct {
+                    dreg: Register::R0,
+                    key: CtKey::Mark,
+                },
+                RuleExpr::CtSet {
+                    key: CtKey::Mark,
+                    sreg: Register::R1,
+                },
+                RuleExpr::Rt {
+                    dreg: Register::R2,
+                    key: RtKey::TcpMss,
+                },
+                RuleExpr::Byteorder {
+                    sreg: Register::R2,
+                    dreg: Register::R3,
+                    op: ByteorderOp::Hton,
+                    len: 2,
+                    size: 2,
+                },
+                RuleExpr::Bitwise {
+                    sreg: Register::R0,
+                    dreg: Register::R0,
+                    len: 4,
+                    mask: vec![0xff, 0, 0, 0],
+                    xor: vec![1, 0, 0, 0],
+                },
+                RuleExpr::Lookup {
+                    set: "s".into(),
+                    sreg: Register::R0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn shapes_the_typed_variants_do_not_describe_stay_unknown() {
+        // `ct original saddr`: a direction `RuleExpr::Ct` cannot carry.
+        let directional = build_attrs(|b| {
+            b.append_attr_u32_be(NFTA_CT_DREG, 1);
+            b.append_attr_u32_be(NFTA_CT_KEY, 0);
+            b.append_attr_u8(NFTA_CT_DIRECTION, 0);
+        });
+        // `ip saddr != @s`: NFT_LOOKUP_F_INV.
+        let inverted = build_attrs(|b| {
+            b.append_attr_str(NFTA_LOOKUP_SET, "s");
+            b.append_attr_u32_be(NFTA_LOOKUP_SREG, 1);
+            b.append_attr_u32_be(NFTA_LOOKUP_FLAGS, 1);
+        });
+        // `meta mark >> 8`: NFT_BITWISE_RSHIFT (2) with a data operand.
+        let shift = build_attrs(|b| {
+            b.append_attr_u32_be(NFTA_BITWISE_SREG, 1);
+            b.append_attr_u32_be(NFTA_BITWISE_DREG, 1);
+            b.append_attr_u32_be(NFTA_BITWISE_LEN, 4);
+            b.append_attr_u32_be(NFTA_BITWISE_OP, 2);
+        });
+        for (name, data) in [("ct", directional), ("lookup", inverted), ("bitwise", shift)] {
+            let decoded = parse_expressions(&build_elem(name, &data));
+            assert!(
+                matches!(decoded.as_slice(), [RuleExpr::Unknown { name: n, .. }] if n == name),
+                "{name}: got {decoded:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn set_mark_masked_keeps_the_bits_outside_the_mask() {
+        let rule = Rule::new("t", "c").set_mark_masked(0x1234, 0xff);
+        assert_eq!(
+            parse_expressions(&encode(&rule.exprs)),
+            [
+                RuleExpr::Meta {
+                    dreg: Register::R0,
+                    key: MetaKey::Mark,
+                },
+                // (mark & !0xff) ^ (0x1234 & 0xff), host order like the mark.
+                RuleExpr::Bitwise {
+                    sreg: Register::R0,
+                    dreg: Register::R0,
+                    len: 4,
+                    mask: (!0xffu32).to_ne_bytes().to_vec(),
+                    xor: 0x34u32.to_ne_bytes().to_vec(),
+                },
+                RuleExpr::MetaSet {
+                    key: MetaKey::Mark,
+                    sreg: Register::R0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn match_mark_masked_compares_only_the_masked_bits() {
+        let rule = Rule::new("t", "c").match_mark_masked(0x1234, 0xff);
+        let decoded = parse_expressions(&encode(&rule.exprs));
+        assert_eq!(
+            decoded[1..],
+            [
+                RuleExpr::Bitwise {
+                    sreg: Register::R0,
+                    dreg: Register::R0,
+                    len: 4,
+                    mask: 0xffu32.to_ne_bytes().to_vec(),
+                    xor: vec![0; 4],
+                },
+                RuleExpr::Cmp {
+                    sreg: Register::R0,
+                    op: CmpOp::Eq,
+                    data: 0x34u32.to_ne_bytes().to_vec(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn set_priority_writes_the_classid() {
+        let rule = Rule::new("t", "c").set_priority(crate::TcHandle::new(1, 0x10));
+        assert_eq!(
+            parse_expressions(&encode(&rule.exprs)),
+            [
+                // `meta priority set 1:10` is `immediate reg 1 0x00010010`.
+                RuleExpr::Immediate {
+                    dreg: Register::R0,
+                    data: 0x0001_0010u32.to_ne_bytes().to_vec(),
+                },
+                RuleExpr::MetaSet {
+                    key: MetaKey::Priority,
+                    sreg: Register::R0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn connmark_helpers_are_the_iptables_translations() {
+        // CONNMARK --save-mark: `ct mark set mark`.
+        let save = Rule::new("t", "c").save_mark_to_ct();
+        assert_eq!(
+            parse_expressions(&encode(&save.exprs)),
+            [
+                RuleExpr::Meta {
+                    dreg: Register::R0,
+                    key: MetaKey::Mark,
+                },
+                RuleExpr::CtSet {
+                    key: CtKey::Mark,
+                    sreg: Register::R0,
+                },
+            ]
+        );
+        // CONNMARK --restore-mark: `meta mark set ct mark`.
+        let restore = Rule::new("t", "c").restore_mark_from_ct();
+        assert_eq!(
+            parse_expressions(&encode(&restore.exprs)),
+            [
+                RuleExpr::Ct {
+                    dreg: Register::R0,
+                    key: CtKey::Mark,
+                },
+                RuleExpr::MetaSet {
+                    key: MetaKey::Mark,
+                    sreg: Register::R0,
+                },
+            ]
+        );
+        let set = Rule::new("t", "c").set_ct_mark(7).match_ct_mark(7);
+        assert_eq!(
+            parse_expressions(&encode(&set.exprs)),
+            [
+                RuleExpr::Immediate {
+                    dreg: Register::R0,
+                    data: 7u32.to_ne_bytes().to_vec(),
+                },
+                RuleExpr::CtSet {
+                    key: CtKey::Mark,
+                    sreg: Register::R0,
+                },
+                RuleExpr::Ct {
+                    dreg: Register::R0,
+                    key: CtKey::Mark,
+                },
+                RuleExpr::Cmp {
+                    sreg: Register::R0,
+                    op: CmpOp::Eq,
+                    data: 7u32.to_ne_bytes().to_vec(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn clamp_tcp_mss_to_pmtu_is_the_nft_statement() {
+        // `tcp option maxseg size set rt mtu` (nftables
+        // tests/py/inet/rt.t.payload): rt load tcpmss, byteorder
+        // hton(reg, 2, 2), exthdr write — behind the l4proto guard.
+        let rule = Rule::new("t", "c").clamp_tcp_mss_to_pmtu();
+        let decoded = parse_expressions(&encode(&rule.exprs));
+        assert_eq!(
+            decoded[2..],
+            [
+                RuleExpr::Rt {
+                    dreg: Register::R0,
+                    key: RtKey::TcpMss,
+                },
+                RuleExpr::Byteorder {
+                    sreg: Register::R0,
+                    dreg: Register::R0,
+                    op: ByteorderOp::Hton,
+                    len: 2,
+                    size: 2,
+                },
+                RuleExpr::ExthdrSet {
+                    sreg: Register::R0,
+                    op: ExthdrOp::TcpOpt,
+                    exthdr_type: TCPOPT_MAXSEG,
+                    offset: 2,
+                    len: 2,
+                },
+            ]
+        );
     }
 }

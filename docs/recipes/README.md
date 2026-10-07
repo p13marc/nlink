@@ -44,6 +44,11 @@ to the hand-rolled netlink primitives if you want to go deeper.
   socket cgroup membership. Uses the typed `CgroupFilter` and
   the `net_cls` cgroup v1 controller; ematch combination shown
   for L4-aware steering.
+- [**Classify into TC classes from nftables**](nft-mark-tc-classification.md) —
+  let the firewall decide what gets shaped: `meta priority set 1:10`
+  straight into an HTB leaf (no `tc` filter), a masked mark plus a `fw`
+  filter, or a conntrack mark set once per connection. Includes TCP MSS
+  clamping (constant or path MTU) on the same path.
 
 ### Firewalling
 

@@ -22,6 +22,7 @@ use nlink::netlink::nftables::types::{
 };
 use nlink::netlink::nftables::{Expr, NFT_REJECT_TCP_RST, Verdict};
 use nlink::netlink::{Connection, Nftables, namespace};
+use nlink::TcHandle;
 
 use crate::common::TestNamespace;
 
@@ -77,6 +78,11 @@ async fn every_filter_rule_shape_reconciles() -> nlink::Result<()> {
                     .chain_type(ChainType::Filter)
             })
             .chain("sub", |c| c)
+            .chain("forward", |c| {
+                c.hook(Hook::Forward)
+                    .priority(Priority::Mangle)
+                    .chain_type(ChainType::Filter)
+            })
             .set("allow4", |s| s.key_type(SetKeyType::Ipv4Addr).ipv4(v4))
             // Transport matchers.
             .rule_keyed("input", "tcp-dport", |r| r.match_tcp_dport(22).accept())
@@ -132,6 +138,26 @@ async fn every_filter_rule_shape_reconciles() -> nlink::Result<()> {
                 }])
             })
             .rule_keyed("input", "set-mark", |r| r.match_tcp_dport(84).set_mark(1))
+            .rule_keyed("input", "set-mark-masked", |r| {
+                r.match_tcp_dport(89).set_mark_masked(0x10, 0xff)
+            })
+            .rule_keyed("input", "mark-masked", |r| {
+                r.match_mark_masked(0x10, 0xff).accept()
+            })
+            .rule_keyed("input", "set-priority", |r| {
+                r.match_tcp_dport(90).set_priority(TcHandle::new(1, 0x10))
+            })
+            .rule_keyed("input", "set-ct-mark", |r| r.match_tcp_dport(91).set_ct_mark(7))
+            .rule_keyed("input", "ct-mark", |r| r.match_ct_mark(7).accept())
+            .rule_keyed("input", "save-mark", |r| r.match_tcp_dport(92).save_mark_to_ct())
+            .rule_keyed("input", "restore-mark", |r| {
+                r.match_tcp_dport(93).restore_mark_from_ct()
+            })
+            // `rt tcpmss` is only valid in forward/output/postrouting.
+            .rule_keyed("forward", "mss-pmtu", |r| {
+                r.match_tcp_flags(TcpFlags::SYN, TcpFlags::SYN | TcpFlags::RST)
+                    .clamp_tcp_mss_to_pmtu()
+            })
             .rule_keyed("input", "mss", |r| {
                 r.match_tcp_flags(TcpFlags::SYN, TcpFlags::SYN | TcpFlags::RST)
                     .clamp_tcp_mss(1360)
