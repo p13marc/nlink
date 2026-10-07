@@ -7,6 +7,7 @@ use super::super::{
         ChainType, Family, Hook, Policy, Priority, Rule, Set, SetDataType, SetElement, SetFlags,
         SetKeyType,
     },
+    object::{Object, ObjectConfig},
 };
 
 /// A complete declarative nftables ruleset. Construct via
@@ -67,6 +68,7 @@ pub struct DeclaredTable {
     pub(crate) rules: Vec<DeclaredRule>,
     pub(crate) flowtables: Vec<DeclaredFlowtable>,
     pub(crate) sets: Vec<DeclaredSet>,
+    pub(crate) objects: Vec<DeclaredObject>,
 }
 
 impl DeclaredTable {
@@ -96,6 +98,41 @@ impl DeclaredTable {
     pub fn sets(&self) -> &[DeclaredSet] {
         &self.sets
     }
+    /// Declared stateful objects.
+    pub fn objects(&self) -> &[DeclaredObject] {
+        &self.objects
+    }
+}
+
+/// A declared named stateful object — a counter, quota or limit.
+///
+/// Reconciled by name and type. Only the configuration is compared, never
+/// the live state, so a counter keeps counting and a quota keeps what it has
+/// used across applies. A changed quota is updated in place and keeps its
+/// consumption. A limit cannot be updated (the kernel accepts the message
+/// and changes nothing), so a changed limit is deleted and recreated, and
+/// the rules using it move out of the way and back to their places.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredObject {
+    pub(crate) name: String,
+    pub(crate) config: ObjectConfig,
+}
+
+impl DeclaredObject {
+    /// Object name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    /// Its configuration.
+    pub fn config(&self) -> &ObjectConfig {
+        &self.config
+    }
+    /// The runtime [`Object`] this declaration describes, in `table`.
+    pub(crate) fn to_object(&self, table: &str, family: Family) -> Object {
+        Object::new(table, &self.name, self.config.clone()).family(family)
+    }
 }
 
 /// Closure-style builder for [`DeclaredTable`]. Returned by the
@@ -108,6 +145,7 @@ pub struct DeclaredTableBuilder {
     rules: Vec<DeclaredRule>,
     flowtables: Vec<DeclaredFlowtable>,
     sets: Vec<DeclaredSet>,
+    objects: Vec<DeclaredObject>,
 }
 
 impl DeclaredTableBuilder {
@@ -120,6 +158,7 @@ impl DeclaredTableBuilder {
             rules: Vec::new(),
             flowtables: Vec::new(),
             sets: Vec::new(),
+            objects: Vec::new(),
         }
     }
 
@@ -221,6 +260,17 @@ impl DeclaredTableBuilder {
         self
     }
 
+    /// Declare a named stateful object — see [`DeclaredObject`]. Rules use
+    /// it with [`Rule::counter_named`](crate::netlink::nftables::Rule::counter_named)
+    /// and friends; object maps name it in their elements.
+    pub fn object(mut self, name: impl Into<String>, config: ObjectConfig) -> Self {
+        self.objects.push(DeclaredObject {
+            name: name.into(),
+            config,
+        });
+        self
+    }
+
     fn into_table(self) -> DeclaredTable {
         DeclaredTable {
             name: self.name,
@@ -230,6 +280,7 @@ impl DeclaredTableBuilder {
             rules: self.rules,
             flowtables: self.flowtables,
             sets: self.sets,
+            objects: self.objects,
         }
     }
 }
@@ -552,7 +603,7 @@ impl DeclaredSetBuilder {
     /// changed data type recreates it; an element whose data changed is
     /// replaced (removed and added in the same batch).
     pub fn map(mut self, data: SetDataType) -> Self {
-        self.flags |= SetFlags::MAP;
+        self.flags |= data.flag();
         self.data_type = Some(data);
         self
     }

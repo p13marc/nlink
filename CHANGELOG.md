@@ -38,6 +38,53 @@ All notable changes to this project will be documented in this file.
   a range to the top of the key space — and 0.30 refused interval elements
   outright.
 
+- **Named stateful objects: counters, quotas and limits, and object maps.**
+  - `Object::{counter, quota, limit}` with `ObjectConfig`, `ObjectType`
+    (`NFT_OBJECT_*`, audit-mapped), and `ObjectInfo` / `ObjectState` read
+    back.
+  - `Connection::{add_object, del_object, list_objects, list_objects_in,
+    reset_object}`. `reset_object` is `NFT_MSG_GETOBJ_RESET`: it reads the
+    object and zeroes it in one step, so no packet is lost between the read
+    and the reset.
+  - `Transaction::{add_object, update_object, del_object}`.
+    `update_object` changes a quota in place and keeps its consumption. For
+    a counter or a limit the kernel accepts the update and changes nothing
+    (they have no update operation), and the method says so.
+  - `Expr::Quota(QuotaExpr)` and `Expr::Objref(ObjrefExpr::{Named, Map})`.
+    `Rule::{counter_named, quota_named, limit_named, objref,
+    objref_from_map, quota_until, quota_over}`.
+  - `SetDataType::Object(ObjectType)` and `SetElement::object(name)` for
+    object maps (`NFT_SET_OBJECT` with `NFTA_SET_OBJ_TYPE`; `MAP | OBJECT`
+    is `EOPNOTSUPP`).
+  - `RuleExpr::{Quota, Objref}` decode typed.
+  - `NftablesEvent::{NewObject, DelObject}`.
+  - Declaratively, `DeclaredTableBuilder::object(name, ObjectConfig)`.
+    Only configuration is compared, so a counter keeps counting and a quota
+    keeps what it has used across applies. A changed quota is updated in
+    place. A changed limit is deleted and recreated, and the rules using it
+    are moved out of its way and back to their places
+    (`MoveReason::BoundToRecreatedObject`). A limit declared with burst 0 is
+    compared as the 5 the kernel stores.
+  - A rule's own quota echoes its consumption (`nft_quota_do_dump` always
+    emits it), so the echo form carries a zero one and the diff zeroes the
+    live value. A request never sends it, because the quota would start
+    there.
+
+  Tested on traffic:
+  - a named counter counts 4 packets, `reset_object` returns 4 and leaves 0,
+    and the object is notified;
+  - an object map counts each destination in its own counter;
+  - with 33-byte datagrams, `quota until 100 bytes` matches 3,
+    `quota over` the other 7, and a named quota reports itself used up at
+    100;
+  - declared objects converge and keep their state through a quota update
+    and a limit recreate, with rule order unchanged.
+
+  Mutation-checked: comparing a limit's burst unnormalized, not moving the
+  rules of a recreated object, a quota echo without its consumption, and
+  adding objects after the map elements that name them each fail a test.
+  `nft_quota` and `nft_limit` join the privileged lane's strict modules.
+
 - **Maps and verdict maps (`vmap`).**
   - `Set::map(SetDataType)` and `Set::vmap()`, plus the same on
     `DeclaredSetBuilder`. `SetDataType::{Verdict, Value(SetKeyType)}`, and

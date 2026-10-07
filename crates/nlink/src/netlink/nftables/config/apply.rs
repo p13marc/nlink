@@ -9,19 +9,22 @@
 //! mutex for the duration of the batch).
 //!
 //! Operations are enqueued in dependency-correct order so the
-//! kernel's intra-batch validation accepts them:
-//! 1. Rule deletes (release dependencies on chains/sets/tables)
+//! kernel's intra-batch validation accepts them (after the in-place set
+//! updates, which commit first in a batch of their own):
+//! 1. Rule deletes, and deletes of the rules being moved
 //! 2. Set-element removes (for sets that persist)
-//! 3. Set deletes (after the rules that referenced them)
+//! 3. Set deletes, then object deletes (after what used them)
 //! 4. Chain deletes
 //! 5. Flowtable deletes
 //! 6. Table deletes (cascades any leftover children)
-//! 7. Table adds (creates the namespace for children)
-//! 8. Set adds (before the rules that reference them by `@name`)
-//! 9. Set-element adds
-//! 10. Chain adds
-//! 11. Rule adds
-//! 12. Flowtable adds
+//! 7. Table adds and flag updates
+//! 8. Chain adds and updates (a verdict map's elements name chains), then
+//!    object adds and quota updates (object maps' elements name objects)
+//! 9. Flowtable adds (a rule's `flow add @ft` names one)
+//! 10. Set adds
+//! 11. Set-element adds
+//! 12. Rule inserts and moves, in planned order
+//! 13. Rule replaces
 //!
 //! Tables with flags (`NFT_TABLE_F_DORMANT` / `_OWNER` /
 //! `_PERSIST`) route through `Transaction::add_table_with_flags`
@@ -153,6 +156,12 @@ impl NftablesDiff {
             tx = tx.del_set(table, name, *family);
         }
 
+        // 3b. Object deletes — after the rules (step 1), map elements (2)
+        //     and maps (3) that used them: a used object is EBUSY.
+        for (table, family, name, object_type) in &self.objects_to_delete {
+            tx = tx.del_object(table, name, *object_type, *family);
+        }
+
         // 4. Chain deletes.
         for (table, family, name) in &self.chains_to_delete {
             tx = tx.del_chain(table, name, *family);
@@ -197,6 +206,15 @@ impl NftablesDiff {
             self.chains_to_add.iter().chain(self.chains_to_modify.iter())
         {
             tx = tx.add_chain(build_chain(table_name, *family, declared)?);
+        }
+
+        // 8b. Object adds and quota updates — before the object maps' elements
+        //     (step 11) that name them and the rules (step 12) that use them.
+        for (table, family, declared) in &self.objects_to_add {
+            tx = tx.add_object(&declared.to_object(table, *family));
+        }
+        for (table, family, declared) in &self.objects_to_update {
+            tx = tx.update_object(&declared.to_object(table, *family));
         }
 
         // 9. Flowtable adds — **before** the rules.

@@ -25,7 +25,7 @@ use super::{
     NFGENMSG_HDRLEN, NFNL_SUBSYS_NFTABLES, NFT_MSG_DELCHAIN, NFT_MSG_DELFLOWTABLE,
     NFT_MSG_DELRULE, NFT_MSG_DELSET, NFT_MSG_DELSETELEM, NFT_MSG_DELTABLE, NFT_MSG_NEWCHAIN,
     NFT_MSG_NEWFLOWTABLE, NFT_MSG_NEWGEN, NFT_MSG_NEWRULE, NFT_MSG_NEWSET, NFT_MSG_NEWSETELEM,
-    NFT_MSG_NEWTABLE, NFTA_GEN_ID, NFTA_GEN_PROC_NAME, NFTA_GEN_PROC_PID,
+    NFT_MSG_NEWTABLE, NFT_MSG_NEWOBJ, NFT_MSG_DELOBJ, NFTA_GEN_ID, NFTA_GEN_PROC_NAME, NFTA_GEN_PROC_PID,
     NFTA_SET_ELEM_LIST_SET, NFTA_SET_ELEM_LIST_TABLE,
 };
 use crate::netlink::attr::{AttrIter, get};
@@ -106,6 +106,10 @@ pub enum NftablesEvent {
     /// `NFT_MSG_NEWGEN` — a batch was committed; the ruleset generation
     /// moved on.
     NewGen(GenInfo),
+    /// `NFT_MSG_NEWOBJ` — a stateful object was created or updated.
+    NewObject(super::object::ObjectInfo),
+    /// `NFT_MSG_DELOBJ` — a stateful object was destroyed.
+    DelObject(super::object::ObjectInfo),
 }
 
 /// Elements added to or removed from a set, as one notification carries
@@ -214,6 +218,12 @@ pub(crate) fn parse_nftables_event(msg_type: u16, body: &[u8]) -> Option<Nftable
             parse_set_elements_event(attrs, family).map(NftablesEvent::DelSetElements)
         }
         NFT_MSG_NEWGEN => parse_gen(attrs).map(NftablesEvent::NewGen),
+        NFT_MSG_NEWOBJ => {
+            super::object::parse_object(attrs, family).map(NftablesEvent::NewObject)
+        }
+        NFT_MSG_DELOBJ => {
+            super::object::parse_object(attrs, family).map(NftablesEvent::DelObject)
+        }
         _ => None,
     }
 }

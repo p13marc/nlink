@@ -114,6 +114,10 @@ pub enum Expr {
     /// Add, refresh or delete a set element from the packet path — see
     /// [`DynsetExpr`].
     Dynset(DynsetExpr),
+    /// A byte quota of the rule's own — see [`QuotaExpr`].
+    Quota(QuotaExpr),
+    /// Use a named stateful object — see [`ObjrefExpr`].
+    Objref(ObjrefExpr),
     /// Bitwise operation.
     Bitwise {
         sreg: Register,
@@ -248,6 +252,67 @@ impl From<LookupExpr> for Expr {
     }
 }
 
+/// `quota`: a byte budget. `quota until N bytes` matches until `N` bytes
+/// have passed it; with [`over`](Self::over), `quota over N bytes` matches
+/// only after. As a rule expression the quota is the rule's own; as an
+/// [`Object`] it is shared by name.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct QuotaExpr {
+    /// The quota, in bytes.
+    pub bytes: u64,
+    /// Match once the quota is used up (`NFT_QUOTA_F_INV`), not until.
+    pub over: bool,
+}
+
+impl QuotaExpr {
+    /// `quota until <bytes> bytes`.
+    pub fn new(bytes: u64) -> Self {
+        Self { bytes, over: false }
+    }
+
+    /// `quota over <bytes> bytes`: match once used up.
+    pub fn over(mut self) -> Self {
+        self.over = true;
+        self
+    }
+}
+
+impl From<QuotaExpr> for Expr {
+    fn from(e: QuotaExpr) -> Self {
+        Expr::Quota(e)
+    }
+}
+
+/// `objref`: use a named stateful object — counter, quota or limit — by name
+/// (`counter name "web"`), or the one an object map picks for the key in a
+/// register (`counter name ip saddr map @counters`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ObjrefExpr {
+    /// The object `name` of type `object_type`.
+    Named {
+        /// Object type.
+        object_type: super::object::ObjectType,
+        /// Object name.
+        name: String,
+    },
+    /// The object the object map `map` holds for the key in `sreg`.
+    Map {
+        /// Register holding the key.
+        sreg: Register,
+        /// Object map name.
+        map: String,
+    },
+}
+
+impl From<ObjrefExpr> for Expr {
+    fn from(e: ObjrefExpr) -> Self {
+        Expr::Objref(e)
+    }
+}
+
 /// What a [`DynsetExpr`] does to its set: `NFT_DYNSET_OP_*`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -344,6 +409,7 @@ impl From<DynsetExpr> for Expr {
 
 /// `limit`: a packet-rate limit, matching while under the rate (or, with
 /// [`over`](Self::over), once over it).
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct LimitExpr {
@@ -591,25 +657,31 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             builder.append_attr_u64_be(NFTA_COUNTER_PACKETS, 0);
             builder.nest_end(data);
         }
-        Expr::Limit(LimitExpr {
-            rate,
-            unit,
-            burst,
-            over,
-        }) => {
+        Expr::Limit(limit) => {
             builder.append_attr_str(NFTA_EXPR_NAME, "limit");
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
-            builder.append_attr_u64_be(NFTA_LIMIT_RATE, *rate);
-            builder.append_attr_u64_be(NFTA_LIMIT_UNIT, unit.to_u64());
-            // A packet limit with burst 0 is stored (and dumped) as the
-            // kernel's NFT_LIMIT_PKT_BURST_DEFAULT, 5; send what it keeps.
-            let burst = if *burst == 0 { 5 } else { *burst };
-            builder.append_attr_u32_be(NFTA_LIMIT_BURST, burst);
-            builder.append_attr_u32_be(NFTA_LIMIT_TYPE, 0); // NFT_LIMIT_PKTS
-            // `nft_limit_dump` always emits FLAGS, 0 included. Without it a
-            // declared `limit` rendered one attribute short of the echo and
-            // was replaced on every apply.
-            builder.append_attr_u32_be(NFTA_LIMIT_FLAGS, if *over { NFT_LIMIT_F_INV } else { 0 });
+            write_limit_attrs(builder, limit);
+            builder.nest_end(data);
+        }
+        Expr::Quota(quota) => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "quota");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            write_quota_attrs(builder, quota, form == WireForm::Echo);
+            builder.nest_end(data);
+        }
+        Expr::Objref(objref) => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "objref");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            match objref {
+                ObjrefExpr::Named { object_type, name } => {
+                    builder.append_attr_u32_be(NFTA_OBJREF_IMM_TYPE, *object_type as u32);
+                    builder.append_attr_str(NFTA_OBJREF_IMM_NAME, name);
+                }
+                ObjrefExpr::Map { sreg, map } => {
+                    builder.append_attr_u32_be(NFTA_OBJREF_SET_SREG, sreg.wire());
+                    builder.append_attr_str(NFTA_OBJREF_SET_NAME, map);
+                }
+            }
             builder.nest_end(data);
         }
         Expr::Masquerade(MasqExpr {}) => {
@@ -865,6 +937,35 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
     builder.nest_end(elem);
 }
 
+/// The attributes of a packet `limit`, as an expression or a limit object.
+pub(crate) fn write_limit_attrs(builder: &mut MessageBuilder, limit: &LimitExpr) {
+    builder.append_attr_u64_be(NFTA_LIMIT_RATE, limit.rate);
+    builder.append_attr_u64_be(NFTA_LIMIT_UNIT, limit.unit.to_u64());
+    // A packet limit with burst 0 is stored (and dumped) as the
+    // kernel's NFT_LIMIT_PKT_BURST_DEFAULT, 5; send what it keeps.
+    let burst = if limit.burst == 0 { 5 } else { limit.burst };
+    builder.append_attr_u32_be(NFTA_LIMIT_BURST, burst);
+    builder.append_attr_u32_be(NFTA_LIMIT_TYPE, 0); // NFT_LIMIT_PKTS
+    // `nft_limit_dump` always emits FLAGS, 0 included. Without it a
+    // declared `limit` rendered one attribute short of the echo and
+    // was replaced on every apply.
+    let flags = if limit.over { NFT_LIMIT_F_INV } else { 0 };
+    builder.append_attr_u32_be(NFTA_LIMIT_FLAGS, flags);
+}
+
+/// The attributes of a `quota`, as an expression or a quota object.
+/// `nft_quota_do_dump` always emits CONSUMED — capped live state, which the
+/// diff zeroes on both sides — so the echo form carries a zero one. A
+/// request leaves it out: the kernel would start the quota there.
+pub(crate) fn write_quota_attrs(builder: &mut MessageBuilder, quota: &QuotaExpr, echo: bool) {
+    builder.append_attr_u64_be(NFTA_QUOTA_BYTES, quota.bytes);
+    if echo {
+        builder.append_attr_u64_be(NFTA_QUOTA_CONSUMED, 0);
+    }
+    let flags = if quota.over { NFT_QUOTA_F_INV } else { 0 };
+    builder.append_attr_u32_be(NFTA_QUOTA_FLAGS, flags);
+}
+
 /// A duration in whole milliseconds, as nftables timeouts are written.
 pub(crate) fn millis(d: std::time::Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
@@ -1102,6 +1203,21 @@ pub enum RuleExpr {
         /// `!= @set` (`NFT_LOOKUP_F_INV`).
         invert: bool,
     },
+    /// `quota` — a rule's own byte quota, with its live consumption.
+    #[non_exhaustive]
+    Quota {
+        /// The quota, in bytes.
+        bytes: u64,
+        /// Bytes used, capped at the quota.
+        consumed: u64,
+        /// `quota over`.
+        over: bool,
+        /// Used up (`NFT_QUOTA_F_DEPLETED`).
+        depleted: bool,
+    },
+    /// `objref` — a named object, or an object map's pick. One naming an
+    /// object type nlink does not model decodes as [`Unknown`](Self::Unknown).
+    Objref(ObjrefExpr),
     /// `dynset` — `add|update|delete @set { <key> [timeout T] }`. A dynset
     /// carrying per-element expressions (`NFTA_DYNSET_EXPR`) or unknown
     /// flags decodes as [`Unknown`](Self::Unknown).
@@ -1176,6 +1292,8 @@ fn parse_expr(name: &str, data: &[u8]) -> RuleExpr {
         "bitwise" => parse_bitwise(data),
         "lookup" => parse_lookup(data),
         "dynset" => parse_dynset(data),
+        "quota" => parse_quota(data),
+        "objref" => parse_objref(data),
         _ => None,
     };
     decoded.unwrap_or_else(|| RuleExpr::Unknown {
@@ -1445,6 +1563,53 @@ fn parse_lookup(data: &[u8]) -> Option<RuleExpr> {
         dreg,
         invert,
     })
+}
+
+fn parse_quota(data: &[u8]) -> Option<RuleExpr> {
+    let mut bytes = None;
+    let mut consumed = 0;
+    let mut flags = 0;
+    for (attr, payload) in AttrIter::new(data) {
+        match attr {
+            NFTA_QUOTA_BYTES => bytes = Some(get::u64_be(payload).ok()?),
+            NFTA_QUOTA_CONSUMED => consumed = get::u64_be(payload).ok()?,
+            NFTA_QUOTA_FLAGS => flags = get::u32_be(payload).ok()?,
+            _ => {}
+        }
+    }
+    Some(RuleExpr::Quota {
+        bytes: bytes?,
+        consumed,
+        over: flags & NFT_QUOTA_F_INV != 0,
+        depleted: flags & NFT_QUOTA_F_DEPLETED != 0,
+    })
+}
+
+fn parse_objref(data: &[u8]) -> Option<RuleExpr> {
+    let mut object_type = None;
+    let mut name = None;
+    let mut sreg = None;
+    let mut map = None;
+    for (attr, payload) in AttrIter::new(data) {
+        match attr {
+            NFTA_OBJREF_IMM_TYPE => {
+                object_type = super::object::ObjectType::from_u32(get::u32_be(payload).ok()?);
+            }
+            NFTA_OBJREF_IMM_NAME => name = get::string(payload).ok().map(str::to_string),
+            NFTA_OBJREF_SET_SREG => sreg = Register::from_u32(get::u32_be(payload).ok()?),
+            NFTA_OBJREF_SET_NAME => map = get::string(payload).ok().map(str::to_string),
+            _ => {}
+        }
+    }
+    let objref = match (name, map) {
+        (Some(name), None) => ObjrefExpr::Named {
+            object_type: object_type?,
+            name,
+        },
+        (None, Some(map)) => ObjrefExpr::Map { sreg: sreg?, map },
+        _ => return None,
+    };
+    Some(RuleExpr::Objref(objref))
 }
 
 fn parse_dynset(data: &[u8]) -> Option<RuleExpr> {
@@ -2160,6 +2325,47 @@ mod decode_tests {
             assert_eq!(attrs[&NFTA_DYNSET_TIMEOUT], 60_000u64.to_be_bytes());
             assert_eq!(attrs[&NFTA_DYNSET_FLAGS], NFT_DYNSET_F_INV.to_be_bytes());
         }
+    }
+
+    /// `nft_quota_do_dump` always emits CONSUMED; a request must not (the
+    /// quota would start there).
+    #[test]
+    fn quota_echoes_a_zero_consumption_and_objrefs_round_trip() {
+        let quota = [QuotaExpr::new(500).over().into()];
+        assert!(!data_attrs_as(&quota, WireForm::Request).contains_key(&NFTA_QUOTA_CONSUMED));
+        let echo = data_attrs_as(&quota, WireForm::Echo);
+        assert_eq!(echo[&NFTA_QUOTA_CONSUMED], 0u64.to_be_bytes());
+        assert_eq!(echo[&NFTA_QUOTA_FLAGS], NFT_QUOTA_F_INV.to_be_bytes());
+
+        let exprs: Vec<Expr> = vec![
+            ObjrefExpr::Named {
+                object_type: super::super::object::ObjectType::Counter,
+                name: "web".into(),
+            }
+            .into(),
+            ObjrefExpr::Map {
+                sreg: Register::R0,
+                map: "counters".into(),
+            }
+            .into(),
+            QuotaExpr::new(500).into(),
+        ];
+        let decoded = parse_expressions(&encode(&exprs));
+        let want: Vec<RuleExpr> = vec![
+            RuleExpr::Objref(ObjrefExpr::Named {
+                object_type: super::super::object::ObjectType::Counter,
+                name: "web".into(),
+            }),
+            RuleExpr::Objref(ObjrefExpr::Map {
+                sreg: Register::R0,
+                map: "counters".into(),
+            }),
+        ];
+        assert_eq!(decoded[..2], want[..]);
+        assert!(matches!(
+            decoded[2],
+            RuleExpr::Quota { bytes: 500, over: false, depleted: false, .. }
+        ));
     }
 
     #[test]

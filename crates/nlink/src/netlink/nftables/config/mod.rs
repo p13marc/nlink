@@ -71,6 +71,6 @@ pub use diff::{
 // helper function could take one as a parameter.
 pub use types::{
     DeclaredChain, DeclaredChainBuilder, DeclaredFlowtable, DeclaredFlowtableBuilder,
-    DeclaredRule, DeclaredSet, DeclaredSetBuilder, DeclaredTable,
+    DeclaredObject, DeclaredRule, DeclaredSet, DeclaredSetBuilder, DeclaredTable,
     DeclaredTableBuilder, NftablesConfig, SetElementMode,
 };

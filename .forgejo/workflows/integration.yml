@@ -75,8 +75,8 @@ jobs:
             echo "::error::or built-in modules become silent test skips (#273, #350)"
             exit 1
           fi
-          for m in nf_tables sch_htb cls_flower sch_netem sch_ingress ifb \
-                   act_mirred cls_u32 dummy veth vrf wireguard 8021q; do
+          for m in nf_tables nft_quota nft_limit sch_htb cls_flower sch_netem \
+                   sch_ingress ifb act_mirred cls_u32 dummy veth vrf wireguard 8021q; do
             if [ -d "/sys/module/$m" ] || grep -qE "(^|/)$m\.ko" $idx 2>/dev/null; then
               continue
             fi
@@ -104,8 +104,8 @@ jobs:
           # named here (ovpn needs 6.16, wireguard may be absent) still
           # skip.
           NLINK_TEST_STRICT_MODULES: >-
-            nf_tables,sch_htb,cls_flower,sch_netem,sch_ingress,ifb,
-            act_mirred,cls_u32,dummy,veth,8021q
+            nf_tables,nft_quota,nft_limit,sch_htb,cls_flower,sch_netem,
+            sch_ingress,ifb,act_mirred,cls_u32,dummy,veth,8021q
           # NLINK_TEST_STRICT_HOST_ROOT is deliberately NOT set. This
           # lane's containers are rootless: uid 0 here is the runner's
           # unprivileged user wearing a mapping, and six tests need root
