@@ -24,9 +24,9 @@ use std::time::Duration;
 use nlink::netlink::config::{
     BondMode, MacvlanMode, NetkitMode, NetworkConfig, QdiscBuilder, RouteBuilder, VlanProtocol,
 };
-use nlink::netlink::tc::NetemLossModel;
+use nlink::netlink::tc::{NetemLossModel, TbfConfig};
 use nlink::netlink::{Connection, Route};
-use nlink::{Bytes, Percent, Rate};
+use nlink::{Bytes, Percent, Rate, TcMessage};
 
 use crate::common::TestNamespace;
 
@@ -406,10 +406,11 @@ async fn routes_converge() -> nlink::Result<()> {
 // Qdiscs
 // ============================================================================
 
-/// TBF across a rate sweep, with and without peakrate and limit. The
-/// kernel keeps `buffer` and `mtu` as psched ticks and does not echo the
-/// byte-valued `TCA_TBF_BURST`/`PBURST`, so the burst that comes back is
-/// a tick round-trip of the declared one.
+/// TBF across a rate sweep, with and without peakrate and mtu, and with
+/// the limit edited in place. The kernel keeps `buffer` and `mtu` as
+/// psched ticks and does not echo the byte-valued `TCA_TBF_BURST`/
+/// `PBURST`, so the burst that comes back is a tick round-trip of the
+/// declared one.
 #[tokio::test]
 async fn tbf_rate_sweep_converges() -> nlink::Result<()> {
     require_root!();
@@ -429,14 +430,17 @@ async fn tbf_rate_sweep_converges() -> nlink::Result<()> {
         for burst in [Bytes::kib(32), Bytes::new(10_000)] {
             let tag = format!("{rate}-burst{}", burst.as_u32_saturating());
             cases.push(case(
-                format!("tbf-{tag}"),
-                vec![dummy_up("d0").qdisc("d0", |q| q.tbf(rate, burst))],
-            ));
-            cases.push(case(
                 format!("tbf-{tag}-limit"),
                 vec![dummy_up("d0").qdisc("d0", |q| {
                     q.tbf(rate, burst).limit_bytes(Bytes::kib(64))
                 })],
+            ));
+            cases.push(case(
+                format!("tbf-{tag}-limit-edited"),
+                vec![
+                    dummy_up("d0").qdisc("d0", |q| q.tbf(rate, burst).limit_bytes(Bytes::kib(64))),
+                    dummy_up("d0").qdisc("d0", |q| q.tbf(rate, burst).limit_bytes(Bytes::mib(1))),
+                ],
             ));
             cases.push(case(
                 format!("tbf-{tag}-limit-peakrate"),
@@ -571,4 +575,66 @@ async fn other_qdisc_kinds_converge() -> nlink::Result<()> {
 // ============================================================================
 // Things a second diff cannot show
 // ============================================================================
+
+async fn tbf_on(conn: &Connection<Route>, dev: &str) -> nlink::Result<Option<TcMessage>> {
+    let qdiscs = conn.get_qdiscs_by_name(dev).await?;
+    Ok(qdiscs.into_iter().find(|q| q.kind() == Some("tbf")))
+}
+
+/// A TBF needs a queue limit; without one it is refused, not installed.
+///
+/// `tbf_change` only creates the child bfifo when `qopt->limit > 0`; with
+/// a zero limit the child stays `noop_qdisc` and every packet is dropped.
+/// tc(8) refuses such a qdisc ("either \"limit\" or \"latency\" are
+/// required"). `TbfConfig::new()` defaults the limit to 0, so a TBF
+/// declared with only a rate and a burst used to install as a black hole —
+/// and the diff converged on it perfectly, so only traffic could show it.
+/// The half with a limit pins that a TBF does pass traffic.
+#[tokio::test]
+async fn tbf_without_a_limit_is_refused() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("veth", "sch_tbf");
+
+    let left = TestNamespace::new("nce-tbf-traf-l")?;
+    let right = TestNamespace::new("nce-tbf-traf-r")?;
+    left.connect_to(&right, "veth0", "veth1")?;
+    left.add_addr("veth0", "10.9.7.1/24")?;
+    left.link_up("veth0")?;
+    right.add_addr("veth1", "10.9.7.2/24")?;
+    right.link_up("veth1")?;
+    let conn = left.connection()?;
+
+    // Declared without a limit: refused, and nothing installed.
+    let unlimited = NetworkConfig::new().qdisc("veth0", |q| q.tbf(Rate::mbit(10), Bytes::kib(32)));
+    let err = unlimited
+        .apply(&conn)
+        .await
+        .expect_err("a TBF without a limit has no queue and drops every packet");
+    assert!(err.to_string().contains("limit"), "the error must say what is missing: {err}");
+    assert!(tbf_on(&conn, "veth0").await?.is_none(), "nothing may be installed");
+
+    // The imperative config refuses it the same way.
+    let imperative = TbfConfig::new().rate(Rate::mbit(10)).burst(Bytes::kib(32));
+    let err = conn
+        .add_qdisc("veth0", imperative)
+        .await
+        .expect_err("TbfConfig without a limit is refused too");
+    assert!(err.to_string().contains("limit"), "{err}");
+
+    // With a limit it installs, and passes traffic.
+    let limited = NetworkConfig::new().qdisc("veth0", |q| {
+        q.tbf(Rate::mbit(10), Bytes::kib(32)).limit_bytes(Bytes::kib(64))
+    });
+    let applied = limited.apply(&conn).await?;
+    assert!(applied.is_success(), "{applied:?}");
+    left.exec("ping", &["-c", "10", "-i", "0.05", "-W", "1", "10.9.7.2"])?;
+    let tbf = tbf_on(&conn, "veth0").await?.expect("the declared tbf is installed");
+    assert!(
+        tbf.packets() >= 10 && tbf.drops() == 0,
+        "a TBF with a limit must pass traffic: sent {}, dropped {}",
+        tbf.packets(),
+        tbf.drops()
+    );
+    Ok(())
+}
 

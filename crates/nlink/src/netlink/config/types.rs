@@ -1749,8 +1749,10 @@ pub enum DeclaredQdiscType {
         rate_bps: u64,
         /// Bucket size in bytes (`TbfConfig::burst`).
         burst_bytes: u32,
-        /// Queue limit in bytes (`TbfConfig::limit`); `None` leaves the
-        /// kernel default.
+        /// Queue limit in bytes (`TbfConfig::limit`). **Required** — there
+        /// is no kernel default: a TBF without one has no queue and drops
+        /// every packet, so applying a declaration that leaves this `None`
+        /// is an error. Set it with [`QdiscBuilder::limit_bytes`].
         limit_bytes: Option<u32>,
         /// Peak rate in **bytes** per second (`TbfConfig::peakrate`),
         /// the ceiling a burst may drain at. Requires `mtu` to be
@@ -2225,6 +2227,9 @@ impl QdiscBuilder {
     /// `100_000_000` for 100 Mbit/s got 800 Mbit/s, silently, the exact
     /// bug the `Rate` newtype exists to make a compile error.
     ///
+    /// Follow it with [`limit_bytes`](Self::limit_bytes): a TBF needs a
+    /// queue limit, and applying one without is an error.
+    ///
     /// ```
     /// use nlink::netlink::config::NetworkConfig;
     /// use nlink::{Bytes, Rate};
@@ -2245,8 +2250,10 @@ impl QdiscBuilder {
         self
     }
 
-    /// Set the TBF queue limit in bytes (`TbfConfig::limit`). No-op for
-    /// other kinds; netem's packet limit is [`QdiscBuilder::limit`].
+    /// Set the TBF queue limit in bytes (`TbfConfig::limit`). Required for
+    /// a TBF: the kernel gives one without a limit no queue, so it drops
+    /// every packet, and `apply` refuses it as tc(8) does. No-op for other
+    /// kinds; netem's packet limit is [`QdiscBuilder::limit`].
     pub fn limit_bytes(mut self, limit: crate::util::Bytes) -> Self {
         if let Some(DeclaredQdiscType::Tbf { limit_bytes, .. }) = &mut self.qdisc_type {
             *limit_bytes = Some(limit.as_u32_saturating());

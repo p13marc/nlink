@@ -1027,7 +1027,13 @@ fn qdisc_params_match(declared: &DeclaredQdiscType, existing: &TcMessage) -> boo
                 Some(peak) => psched::tbf_bucket_round_trip(peak, cfg.mtu),
                 None => psched::tc_calc_xmitsize(rate, psched::tc_calc_xmittime(rate, cfg.mtu)),
             };
-            live.rate == rate
+            // A declaration without a limit never matches, so `apply` gets
+            // to refuse it (`TbfConfig::write_options`) even where an older
+            // apply already installed it: the kernel's limit-0 TBF has no
+            // queue and drops everything, and an empty diff would leave that
+            // black hole looking converged.
+            cfg.limit.as_u32_saturating() != 0
+                && live.rate == rate
                 && live.burst == burst
                 && live.limit == cfg.limit.as_u32_saturating()
                 && live.peakrate == peak.unwrap_or(0)
@@ -1595,6 +1601,22 @@ mod tests {
             !qdisc_params_match(&tbf(65_536), &echo),
             "a burst that really differs must still be seen"
         );
+    }
+
+    /// A TBF declared without a limit is never "already there", even when
+    /// the kernel has the limit-0 TBF an older apply installed: that one
+    /// has no queue, and only `apply` can say so (it refuses the write).
+    #[test]
+    fn a_tbf_declared_without_a_limit_never_matches() {
+        let declared = DeclaredQdiscType::Tbf {
+            rate_bps: 1_250_000_000,
+            burst_bytes: 32_768,
+            limit_bytes: None,
+            peakrate_bps: None,
+            mtu: None,
+        };
+        let black_hole = live("tbf", Some(kernel_tbf_echo(1_250_000_000, 0, 409, 18)));
+        assert!(!qdisc_params_match(&declared, &black_hole));
     }
 
     #[test]
