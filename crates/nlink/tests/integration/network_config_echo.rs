@@ -494,6 +494,18 @@ async fn run_kind_case(case: &KindCase) -> Result<(), String> {
     let mut wrong = Vec::new();
     for (dev, path, want) in &case.expect {
         let link = ip_link_json(&ns, dev)?;
+        // An `ip` older than the link kind prints no `info_data` for it at
+        // all — bookworm's iproute2 6.1 and netkit (6.7), on the CI lane.
+        // That is this cross-check's blind spot, not the kernel's state: the
+        // apply-twice check above already read the link back through nlink.
+        // Say so, rather than fail on a value nobody could print.
+        if path.starts_with("linkinfo.info_data.") && link["linkinfo"]["info_data"].is_null() {
+            eprintln!(
+                "[{}] {dev}: this `ip` does not decode {} link data; {path} not cross-checked",
+                case.name, link["linkinfo"]["info_kind"],
+            );
+            continue;
+        }
         let have = at_path(&link, path);
         if have != want {
             wrong.push(format!("{dev} {path}: kernel has {have}, declared {want}"));
@@ -1152,14 +1164,21 @@ async fn netkit_kind_parameters() -> nlink::Result<()> {
     let l2 = nk(NetkitMode::L2, NetkitPolicy::Forward, NetkitPolicy::Forward);
     let applied = l2.apply(&conn).await?;
     assert!(applied.is_success(), "{applied:?}");
+    let before = ip_link_json(&ns, "nk0").map_err(nlink::Error::InvalidMessage)?;
     let err = nk(NetkitMode::L3, NetkitPolicy::Forward, NetkitPolicy::Forward)
         .apply(&conn)
         .await
         .expect_err("a netkit mode change cannot be applied");
     assert!(err.is_not_supported(), "{err}");
     assert!(err.to_string().contains("mode"), "the error must name the mode: {err}");
+    // Refused before anything changed: the same link, still L2.
     let link = ip_link_json(&ns, "nk0").map_err(nlink::Error::InvalidMessage)?;
-    assert_eq!(at_path(&link, "linkinfo.info_data.mode"), &json!("l2"));
+    assert_eq!(link["ifindex"], before["ifindex"], "the refused apply recreated nk0");
+    if link["linkinfo"]["info_data"].is_null() {
+        eprintln!("this `ip` does not decode netkit link data; the mode is not cross-checked");
+    } else {
+        assert_eq!(at_path(&link, "linkinfo.info_data.mode"), &json!("l2"));
+    }
     Ok(())
 }
 
