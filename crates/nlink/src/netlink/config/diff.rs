@@ -429,7 +429,7 @@ pub async fn compute_diff_with_options(
     // Diff links — pass the ifindex→name map so master changes
     // can be detected by resolving the kernel's master ifindex
     // back to a name (Plan 207b H2).
-    diff_links(config, &link_by_name, &ifindex_to_name, &mut diff);
+    let ipv6_flushed = diff_links(config, &link_by_name, &ifindex_to_name, &mut diff);
 
     // Plan 186 §3c — topo-sort `links_to_add` so a child whose
     // parent is also being created in this apply lands AFTER
@@ -442,7 +442,14 @@ pub async fn compute_diff_with_options(
     topo_sort_links_to_add(&mut diff.links_to_add);
 
     // Diff addresses
-    diff_addresses(config, &current_addresses, &ifindex_to_name, opts.purge, &mut diff);
+    diff_addresses(
+        config,
+        &current_addresses,
+        &ifindex_to_name,
+        &ipv6_flushed,
+        opts.purge,
+        &mut diff,
+    );
 
     // Diff routes
     diff_routes(config, &current_routes, &ifindex_to_name, opts, &mut diff);
@@ -453,44 +460,76 @@ pub async fn compute_diff_with_options(
     Ok(diff)
 }
 
-fn diff_links(
-    config: &NetworkConfig,
-    current: &HashMap<&str, &LinkMessage>,
-    ifindex_to_name: &HashMap<u32, &str>,
-    diff: &mut ConfigDiff,
-) {
-    // Note: desired_names would be used for purge mode to find links to remove
-    let _desired_names: HashSet<&str> = config.links.iter().map(|l| l.name.as_str()).collect();
-
-    // Every bond, live or about to be created — a port changing to or from
-    // one of these changes state as a side effect (see compute_link_changes).
-    let bonds: HashSet<&str> = current
+/// Every link of a kind, live or about to be created by `config`.
+fn links_of_kind<'a>(
+    current: &HashMap<&'a str, &LinkMessage>,
+    config: &'a NetworkConfig,
+    kind: &str,
+) -> HashSet<&'a str> {
+    current
         .iter()
-        .filter(|(_, l)| l.kind() == Some("bond"))
+        .filter(|(_, l)| l.kind() == Some(kind))
         .map(|(name, _)| *name)
         .chain(
             config
                 .links
                 .iter()
-                .filter(|l| matches!(l.link_type, DeclaredLinkType::Bond { .. }))
+                .filter(|l| l.link_type.kind() == Some(kind))
                 .map(|l| l.name.as_str()),
         )
-        .collect();
+        .collect()
+}
+
+/// Diff the links. Returns the links whose IPv6 addresses the apply will
+/// flush as a side effect of their link change (see `diff_addresses`).
+fn diff_links<'a>(
+    config: &'a NetworkConfig,
+    current: &HashMap<&'a str, &LinkMessage>,
+    ifindex_to_name: &HashMap<u32, &'a str>,
+    diff: &mut ConfigDiff,
+) -> HashSet<&'a str> {
+    // Note: desired_names would be used for purge mode to find links to remove
+    let _desired_names: HashSet<&str> = config.links.iter().map(|l| l.name.as_str()).collect();
+
+    // Every bond, live or about to be created — a port changing to or from
+    // one of these changes state as a side effect (see compute_link_changes).
+    let bonds = links_of_kind(current, config, "bond");
+    // Every VRF: an L3 master, whose ports addrconf flushes on the way in
+    // and out.
+    let vrfs = links_of_kind(current, config, "vrf");
 
     // Masters whose set of ports this apply changes.
     let mut port_set_changes: HashSet<&str> = HashSet::new();
+    let mut ipv6_flushed: HashSet<&str> = HashSet::new();
 
     for declared in &config.links {
         if let Some(existing) = current.get(declared.name.as_str()) {
             // Link exists, check if it needs modification
             let changes = compute_link_changes(declared, existing, ifindex_to_name, &bonds);
+            let existing_master = existing
+                .master()
+                .and_then(|idx| ifindex_to_name.get(&idx).copied());
             if changes.set_master.is_some() || changes.unset_master {
                 port_set_changes.extend(declared.master.as_deref());
-                port_set_changes.extend(
-                    existing
-                        .master()
-                        .and_then(|idx| ifindex_to_name.get(&idx).copied()),
-                );
+                port_set_changes.extend(existing_master);
+            }
+            // The link changes that make the kernel drop the link's IPv6
+            // addresses (`addrconf_ifdown()`, unless `keep_addr_on_down`):
+            // going down; joining or leaving an L3 master
+            // (`NETDEV_CHANGEUPPER`, then the VRF cycles the port); and
+            // joining or leaving a bond, which takes the port down (the
+            // bond closes the one it releases; `enslave` downs the one it
+            // adds).
+            let flushing_master = |m: Option<&str>| {
+                m.is_some_and(|m| bonds.contains(m) || vrfs.contains(m))
+            };
+            let master_changes = changes.set_master.is_some() || changes.unset_master;
+            if changes.set_down
+                || (master_changes
+                    && (flushing_master(existing_master)
+                        || flushing_master(changes.set_master.as_deref())))
+            {
+                ipv6_flushed.insert(declared.name.as_str());
             }
             if !changes.is_empty() {
                 diff.links_to_modify.push((declared.name.clone(), changes));
@@ -526,6 +565,8 @@ fn diff_links(
 
     // Note: We don't auto-remove links that aren't in the config
     // That requires explicit purge mode
+
+    ipv6_flushed
 }
 
 /// Plan 186 §3c — stable topological sort of `links_to_add`.
@@ -716,6 +757,7 @@ fn diff_addresses(
     config: &NetworkConfig,
     current: &[AddressMessage],
     ifindex_to_name: &HashMap<u32, &str>,
+    ipv6_flushed: &HashSet<&str>,
     purge: bool,
     diff: &mut ConfigDiff,
 ) {
@@ -736,10 +778,17 @@ fn diff_addresses(
         })
         .collect();
 
-    // Find addresses to add
+    // Find addresses to add. An IPv6 address on a link whose change in
+    // this apply makes the kernel drop it (set down, moved into or out of
+    // a VRF or a bond — see `diff_links`) is read here as present and is
+    // gone by the time the address step runs, so it is (re-)added too.
+    // Comparing only against the pre-apply dump left it missing until the
+    // next apply (#TBD). Should the address survive after all
+    // (`keep_addr_on_down`), the add finds it in place and is not counted.
     for declared in &config.addresses {
         let key = (declared.dev.as_str(), declared.address, declared.prefix_len);
-        if !current_set.contains(&key) {
+        let flushed = declared.address.is_ipv6() && ipv6_flushed.contains(declared.dev.as_str());
+        if flushed || !current_set.contains(&key) {
             diff.addresses_to_add.push(declared.clone());
         }
     }

@@ -310,6 +310,15 @@ pub async fn apply_diff(
                     ));
                     result.changes_made += 1;
                 }
+                // A re-add the diff scheduled because the link change was
+                // expected to flush it, where the kernel kept it after all
+                // (`keep_addr_on_down`): the state we wanted, not a change.
+                Err(e) if e.is_already_exists() => {
+                    result.summary.push(format!(
+                        "Address {}/{} on {} already present",
+                        addr.address, addr.prefix_len, addr.dev
+                    ));
+                }
                 Err(e) => {
                     if options.continue_on_error {
                         result.errors.push(ApplyError {
@@ -474,6 +483,15 @@ pub async fn apply_diff(
                         addr.address, addr.prefix_len, addr.dev
                     ));
                     result.changes_made += 1;
+                }
+                // Gone before we got to it — an IPv6 address the link
+                // change flushed, say. The state we wanted, as for a route
+                // (#335): not a change we made, and not an error.
+                Err(e) if e.is_not_found() || e.errno() == Some(libc::EADDRNOTAVAIL) => {
+                    result.summary.push(format!(
+                        "Address {}/{} on {} already absent",
+                        addr.address, addr.prefix_len, addr.dev
+                    ));
                 }
                 Err(e) => {
                     if options.continue_on_error {

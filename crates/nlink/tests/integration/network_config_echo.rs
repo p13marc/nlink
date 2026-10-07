@@ -427,7 +427,7 @@ async fn link_modifiers_converge() -> nlink::Result<()> {
 #[tokio::test]
 async fn addresses_converge() -> nlink::Result<()> {
     require_root!();
-    nlink::require_modules!("dummy", "vrf");
+    nlink::require_modules!("dummy", "vrf", "bonding");
 
     let addressed = |cfg: NetworkConfig| {
         cfg.address("d0", "10.2.0.1/24")
@@ -452,6 +452,57 @@ async fn addresses_converge() -> nlink::Result<()> {
                     .unwrap(),
             ],
         ),
+        // Setting a link down makes the kernel drop its IPv6 addresses
+        // (unless `keep_addr_on_down`); the diff saw them present before
+        // the link change ran.
+        case(
+            "existing-link-set-down",
+            vec![
+                addressed(dummy_up("d0")),
+                addressed(NetworkConfig::new().link("d0", |l| l.dummy().down())),
+            ],
+        ),
+        // Enslaving to an L3 master flushes the port's IPv6 addresses
+        // (addrconf's NETDEV_CHANGEUPPER handler).
+        case(
+            "existing-link-moved-into-vrf",
+            vec![
+                addressed(dummy_up("d0")),
+                addressed(
+                    NetworkConfig::new()
+                        .link("vrf0", |l| l.vrf(10).up())
+                        .link("d0", |l| l.dummy().master("vrf0").up()),
+                ),
+            ],
+        ),
+        // …and so does leaving one.
+        case(
+            "existing-link-moved-out-of-vrf",
+            vec![
+                addressed(
+                    NetworkConfig::new()
+                        .link("vrf0", |l| l.vrf(10).up())
+                        .link("d0", |l| l.dummy().master("vrf0").up()),
+                ),
+                addressed(
+                    NetworkConfig::new()
+                        .link("vrf0", |l| l.vrf(10).up())
+                        .link("d0", |l| l.dummy().up()),
+                ),
+            ],
+        ),
+        // A bond takes its port down on the way in and out.
+        case(
+            "existing-link-moved-into-bond",
+            vec![
+                addressed(dummy_up("d0")),
+                addressed(
+                    NetworkConfig::new()
+                        .link("bond0", |l| l.bond().up())
+                        .link("d0", |l| l.dummy().master("bond0").up()),
+                ),
+            ],
+        ),
         case(
             "new-link-in-vrf",
             vec![addressed(
@@ -462,6 +513,39 @@ async fn addresses_converge() -> nlink::Result<()> {
         ),
     ];
     assert_converges("nce-addrs", cases).await
+}
+
+/// A purging apply that takes a link down: the kernel flushes the link's
+/// IPv6 addresses during the link step, including the undeclared one the
+/// purge is about to remove. That removal finds it gone, which is the
+/// state wanted, not an error.
+#[tokio::test]
+async fn purge_tolerates_an_address_the_link_change_flushed() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy");
+
+    let ns = TestNamespace::new("nce-addr-purge")?;
+    let conn = ns.connection()?;
+    let first = dummy_up("d0")
+        .address("d0", "fd00:2::1/64")?
+        .address("d0", "fd00:2::2/64")?
+        .apply(&conn)
+        .await?;
+    assert!(first.is_success(), "{first:?}");
+
+    let cfg = NetworkConfig::new()
+        .link("d0", |l| l.dummy().down())
+        .address("d0", "fd00:2::1/64")?;
+    let purging = ApplyOptions::default().with_purge(true);
+    let applied = cfg.apply_with_options(&conn, purging.clone()).await?;
+    assert!(applied.is_success(), "{applied:?}");
+    let diff = cfg
+        .diff_with_options(&conn, DiffOptions::default().purge(true))
+        .await?;
+    assert!(diff.is_empty(), "{diff}");
+    let again = cfg.apply_with_options(&conn, purging).await?;
+    assert_eq!(again.changes_made, 0, "{again:?}");
+    Ok(())
 }
 
 // ============================================================================
