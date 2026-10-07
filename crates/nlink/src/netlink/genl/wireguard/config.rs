@@ -738,6 +738,30 @@ fn parse_fwmark(s: &str) -> Result<u32> {
     parsed.map_err(|_| Error::InvalidMessage(format!("wireguard config: invalid FwMark `{s}`")))
 }
 
+/// Allowed IPs as the kernel's trie holds them: each masked to its prefix
+/// length, each prefix once, in a canonical order.
+fn allowed_ip_set(ips: &[AllowedIp]) -> std::collections::BTreeSet<(IpAddr, u8)> {
+    ips.iter()
+        .map(|ip| {
+            let addr = match ip.addr {
+                IpAddr::V4(v4) => {
+                    let mask = u32::MAX
+                        .checked_shl(32 - u32::from(ip.cidr.min(32)))
+                        .unwrap_or(0);
+                    IpAddr::V4(std::net::Ipv4Addr::from(u32::from(v4) & mask))
+                }
+                IpAddr::V6(v6) => {
+                    let mask = u128::MAX
+                        .checked_shl(128 - u32::from(ip.cidr.min(128)))
+                        .unwrap_or(0);
+                    IpAddr::V6(std::net::Ipv6Addr::from(u128::from(v6) & mask))
+                }
+            };
+            (addr, ip.cidr)
+        })
+        .collect()
+}
+
 /// A private key as the kernel keeps it: X25519-clamped.
 ///
 /// `wg_noise_set_static_identity_private_key()` copies the key and runs
@@ -954,14 +978,14 @@ impl DeclaredWgPeer {
                 changes.persistent_keepalive_set = true;
             }
         }
-        // allowed_ips — compare as ordered sets. The kernel
-        // returns them in insertion order; we compare as
-        // multisets via sort+eq to avoid spurious churn.
-        let mut want = self.allowed_ips.clone();
-        let mut have = current.allowed_ips.clone();
-        want.sort_by_key(|a| (a.addr, a.cidr));
-        have.sort_by_key(|a| (a.addr, a.cidr));
-        if want != have {
+        // allowed_ips — compare as sets of what the kernel stores. The
+        // kernel returns them in its own order, so sort; and its trie
+        // keeps each prefix once, masked to its length
+        // (`copy_and_assign_cidr()` in allowedips.c), so `10.0.0.5/24`
+        // dumps as `10.0.0.0/24` and a prefix declared twice dumps once.
+        // Comparing the declaration as written rewrote such a peer on
+        // every apply (#TBD).
+        if allowed_ip_set(&self.allowed_ips) != allowed_ip_set(&current.allowed_ips) {
             changes.allowed_ips_set = true;
         }
 
@@ -1396,6 +1420,38 @@ mod tests {
         assert_eq!(peer.public_key, key(0xbb));
         assert_eq!(peer.persistent_keepalive, Some(Duration::from_secs(25)));
         assert_eq!(peer.allowed_ips.len(), 1);
+    }
+
+    /// Host bits and duplicates do not survive the kernel's trie, so they
+    /// must not count as a difference; a different prefix still does.
+    #[test]
+    fn diff_allowed_ips_compare_masked_and_deduplicated() {
+        let declared = DeclaredWgDeviceBuilder::new("wg0".into())
+            .peer(key(0xbb), |p| {
+                p.allowed_ip(AllowedIp::v4(Ipv4Addr::new(10, 0, 0, 5), 24))
+                    .allowed_ip(AllowedIp::v4(Ipv4Addr::new(10, 0, 0, 0), 24))
+                    .allowed_ip(AllowedIp::v6("fd00::7".parse().unwrap(), 64))
+            })
+            .build();
+        let mut curr = empty_device("wg0");
+        let mut peer = WgPeer::new(key(0xbb));
+        peer.allowed_ips = vec![
+            AllowedIp::v6("fd00::".parse().unwrap(), 64),
+            AllowedIp::v4(Ipv4Addr::new(10, 0, 0, 0), 24),
+        ];
+        curr.peers.push(peer.clone());
+        let allowed_changed = |curr: &WgDevice| {
+            declared
+                .diff_against(curr)
+                .peers_to_modify
+                .iter()
+                .any(|(_, pc)| pc.allowed_ips_set)
+        };
+        assert!(!allowed_changed(&curr));
+
+        peer.allowed_ips[1] = AllowedIp::v4(Ipv4Addr::new(10, 0, 0, 0), 25);
+        curr.peers[0] = peer;
+        assert!(allowed_changed(&curr), "a different prefix length is a change");
     }
 
     /// A declared PSK is compared with the dumped one: equal is no change,

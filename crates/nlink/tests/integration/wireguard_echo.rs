@@ -179,6 +179,26 @@ async fn every_wireguard_shape_converges() -> nlink::Result<()> {
                 })
             })],
         ),
+        // The allowed-IPs trie keeps the prefix, not the host bits.
+        case(
+            "allowed-ips-with-host-bits",
+            vec![WireguardConfig::new().device("wg0", |d| {
+                d.peer(peer_key(0xb4), |p| {
+                    p.allowed_ip(AllowedIp::v4(Ipv4Addr::new(10, 0, 2, 5), 24))
+                        .allowed_ip(AllowedIp::v6("fd00:2::5".parse().unwrap(), 64))
+                })
+            })],
+        ),
+        // One trie node, however many times it is declared.
+        case(
+            "allowed-ips-duplicated",
+            vec![WireguardConfig::new().device("wg0", |d| {
+                d.peer(peer_key(0xb5), |p| {
+                    p.allowed_ip(AllowedIp::v4(Ipv4Addr::new(10, 0, 3, 0), 24))
+                        .allowed_ip(AllowedIp::v4(Ipv4Addr::new(10, 0, 3, 0), 24))
+                })
+            })],
+        ),
         case(
             "multiple-peers",
             vec![WireguardConfig::new().device("wg0", |d| {
@@ -220,3 +240,30 @@ async fn every_wireguard_shape_converges() -> nlink::Result<()> {
     assert_converges(cases).await
 }
 
+/// A `wg-quick` profile as people write them: an unclamped private key
+/// (whatever `wg genkey` printed is already clamped, but a hand-made or
+/// derived one need not be), a preshared key, host bits in AllowedIPs.
+#[tokio::test]
+async fn wg_quick_profile_converges() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_host_root!();
+    nlink::require_modules!("wireguard");
+
+    // 0xaa * 32, 0xbb * 32 and 0x11 * 32 in base64.
+    let profile = "\
+[Interface]
+PrivateKey = qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqo=
+ListenPort = 51823
+FwMark = 0x10
+Address = 10.200.0.1/24
+
+[Peer]
+PublicKey = u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7s=
+PresharedKey = ERERERERERERERERERERERERERERERERERERERERERE=
+Endpoint = 198.51.100.7:51820
+AllowedIPs = 10.200.0.2/32, 10.201.0.9/16, fd00:200::1/64
+PersistentKeepalive = 15
+";
+    let cfg = WireguardConfig::from_wg_quick("wg0", profile)?;
+    assert_converges(vec![case("wg-quick", vec![cfg])]).await
+}
