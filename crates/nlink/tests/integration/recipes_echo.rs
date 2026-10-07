@@ -193,6 +193,24 @@ async fn per_host_limiter_shapes_converge() -> nlink::Result<()> {
             vec![Recipe::Host(ph().limit_port_range(8000, 8100, Rate::mbit(5)))],
         ),
         case(
+            "port-range-narrow",
+            vec![Recipe::Host(ph().limit_port_range(8000, 8005, Rate::mbit(5)))],
+        ),
+        // A one-port range is the port.
+        case(
+            "port-range-single",
+            vec![Recipe::Host(ph().limit_port_range(8000, 8000, Rate::mbit(5)))],
+        ),
+        case(
+            "port-range-edited",
+            vec![
+                Recipe::Host(ph().limit_port_range(8000, 8100, Rate::mbit(5))),
+                Recipe::Host(ph().limit_port_range(9000, 9100, Rate::mbit(5))),
+                Recipe::Host(ph().limit_port(9000, Rate::mbit(5))),
+                Recipe::Host(ph().limit_port_range(9000, 9100, Rate::mbit(5))),
+            ],
+        ),
+        case(
             "src-ip-v4",
             vec![Recipe::Host(ph().limit_src_ip(v4(10, 0, 0, 2), Rate::mbit(5)))],
         ),
@@ -252,6 +270,96 @@ async fn per_host_limiter_shapes_converge() -> nlink::Result<()> {
         ),
     ];
     assert_converges("rce-ph", cases).await
+}
+
+/// Send `count` UDP datagrams from inside `ns` to each of `targets`.
+fn send_udp(ns: &TestNamespace, targets: &[std::net::SocketAddr], count: usize) {
+    let name = ns.name().to_string();
+    let targets = targets.to_vec();
+    std::thread::spawn(move || {
+        let _ns = nlink::netlink::namespace::enter(&name).expect("enter test netns");
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind");
+        for target in &targets {
+            for _ in 0..count {
+                socket.send_to(b"nlink", target).expect("send");
+            }
+        }
+    })
+    .join()
+    .expect("UDP thread panicked");
+}
+
+/// A `PerHostLimiter` port range classifies the ports in the range, and
+/// only those. `reconcile()` installed no filter for a range at all and
+/// `apply()` none for a range wider than 10 ports — and for a narrower
+/// one, TCP filters only — so the rule's class existed and nothing was
+/// ever classified into it (#416).
+///
+/// The traffic leaves through a dummy device, so every datagram is
+/// classified by the HTB root and counted on the class it lands in.
+#[tokio::test]
+async fn per_host_port_range_classifies_only_the_range() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "sch_htb", "sch_fq_codel", "cls_flower");
+
+    let peer = std::net::Ipv4Addr::new(10, 41, 0, 2);
+    let at = |port: u16| std::net::SocketAddr::from((peer, port));
+    const PER_PORT: usize = 5;
+
+    let mut failures = Vec::new();
+    for (start, end) in [(8000u16, 8100u16), (8000, 8005)] {
+        let inside = [start, start + 1, (start + end) / 2, end];
+        let outside = [start - 1, end + 1, 9000];
+        for verb in ["apply", "reconcile"] {
+            let case = format!("{verb} {start}-{end}");
+            let ns = TestNamespace::new("rce-ph-range")?;
+            let conn = ns.connection()?;
+            conn.add_link(nlink::netlink::link::DummyLink::new("d0"))
+                .await?;
+            conn.set_link_up("d0").await?;
+            ns.add_addr("d0", "10.41.0.1/24")?;
+
+            let limiter = PerHostLimiter::new("d0", Rate::mbit(100))
+                .limit_port_range(start, end, Rate::mbit(50));
+            match verb {
+                "apply" => limiter.apply(&conn).await?,
+                _ => {
+                    let _ = limiter.reconcile(&conn).await?;
+                }
+            }
+            // The two verbs build the same tree: a reconcile after
+            // either one changes nothing.
+            let again = limiter.reconcile(&conn).await?;
+            if !again.is_noop() {
+                failures.push(format!(
+                    "[{case}] reconcile after {verb} was not a no-op: {again:?}"
+                ));
+            }
+
+            let targets: Vec<_> = inside.iter().chain(&outside).map(|p| at(*p)).collect();
+            send_udp(&ns, &targets, PER_PORT);
+
+            let classes = conn.get_classes_by_name("d0").await?;
+            let count = |minor: u16| {
+                classes
+                    .iter()
+                    .find(|c| c.handle() == nlink::TcHandle::new(1, minor))
+                    .map(|c| c.packets())
+            };
+            let rule = count(2);
+            let default = count(0xffff);
+            let want_rule = (inside.len() * PER_PORT) as u64;
+            let want_default = (outside.len() * PER_PORT) as u64;
+            if rule != Some(want_rule) || default != Some(want_default) {
+                failures.push(format!(
+                    "[{case}] rule class 1:2 counted {rule:?} (want {want_rule}), default class \
+                     counted {default:?} (want {want_default})"
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
 }
 
 // ============================================================================

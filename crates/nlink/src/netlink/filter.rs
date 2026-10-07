@@ -879,6 +879,10 @@ pub struct FlowerFilter {
     src_port: Option<u16>,
     /// Destination port.
     dst_port: Option<u16>,
+    /// Source port range, inclusive (min, max).
+    src_port_range: Option<(u16, u16)>,
+    /// Destination port range, inclusive (min, max).
+    dst_port_range: Option<(u16, u16)>,
     /// Source MAC address.
     src_mac: Option<[u8; 6]>,
     /// Destination MAC address.
@@ -1016,15 +1020,63 @@ impl FlowerFilter {
         self
     }
 
-    /// Match source port.
+    /// Match source port. Replaces a [`src_port_range`](Self::src_port_range).
     pub fn src_port(mut self, port: u16) -> Self {
         self.src_port = Some(port);
+        self.src_port_range = None;
         self
     }
 
-    /// Match destination port.
+    /// Match destination port. Replaces a
+    /// [`dst_port_range`](Self::dst_port_range).
     pub fn dst_port(mut self, port: u16) -> Self {
         self.dst_port = Some(port);
+        self.dst_port_range = None;
+        self
+    }
+
+    /// Match a source port in `min..=max` (`TCA_FLOWER_KEY_PORT_SRC_MIN`
+    /// / `_MAX`, kernel 5.2+; tc(8) `src_port min-max`). Replaces a
+    /// [`src_port`](Self::src_port).
+    ///
+    /// The kernel needs `min < max` — a single port is
+    /// [`src_port`](Self::src_port) — and reads a range only for TCP, UDP
+    /// or SCTP, so the filter must also set
+    /// [`ip_proto_tcp`](Self::ip_proto_tcp) / [`ip_proto_udp`](Self::ip_proto_udp)
+    /// / `ip_proto(132)` and an ethertype. Installing one that does not is
+    /// an error rather than the match-all the kernel would make of it.
+    pub fn src_port_range(mut self, min: u16, max: u16) -> Self {
+        self.src_port_range = Some((min, max));
+        self.src_port = None;
+        self
+    }
+
+    /// Match a destination port in `min..=max`
+    /// (`TCA_FLOWER_KEY_PORT_DST_MIN` / `_MAX`, kernel 5.2+; tc(8)
+    /// `dst_port min-max`). Replaces a [`dst_port`](Self::dst_port). The
+    /// same rules as [`src_port_range`](Self::src_port_range) apply.
+    ///
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// use nlink::netlink::filter::FlowerFilter;
+    /// use nlink::TcHandle;
+    ///
+    /// // UDP to ports 8000-8100 into class 1:2.
+    /// let filter = FlowerFilter::new()
+    ///     .classid(TcHandle::new(1, 2))
+    ///     .ipv4()
+    ///     .ip_proto_udp()
+    ///     .dst_port_range(8000, 8100)
+    ///     .build();
+    /// conn.add_filter_full("eth0", TcHandle::major_only(1), None, 0x0800, 1, filter)
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn dst_port_range(mut self, min: u16, max: u16) -> Self {
+        self.dst_port_range = Some((min, max));
+        self.dst_port = None;
         self
     }
 
@@ -1115,7 +1167,9 @@ impl FlowerFilter {
     /// - `src_ip <addr[/prefix]>` / `dst_ip <addr[/prefix]>` — IPv4 or
     ///   IPv6 (auto-detected via `:` presence). Bare address means
     ///   `/32` (v4) or `/128` (v6). Sets `eth_type` if not already set.
-    /// - `src_port <port>` / `dst_port <port>`
+    /// - `src_port <port|min-max>` / `dst_port <port|min-max>` — a range
+    ///   (`8000-8100`, inclusive, `min` below `max`) is a port-range key,
+    ///   as in tc(8)
     /// - `src_mac <mac>` / `dst_mac <mac>` — `xx:xx:xx:xx:xx:xx`
     /// - `eth_type <name|hex>` — `ip` / `ipv4` / `ipv6` / `arp` / `vlan`
     ///   / `802.1q` / `802.1ad`, or hex (`0x800`)
@@ -1175,23 +1229,17 @@ impl FlowerFilter {
                     i += 2;
                 }
                 "src_port" => {
-                    let s = need_value()?;
-                    let port: u16 = s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!(
-                            "flower: invalid src_port `{s}` (expected 0-65535)"
-                        ))
-                    })?;
-                    f = f.src_port(port);
+                    f = match parse_flower_port(key, need_value()?)? {
+                        FlowerPort::One(port) => f.src_port(port),
+                        FlowerPort::Range(min, max) => f.src_port_range(min, max),
+                    };
                     i += 2;
                 }
                 "dst_port" => {
-                    let s = need_value()?;
-                    let port: u16 = s.parse().map_err(|_| {
-                        Error::InvalidMessage(format!(
-                            "flower: invalid dst_port `{s}` (expected 0-65535)"
-                        ))
-                    })?;
-                    f = f.dst_port(port);
+                    f = match parse_flower_port(key, need_value()?)? {
+                        FlowerPort::One(port) => f.dst_port(port),
+                        FlowerPort::Range(min, max) => f.dst_port_range(min, max),
+                    };
                     i += 2;
                 }
                 "src_ip" => {
@@ -1293,6 +1341,35 @@ impl FlowerFilter {
         }
         Ok(f)
     }
+}
+
+/// A flower `src_port` / `dst_port` value: a port, or tc(8)'s `min-max`.
+enum FlowerPort {
+    One(u16),
+    Range(u16, u16),
+}
+
+fn parse_flower_port(key: &str, s: &str) -> crate::Result<FlowerPort> {
+    use crate::Error;
+    let port = |p: &str| {
+        p.parse::<u16>().map_err(|_| {
+            Error::InvalidMessage(format!(
+                "flower: invalid {key} `{s}` (expected 0-65535 or min-max)"
+            ))
+        })
+    };
+    let Some((min, max)) = s.split_once('-') else {
+        return Ok(FlowerPort::One(port(s)?));
+    };
+    let (min, max) = (port(min)?, port(max)?);
+    // `fl_set_key_port_range` refuses `max <= min`; so does tc(8).
+    if min >= max {
+        return Err(Error::InvalidMessage(format!(
+            "flower: invalid {key} range `{s}` (min must be below max; a single port is \
+             `{key} {min}`)"
+        )));
+    }
+    Ok(FlowerPort::Range(min, max))
 }
 
 fn parse_flower_ip_proto(s: &str) -> crate::Result<u8> {
@@ -1536,6 +1613,8 @@ impl FilterConfig for FlowerFilter {
                 self.ip_proto.map(|_| "ip_proto"),
                 self.src_port.map(|_| "src_port"),
                 self.dst_port.map(|_| "dst_port"),
+                self.src_port_range.map(|_| "src_port range"),
+                self.dst_port_range.map(|_| "dst_port range"),
                 self.ip_tos.map(|_| "ip_tos"),
                 self.ip_ttl.map(|_| "ip_ttl"),
                 self.tcp_flags.map(|_| "tcp_flags"),
@@ -1550,6 +1629,30 @@ impl FilterConfig for FlowerFilter {
                      install this as a match-all filter. Call .ipv4() or .ipv6() \
                      (an address setter such as .dst_ipv4() implies one)",
                     unusable.join(", ")
+                )));
+            }
+        }
+
+        // Port ranges, checked the way `fl_set_key_port_range` would — but
+        // that is only reached for TCP, UDP and SCTP; for any other
+        // protocol the kernel ACKs and drops the range, which again leaves
+        // a match-all.
+        for (what, range) in [
+            ("src_port", self.src_port_range),
+            ("dst_port", self.dst_port_range),
+        ] {
+            let Some((min, max)) = range else { continue };
+            if min >= max {
+                return Err(Error::InvalidMessage(format!(
+                    "flower: {what} range {min}-{max} is invalid: the kernel needs min below \
+                     max (a single port is .{what}({min}))"
+                )));
+            }
+            let l4 = [flower::IPPROTO_TCP, flower::IPPROTO_UDP, flower::IPPROTO_SCTP];
+            if !self.ip_proto.is_some_and(|p| l4.contains(&p)) {
+                return Err(Error::InvalidMessage(format!(
+                    "flower: a {what} range needs ip_proto tcp, udp or sctp — cls_flower \
+                     reads port ranges for those only, and would install this as a match-all"
                 )));
             }
         }
@@ -1617,6 +1720,16 @@ impl FilterConfig for FlowerFilter {
             } else if self.ip_proto == Some(flower::IPPROTO_UDP) {
                 builder.append_attr(flower::TCA_FLOWER_KEY_UDP_DST, &port.to_be_bytes());
             }
+        }
+
+        // Port ranges: protocol-independent attributes, network order.
+        if let Some((min, max)) = self.src_port_range {
+            builder.append_attr(flower::TCA_FLOWER_KEY_PORT_SRC_MIN, &min.to_be_bytes());
+            builder.append_attr(flower::TCA_FLOWER_KEY_PORT_SRC_MAX, &max.to_be_bytes());
+        }
+        if let Some((min, max)) = self.dst_port_range {
+            builder.append_attr(flower::TCA_FLOWER_KEY_PORT_DST_MIN, &min.to_be_bytes());
+            builder.append_attr(flower::TCA_FLOWER_KEY_PORT_DST_MAX, &max.to_be_bytes());
         }
 
         // Add MAC addresses
@@ -5179,6 +5292,26 @@ mod tests {
         assert_eq!(f.dst_port, Some(443));
     }
 
+    /// tc(8)'s `min-max` is a port range (#416).
+    #[test]
+    fn flower_parse_params_port_ranges() {
+        let f = FlowerFilter::parse_params(&["dst_port", "8000-8100"]).unwrap();
+        assert_eq!(f.dst_port_range, Some((8000, 8100)));
+        assert_eq!(f.dst_port, None);
+        let f = FlowerFilter::parse_params(&["src_port", "1-2"]).unwrap();
+        assert_eq!(f.src_port_range, Some((1, 2)));
+
+        for bad in ["8100-8000", "8000-8000", "8000-", "-8000", "8000-x", "1-70000"] {
+            let crate::Error::InvalidMessage(err) =
+                FlowerFilter::parse_params(&["dst_port", bad]).expect_err(bad)
+            else {
+                panic!("{bad}: not an InvalidMessage");
+            };
+            assert!(err.starts_with("flower: "), "{bad}: {err}");
+            assert!(err.contains(bad), "{bad}: the error must quote the value: {err}");
+        }
+    }
+
     #[test]
     fn flower_parse_params_src_ip_v4_with_prefix() {
         let f = FlowerFilter::parse_params(&["src_ip", "10.0.0.0/8"]).unwrap();
@@ -6357,5 +6490,58 @@ fn flower_with_no_l4_keys_needs_no_ethertype() {
     // A classid-only flower filter is a legitimate match-all; the guard
     // must not turn that into an error.
     assert!(flower_option_ids(&FlowerFilter::new().classid(TcHandle::new(1, 2)).build()).is_ok());
+}
+
+/// A port range is written as the protocol-independent MIN/MAX keys,
+/// in network order, and replaces an exact port (#416).
+#[test]
+fn flower_port_ranges_are_written_as_min_max_keys() {
+    let f = FlowerFilter::new()
+        .ipv4()
+        .ip_proto_udp()
+        .dst_port(53)
+        .dst_port_range(8000, 8100)
+        .build();
+    let mut builder = MessageBuilder::new(0, 0);
+    let start = builder.len();
+    f.write_options(&mut builder).expect("accepted");
+    let blob = builder.as_bytes()[start..].to_vec();
+    let attrs: Vec<(u16, Vec<u8>)> = crate::netlink::attr::AttrIter::new(&blob)
+        .map(|(t, p)| (t, p.to_vec()))
+        .collect();
+    assert!(attrs.contains(&(flower::TCA_FLOWER_KEY_PORT_DST_MIN, 8000u16.to_be_bytes().to_vec())));
+    assert!(attrs.contains(&(flower::TCA_FLOWER_KEY_PORT_DST_MAX, 8100u16.to_be_bytes().to_vec())));
+    assert!(
+        !attrs.iter().any(|(t, _)| *t == flower::TCA_FLOWER_KEY_UDP_DST),
+        "the range replaced the exact port"
+    );
+
+    let ids = flower_option_ids(&FlowerFilter::new().ipv4().ip_proto_tcp().src_port_range(1, 2))
+        .expect("accepted");
+    assert!(ids.contains(&flower::TCA_FLOWER_KEY_PORT_SRC_MIN));
+    assert!(ids.contains(&flower::TCA_FLOWER_KEY_PORT_SRC_MAX));
+}
+
+/// What `fl_set_key_port_range` would refuse, and what it would silently
+/// turn into a match-all, is refused here.
+#[test]
+fn flower_unusable_port_ranges_are_refused() {
+    let cases = [
+        (FlowerFilter::new().ipv4().ip_proto_udp().dst_port_range(80, 80), "min below max"),
+        (FlowerFilter::new().ipv4().ip_proto_udp().dst_port_range(90, 80), "min below max"),
+        (FlowerFilter::new().ipv4().dst_port_range(80, 90), "needs ip_proto"),
+        (FlowerFilter::new().ipv4().ip_proto_icmp().src_port_range(80, 90), "needs ip_proto"),
+        (FlowerFilter::new().ip_proto_udp().dst_port_range(80, 90), "needs an ethertype"),
+    ];
+    for (f, why) in cases {
+        let crate::Error::InvalidMessage(err) = flower_option_ids(&f).expect_err(why) else {
+            panic!("{why}: not an InvalidMessage");
+        };
+        assert!(err.starts_with("flower: ") && err.contains(why), "{why}: {err}");
+    }
+    assert!(
+        flower_option_ids(&FlowerFilter::new().ipv6().ip_proto(132).dst_port_range(80, 90)).is_ok(),
+        "SCTP takes a range"
+    );
 }
 }

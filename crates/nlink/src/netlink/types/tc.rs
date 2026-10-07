@@ -1922,6 +1922,13 @@ pub mod filter {
         pub const TCA_FLOWER_KEY_ENC_IP_TOS_MASK: u16 = 81;
         pub const TCA_FLOWER_KEY_ENC_IP_TTL: u16 = 82;
         pub const TCA_FLOWER_KEY_ENC_IP_TTL_MASK: u16 = 83;
+        /// Port ranges (kernel 5.2+), big-endian, each pair min/max.
+        /// `fl_set_key_port_range` reads them only when the IP protocol
+        /// is TCP, UDP or SCTP, needs both ends, and refuses `min >= max`.
+        pub const TCA_FLOWER_KEY_PORT_SRC_MIN: u16 = 87;
+        pub const TCA_FLOWER_KEY_PORT_SRC_MAX: u16 = 88;
+        pub const TCA_FLOWER_KEY_PORT_DST_MIN: u16 = 89;
+        pub const TCA_FLOWER_KEY_PORT_DST_MAX: u16 = 90;
         pub const TCA_FLOWER_KEY_CT_STATE: u16 = 91;
         pub const TCA_FLOWER_KEY_CT_STATE_MASK: u16 = 92;
         pub const TCA_FLOWER_KEY_CT_ZONE: u16 = 93;

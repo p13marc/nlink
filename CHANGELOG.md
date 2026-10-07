@@ -466,6 +466,22 @@ All notable changes to this project will be documented in this file.
   compares them — in place within a family, recreating the link across
   families, which `vxlan_nl2conf` refuses on a live link.
 
+- **`PerHostLimiter::limit_port_range` classified nothing (#416).**
+  `reconcile()` installed no filter for a port range, and `apply()` none for
+  a range wider than 10 ports — for a narrower one, a TCP filter per port
+  with its errors discarded, and nothing for UDP. The rule's class existed
+  and no traffic reached it. `FlowerFilter` gained `dst_port_range` /
+  `src_port_range` (`TCA_FLOWER_KEY_PORT_{DST,SRC}_{MIN,MAX}`, kernel
+  5.2+), and its `parse_params` takes tc(8)'s `dst_port 8000-8100`. A range
+  without TCP/UDP/SCTP as `ip_proto`, which cls_flower would install as a
+  match-all, or with `min >= max`, which it refuses, is an error. Both
+  verbs now build their filters from one list, so a range gets an IPv4 TCP
+  and an IPv4 UDP filter at the two priorities `limit_port` uses (IPv6 is
+  not matched, as with `limit_port`); a one-port range is that port, and
+  `start > end` fails before anything changes. Tested on traffic: UDP to
+  ports inside the range lands in the rule's class, the rest in the default
+  class.
+
 ## [0.29.0] - 2026-10-01
 
 > Upgrading from 0.28.x? See

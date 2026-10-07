@@ -901,7 +901,7 @@ pub enum HostMatch {
     Subnet(IpAddr, u8),
     /// Match a destination port.
     Port(u16),
-    /// Match a port range.
+    /// Match a destination port range, inclusive (IPv4 TCP and UDP).
     PortRange(u16, u16),
     /// Match source IP address.
     SrcIp(IpAddr),
@@ -988,7 +988,13 @@ impl PerHostLimiter {
         self
     }
 
-    /// Add a rate limit for a port range.
+    /// Add a rate limit for IPv4 TCP and UDP traffic to a destination port
+    /// in `start..=end`, the way [`limit_port`](Self::limit_port) does for
+    /// one port.
+    ///
+    /// Classified by two flower port-range filters (kernel 5.2+). A
+    /// one-port range (`start == end`) is that port; `start > end` makes
+    /// `apply()` and `reconcile()` fail before changing anything.
     pub fn limit_port_range(mut self, start: u16, end: u16, rate: crate::util::Rate) -> Self {
         self.rules.push(HostRule {
             match_: HostMatch::PortRange(start, end),
@@ -1007,6 +1013,9 @@ impl PerHostLimiter {
     /// Apply the per-host rate limits.
     #[tracing::instrument(level = "info", skip_all, fields(dev = %self.dev, rules = self.rules.len()))]
     pub async fn apply(&self, conn: &Connection<Route>) -> Result<()> {
+        // An unusable rule fails before the live tree is torn down.
+        self.check_rules()?;
+
         // Remove existing root qdisc
         let _ = conn.del_qdisc(&self.dev, TcHandle::ROOT).await;
 
@@ -1131,6 +1140,7 @@ impl PerHostLimiter {
         conn: &Connection<Route>,
         opts: ReconcileOptions,
     ) -> Result<ReconcileReport> {
+        self.check_rules()?;
         // Resolve interface for typed-by-index calls.
         let link = conn
             .get_link_by_name(&self.dev)
@@ -1480,120 +1490,12 @@ impl PerHostLimiter {
         rule_modified: &mut bool,
         report: &mut ReconcileReport,
     ) -> Result<()> {
-        use super::filter::FlowerFilter;
-
-        const ETH_P_IP: u16 = 0x0800;
-        const ETH_P_IPV6: u16 = 0x86DD;
-
-        // `.ipv4()` on the port filters is load-bearing, not decoration:
-        // cls_flower discards `ip_proto` and the port keys unless the
-        // request carries TCA_FLOWER_KEY_ETH_TYPE, and a port rule
-        // without it installs as a match-all that claims every packet
-        // on the interface (#288). The address setters imply it; the
-        // L4 ones do not.
-
-        let priority = (index + 1) as u16;
         let root_handle = TcHandle::major_only(1);
 
         // For each filter we want to install for this rule, check vs
-        // the live tree at that priority.
-        let want: Vec<(u16, u16, FlowerFilter)> = match &rule.match_ {
-            HostMatch::Ip(ip) | HostMatch::Subnet(ip, _) => {
-                let prefix = match &rule.match_ {
-                    HostMatch::Subnet(_, p) => *p,
-                    _ => {
-                        if ip.is_ipv4() {
-                            32
-                        } else {
-                            128
-                        }
-                    }
-                };
-                match ip {
-                    IpAddr::V4(addr) => vec![(
-                        ETH_P_IP,
-                        priority,
-                        FlowerFilter::new()
-                            .classid(classid)
-                            .priority(priority)
-                            .dst_ipv4(*addr, prefix)
-                            .build(),
-                    )],
-                    IpAddr::V6(addr) => vec![(
-                        ETH_P_IPV6,
-                        priority,
-                        FlowerFilter::new()
-                            .classid(classid)
-                            .priority(priority)
-                            .dst_ipv6(*addr, prefix)
-                            .build(),
-                    )],
-                }
-            }
-            HostMatch::SrcIp(ip) | HostMatch::SrcSubnet(ip, _) => {
-                let prefix = match &rule.match_ {
-                    HostMatch::SrcSubnet(_, p) => *p,
-                    _ => {
-                        if ip.is_ipv4() {
-                            32
-                        } else {
-                            128
-                        }
-                    }
-                };
-                match ip {
-                    IpAddr::V4(addr) => vec![(
-                        ETH_P_IP,
-                        priority,
-                        FlowerFilter::new()
-                            .classid(classid)
-                            .priority(priority)
-                            .src_ipv4(*addr, prefix)
-                            .build(),
-                    )],
-                    IpAddr::V6(addr) => vec![(
-                        ETH_P_IPV6,
-                        priority,
-                        FlowerFilter::new()
-                            .classid(classid)
-                            .priority(priority)
-                            .src_ipv6(*addr, prefix)
-                            .build(),
-                    )],
-                }
-            }
-            HostMatch::Port(port) => vec![
-                (
-                    ETH_P_IP,
-                    priority,
-                    FlowerFilter::new()
-                        .classid(classid)
-                        .priority(priority)
-                        .ipv4()
-                        .ip_proto_tcp()
-                        .dst_port(*port)
-                        .build(),
-                ),
-                (
-                    ETH_P_IP,
-                    priority + 100,
-                    FlowerFilter::new()
-                        .classid(classid)
-                        .priority(priority + 100)
-                        .ipv4()
-                        .ip_proto_udp()
-                        .dst_port(*port)
-                        .build(),
-                ),
-            ],
-            HostMatch::PortRange(_, _) => {
-                // Port ranges are intentionally complex (multiple
-                // filters); skip incremental reconcile for them and
-                // require apply() instead. A full reconcile of these
-                // rules is a follow-up.
-                Vec::new()
-            }
-        };
+        // the live tree at that priority. `apply()` installs the same
+        // list.
+        let want = rule_filters(index, rule, classid)?;
 
         for (proto, prio, filter) in want {
             let live = tree.filter_at_priority(prio);
@@ -1778,190 +1680,137 @@ impl PerHostLimiter {
         Ok(())
     }
 
-    /// Add a flower filter for a specific rule.
+    /// Fail on a rule no filter can express (an empty port range), before
+    /// anything is changed.
+    fn check_rules(&self) -> Result<()> {
+        for (i, rule) in self.rules.iter().enumerate() {
+            rule_filters(i, rule, TcHandle::new(1, (i + 2) as u16))?;
+        }
+        Ok(())
+    }
+
+    /// Add the flower filters for a specific rule — the ones `reconcile()`
+    /// compares against.
     async fn add_filter_for_rule(
         &self,
         conn: &Connection<Route>,
         index: usize,
         rule: &HostRule,
     ) -> Result<()> {
-        use super::filter::FlowerFilter;
-
-        // tcm_info etherproto values. The kernel walks the per-protocol
-        // dispatch table before flower's own KEY_ETH_TYPE attribute is
-        // consulted, so passing the wrong value here means the filter
-        // never matches its intended packets.
-        const ETH_P_IP: u16 = 0x0800;
-        const ETH_P_IPV6: u16 = 0x86DD;
-
         let classid = TcHandle::new(1, (index + 2) as u16);
-        let priority = (index + 1) as u16;
-
-        match &rule.match_ {
-            HostMatch::Ip(ip) | HostMatch::Subnet(ip, _) => {
-                let prefix = match &rule.match_ {
-                    HostMatch::Subnet(_, p) => *p,
-                    _ => {
-                        if ip.is_ipv4() {
-                            32
-                        } else {
-                            128
-                        }
-                    }
-                };
-
-                match ip {
-                    IpAddr::V4(addr) => {
-                        let filter = FlowerFilter::new()
-                            .classid(classid)
-                            .priority(priority)
-                            .dst_ipv4(*addr, prefix)
-                            .build();
-                        conn.add_filter_full(
-                            &self.dev,
-                            TcHandle::major_only(1),
-                            None,
-                            ETH_P_IP,
-                            priority,
-                            filter,
-                        )
-                        .await?;
-                    }
-                    IpAddr::V6(addr) => {
-                        let filter = FlowerFilter::new()
-                            .classid(classid)
-                            .priority(priority)
-                            .dst_ipv6(*addr, prefix)
-                            .build();
-                        conn.add_filter_full(
-                            &self.dev,
-                            TcHandle::major_only(1),
-                            None,
-                            ETH_P_IPV6,
-                            priority,
-                            filter,
-                        )
-                        .await?;
-                    }
-                }
-            }
-            HostMatch::SrcIp(ip) | HostMatch::SrcSubnet(ip, _) => {
-                let prefix = match &rule.match_ {
-                    HostMatch::SrcSubnet(_, p) => *p,
-                    _ => {
-                        if ip.is_ipv4() {
-                            32
-                        } else {
-                            128
-                        }
-                    }
-                };
-
-                match ip {
-                    IpAddr::V4(addr) => {
-                        let filter = FlowerFilter::new()
-                            .classid(classid)
-                            .priority(priority)
-                            .src_ipv4(*addr, prefix)
-                            .build();
-                        conn.add_filter_full(
-                            &self.dev,
-                            TcHandle::major_only(1),
-                            None,
-                            ETH_P_IP,
-                            priority,
-                            filter,
-                        )
-                        .await?;
-                    }
-                    IpAddr::V6(addr) => {
-                        let filter = FlowerFilter::new()
-                            .classid(classid)
-                            .priority(priority)
-                            .src_ipv6(*addr, prefix)
-                            .build();
-                        conn.add_filter_full(
-                            &self.dev,
-                            TcHandle::major_only(1),
-                            None,
-                            ETH_P_IPV6,
-                            priority,
-                            filter,
-                        )
-                        .await?;
-                    }
-                }
-            }
-            HostMatch::Port(port) => {
-                // Match both TCP and UDP. L4 port matching at the IP layer
-                // dispatches under ETH_P_IP — and `.ipv4()` must say so
-                // in the flower keys too, or cls_flower drops the port
-                // match and installs a match-all (#288).
-                let tcp_filter = FlowerFilter::new()
-                    .classid(classid)
-                    .priority(priority)
-                    .ipv4()
-                    .ip_proto_tcp()
-                    .dst_port(*port)
-                    .build();
-                conn.add_filter_full(
-                    &self.dev,
-                    TcHandle::major_only(1),
-                    None,
-                    ETH_P_IP,
-                    priority,
-                    tcp_filter,
-                )
+        for (proto, prio, filter) in rule_filters(index, rule, classid)? {
+            conn.add_filter_full(&self.dev, TcHandle::major_only(1), None, proto, prio, filter)
                 .await?;
-
-                let udp_filter = FlowerFilter::new()
-                    .classid(classid)
-                    .priority(priority + 100) // Different priority to avoid conflict
-                    .ipv4()
-                    .ip_proto_udp()
-                    .dst_port(*port)
-                    .build();
-                conn.add_filter_full(
-                    &self.dev,
-                    TcHandle::major_only(1),
-                    None,
-                    ETH_P_IP,
-                    priority + 100,
-                    udp_filter,
-                )
-                .await?;
-            }
-            HostMatch::PortRange(start, end) => {
-                // For port ranges, we need to add individual filters or use u32
-                // For simplicity, we'll add filters for each port in small ranges
-                // or skip for large ranges
-                if *end - *start <= 10 {
-                    for port in *start..=*end {
-                        let filter = FlowerFilter::new()
-                            .classid(classid)
-                            .priority(priority)
-                            .ipv4()
-                            .ip_proto_tcp()
-                            .dst_port(port)
-                            .build();
-                        let _ = conn
-                            .add_filter_full(
-                                &self.dev,
-                                TcHandle::major_only(1),
-                                None,
-                                ETH_P_IP,
-                                priority,
-                                filter,
-                            )
-                            .await;
-                    }
-                }
-                // For larger ranges, we'd need u32 filter with masks
-            }
         }
-
         Ok(())
     }
+}
+
+/// The flower filters that classify a `PerHostLimiter` rule's traffic
+/// into its class, as `(tcm_info protocol, priority, filter)`.
+///
+/// One list for both verbs. `apply()` and `reconcile()` each built their
+/// own, and they had drifted: for a port range `reconcile()` built none,
+/// and `apply()` none for a range wider than 10 ports — and for a narrower
+/// one a TCP filter per port, errors ignored, no UDP (#416).
+///
+/// Address rules take one priority (`index + 1`); port rules two, TCP at
+/// `index + 1` and UDP at `index + 101`.
+fn rule_filters(
+    index: usize,
+    rule: &HostRule,
+    classid: TcHandle,
+) -> Result<Vec<(u16, u16, super::filter::FlowerFilter)>> {
+    use super::filter::FlowerFilter;
+
+    // tcm_info etherproto values. The kernel walks the per-protocol
+    // dispatch table before flower's own KEY_ETH_TYPE attribute is
+    // consulted, so passing the wrong value here means the filter
+    // never matches its intended packets.
+    const ETH_P_IP: u16 = 0x0800;
+    const ETH_P_IPV6: u16 = 0x86DD;
+
+    // `.ipv4()` on the port filters is load-bearing, not decoration:
+    // cls_flower discards `ip_proto` and the port keys unless the
+    // request carries TCA_FLOWER_KEY_ETH_TYPE, and a port rule
+    // without it installs as a match-all that claims every packet
+    // on the interface (#288). The address setters imply it; the
+    // L4 ones do not.
+
+    let priority = (index + 1) as u16;
+    let base = || FlowerFilter::new().classid(classid);
+    let prefix_of = |ip: &IpAddr, subnet: Option<u8>| {
+        subnet.unwrap_or(if ip.is_ipv4() { 32 } else { 128 })
+    };
+    // TCP at `priority`, UDP at `priority + 100`, both IPv4 — matching
+    // what `port` is set on each.
+    let tcp_and_udp = |set_port: &dyn Fn(FlowerFilter) -> FlowerFilter| {
+        vec![
+            (
+                ETH_P_IP,
+                priority,
+                set_port(base().priority(priority).ipv4().ip_proto_tcp()).build(),
+            ),
+            (
+                ETH_P_IP,
+                priority + 100,
+                set_port(base().priority(priority + 100).ipv4().ip_proto_udp()).build(),
+            ),
+        ]
+    };
+
+    Ok(match &rule.match_ {
+        HostMatch::Ip(ip) | HostMatch::Subnet(ip, _) => {
+            let subnet = match &rule.match_ {
+                HostMatch::Subnet(_, p) => Some(*p),
+                _ => None,
+            };
+            let prefix = prefix_of(ip, subnet);
+            match ip {
+                IpAddr::V4(addr) => vec![(
+                    ETH_P_IP,
+                    priority,
+                    base().priority(priority).dst_ipv4(*addr, prefix).build(),
+                )],
+                IpAddr::V6(addr) => vec![(
+                    ETH_P_IPV6,
+                    priority,
+                    base().priority(priority).dst_ipv6(*addr, prefix).build(),
+                )],
+            }
+        }
+        HostMatch::SrcIp(ip) | HostMatch::SrcSubnet(ip, _) => {
+            let subnet = match &rule.match_ {
+                HostMatch::SrcSubnet(_, p) => Some(*p),
+                _ => None,
+            };
+            let prefix = prefix_of(ip, subnet);
+            match ip {
+                IpAddr::V4(addr) => vec![(
+                    ETH_P_IP,
+                    priority,
+                    base().priority(priority).src_ipv4(*addr, prefix).build(),
+                )],
+                IpAddr::V6(addr) => vec![(
+                    ETH_P_IPV6,
+                    priority,
+                    base().priority(priority).src_ipv6(*addr, prefix).build(),
+                )],
+            }
+        }
+        HostMatch::Port(port) => tcp_and_udp(&|f| f.dst_port(*port)),
+        // The kernel takes a port range only with `min < max`
+        // (`fl_set_key_port_range`), so a one-port range is the port.
+        HostMatch::PortRange(start, end) if start == end => tcp_and_udp(&|f| f.dst_port(*start)),
+        HostMatch::PortRange(start, end) if start < end => {
+            tcp_and_udp(&|f| f.dst_port_range(*start, *end))
+        }
+        HostMatch::PortRange(start, end) => {
+            return Err(Error::InvalidMessage(format!(
+                "PerHostLimiter: port range {start}-{end} is empty (start is above end)"
+            )));
+        }
+    })
 }
 
 /// Parse a subnet string like "10.0.0.0/8" into address and prefix length.
@@ -2183,6 +2032,53 @@ mod tests {
             let name = RateLimiter::new(dev).ifb_name();
             assert!(name.len() <= 15, "{dev} -> {name} ({} bytes)", name.len());
         }
+    }
+
+    /// The attribute ids a rule filter writes.
+    fn filter_keys(f: &super::super::filter::FlowerFilter) -> Vec<u16> {
+        use super::super::filter::FilterConfig;
+        let mut b = crate::netlink::builder::MessageBuilder::new(0, 0);
+        let start = b.len();
+        f.write_options(&mut b).expect("a usable filter");
+        crate::netlink::attr::AttrIter::new(&b.as_bytes()[start..])
+            .map(|(t, _)| t)
+            .collect()
+    }
+
+    /// A port range gets a TCP and a UDP filter with range keys, the
+    /// same two priorities a single port gets (#416).
+    #[test]
+    fn a_port_range_rule_gets_tcp_and_udp_range_filters() {
+        use crate::netlink::types::tc::filter::flower::*;
+        use crate::util::Rate;
+
+        let limiter = PerHostLimiter::new("d0", Rate::mbit(10))
+            .limit_port_range(8000, 8100, Rate::mbit(5))
+            .limit_port_range(8200, 8200, Rate::mbit(5));
+        let range = rule_filters(0, &limiter.rules[0], TcHandle::new(1, 2)).unwrap();
+        let prios: Vec<(u16, u16)> = range.iter().map(|(proto, prio, _)| (*proto, *prio)).collect();
+        assert_eq!(prios, vec![(0x0800, 1), (0x0800, 101)]);
+        for (_, _, f) in &range {
+            let keys = filter_keys(f);
+            assert!(keys.contains(&TCA_FLOWER_KEY_PORT_DST_MIN), "{keys:?}");
+            assert!(keys.contains(&TCA_FLOWER_KEY_PORT_DST_MAX), "{keys:?}");
+            assert!(keys.contains(&TCA_FLOWER_KEY_ETH_TYPE), "{keys:?}");
+        }
+        assert!(filter_keys(&range[0].2).contains(&TCA_FLOWER_KEY_IP_PROTO));
+
+        // One port is the port: the kernel refuses min == max.
+        let single = rule_filters(1, &limiter.rules[1], TcHandle::new(1, 3)).unwrap();
+        assert!(filter_keys(&single[0].2).contains(&TCA_FLOWER_KEY_TCP_DST));
+        assert!(filter_keys(&single[1].2).contains(&TCA_FLOWER_KEY_UDP_DST));
+    }
+
+    #[test]
+    fn an_empty_port_range_is_refused_before_anything_changes() {
+        use crate::util::Rate;
+        let limiter =
+            PerHostLimiter::new("d0", Rate::mbit(10)).limit_port_range(8100, 8000, Rate::mbit(5));
+        let err = limiter.check_rules().expect_err("8100-8000 is empty");
+        assert!(err.to_string().contains("8100-8000"), "{err}");
     }
 
     #[test]
