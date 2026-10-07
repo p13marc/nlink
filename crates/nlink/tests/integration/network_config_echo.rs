@@ -1,0 +1,522 @@
+//! Every shape `NetworkConfig` can declare must converge.
+//!
+//! The declarative diff compares a declaration against the kernel's
+//! dump of what the last apply installed. Wherever the kernel stores
+//! something other than what it was sent — a masked prefix, a default it
+//! substitutes, a value it clamps or quantises, an attribute it does not
+//! echo — or wherever an apply step undoes an earlier one, the next diff
+//! is not empty, and every apply after it rewrites the same thing
+//! forever. None of that is visible applying once to an empty namespace.
+//!
+//! So each case here is applied, then diffed, then applied again, then
+//! diffed again, and all four must say "nothing to do". A case with
+//! several steps applies them in order to the same namespace, which is
+//! how a replace (a knob removed, a link moved) gets exercised at all:
+//! every case that only ever installs onto a fresh device misses what a
+//! replace keeps.
+//!
+//! The cases are tables rather than one test each so a run reports every
+//! red shape at once instead of stopping at the first.
+
+use std::net::Ipv4Addr;
+use std::time::Duration;
+
+use nlink::netlink::config::{
+    BondMode, MacvlanMode, NetkitMode, NetworkConfig, QdiscBuilder, RouteBuilder, VlanProtocol,
+};
+use nlink::netlink::tc::NetemLossModel;
+use nlink::netlink::{Connection, Route};
+use nlink::{Bytes, Percent, Rate};
+
+use crate::common::TestNamespace;
+
+const MAC_A: [u8; 6] = [0x02, 0x00, 0x5e, 0x10, 0x00, 0x01];
+const MAC_B: [u8; 6] = [0x02, 0x00, 0x5e, 0x10, 0x00, 0x02];
+
+/// One declaration, or a sequence applied in order to one namespace.
+struct Case {
+    name: String,
+    steps: Vec<NetworkConfig>,
+}
+
+fn case(name: impl Into<String>, steps: Vec<NetworkConfig>) -> Case {
+    Case {
+        name: name.into(),
+        steps,
+    }
+}
+
+/// Apply `cfg` and check that it converged: the diff after the apply is
+/// empty, a second apply changes nothing, and the diff after that is
+/// empty too.
+async fn converges(conn: &Connection<Route>, cfg: &NetworkConfig) -> Result<(), String> {
+    let first = cfg
+        .apply(conn)
+        .await
+        .map_err(|e| format!("first apply failed: {e}"))?;
+    if !first.is_success() {
+        return Err(format!("first apply reported errors: {:?}", first.errors));
+    }
+    let diff = cfg
+        .diff(conn)
+        .await
+        .map_err(|e| format!("diff after apply failed: {e}"))?;
+    if !diff.is_empty() {
+        return Err(format!("diff after apply is not empty:\n{diff}"));
+    }
+    let second = cfg
+        .apply(conn)
+        .await
+        .map_err(|e| format!("second apply failed: {e}"))?;
+    if second.changes_made != 0 {
+        return Err(format!(
+            "second apply made {} change(s): {:?}",
+            second.changes_made, second.summary
+        ));
+    }
+    let third = cfg
+        .diff(conn)
+        .await
+        .map_err(|e| format!("diff after second apply failed: {e}"))?;
+    if !third.is_empty() {
+        return Err(format!("diff after second apply is not empty:\n{third}"));
+    }
+    Ok(())
+}
+
+/// Run every case in its own namespace, then fail once, listing every
+/// case that did not converge.
+async fn assert_converges(prefix: &str, cases: Vec<Case>) -> nlink::Result<()> {
+    let mut failures = Vec::new();
+    for case in cases {
+        let ns = TestNamespace::new(prefix)?;
+        let conn = ns.connection()?;
+        for (i, step) in case.steps.iter().enumerate() {
+            let outcome =
+                match tokio::time::timeout(Duration::from_secs(30), converges(&conn, step)).await {
+                    Ok(outcome) => outcome,
+                    Err(_elapsed) => Err("timed out".to_string()),
+                };
+            if let Err(why) = outcome {
+                failures.push(format!("[{}] step {}: {why}", case.name, i + 1));
+                break;
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} case(s) did not converge:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+    Ok(())
+}
+
+fn dummy_up(name: &str) -> NetworkConfig {
+    NetworkConfig::new().link(name, |l| l.dummy().up())
+}
+
+// ============================================================================
+// Links
+// ============================================================================
+
+/// Every link kind, created by the apply.
+#[tokio::test]
+async fn every_link_kind_converges() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!(
+        "dummy", "veth", "bridge", "8021q", "vxlan", "macvlan", "bonding", "vrf", "ifb"
+    );
+
+    let cases = vec![
+        case("dummy", vec![dummy_up("d0")]),
+        case(
+            "dummy-mtu-mac",
+            vec![NetworkConfig::new().link("d0", |l| l.dummy().mtu(9000).address(MAC_A).up())],
+        ),
+        case(
+            "veth-mtu-mac",
+            vec![NetworkConfig::new().link("v0", |l| l.veth("v1").mtu(1400).address(MAC_A).up())],
+        ),
+        case(
+            "bridge+port",
+            vec![
+                NetworkConfig::new()
+                    .link("br0", |l| l.bridge().up())
+                    .link("d0", |l| l.dummy().master("br0").up()),
+            ],
+        ),
+        case(
+            "vlan",
+            vec![dummy_up("d0").link("d0.10", |l| l.vlan("d0", 10).up())],
+        ),
+        case(
+            "vlan-802.1ad-mac",
+            vec![dummy_up("d0").link("d0.20", |l| {
+                l.vlan("d0", 20)
+                    .vlan_protocol(VlanProtocol::Dot1ad)
+                    .address(MAC_A)
+                    .up()
+            })],
+        ),
+        case(
+            "vxlan",
+            vec![
+                dummy_up("d0")
+                    .link("vx0", |l| {
+                        l.vxlan(100)
+                            .vxlan_remote(Ipv4Addr::new(10, 1, 0, 2).into())
+                            .vxlan_local(Ipv4Addr::new(10, 1, 0, 1).into())
+                            .vxlan_port(4790)
+                            .vxlan_underlay_dev("d0")
+                            .mtu(1400)
+                            .address(MAC_A)
+                            .up()
+                    })
+                    .address("d0", "10.1.0.1/24")
+                    .unwrap(),
+            ],
+        ),
+        case(
+            "macvlan-mac",
+            vec![dummy_up("d0").link("mv0", |l| {
+                l.macvlan("d0")
+                    .macvlan_mode(MacvlanMode::Bridge)
+                    .address(MAC_A)
+                    .up()
+            })],
+        ),
+        case(
+            "bond+slaves-state-unchanged",
+            vec![
+                NetworkConfig::new()
+                    .link("bond0", |l| l.bond().bond_mode(BondMode::BalanceXor).up())
+                    .link("d0", |l| l.dummy().master("bond0"))
+                    .link("d1", |l| l.dummy().master("bond0")),
+            ],
+        ),
+        case(
+            "vrf+member",
+            vec![
+                NetworkConfig::new()
+                    .link("vrf0", |l| l.vrf(10).up())
+                    .link("d0", |l| l.dummy().master("vrf0").up()),
+            ],
+        ),
+        case(
+            "ifb-mac",
+            vec![NetworkConfig::new().link("ifb0", |l| l.ifb().address(MAC_A).up())],
+        ),
+    ];
+    assert_converges("nce-links", cases).await
+}
+
+/// netkit is 6.7+, so it gets its own gate.
+#[tokio::test]
+async fn netkit_converges() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("netkit");
+
+    let cases = vec![
+        case(
+            "netkit-l3",
+            vec![NetworkConfig::new().link("nk0", |l| {
+                l.netkit("nk1").netkit_mode(NetkitMode::L3).up()
+            })],
+        ),
+    ];
+    assert_converges("nce-netkit", cases).await
+}
+
+/// Modifiers on links that already exist: each case's first step builds
+/// the starting point, the next one changes it.
+#[tokio::test]
+async fn link_modifiers_converge() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "bridge", "bonding", "vrf");
+
+    let cases = vec![
+        case(
+            "existing-link-into-bridge",
+            vec![
+                dummy_up("d0"),
+                NetworkConfig::new()
+                    .link("br0", |l| l.bridge().up())
+                    .link("d0", |l| l.dummy().master("br0").up()),
+            ],
+        ),
+        case(
+            "existing-link-out-of-bridge",
+            vec![
+                NetworkConfig::new()
+                    .link("br0", |l| l.bridge().up())
+                    .link("d0", |l| l.dummy().master("br0").up()),
+                NetworkConfig::new()
+                    .link("br0", |l| l.bridge().up())
+                    .link("d0", |l| l.dummy().up()),
+            ],
+        ),
+        case(
+            "existing-link-into-vrf",
+            vec![
+                dummy_up("d0"),
+                NetworkConfig::new()
+                    .link("vrf0", |l| l.vrf(10).up())
+                    .link("d0", |l| l.dummy().master("vrf0").up()),
+            ],
+        ),
+        case(
+            "mtu-change",
+            vec![
+                NetworkConfig::new().link("d0", |l| l.dummy().mtu(1500).up()),
+                NetworkConfig::new().link("d0", |l| l.dummy().mtu(9000).up()),
+            ],
+        ),
+        case(
+            "mac-change",
+            vec![
+                NetworkConfig::new().link("d0", |l| l.dummy().address(MAC_A)),
+                NetworkConfig::new().link("d0", |l| l.dummy().address(MAC_B)),
+            ],
+        ),
+        case(
+            "set-down",
+            vec![
+                dummy_up("d0"),
+                NetworkConfig::new().link("d0", |l| l.dummy().down()),
+            ],
+        ),
+        case(
+            "bridge-mtu-change-with-port",
+            vec![
+                NetworkConfig::new()
+                    .link("br0", |l| l.bridge().up())
+                    .link("d0", |l| l.dummy().master("br0").up()),
+                NetworkConfig::new()
+                    .link("br0", |l| l.bridge().mtu(1400).up())
+                    .link("d0", |l| l.dummy().master("br0").up()),
+            ],
+        ),
+    ];
+    assert_converges("nce-mods", cases).await
+}
+
+// ============================================================================
+// Addresses
+// ============================================================================
+
+#[tokio::test]
+async fn addresses_converge() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "vrf");
+
+    let addressed = |cfg: NetworkConfig| {
+        cfg.address("d0", "10.2.0.1/24")
+            .unwrap()
+            .address("d0", "fd00:2::1/64")
+            .unwrap()
+    };
+
+    let cases = vec![
+        case("v4+v6-on-up-link", vec![addressed(dummy_up("d0"))]),
+        case(
+            "v4+v6-on-down-link",
+            vec![addressed(NetworkConfig::new().link("d0", |l| l.dummy().down()))],
+        ),
+        case(
+            "host-routes",
+            vec![
+                dummy_up("d0")
+                    .address("d0", "10.2.0.9/32")
+                    .unwrap()
+                    .address("d0", "fd00:2::9/128")
+                    .unwrap(),
+            ],
+        ),
+        case(
+            "new-link-in-vrf",
+            vec![addressed(
+                NetworkConfig::new()
+                    .link("vrf0", |l| l.vrf(10).up())
+                    .link("d0", |l| l.dummy().master("vrf0").up()),
+            )],
+        ),
+    ];
+    assert_converges("nce-addrs", cases).await
+}
+
+// ============================================================================
+// Routes
+// ============================================================================
+
+#[tokio::test]
+async fn routes_converge() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy");
+
+    let base = || {
+        dummy_up("d0")
+            .address("d0", "10.3.0.1/24")
+            .unwrap()
+            .address("d0", "fd00:3::1/64")
+            .unwrap()
+    };
+    let with_route = |dst: &str, f: fn(RouteBuilder) -> RouteBuilder| base().route(dst, f).unwrap();
+
+    let cases = vec![
+        case("v4-via", vec![with_route("10.30.0.0/16", |r| r.via("10.3.0.254"))]),
+        case("v4-dev", vec![with_route("10.31.0.0/16", |r| r.dev("d0"))]),
+        case("v4-default", vec![with_route("0.0.0.0/0", |r| r.via("10.3.0.254"))]),
+        case("v4-metric-0", vec![with_route("10.32.0.0/16", |r| r.dev("d0").metric(0))]),
+        case("v4-metric-50", vec![with_route("10.32.0.0/16", |r| r.dev("d0").metric(50))]),
+        case("v6-via", vec![with_route("2001:db8:30::/48", |r| r.via("fd00:3::fe"))]),
+        case("v6-dev", vec![with_route("2001:db8:31::/48", |r| r.dev("d0"))]),
+        case("v6-default", vec![with_route("::/0", |r| r.via("fd00:3::fe"))]),
+        case(
+            "v6-metric-1024",
+            vec![with_route("2001:db8:34::/48", |r| r.dev("d0").metric(1024))],
+        ),
+        case("v4-blackhole", vec![with_route("10.33.0.0/16", |r| r.blackhole())]),
+        case("v6-blackhole", vec![with_route("2001:db8:35::/48", |r| r.blackhole())]),
+        case("v4-unreachable", vec![with_route("10.34.0.0/16", |r| r.unreachable())]),
+        case("v6-unreachable", vec![with_route("2001:db8:36::/48", |r| r.unreachable())]),
+        case("v4-prohibit", vec![with_route("10.35.0.0/16", |r| r.prohibit())]),
+        case("v6-prohibit", vec![with_route("2001:db8:37::/48", |r| r.prohibit())]),
+        case("v4-table", vec![with_route("10.36.0.0/16", |r| r.dev("d0").table(100))]),
+        case("v6-table", vec![with_route("2001:db8:38::/48", |r| r.dev("d0").table(100))]),
+        case(
+            "v4-gateway-change",
+            vec![
+                with_route("10.37.0.0/16", |r| r.via("10.3.0.254")),
+                with_route("10.37.0.0/16", |r| r.via("10.3.0.253")),
+            ],
+        ),
+        case(
+            "v6-gateway-change",
+            vec![
+                with_route("2001:db8:3a::/48", |r| r.via("fd00:3::fe")),
+                with_route("2001:db8:3a::/48", |r| r.via("fd00:3::fd")),
+            ],
+        ),
+    ];
+    assert_converges("nce-routes", cases).await
+}
+
+// ============================================================================
+// Qdiscs
+// ============================================================================
+
+/// Each netem knob added to a plain delay, then removed again. A replace
+/// is `netem_change()`, which keeps whatever it is not sent (#370).
+#[tokio::test]
+async fn netem_knobs_added_and_removed_converge() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "sch_netem");
+
+    type Knob = fn(QdiscBuilder) -> QdiscBuilder;
+    let knobs: Vec<(&str, Knob)> = vec![
+        ("jitter", |q| q.jitter(Duration::from_millis(2))),
+        ("loss", |q| q.loss_pct(Percent::new(1.0))),
+        ("duplicate", |q| q.duplicate_pct(Percent::new(1.0))),
+        ("corrupt", |q| q.corrupt_pct(Percent::new(1.0))),
+        ("limit", |q| q.limit(500)),
+        ("rate", |q| q.rate(Rate::mbit(10))),
+        ("loss-correlation", |q| {
+            q.loss_pct(Percent::new(1.0))
+                .loss_correlation_pct(Percent::new(25.0))
+        }),
+        ("delay-correlation", |q| {
+            q.jitter(Duration::from_millis(2))
+                .delay_correlation_pct(Percent::new(25.0))
+        }),
+        ("duplicate-correlation", |q| {
+            q.duplicate_pct(Percent::new(1.0))
+                .duplicate_correlation_pct(Percent::new(25.0))
+        }),
+        ("corrupt-correlation", |q| {
+            q.corrupt_pct(Percent::new(1.0))
+                .corrupt_correlation_pct(Percent::new(25.0))
+        }),
+        ("reorder-gap-correlation", |q| {
+            q.reorder_pct(Percent::new(5.0))
+                .reorder_correlation_pct(Percent::new(25.0))
+                .gap(3)
+        }),
+        ("loss-model", |q| {
+            q.loss_model(
+                NetemLossModel::gilbert_elliot(Percent::new(1.0)).r(Percent::new(30.0)),
+            )
+        }),
+    ];
+
+    let base = || dummy_up("d0");
+    let mut cases = Vec::new();
+    for (name, knob) in knobs {
+        cases.push(case(
+            format!("netem-{name}"),
+            vec![
+                base().qdisc("d0", |q| q.netem().delay(Duration::from_millis(10))),
+                base().qdisc("d0", |q| knob(q.netem().delay(Duration::from_millis(10)))),
+                base().qdisc("d0", |q| q.netem().delay(Duration::from_millis(10))),
+            ],
+        ));
+    }
+    assert_converges("nce-netem", cases).await
+}
+
+/// fq_codel / sfq / prio / htb / hook kinds, including values the kernel
+/// clamps on the way in.
+#[tokio::test]
+async fn other_qdisc_kinds_converge() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!(
+        "dummy", "sch_fq_codel", "sch_sfq", "sch_prio", "sch_htb", "sch_ingress", "sch_tbf",
+        "sch_netem"
+    );
+
+    let base = || dummy_up("d0");
+    let cases = vec![
+        case("fq_codel", vec![base().qdisc("d0", |q| q.fq_codel())]),
+        case("fq_codel-quantum-256", vec![base().qdisc("d0", |q| q.fq_codel().quantum(256))]),
+        case("sfq", vec![base().qdisc("d0", |q| q.sfq())]),
+        case("sfq-limit-200", vec![base().qdisc("d0", |q| q.sfq().limit(200))]),
+        case(
+            "sfq-perturb-quantum",
+            vec![base().qdisc("d0", |q| {
+                q.sfq().perturb(Duration::from_secs(10)).quantum(1514)
+            })],
+        ),
+        case("prio", vec![base().qdisc("d0", |q| q.prio())]),
+        case("prio-bands-4", vec![base().qdisc("d0", |q| q.prio().bands(4))]),
+        case("htb", vec![base().qdisc("d0", |q| q.htb().default_class(0x10))]),
+        case("ingress", vec![base().qdisc("d0", |q| q.ingress())]),
+        case("clsact", vec![base().qdisc("d0", |q| q.clsact())]),
+        case(
+            "ingress-then-clsact",
+            vec![
+                base().qdisc("d0", |q| q.ingress()),
+                base().qdisc("d0", |q| q.clsact()),
+            ],
+        ),
+        case(
+            "kind-switches",
+            vec![
+                base().qdisc("d0", |q| {
+                    q.tbf(Rate::mbit(10), Bytes::kib(32))
+                        .limit_bytes(Bytes::kib(64))
+                }),
+                base().qdisc("d0", |q| q.netem().delay(Duration::from_millis(5))),
+                base().qdisc("d0", |q| q.fq_codel()),
+                base().qdisc("d0", |q| q.prio()),
+                base().qdisc("d0", |q| q.sfq()),
+                base().qdisc("d0", |q| q.htb().default_class(0x10)),
+            ],
+        ),
+    ];
+    assert_converges("nce-qdiscs", cases).await
+}
+
+// ============================================================================
+// Things a second diff cannot show
+// ============================================================================
+
