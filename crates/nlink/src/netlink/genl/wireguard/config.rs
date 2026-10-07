@@ -930,10 +930,18 @@ impl DeclaredWgPeer {
     fn diff_against(&self, current: &WgPeer) -> PeerChanges {
         let mut changes = PeerChanges::default();
 
-        // preshared_key — never observable; if declared,
-        // mark dirty (same shape as device.private_key).
-        if self.preshared_key.is_some() {
-            changes.preshared_key_set = true;
+        // preshared_key — compared, not assumed dirty, for the reason
+        // device.private_key is (#281): `get_peer()` puts
+        // WGPEER_A_PRESHARED_KEY in every peer of a GET_DEVICE, which needs
+        // CAP_NET_ADMIN anyway, and the parser maps the all-zero "no key"
+        // to `None`. Marking it dirty whenever declared rewrote every
+        // peer with a PSK on every apply (#TBD). A declared all-zero key
+        // is the kernel's "none", so it compares as `None`.
+        if let Some(psk) = self.preshared_key {
+            let want = (psk != [0u8; WG_KEY_LEN]).then_some(psk);
+            if current.preshared_key != want {
+                changes.preshared_key_set = true;
+            }
         }
         if let Some(ep) = self.endpoint
             && current.endpoint != Some(ep)
@@ -1388,6 +1396,35 @@ mod tests {
         assert_eq!(peer.public_key, key(0xbb));
         assert_eq!(peer.persistent_keepalive, Some(Duration::from_secs(25)));
         assert_eq!(peer.allowed_ips.len(), 1);
+    }
+
+    /// A declared PSK is compared with the dumped one: equal is no change,
+    /// different or missing is, and an all-zero declaration means none.
+    #[test]
+    fn diff_preshared_key_compares_with_the_dump() {
+        let with_psk = |psk| {
+            DeclaredWgDeviceBuilder::new("wg0".into())
+                .peer(key(0xbb), |p| p.preshared_key(psk))
+                .build()
+        };
+        let dumped = |psk: Option<[u8; WG_KEY_LEN]>| {
+            let mut curr = empty_device("wg0");
+            let mut peer = WgPeer::new(key(0xbb));
+            peer.preshared_key = psk;
+            curr.peers.push(peer);
+            curr
+        };
+        let psk_changed = |declared: &DeclaredWgDevice, curr: &WgDevice| {
+            declared
+                .diff_against(curr)
+                .peers_to_modify
+                .iter()
+                .any(|(_, pc)| pc.preshared_key_set)
+        };
+        assert!(!psk_changed(&with_psk(key(0x11)), &dumped(Some(key(0x11)))));
+        assert!(psk_changed(&with_psk(key(0x11)), &dumped(Some(key(0x22)))));
+        assert!(psk_changed(&with_psk(key(0x11)), &dumped(None)));
+        assert!(!psk_changed(&with_psk([0; WG_KEY_LEN]), &dumped(None)));
     }
 
     /// The kernel dumps the clamped key, so an unclamped declaration

@@ -158,6 +158,17 @@ async fn every_wireguard_shape_converges() -> nlink::Result<()> {
                 })
             })],
         ),
+        // The kernel returns a preshared key to a CAP_NET_ADMIN GET, so it
+        // can be compared like the private key.
+        case(
+            "peer-preshared-key",
+            vec![WireguardConfig::new().device("wg0", |d| {
+                d.peer(peer_key(0xb2), |p| {
+                    p.preshared_key([0x11; 32])
+                        .allowed_ip(AllowedIp::v4(Ipv4Addr::new(10, 0, 1, 0), 24))
+                })
+            })],
+        ),
         case(
             "peer-v6-endpoint-and-allowed-ips",
             vec![WireguardConfig::new().device("wg0", |d| {
