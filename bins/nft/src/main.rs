@@ -395,6 +395,28 @@ fn build_rule(family: Family, table: &str, chain: &str, tokens: &[&str]) -> Resu
     let mut i = 0;
     while i < tokens.len() {
         match tokens[i] {
+            // `<ip|ip6> <saddr|daddr> [!=] @set`, `<tcp|udp> <sport|dport>
+            // [!=] @set` — before the address and port arms, which would
+            // reject the `@`.
+            proto if set_lookup_field(proto, tokens.get(i + 1)).is_some()
+                && (tokens.get(i + 2).is_some_and(|t| t.starts_with('@'))
+                    || (tokens.get(i + 2) == Some(&"!=")
+                        && tokens.get(i + 3).is_some_and(|t| t.starts_with('@')))) =>
+            {
+                let field = set_lookup_field(proto, tokens.get(i + 1)).unwrap();
+                let inverted = tokens[i + 2] == "!=";
+                let set_tok = if inverted { tokens[i + 3] } else { tokens[i + 2] };
+                let set = &set_tok[1..];
+                if set.is_empty() {
+                    return Err(rule_err("`@` needs a set name"));
+                }
+                rule = if inverted {
+                    rule.match_not_in_set(field, set)
+                } else {
+                    rule.match_in_set(field, set)
+                };
+                i += if inverted { 4 } else { 3 };
+            }
             "tcp" if tokens.get(i + 1) == Some(&"dport") => {
                 let port = parse_rule_port(tokens.get(i + 2), "tcp dport")?;
                 rule = rule.match_tcp_dport(port);
@@ -483,22 +505,6 @@ fn build_rule(family: Family, table: &str, chain: &str, tokens: &[&str]) -> Resu
                     }
                 }
                 rule = rule.match_ct_state(state);
-                i += 3;
-            }
-            // `ip saddr @set` / `ip daddr @set` — before the CIDR arms,
-            // which would reject the `@`.
-            "ip" if matches!(tokens.get(i + 1), Some(&"saddr" | &"daddr"))
-                && tokens.get(i + 2).is_some_and(|t| t.starts_with('@')) =>
-            {
-                let set = &tokens[i + 2][1..];
-                if set.is_empty() {
-                    return Err(rule_err("`@` needs a set name"));
-                }
-                rule = if tokens[i + 1] == "saddr" {
-                    rule.match_saddr_in_set(set)
-                } else {
-                    rule.match_daddr_in_set(set)
-                };
                 i += 3;
             }
             // mark <value>[/<mask>]
@@ -1521,6 +1527,25 @@ fn parse_set_size(tok: Option<&&str>) -> Result<u32> {
     }
 }
 
+/// The packet field `<proto> <field>` names in a set lookup, if any.
+fn set_lookup_field(
+    proto: &str,
+    field: Option<&&str>,
+) -> Option<nlink::netlink::nftables::PacketField> {
+    use nlink::netlink::nftables::PacketField;
+    Some(match (proto, *field?) {
+        ("ip", "saddr") => PacketField::Ip4Saddr,
+        ("ip", "daddr") => PacketField::Ip4Daddr,
+        ("ip6", "saddr") => PacketField::Ip6Saddr,
+        ("ip6", "daddr") => PacketField::Ip6Daddr,
+        ("tcp", "sport") => PacketField::TcpSport,
+        ("tcp", "dport") => PacketField::TcpDport,
+        ("udp", "sport") => PacketField::UdpSport,
+        ("udp", "dport") => PacketField::UdpDport,
+        _ => return None,
+    })
+}
+
 fn rule_err(msg: &str) -> nlink::netlink::Error {
     nlink::netlink::Error::InvalidAttribute(format!("nft: {msg}"))
 }
@@ -1719,6 +1744,11 @@ mod tests {
         };
         ok("ip daddr @throttled meta mark set 0x10");
         ok("ip saddr @allow accept");
+        ok("ip saddr != @allow drop");
+        ok("ip6 daddr @v6 counter");
+        ok("ip6 saddr != @v6 drop");
+        ok("tcp dport @ports accept");
+        ok("udp sport != @ports drop");
         ok("mark 0x10/0xff meta mark set 0x20/0xff");
         ok("meta priority set 1:10");
         ok("ct mark set mark");

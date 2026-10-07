@@ -42,8 +42,8 @@ pub mod resync;
 pub mod types;
 pub(crate) mod userdata;
 
-pub use connection::Transaction;
-pub use events::{NftablesEvent, NftablesGroup, NFNLGRP_NFTABLES};
+pub use connection::{RawMessage, Transaction};
+pub use events::{GenInfo, NftablesEvent, NftablesGroup, SetElementsEvent, NFNLGRP_NFTABLES};
 pub use resync::{nftables_snapshot, BorrowedResyncStream, OwnedResyncStream};
 pub use expr::*;
 pub use types::*;
@@ -85,6 +85,11 @@ pub const NFT_MSG_GETSETELEM: u8 = 13;
 pub const NFT_MSG_DELSETELEM: u8 = 14;
 pub const NFT_MSG_NEWGEN: u8 = 15;
 pub const NFT_MSG_GETGEN: u8 = 16;
+
+// Generation (`NFT_MSG_NEWGEN`, sent after every committed batch)
+pub const NFTA_GEN_ID: u16 = 1;
+pub const NFTA_GEN_PROC_PID: u16 = 2;
+pub const NFTA_GEN_PROC_NAME: u16 = 3;
 /// Create a flowtable (`NFT_MSG_NEWFLOWTABLE`). Kernel 5.x+.
 pub const NFT_MSG_NEWFLOWTABLE: u8 = 22;
 /// Dump flowtables (`NFT_MSG_GETFLOWTABLE`).

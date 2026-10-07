@@ -178,6 +178,11 @@ mod nftables_echo;
 #[path = "integration/nftables_rules.rs"]
 mod nftables_rules;
 
+// Set lookups by packet field (IPv6, ports, `!= @set`), the raw escape
+// hatch, and set-element / generation events — on real traffic.
+#[path = "integration/nftables_lookups.rs"]
+mod nftables_lookups;
+
 // #191-#194, #218 — psched tick conversion. The unit tests pin the
 // bytes nlink emits; these pin that the *kernel* accepts them and
 // reads back what we wrote. Needed because the pre-fix writer and

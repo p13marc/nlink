@@ -17,13 +17,18 @@
 //!
 //! [`Connection::<Nftables>::subscribe`]: crate::netlink::Connection
 
-use super::connection::{parse_chain, parse_flowtable, parse_rule, parse_set, parse_table};
-use super::types::{ChainInfo, Family, Flowtable, RuleInfo, SetInfo, Table};
+use super::connection::{
+    parse_chain, parse_flowtable, parse_rule, parse_set, parse_set_elements, parse_table,
+};
+use super::types::{ChainInfo, Family, Flowtable, RuleInfo, SetElement, SetInfo, Table};
 use super::{
     NFGENMSG_HDRLEN, NFNL_SUBSYS_NFTABLES, NFT_MSG_DELCHAIN, NFT_MSG_DELFLOWTABLE,
-    NFT_MSG_DELRULE, NFT_MSG_DELSET, NFT_MSG_DELTABLE, NFT_MSG_NEWCHAIN, NFT_MSG_NEWFLOWTABLE,
-    NFT_MSG_NEWRULE, NFT_MSG_NEWSET, NFT_MSG_NEWTABLE,
+    NFT_MSG_DELRULE, NFT_MSG_DELSET, NFT_MSG_DELSETELEM, NFT_MSG_DELTABLE, NFT_MSG_NEWCHAIN,
+    NFT_MSG_NEWFLOWTABLE, NFT_MSG_NEWGEN, NFT_MSG_NEWRULE, NFT_MSG_NEWSET, NFT_MSG_NEWSETELEM,
+    NFT_MSG_NEWTABLE, NFTA_GEN_ID, NFTA_GEN_PROC_NAME, NFTA_GEN_PROC_PID,
+    NFTA_SET_ELEM_LIST_SET, NFTA_SET_ELEM_LIST_TABLE,
 };
+use crate::netlink::attr::{AttrIter, get};
 
 /// `NFNLGRP_NFTABLES` (7) — the single multicast group on which
 /// the kernel announces table/chain/rule/flowtable mutations.
@@ -94,6 +99,82 @@ pub enum NftablesEvent {
     NewSet(SetInfo),
     /// `NFT_MSG_DELSET` — a set was destroyed.
     DelSet(SetInfo),
+    /// `NFT_MSG_NEWSETELEM` — elements were added to a set.
+    NewSetElements(SetElementsEvent),
+    /// `NFT_MSG_DELSETELEM` — elements were removed from a set.
+    DelSetElements(SetElementsEvent),
+    /// `NFT_MSG_NEWGEN` — a batch was committed; the ruleset generation
+    /// moved on.
+    NewGen(GenInfo),
+}
+
+/// Elements added to or removed from a set, as one notification carries
+/// them. They are the raw wire elements: an event does not say what kind
+/// of set it is, so an interval set's range shows as its start element and
+/// its end marker ([`SetElement::is_interval_end`]). Elements a rule adds
+/// from the packet path (`add @set`) are not notified by the kernel.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct SetElementsEvent {
+    /// Address family.
+    pub family: Family,
+    /// Owning table.
+    pub table: String,
+    /// Set name.
+    pub set: String,
+    /// The elements.
+    pub elements: Vec<SetElement>,
+}
+
+/// A committed batch: the new ruleset generation, and who committed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct GenInfo {
+    /// Generation ID, incremented by every commit.
+    pub id: u32,
+    /// PID of the committing process, if the kernel reports it.
+    pub pid: Option<u32>,
+    /// Name of the committing process, if the kernel reports it.
+    pub proc_name: Option<String>,
+}
+
+fn parse_set_elements_event(attrs: &[u8], family: Family) -> Option<SetElementsEvent> {
+    let mut table = None;
+    let mut set = None;
+    for (attr, payload) in AttrIter::new(attrs) {
+        match attr {
+            NFTA_SET_ELEM_LIST_TABLE => table = get::string(payload).ok().map(str::to_string),
+            NFTA_SET_ELEM_LIST_SET => set = get::string(payload).ok().map(str::to_string),
+            _ => {}
+        }
+    }
+    let mut elements = Vec::new();
+    parse_set_elements(attrs, &mut elements);
+    Some(SetElementsEvent {
+        family,
+        table: table?,
+        set: set?,
+        elements,
+    })
+}
+
+fn parse_gen(attrs: &[u8]) -> Option<GenInfo> {
+    let mut id = None;
+    let mut pid = None;
+    let mut proc_name = None;
+    for (attr, payload) in AttrIter::new(attrs) {
+        match attr {
+            NFTA_GEN_ID => id = get::u32_be(payload).ok(),
+            NFTA_GEN_PROC_PID => pid = get::u32_be(payload).ok(),
+            NFTA_GEN_PROC_NAME => proc_name = get::string(payload).ok().map(str::to_string),
+            _ => {}
+        }
+    }
+    Some(GenInfo {
+        id: id?,
+        pid,
+        proc_name,
+    })
 }
 
 /// Build an [`NftablesEvent`] from the netlink message type byte +
@@ -126,6 +207,13 @@ pub(crate) fn parse_nftables_event(msg_type: u16, body: &[u8]) -> Option<Nftable
         NFT_MSG_DELFLOWTABLE => parse_flowtable(attrs, family).map(NftablesEvent::DelFlowtable),
         NFT_MSG_NEWSET => parse_set(attrs, family).map(NftablesEvent::NewSet),
         NFT_MSG_DELSET => parse_set(attrs, family).map(NftablesEvent::DelSet),
+        NFT_MSG_NEWSETELEM => {
+            parse_set_elements_event(attrs, family).map(NftablesEvent::NewSetElements)
+        }
+        NFT_MSG_DELSETELEM => {
+            parse_set_elements_event(attrs, family).map(NftablesEvent::DelSetElements)
+        }
+        NFT_MSG_NEWGEN => parse_gen(attrs).map(NftablesEvent::NewGen),
         _ => None,
     }
 }
@@ -156,10 +244,55 @@ mod tests {
 
     #[test]
     fn parse_unknown_msg_type_returns_none() {
-        // Valid nftables subsystem byte, but msg=NFT_MSG_NEWSETELEM
-        // which we don't parse into a typed variant.
-        let msg_type = (NFNL_SUBSYS_NFTABLES << 8) | 12u16;
+        // Valid nftables subsystem byte, but a message type this module
+        // does not parse (NFT_MSG_TRACE).
+        let msg_type = (NFNL_SUBSYS_NFTABLES << 8) | 17u16;
         let body = vec![0u8; NFGENMSG_HDRLEN];
         assert!(parse_nftables_event(msg_type, &body).is_none());
+    }
+
+    #[test]
+    fn set_element_and_gen_events_decode() {
+        use crate::netlink::builder::MessageBuilder;
+        use crate::netlink::nftables::{
+            NFTA_DATA_VALUE, NFTA_LIST_ELEM, NFTA_SET_ELEM_KEY, NFTA_SET_ELEM_LIST_ELEMENTS,
+        };
+        let mut b = MessageBuilder::new(0, 0);
+        b.append_bytes(&[2, 0, 0, 0]); // nfgenmsg: AF_INET
+        b.append_attr_str(NFTA_SET_ELEM_LIST_TABLE, "t");
+        b.append_attr_str(NFTA_SET_ELEM_LIST_SET, "s");
+        let elems = b.nest_start(NFTA_SET_ELEM_LIST_ELEMENTS | 0x8000);
+        let elem = b.nest_start(NFTA_LIST_ELEM | 0x8000);
+        let key = b.nest_start(NFTA_SET_ELEM_KEY | 0x8000);
+        b.append_attr(NFTA_DATA_VALUE, &[10, 0, 0, 1]);
+        b.nest_end(key);
+        b.nest_end(elem);
+        b.nest_end(elems);
+        let body = b.as_bytes()[16..].to_vec();
+        let msg_type = (NFNL_SUBSYS_NFTABLES << 8) | NFT_MSG_NEWSETELEM as u16;
+        match parse_nftables_event(msg_type, &body) {
+            Some(NftablesEvent::NewSetElements(e)) => {
+                assert_eq!((e.table.as_str(), e.set.as_str()), ("t", "s"));
+                assert_eq!(e.elements.len(), 1);
+                assert_eq!(e.elements[0].key(), [10, 0, 0, 1]);
+            }
+            other => panic!("expected NewSetElements, got {other:?}"),
+        }
+
+        let mut b = MessageBuilder::new(0, 0);
+        b.append_bytes(&[0, 0, 0, 0]);
+        b.append_attr_u32_be(NFTA_GEN_ID, 42);
+        b.append_attr_u32_be(NFTA_GEN_PROC_PID, 7);
+        b.append_attr_str(NFTA_GEN_PROC_NAME, "nlink");
+        let body = b.as_bytes()[16..].to_vec();
+        let msg_type = (NFNL_SUBSYS_NFTABLES << 8) | NFT_MSG_NEWGEN as u16;
+        match parse_nftables_event(msg_type, &body) {
+            Some(NftablesEvent::NewGen(g)) => {
+                assert_eq!(g.id, 42);
+                assert_eq!(g.pid, Some(7));
+                assert_eq!(g.proc_name.as_deref(), Some("nlink"));
+            }
+            other => panic!("expected NewGen, got {other:?}"),
+        }
     }
 }
