@@ -736,6 +736,16 @@ fn kernel_destination(addr: IpAddr, prefix_len: u8) -> IpAddr {
 /// does never matches its own routes.
 const IP6_RT_PRIO_USER: u32 = 1024;
 
+/// The metric the kernel stores for a declared route: the declared one,
+/// except that IPv6 turns both "none" and 0 into `IP6_RT_PRIO_USER`.
+fn kernel_metric(route: &DeclaredRoute) -> u32 {
+    match (route.metric, route.destination.is_ipv6()) {
+        (None | Some(0), true) => IP6_RT_PRIO_USER,
+        (Some(metric), _) => metric,
+        (None, false) => 0,
+    }
+}
+
 fn diff_routes(
     config: &NetworkConfig,
     current: &[RouteMessage],
@@ -858,13 +868,14 @@ fn diff_routes(
                 // `apply` reporting no changes at the same time,
                 // because the apply path does not go through here
                 // (#366).
-                let kernel_default_metric = if declared.destination.is_ipv6() {
-                    IP6_RT_PRIO_USER
-                } else {
-                    0
-                };
-                let metric_match =
-                    declared.metric.unwrap_or(kernel_default_metric) == r.priority().unwrap_or(0);
+                //
+                // An explicit 0 is the same as none for IPv6: the kernel
+                // tests the value, not its presence (`if (cfg->fc_metric
+                // == 0) cfg->fc_metric = IP6_RT_PRIO_USER;` in
+                // `ip6_route_info_create`), so `.metric(0)` installs 1024
+                // and comparing it as 0 re-added the route on every apply
+                // (#TBD).
+                let metric_match = kernel_metric(declared) == r.priority().unwrap_or(0);
                 gw_match && dev_match && metric_match
             })
             });
@@ -1742,6 +1753,24 @@ mod tests {
         assert_eq!(kernel_destination(v6("2001:db8:ffff::"), 33), v6("2001:db8:8000::"));
         let v4 = IpAddr::V4(std::net::Ipv4Addr::new(10, 1, 2, 3));
         assert_eq!(kernel_destination(v4, 16), v4);
+    }
+
+    #[test]
+    fn ipv6_metric_zero_is_the_kernel_default() {
+        let route = |dst: &str, metric| DeclaredRoute {
+            destination: dst.parse().unwrap(),
+            prefix_len: 48,
+            gateway: None,
+            dev: None,
+            metric,
+            table: None,
+            route_type: DeclaredRouteType::Unicast,
+        };
+        assert_eq!(kernel_metric(&route("2001:db8::", None)), 1024);
+        assert_eq!(kernel_metric(&route("2001:db8::", Some(0))), 1024);
+        assert_eq!(kernel_metric(&route("2001:db8::", Some(7))), 7);
+        assert_eq!(kernel_metric(&route("10.0.0.0", None)), 0);
+        assert_eq!(kernel_metric(&route("10.0.0.0", Some(0))), 0);
     }
 
     // ---- Plan 188 §2.2 — ApplyOptions builders ----

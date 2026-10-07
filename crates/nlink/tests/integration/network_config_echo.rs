@@ -379,6 +379,8 @@ async fn routes_converge() -> nlink::Result<()> {
             "v6-destination-host-bits",
             vec![with_route("2001:db8:32::1/48", |r| r.dev("d0"))],
         ),
+        // ip6_route_add turns metric 0 into IP6_RT_PRIO_USER.
+        case("v6-metric-0", vec![with_route("2001:db8:33::/48", |r| r.dev("d0").metric(0))]),
         case(
             "v6-metric-1024",
             vec![with_route("2001:db8:34::/48", |r| r.dev("d0").metric(1024))],
@@ -391,6 +393,10 @@ async fn routes_converge() -> nlink::Result<()> {
         case("v6-prohibit", vec![with_route("2001:db8:37::/48", |r| r.prohibit())]),
         case("v4-table", vec![with_route("10.36.0.0/16", |r| r.dev("d0").table(100))]),
         case("v6-table", vec![with_route("2001:db8:38::/48", |r| r.dev("d0").table(100))]),
+        case(
+            "v6-table-host-bits-metric-0",
+            vec![with_route("2001:db8:39::5/48", |r| r.dev("d0").table(100).metric(0))],
+        ),
         case(
             "v4-gateway-change",
             vec![
