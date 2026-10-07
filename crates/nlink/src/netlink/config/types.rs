@@ -2075,6 +2075,10 @@ impl QdiscBuilder {
     ///
     /// Before 0.28 this reached netem only, which left fq_codel and sfq
     /// unconfigurable through the builder entirely (#361).
+    ///
+    /// sfq caps its limit at 127 × 128 = 16256 packets (`sfq_change()`,
+    /// default depth times default flows); the diff compares against the
+    /// capped value, so declaring more installs 16256.
     pub fn limit(mut self, packets: u32) -> Self {
         match &mut self.qdisc_type {
             Some(DeclaredQdiscType::Netem { limit, .. })
@@ -2125,6 +2129,9 @@ impl QdiscBuilder {
 
     /// Set the bytes dequeued per round — fq_codel's and sfq's
     /// `quantum`, which mean the same thing. Added in 0.28 (#361).
+    ///
+    /// fq_codel raises anything below 256 to 256 (`fq_codel_change()`), and
+    /// the diff compares against that, so declaring less installs 256.
     pub fn quantum(mut self, bytes: u32) -> Self {
         match &mut self.qdisc_type {
             Some(DeclaredQdiscType::FqCodel { quantum, .. })

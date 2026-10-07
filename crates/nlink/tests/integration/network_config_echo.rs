@@ -533,8 +533,12 @@ async fn other_qdisc_kinds_converge() -> nlink::Result<()> {
     let base = || dummy_up("d0");
     let cases = vec![
         case("fq_codel", vec![base().qdisc("d0", |q| q.fq_codel())]),
+        // fq_codel_change: `q->quantum = max(256U, quantum)`.
+        case("fq_codel-quantum-128", vec![base().qdisc("d0", |q| q.fq_codel().quantum(128))]),
         case("fq_codel-quantum-256", vec![base().qdisc("d0", |q| q.fq_codel().quantum(256))]),
         case("sfq", vec![base().qdisc("d0", |q| q.sfq())]),
+        // sfq_change caps limit at maxdepth * maxflows (127 * 128).
+        case("sfq-limit-20000", vec![base().qdisc("d0", |q| q.sfq().limit(20000))]),
         case("sfq-limit-200", vec![base().qdisc("d0", |q| q.sfq().limit(200))]),
         case(
             "sfq-perturb-quantum",

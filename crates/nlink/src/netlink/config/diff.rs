@@ -958,6 +958,16 @@ fn diff_qdiscs(
     }
 }
 
+/// The smallest quantum fq_codel keeps: `fq_codel_change()` stores
+/// `max(256U, quantum)` (net/sched/sch_fq_codel.c).
+const FQ_CODEL_MIN_QUANTUM: u32 = 256;
+
+/// The largest limit sfq keeps when neither depth nor flows is set, which
+/// nlink never does: `sfq_change()` caps `limit` at `maxdepth * maxflows`,
+/// `SFQ_MAX_DEPTH` (127) times `SFQ_DEFAULT_FLOWS` (128) by default
+/// (net/sched/sch_sfq.c).
+const SFQ_MAX_LIMIT: u32 = 127 * 128;
+
 /// Decide whether the live qdisc already *is* the declared one.
 ///
 /// Compares field by field, through the parsed [`QdiscOptions`] the
@@ -1066,10 +1076,14 @@ fn qdisc_params_match(declared: &DeclaredQdiscType, existing: &TcMessage) -> boo
             // close the gap. Changing `flows` needs the qdisc deleted
             // and re-added, which is the caller's decision to make, not
             // something to churn on (#361).
+            //
+            // `quantum` is compared as the kernel keeps it:
+            // `fq_codel_change()` stores `max(256U, quantum)`, so a declared
+            // 128 reads back as 256 and was replaced on every apply (#TBD).
             limit.is_none_or(|l| live.limit == l)
                 && target_us.is_none_or(|t| codel_round_trip_us(t) == live.target_us)
                 && interval_us.is_none_or(|i| codel_round_trip_us(i) == live.interval_us)
-                && quantum.is_none_or(|q| live.quantum == q)
+                && quantum.is_none_or(|q| live.quantum == q.max(FQ_CODEL_MIN_QUANTUM))
                 && ecn.is_none_or(|e| live.ecn == e)
         }
         (
@@ -1081,8 +1095,12 @@ fn qdisc_params_match(declared: &DeclaredQdiscType, existing: &TcMessage) -> boo
             },
             Some(QdiscOptions::Sfq(live)),
         ) => {
+            // `limit` is compared as the kernel keeps it: `sfq_change()`
+            // caps it at `maxdepth * maxflows`, which for the defaults nlink
+            // leaves in place is 127 * 128, so a declared 20000 reads back
+            // as 16256 and was replaced on every apply (#TBD).
             perturb_secs.is_none_or(|p| live.perturb_period == i32::try_from(p).unwrap_or(i32::MAX))
-                && limit.is_none_or(|l| live.limit == l)
+                && limit.is_none_or(|l| live.limit == l.min(SFQ_MAX_LIMIT))
                 && quantum.is_none_or(|q| live.quantum == q)
         }
         (DeclaredQdiscType::Prio { .. }, Some(QdiscOptions::Prio(live))) => {
@@ -1646,6 +1664,36 @@ mod tests {
         assert!(qdisc_params_match(&prio, &echo));
         let other = DeclaredQdiscType::Prio { bands: Some(4) };
         assert!(!qdisc_params_match(&other, &echo));
+    }
+
+    /// Values the kernel clamps on the way in are compared clamped: a
+    /// 6.12 kernel stores fq_codel quantum 128 as 256 and sfq limit 20000
+    /// as 16256, and both were replaced on every apply (#TBD).
+    #[test]
+    fn kernel_clamped_values_compare_as_clamped() {
+        use crate::netlink::types::tc::qdisc::fq_codel::TCA_FQ_CODEL_QUANTUM;
+        let fq = |quantum| DeclaredQdiscType::FqCodel {
+            limit: None,
+            target_us: None,
+            interval_us: None,
+            flows: None,
+            quantum: Some(quantum),
+            ecn: None,
+        };
+        let echo = live("fq_codel", Some(attr_u32(TCA_FQ_CODEL_QUANTUM, 256)));
+        assert!(qdisc_params_match(&fq(128), &echo));
+        assert!(qdisc_params_match(&fq(256), &echo));
+        assert!(!qdisc_params_match(&fq(300), &echo));
+
+        let sfq = |limit| DeclaredQdiscType::Sfq {
+            perturb_secs: None,
+            limit: Some(limit),
+            quantum: None,
+        };
+        let echo = live("sfq", Some(declared_options_bytes(&sfq(16_256))));
+        assert!(qdisc_params_match(&sfq(20_000), &echo));
+        assert!(qdisc_params_match(&sfq(16_256), &echo));
+        assert!(!qdisc_params_match(&sfq(16_000), &echo));
     }
 
     // ---- Plan 188 §2.2 — ApplyOptions builders ----
