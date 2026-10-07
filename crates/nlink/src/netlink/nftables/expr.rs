@@ -246,8 +246,15 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
             builder.append_attr_u64_be(NFTA_LIMIT_RATE, *rate);
             builder.append_attr_u64_be(NFTA_LIMIT_UNIT, unit.to_u64());
-            builder.append_attr_u32_be(NFTA_LIMIT_BURST, *burst);
+            // A packet limit with burst 0 is stored (and dumped) as the
+            // kernel's NFT_LIMIT_PKT_BURST_DEFAULT, 5; send what it keeps.
+            let burst = if *burst == 0 { 5 } else { *burst };
+            builder.append_attr_u32_be(NFTA_LIMIT_BURST, burst);
             builder.append_attr_u32_be(NFTA_LIMIT_TYPE, 0); // NFT_LIMIT_PKTS
+            // `nft_limit_dump` always emits FLAGS, 0 included. Without it a
+            // declared `limit` rendered one attribute short of the echo and
+            // was replaced on every apply.
+            builder.append_attr_u32_be(NFTA_LIMIT_FLAGS, 0);
             builder.nest_end(data);
         }
         Expr::Masquerade => {
@@ -339,9 +346,15 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             builder.append_attr_str(NFTA_EXPR_NAME, "reject");
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
             builder.append_attr_u32_be(NFTA_REJECT_TYPE, *reject_type);
-            // NFTA_REJECT_ICMP_CODE is a u8 on the wire, and the kernel wants
-            // it present even for TCP_RST (nft always sends it).
-            builder.append_attr(NFTA_REJECT_ICMP_CODE, &[*icmp_code]);
+            // NFTA_REJECT_ICMP_CODE is a u8 on the wire. `nft_reject_init`
+            // requires it for the two ICMP types and ignores it for a TCP
+            // reset, and `nft_reject_dump` only emits it for the ICMP types
+            // — so a TCP_RST that sent it (as this used to, on the belief
+            // that the kernel wanted it) never matched its own echo, and a
+            // declared `reject with tcp reset` was replaced on every apply.
+            if *reject_type != NFT_REJECT_TCP_RST {
+                builder.append_attr(NFTA_REJECT_ICMP_CODE, &[*icmp_code]);
+            }
             builder.nest_end(data);
         }
         Expr::Log { prefix, group } => {
@@ -350,9 +363,14 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             if let Some(prefix) = prefix {
                 builder.append_attr_str(NFTA_LOG_PREFIX, prefix);
             }
-            if let Some(group) = group {
-                builder.append_attr_u16_be(NFTA_LOG_GROUP, *group);
-            }
+            match group {
+                Some(group) => builder.append_attr_u16_be(NFTA_LOG_GROUP, *group),
+                // Without a group this is a syslog `log`, for which
+                // `nft_log_dump` always emits the level — WARNING when the
+                // request named none. Send it, or the declared rule never
+                // matches its echo.
+                None => builder.append_attr_u32_be(NFTA_LOG_LEVEL, NFT_LOGLEVEL_WARNING),
+            };
             builder.nest_end(data);
         }
         Expr::Ct { dreg, key } => {
@@ -367,6 +385,10 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
             builder.append_attr_str(NFTA_LOOKUP_SET, set);
             builder.append_attr_u32_be(NFTA_LOOKUP_SREG, *sreg as u32);
+            // `nft_lookup_dump` always emits FLAGS (NFT_LOOKUP_F_INV or 0).
+            // Without it every declared rule matching `@set` was replaced on
+            // every apply.
+            builder.append_attr_u32_be(NFTA_LOOKUP_FLAGS, 0);
             builder.nest_end(data);
         }
         Expr::Bitwise {
@@ -396,10 +418,13 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             builder.append_attr_str(NFTA_EXPR_NAME, "flow_offload");
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
             // The flow_offload expression carries a single string
-            // attribute (NFTA_FLOWTABLE_NAME = 2) naming the
-            // flowtable. The kernel resolves the name within the
-            // rule's owning table.
-            builder.append_attr_str(NFTA_FLOWTABLE_NAME, table);
+            // attribute naming the flowtable, which the kernel resolves
+            // within the rule's owning table. It is NFTA_FLOW_TABLE_NAME
+            // (1), from the expression's own attribute enum. This used to
+            // write NFTA_FLOWTABLE_NAME (2), the flowtable *object*'s name
+            // attribute: above the expression's NFTA_FLOW_MAX, so ignored,
+            // and the rule failed with EINVAL — every one of them.
+            builder.append_attr_str(NFTA_FLOW_TABLE_NAME, table);
             builder.nest_end(data);
         }
     }
@@ -1530,5 +1555,107 @@ mod decode_tests {
                 data: vec![TcpFlags::SYN.bits()],
             }
         );
+    }
+
+    // ---- Writers must send what the kernel echoes, and nothing it drops.
+    // Each of these sat behind a green suite because no `is_empty()` diff
+    // assertion ever declared the shape; `nftables_echo.rs` now does, and
+    // these pin the bytes.
+
+    #[test]
+    fn lookup_sends_the_flags_the_kernel_always_dumps() {
+        let attrs = data_attrs(&[Expr::Lookup {
+            set: "s".into(),
+            sreg: Register::R0,
+        }]);
+        assert_eq!(attrs[&NFTA_LOOKUP_FLAGS], 0u32.to_be_bytes());
+    }
+
+    #[test]
+    fn limit_sends_flags_and_the_burst_the_kernel_stores() {
+        let attrs = data_attrs(&[Expr::Limit {
+            rate: 10,
+            unit: LimitUnit::Second,
+            burst: 0,
+        }]);
+        assert_eq!(attrs[&NFTA_LIMIT_FLAGS], 0u32.to_be_bytes());
+        // A packet limit's burst 0 becomes NFT_LIMIT_PKT_BURST_DEFAULT.
+        assert_eq!(attrs[&NFTA_LIMIT_BURST], 5u32.to_be_bytes());
+        let explicit = data_attrs(&[Expr::Limit {
+            rate: 10,
+            unit: LimitUnit::Second,
+            burst: 20,
+        }]);
+        assert_eq!(explicit[&NFTA_LIMIT_BURST], 20u32.to_be_bytes());
+    }
+
+    #[test]
+    fn syslog_log_sends_the_default_level_and_group_log_does_not() {
+        let syslog = data_attrs(&[Expr::Log {
+            prefix: Some("p".into()),
+            group: None,
+        }]);
+        assert_eq!(syslog[&NFTA_LOG_LEVEL], NFT_LOGLEVEL_WARNING.to_be_bytes());
+        assert!(!syslog.contains_key(&NFTA_LOG_GROUP));
+
+        // A group makes it NF_LOG_TYPE_ULOG, whose dump has no level.
+        let group = data_attrs(&[Expr::Log {
+            prefix: None,
+            group: Some(5),
+        }]);
+        assert!(!group.contains_key(&NFTA_LOG_LEVEL));
+        assert_eq!(group[&NFTA_LOG_GROUP], 5u16.to_be_bytes());
+    }
+
+    #[test]
+    fn tcp_reset_reject_omits_the_icmp_code() {
+        let rst = data_attrs(&[Expr::Reject {
+            reject_type: NFT_REJECT_TCP_RST,
+            icmp_code: 0,
+        }]);
+        assert_eq!(rst.keys().copied().collect::<Vec<_>>(), [NFTA_REJECT_TYPE]);
+
+        // The ICMP types require it.
+        for reject_type in [NFT_REJECT_ICMP_UNREACH, NFT_REJECT_ICMPX_UNREACH] {
+            let icmp = data_attrs(&[Expr::Reject {
+                reject_type,
+                icmp_code: 1,
+            }]);
+            assert_eq!(icmp[&NFTA_REJECT_ICMP_CODE], [1]);
+        }
+    }
+
+    #[test]
+    fn flow_offload_names_the_flowtable_with_the_expression_attribute() {
+        let attrs = data_attrs(&[Expr::FlowOffload { table: "ft".into() }]);
+        // NFTA_FLOW_TABLE_NAME (1), not NFTA_FLOWTABLE_NAME (2) — the
+        // latter is above the expression's NFTA_FLOW_MAX.
+        assert_eq!(attrs.keys().copied().collect::<Vec<_>>(), [NFTA_FLOW_TABLE_NAME]);
+        assert_eq!(attrs[&NFTA_FLOW_TABLE_NAME], b"ft\0");
+    }
+
+    #[test]
+    fn set_matchers_carry_the_nfproto_guard() {
+        for rule in [
+            Rule::new("t", "c").match_saddr_in_set("s"),
+            Rule::new("t", "c").match_daddr_in_set("s"),
+        ] {
+            let decoded = parse_expressions(&encode(&rule.exprs));
+            assert_eq!(
+                decoded[..2],
+                [
+                    RuleExpr::Meta {
+                        dreg: Register::R0,
+                        key: MetaKey::NfProto,
+                    },
+                    RuleExpr::Cmp {
+                        sreg: Register::R0,
+                        op: CmpOp::Eq,
+                        data: vec![NFPROTO_IPV4],
+                    },
+                ],
+                "an IPv4 set match in an inet chain needs `meta nfproto ipv4`"
+            );
+        }
     }
 }

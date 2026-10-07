@@ -1594,9 +1594,14 @@ impl Rule {
         self
     }
 
-    /// Match source IPv4 address against a named set.
+    /// Match source IPv4 address against a named set (`ip saddr @set`).
+    ///
+    /// Prepends the `meta nfproto ipv4` guard the address matchers carry:
+    /// without it, in an `inet` chain an IPv6 packet had bytes 4..8 of its
+    /// source address looked up as if they were an IPv4 address.
     pub fn match_saddr_in_set(mut self, set: &str) -> Self {
         use super::expr::Expr;
+        self.push_nfproto_ipv4();
         // Load source IP from network header offset 12
         self.exprs.push(Expr::Payload {
             dreg: Register::R0,
@@ -1611,9 +1616,12 @@ impl Rule {
         self
     }
 
-    /// Match destination IPv4 address against a named set.
+    /// Match destination IPv4 address against a named set
+    /// (`ip daddr @set`), behind the same `meta nfproto ipv4` guard as
+    /// [`match_saddr_in_set`](Self::match_saddr_in_set).
     pub fn match_daddr_in_set(mut self, set: &str) -> Self {
         use super::expr::Expr;
+        self.push_nfproto_ipv4();
         // Load destination IP from network header offset 16
         self.exprs.push(Expr::Payload {
             dreg: Register::R0,
@@ -1937,6 +1945,20 @@ impl Rule {
         self.exprs.push(super::expr::Expr::Reject {
             reject_type,
             icmp_code,
+        });
+        self
+    }
+
+    /// Offload the matched flow to the named flowtable: `flow add @<name>`.
+    ///
+    /// Follow-on packets of the flow then bypass the ruleset on the
+    /// flowtable's fast path. Valid in a `forward` chain only, and the
+    /// flowtable must live in the rule's table (see
+    /// [`Flowtable`]); usually preceded by
+    /// `match_ct_state(CtState::ESTABLISHED)`.
+    pub fn flow_offload(mut self, flowtable: &str) -> Self {
+        self.exprs.push(super::expr::Expr::FlowOffload {
+            table: flowtable.to_string(),
         });
         self
     }

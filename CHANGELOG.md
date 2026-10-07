@@ -39,6 +39,41 @@ All notable changes to this project will be documented in this file.
   it, so a declared MSS clamp reconciles to an empty diff instead of a
   replace on every run (same class as #362).
 
+- **`Rule::flow_offload(flowtable)`** — `flow add @<flowtable>`. The
+  expression existed (`Expr::FlowOffload`) but had no helper, and could
+  not be installed at all (see Fixed, #375).
+
+### Fixed
+
+- **Declared rules using a set lookup, `limit`, `log` or `reject with tcp
+  reset` never converged (#374).** Each was installed fine and then
+  reported as changed — and replaced — on every apply, because its writer
+  disagreed with the kernel's dump: `nft_lookup_dump` and
+  `nft_limit_dump` always emit their `FLAGS` attribute, a syslog `log`
+  always dumps its level (`NFT_LOGLEVEL_WARNING` unless named), and a TCP
+  reset's dump has no ICMP code while nlink always sent one (the comment
+  claiming the kernel wanted it was wrong; `nft_reject_init` ignores it).
+  The writers now send exactly what the kernel keeps. A packet `limit`
+  with burst 0 is sent as the kernel's default of 5 for the same reason.
+  Same class as #362, unseen for the same reason: the idempotency test
+  only ever declared `match_tcp_dport` rules. `nftables_echo.rs` now
+  declares one keyed rule per `Rule` helper and `Expr` writer arm and
+  asserts the second diff is empty.
+
+- **Every `Expr::FlowOffload` rule failed with `EINVAL` (#375).** It named
+  the flowtable with `NFTA_FLOWTABLE_NAME` (2), the flowtable *object*'s
+  attribute; the `flow_offload` expression's is `NFTA_FLOW_TABLE_NAME`
+  (1, new constant), and 2 is above its maxtype, so the kernel never saw
+  a name.
+
+- **`match_saddr_in_set` / `match_daddr_in_set` had no `meta nfproto ipv4`
+  guard (#376).** In an `inet` chain an IPv6 packet reached the 4-byte
+  load at offset 12 / 16 and had bytes of its own source or destination
+  address looked up as an IPv4 address. They now carry the guard the
+  address matchers got in 0.20. **Behaviour change:** a declared rule
+  using them changes body, so the first apply after upgrading replaces it
+  once.
+
 ## [0.29.0] - 2026-10-01
 
 > Upgrading from 0.28.x? See
