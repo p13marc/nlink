@@ -102,6 +102,13 @@ pub const NFTA_FLOWTABLE_NAME: u16 = 2;
 pub const NFTA_FLOWTABLE_HOOK: u16 = 3;
 pub const NFTA_FLOWTABLE_USE: u16 = 4;
 pub const NFTA_FLOWTABLE_HANDLE: u16 = 5;
+
+/// `NFTA_FLOW_TABLE_NAME` — the flowtable name inside a `flow_offload`
+/// *expression* (`enum nft_offload_attributes`). Not
+/// [`NFTA_FLOWTABLE_NAME`], which names the flowtable *object* and is 2:
+/// the expression's policy stops at 1, so a 2 there is ignored and
+/// `nft_flow_offload_init` fails the rule with `EINVAL`.
+pub const NFTA_FLOW_TABLE_NAME: u16 = 1;
 pub const NFTA_FLOWTABLE_PAD: u16 = 6;
 pub const NFTA_FLOWTABLE_FLAGS: u16 = 7;
 
@@ -253,6 +260,9 @@ pub const NFTA_LIMIT_RATE: u16 = 1;
 pub const NFTA_LIMIT_UNIT: u16 = 2;
 pub const NFTA_LIMIT_BURST: u16 = 3;
 pub const NFTA_LIMIT_TYPE: u16 = 4;
+/// `NFTA_LIMIT_FLAGS` — `NFT_LIMIT_F_INV`. `nft_limit_dump` emits it on
+/// every dump, 0 included, so the writer always sends it.
+pub const NFTA_LIMIT_FLAGS: u16 = 5;
 
 // NAT
 pub const NFTA_NAT_TYPE: u16 = 1;
@@ -299,6 +309,12 @@ pub const NFT_REJECT_ICMPX_UNREACH: u32 = 2;
 // Log
 pub const NFTA_LOG_PREFIX: u16 = 2;
 pub const NFTA_LOG_GROUP: u16 = 1;
+/// `NFTA_LOG_LEVEL` — syslog level of a `log` without a group.
+/// `nft_log_dump` emits it for every such expression.
+pub const NFTA_LOG_LEVEL: u16 = 5;
+/// `NFT_LOGLEVEL_WARNING` — the level `nft_log_init` picks when the
+/// request names none.
+pub const NFT_LOGLEVEL_WARNING: u32 = 4;
 
 // =============================================================================
 // Set Attributes
