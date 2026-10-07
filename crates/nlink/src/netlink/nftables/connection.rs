@@ -1372,10 +1372,20 @@ pub(crate) fn parse_set(data: &[u8], family: Family) -> Option<SetInfo> {
         key_type: 0,
         key_len: 0,
         handle: 0,
+        size: None,
     };
 
     for (attr_type, payload) in AttrIter::new(data) {
         match attr_type & 0x7FFF {
+            // Always dumped, without NLA_F_NESTED, and empty when the set
+            // has no size.
+            NFTA_SET_DESC => {
+                for (desc_type, desc) in AttrIter::new(payload) {
+                    if desc_type & 0x7FFF == NFTA_SET_DESC_SIZE && desc.len() >= 4 {
+                        set.size = Some(u32::from_be_bytes(desc[..4].try_into().unwrap()));
+                    }
+                }
+            }
             NFTA_SET_TABLE => {
                 set.table = attr_str(payload).unwrap_or_default();
             }
@@ -1727,12 +1737,27 @@ impl Transaction {
     /// uses it to disambiguate sets created in the same
     /// transaction; element adds reference the set by name, so they
     /// don't need it).
-    pub fn add_set(mut self, set: Set) -> Self {
+    pub fn add_set(self, set: Set) -> Self {
+        self.push_newset(set, NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL)
+    }
+
+    /// Update an existing set in place: `NFT_MSG_NEWSET` without
+    /// `NLM_F_EXCL` (or `NLM_F_CREATE` — a set that has gone is `ENOENT`,
+    /// not silently recreated).
+    ///
+    /// The kernel (6.2+) first checks the key, data, flags and lengths
+    /// match the existing set (`EEXIST` otherwise), then at commit takes
+    /// the new size (6.5+, when non-zero) and **overwrites** the timeout
+    /// and GC interval with what the message carries — absent means 0.
+    /// [`Set`] models neither, so this is only for sets without them.
+    /// Older kernels accept the message and change nothing.
+    pub(crate) fn update_set(self, set: Set) -> Self {
+        self.push_newset(set, NLM_F_REQUEST)
+    }
+
+    fn push_newset(mut self, set: Set, flags: u16) -> Self {
         let set_id = self.next_set_id();
-        let mut builder = MessageBuilder::new(
-            nft_msg_type(NFT_MSG_NEWSET),
-            NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL,
-        );
+        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_NEWSET), flags);
         let nfgenmsg = NfGenMsg::new(set.family);
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_SET_TABLE, &set.table);
@@ -2181,6 +2206,38 @@ mod transaction_tests {
         let desc = find_attr(body, NFTA_SET_DESC).expect("NFTA_SET_DESC missing");
         let size = find_attr(&desc, NFTA_SET_DESC_SIZE).expect("NFTA_SET_DESC_SIZE missing");
         assert_eq!(u32::from_be_bytes(size.try_into().unwrap()), 1024);
+    }
+
+    #[test]
+    fn tx_update_set_is_a_newset_without_excl_or_create() {
+        let tx = new_tx().update_set(Set::new("filter", "s").size(4096));
+        // An update must not be EXCL (EEXIST on the existing set) and is
+        // not CREATE either: a set that vanished is ENOENT, not recreated.
+        assert_header(&tx.messages[0], nft_msg_type(NFT_MSG_NEWSET), NLM_F_REQUEST);
+        let body = body_after_nfgenmsg(&tx.messages[0]);
+        let desc = find_attr(body, NFTA_SET_DESC).expect("NFTA_SET_DESC missing");
+        let size = find_attr(&desc, NFTA_SET_DESC_SIZE).expect("NFTA_SET_DESC_SIZE missing");
+        assert_eq!(u32::from_be_bytes(size.try_into().unwrap()), 4096);
+    }
+
+    #[test]
+    fn parse_set_reads_the_size_from_the_desc_nest() {
+        // As `nf_tables_fill_set` dumps it: the DESC nest without
+        // NLA_F_NESTED, holding SIZE only when the set has one.
+        let dump = |size: Option<u32>| {
+            let mut b = MessageBuilder::new(0, 0);
+            b.append_attr_str(NFTA_SET_NAME, "s");
+            let desc = b.nest_start(NFTA_SET_DESC);
+            if let Some(size) = size {
+                b.append_attr_u32_be(NFTA_SET_DESC_SIZE, size);
+            }
+            b.nest_end(desc);
+            b.as_bytes()[16..].to_vec()
+        };
+        let sized = parse_set(&dump(Some(1024)), Family::Inet).unwrap();
+        assert_eq!(sized.size, Some(1024));
+        let unbounded = parse_set(&dump(None), Family::Inet).unwrap();
+        assert_eq!(unbounded.size, None);
     }
 
     #[test]

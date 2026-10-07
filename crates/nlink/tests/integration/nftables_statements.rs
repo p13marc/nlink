@@ -690,3 +690,109 @@ async fn tcp_mss_clamp_to_pmtu_uses_the_route_mtu() -> nlink::Result<()> {
     })
     .await
 }
+
+/// A throttle config the way a UPF would declare it: a bounded set of
+/// addresses and a rule marking traffic to them.
+fn throttle_cfg(size: u32, addrs: &[Ipv4Addr]) -> NftablesConfig {
+    let addrs = addrs.to_vec();
+    NftablesConfig::new().table("t", Family::Ip, move |t| {
+        t.set("throttled", move |mut s| {
+            s = s.key_type(SetKeyType::Ipv4Addr).size(size);
+            for a in addrs {
+                s = s.ipv4(a);
+            }
+            s
+        })
+        .chain("post", |c| {
+            c.hook(Hook::Postrouting)
+                .priority(Priority::Mangle)
+                .chain_type(ChainType::Filter)
+        })
+        .rule_keyed("post", "throttle", |r| {
+            r.match_daddr_in_set("throttled")
+                .set_mark_masked(0x10, 0xff)
+                .counter()
+        })
+    })
+}
+
+fn addrs(n: u8) -> Vec<Ipv4Addr> {
+    (1..=n).map(|i| Ipv4Addr::new(10, 45, 0, i)).collect()
+}
+
+/// A declared set size reaches the kernel, reads back, and reconciles to
+/// an empty diff.
+#[tokio::test]
+async fn declared_set_size_applies_and_reconciles() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let ns = TestNamespace::new("nft-dsize")?;
+    let conn = nft_in_ns(&ns)?;
+
+    with_timeout(async {
+        let cfg = throttle_cfg(2, &addrs(2));
+        cfg.diff(&conn).await?.apply(&conn).await?;
+
+        let sets = conn.list_sets_in("t", Family::Ip).await?;
+        assert_eq!(sets[0].size, Some(2), "SetInfo::size reads the kernel's size");
+
+        let again = cfg.diff(&conn).await?;
+        assert!(again.is_empty(), "second diff must be empty: {again}");
+        Ok(())
+    })
+    .await
+}
+
+/// Growing a declared set's size is applied in place — the set keeps its
+/// elements and the rule bound to it keeps its handle — and the elements
+/// the larger size admits go in during the same apply.
+///
+/// The kernel checks element adds against the size a set has *before*
+/// the commit, so this only works because the resize is committed first;
+/// in one batch the two new elements would be ENFILE.
+#[tokio::test]
+async fn declared_set_resize_is_in_place_and_admits_new_elements() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let ns = TestNamespace::new("nft-dresize")?;
+    let conn = nft_in_ns(&ns)?;
+
+    with_timeout(async {
+        throttle_cfg(2, &addrs(2))
+            .diff(&conn)
+            .await?
+            .apply(&conn)
+            .await?;
+        let handle_before = conn.list_rules("t", Family::Ip).await?[0].handle;
+
+        let grown = throttle_cfg(4, &addrs(4));
+        let diff = grown.diff(&conn).await?;
+        assert_eq!(diff.sets_to_resize.len(), 1, "{diff}");
+        assert!(
+            diff.sets_to_delete.is_empty() && diff.sets_to_add.is_empty(),
+            "a size change must not recreate the set: {diff}"
+        );
+        diff.apply(&conn).await?;
+
+        let sets = conn.list_sets_in("t", Family::Ip).await?;
+        assert_eq!(sets[0].size, Some(4));
+        assert_eq!(
+            conn.list_set_elements("t", "throttled", Family::Ip)
+                .await?
+                .len(),
+            4
+        );
+        assert_eq!(
+            conn.list_rules("t", Family::Ip).await?[0].handle,
+            handle_before,
+            "the rule bound to the set was replaced",
+        );
+
+        let again = grown.diff(&conn).await?;
+        assert!(again.is_empty(), "the resize must converge: {again}");
+        Ok(())
+    })
+    .await
+}

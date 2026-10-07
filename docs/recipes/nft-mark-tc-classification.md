@@ -86,8 +86,11 @@ use nlink::netlink::{Connection, Nftables};
 let nft = Connection::<Nftables>::new()?;
 
 let cfg = NftablesConfig::new().table("qos", Family::Ip, |t| {
+    // A bounded set: adding past 4096 fails with ENFILE instead of
+    // growing without limit. Raising the size later is applied in place.
     t.set("throttled", |s| {
         s.key_type(SetKeyType::Ipv4Addr)
+            .size(4096)
             .ipv4(Ipv4Addr::new(10, 45, 0, 7))
     })
     .chain("post", |c| {

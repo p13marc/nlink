@@ -355,15 +355,16 @@ impl DeclaredChainBuilder {
 // DeclaredSet
 // =============================================================================
 
-/// A declared named set — name, key type, flags, and its declared
-/// elements.
+/// A declared named set — name, key type, flags, optional size, and its
+/// declared elements.
 ///
 /// Reconciled by **name** (created if absent in the kernel, deleted
-/// if removed from the config) — its `key_type`/`flags` are not
-/// reconciled in place (same as a chain's hook/policy); changing a
-/// set's type means deleting and re-declaring it. The declared
-/// `elements` are reconciled **element-by-element** against the
-/// kernel: missing keys are added, undeclared keys are removed.
+/// if removed from the config). A changed `key_type` or `flags` cannot
+/// be applied to an existing set, so the set is deleted and recreated
+/// with its declared elements. A changed `size` is applied in place
+/// (kernel 6.5+). The declared `elements` are reconciled
+/// **element-by-element** against the kernel: missing keys are added,
+/// undeclared keys are removed.
 ///
 /// Note for dynamic/timeout sets (`NFT_SET_TIMEOUT` etc.): the
 /// kernel adds elements at runtime, so declaring `elements` on such
@@ -376,6 +377,7 @@ pub struct DeclaredSet {
     pub(crate) name: String,
     pub(crate) key_type: SetKeyType,
     pub(crate) flags: u32,
+    pub(crate) size: Option<u32>,
     pub(crate) elements: Vec<SetElement>,
 }
 
@@ -392,6 +394,10 @@ impl DeclaredSet {
     pub fn flags(&self) -> u32 {
         self.flags
     }
+    /// Declared maximum element count, if any.
+    pub fn size(&self) -> Option<u32> {
+        self.size
+    }
     /// Declared elements.
     pub fn elements(&self) -> &[SetElement] {
         &self.elements
@@ -404,6 +410,7 @@ pub struct DeclaredSetBuilder {
     name: String,
     key_type: SetKeyType,
     flags: u32,
+    size: Option<u32>,
     elements: Vec<SetElement>,
 }
 
@@ -415,6 +422,7 @@ impl DeclaredSetBuilder {
             // still well-formed.
             key_type: SetKeyType::Ipv4Addr,
             flags: 0,
+            size: None,
             elements: Vec::new(),
         }
     }
@@ -428,6 +436,22 @@ impl DeclaredSetBuilder {
     /// Set the flags bitmask directly (`NFT_SET_*` constants).
     pub fn flags(mut self, flags: u32) -> Self {
         self.flags = flags;
+        self
+    }
+
+    /// Maximum number of elements (`nft add set ... { size N; }`); see
+    /// [`Set::size`](crate::netlink::nftables::Set::size).
+    ///
+    /// Unlike the key type and flags, a changed size is applied to the
+    /// existing set in place — its elements and the rules bound to it
+    /// stay — in a batch committed ahead of the rest of the apply, so
+    /// that elements a larger size admits can be added in the same apply.
+    /// That needs kernel 6.5+: older kernels accept the update and keep
+    /// the old size, which `apply` reports as an error rather than leave
+    /// a diff that never converges. Leaving the size undeclared never
+    /// counts as drift, whatever the kernel holds.
+    pub fn size(mut self, size: u32) -> Self {
+        self.size = Some(size);
         self
     }
 
@@ -472,6 +496,7 @@ impl DeclaredSetBuilder {
             name: self.name,
             key_type: self.key_type,
             flags: self.flags,
+            size: self.size,
             elements: self.elements,
         }
     }

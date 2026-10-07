@@ -35,10 +35,26 @@
 use std::time::Duration;
 
 use super::diff::NftablesDiff;
-use super::types::DeclaredChain;
+use super::types::{DeclaredChain, DeclaredSet};
 use super::super::connection::Transaction;
 use super::super::types::{Chain, Family, Set};
-use crate::netlink::{connection::Connection, error::Result, protocol::Nftables};
+use crate::netlink::{
+    connection::Connection,
+    error::{Error, Result},
+    protocol::Nftables,
+};
+
+/// Re-build a runtime [`Set`] from a [`DeclaredSet`].
+fn runtime_set(table: &str, family: Family, declared: &DeclaredSet) -> Set {
+    let mut set = Set::new(table, declared.name())
+        .family(family)
+        .key_type(declared.key_type().clone())
+        .flags(declared.flags());
+    if let Some(size) = declared.size() {
+        set = set.size(size);
+    }
+    set
+}
 
 /// Re-build a runtime `Chain` from a `DeclaredChain`.
 ///
@@ -83,6 +99,16 @@ impl NftablesDiff {
         let total = self.change_count();
         if total == 0 {
             return Ok(0);
+        }
+
+        // 0. Set resizes, in a batch of their own committed first. The
+        //    kernel checks an element add against the size the set has
+        //    before the commit, so a set grown in the same batch as its
+        //    new elements would refuse them (ENFILE) and fail the apply,
+        //    every time. Changing a limit is the one change that is safe
+        //    to make ahead of the rest.
+        if !self.sets_to_resize.is_empty() {
+            self.resize_sets(conn).await?;
         }
 
         let mut tx: Transaction = conn.transaction();
@@ -150,11 +176,7 @@ impl NftablesDiff {
         //    rules (step 11) that reference them by `@name`. Re-build
         //    a runtime `Set` from `DeclaredSet`.
         for (table_name, family, declared) in &self.sets_to_add {
-            let set = Set::new(table_name.as_str(), declared.name())
-                .family(*family)
-                .key_type(declared.key_type().clone())
-                .flags(declared.flags());
-            tx = tx.add_set(set);
+            tx = tx.add_set(runtime_set(table_name, *family, declared));
         }
 
         // 9. Set-element adds — after their set is created (step 8 or
@@ -228,6 +250,36 @@ impl NftablesDiff {
 
         tx.commit(conn).await?;
         Ok(total)
+    }
+
+    /// Commit [`Self::sets_to_resize`] as one batch, then read the sets back:
+    /// a kernel older than 6.5 accepts the update and keeps the old size,
+    /// and saying so beats a diff that reports the same resize forever.
+    async fn resize_sets(&self, conn: &Connection<Nftables>) -> Result<()> {
+        let mut tx = conn.transaction();
+        for (table, family, declared) in &self.sets_to_resize {
+            tx = tx.update_set(runtime_set(table, *family, declared));
+        }
+        tx.commit(conn).await?;
+
+        for (table, family, declared) in &self.sets_to_resize {
+            let current = conn
+                .list_sets_in(table, *family)
+                .await?
+                .into_iter()
+                .find(|s| s.name == declared.name())
+                .and_then(|s| s.size);
+            if current != declared.size() {
+                return Err(Error::not_supported(format!(
+                    "set {table}/{}: the kernel accepted a resize to {:?} but kept {current:?} \
+                     (an in-place set size update needs Linux 6.5+); delete the set and \
+                     re-apply to recreate it at the new size",
+                    declared.name(),
+                    declared.size(),
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Apply with bounded retry on transient kernel-busy errors

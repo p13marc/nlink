@@ -75,9 +75,31 @@ All notable changes to this project will be documented in this file.
   see. All values matched the kernel already; now they are checked
   (686 discriminants across 70 enums).
 
+- **Declarative set size.** `DeclaredSetBuilder::size(n)` /
+  `DeclaredSet::size()`, so `NftablesConfig` can bound a set too, and
+  `SetInfo::size` reads the kernel's back. A changed size is applied in
+  place — the set keeps its elements and the rules bound to it keep their
+  handles — through the new `NftablesDiff::sets_to_resize`, committed in
+  a batch of its own ahead of the rest of the apply: the kernel checks an
+  element add against the size a set has *before* the commit, so growing
+  a set and filling it in one batch is `ENFILE`. An in-place resize needs
+  Linux 6.5; older kernels accept the update and keep the old size, which
+  `apply` now reports as `Error::NotSupported` instead of leaving a diff
+  that never converges. An undeclared size is never drift (the kernel
+  gives any set a `dynset` writes to a size of 65535). `nlink-nft` takes
+  `size <n>` on `add set` lines and `--size` on `add set`.
+
 - **`Rule::flow_offload(flowtable)`** — `flow add @<flowtable>`. The
   expression existed (`Expr::FlowOffload`) but had no helper, and could
   not be installed at all (see Fixed, #375).
+
+### Changed
+
+- **Breaking: `SetInfo` is `#[non_exhaustive]` and has a `size:
+  Option<u32>` field.** Code that builds a `SetInfo` with a struct literal
+  stops compiling; reading its fields is unaffected. `ChainInfo` and
+  `RuleInfo` were already non-exhaustive, so the dump-side info types now
+  agree — and the next attribute worth reading back is no longer a break.
 
 ### Fixed
 
