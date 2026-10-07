@@ -9,6 +9,8 @@ use crate::netlink::builder::MessageBuilder;
 pub enum Expr {
     /// Load metadata into a register.
     Meta { dreg: Register, key: MetaKey },
+    /// Write a register into packet metadata (`meta mark set ...`).
+    MetaSet { key: MetaKey, sreg: Register },
     /// Compare register value.
     Cmp {
         sreg: Register,
@@ -24,6 +26,39 @@ pub enum Expr {
     },
     /// Load immediate value into a register.
     Immediate { dreg: Register, data: Vec<u8> },
+    /// Load an extension header / option field into a register
+    /// (`tcp option maxseg size`). The rule stops matching when the
+    /// header or option is absent.
+    Exthdr {
+        dreg: Register,
+        op: ExthdrOp,
+        /// Extension header type, or option kind (e.g. [`TCPOPT_MAXSEG`]).
+        exthdr_type: u8,
+        /// Byte offset within the header / option.
+        offset: u32,
+        /// Number of bytes loaded.
+        len: u32,
+    },
+    /// Overwrite an extension header / option field from a register
+    /// (`tcp option maxseg size set ...`). The kernel fixes up the
+    /// checksum.
+    ///
+    /// Only [`ExthdrOp::TcpOpt`] is writable, and `nft_exthdr_tcp_set_init`
+    /// requires `offset >= 2` (the kind and length bytes are not writable)
+    /// and `len` of 2 or 4 — anything else is `EOPNOTSUPP`. The register
+    /// must hold the value in network byte order. The kernel never raises
+    /// an MSS through this expression, and a packet without the option is
+    /// left alone; a non-TCP packet ends rule evaluation.
+    ExthdrSet {
+        sreg: Register,
+        op: ExthdrOp,
+        /// Extension header type, or option kind (e.g. [`TCPOPT_MAXSEG`]).
+        exthdr_type: u8,
+        /// Byte offset within the option; at least 2.
+        offset: u32,
+        /// Number of bytes written.
+        len: u32,
+    },
     /// Emit a verdict.
     Verdict(Verdict),
     /// Packet counter.
@@ -88,15 +123,30 @@ pub enum Expr {
 
 /// Write a list of expressions into a rule's NFTA_RULE_EXPRESSIONS attribute.
 pub fn write_expressions(builder: &mut MessageBuilder, exprs: &[Expr]) {
+    write_expressions_as(builder, exprs, WireForm::Request);
+}
+
+/// Who the encoded expressions are for. They differ where the kernel
+/// rejects in a request an attribute it then always echoes in a dump.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WireForm {
+    /// What is sent to the kernel.
+    Request,
+    /// What the kernel echoes back, for the declarative diff.
+    Echo,
+}
+
+/// [`write_expressions`], in the given [`WireForm`].
+pub(crate) fn write_expressions_as(builder: &mut MessageBuilder, exprs: &[Expr], form: WireForm) {
     let list = builder.nest_start(NFTA_RULE_EXPRESSIONS | 0x8000); // NLA_F_NESTED
     for expr in exprs {
-        write_expr(builder, expr);
+        write_expr(builder, expr, form);
     }
     builder.nest_end(list);
 }
 
 /// Write a single expression as a nested NFTA_LIST_ELEM.
-fn write_expr(builder: &mut MessageBuilder, expr: &Expr) {
+fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
     let elem = builder.nest_start(NFTA_LIST_ELEM | 0x8000);
 
     match expr {
@@ -105,6 +155,47 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr) {
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
             builder.append_attr_u32_be(NFTA_META_DREG, *dreg as u32);
             builder.append_attr_u32_be(NFTA_META_KEY, *key as u32);
+            builder.nest_end(data);
+        }
+        Expr::MetaSet { key, sreg } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "meta");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_u32_be(NFTA_META_KEY, *key as u32);
+            builder.append_attr_u32_be(NFTA_META_SREG, *sreg as u32);
+            builder.nest_end(data);
+        }
+        Expr::Exthdr {
+            dreg,
+            op,
+            exthdr_type,
+            offset,
+            len,
+        } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "exthdr");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_u32_be(NFTA_EXTHDR_DREG, *dreg as u32);
+            write_exthdr_common(builder, *op, *exthdr_type, *offset, *len, true);
+            builder.nest_end(data);
+        }
+        Expr::ExthdrSet {
+            sreg,
+            op,
+            exthdr_type,
+            offset,
+            len,
+        } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "exthdr");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_u32_be(NFTA_EXTHDR_SREG, *sreg as u32);
+            // The set form rejects NFTA_EXTHDR_FLAGS but dumps it (always 0).
+            write_exthdr_common(
+                builder,
+                *op,
+                *exthdr_type,
+                *offset,
+                *len,
+                form == WireForm::Echo,
+            );
             builder.nest_end(data);
         }
         Expr::Cmp { sreg, op, data } => {
@@ -316,6 +407,27 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr) {
     builder.nest_end(elem);
 }
 
+/// Attributes shared by the load and set forms of `exthdr`. `FLAGS` is
+/// 0 (no `NFT_EXTHDR_F_PRESENT`); the kernel always dumps it, so it is
+/// written whenever the kernel accepts it, to keep declared and dumped
+/// bodies byte-equal.
+fn write_exthdr_common(
+    builder: &mut MessageBuilder,
+    op: ExthdrOp,
+    exthdr_type: u8,
+    offset: u32,
+    len: u32,
+    with_flags: bool,
+) {
+    builder.append_attr_u8(NFTA_EXTHDR_TYPE, exthdr_type);
+    builder.append_attr_u32_be(NFTA_EXTHDR_OFFSET, offset);
+    builder.append_attr_u32_be(NFTA_EXTHDR_LEN, len);
+    if with_flags {
+        builder.append_attr_u32_be(NFTA_EXTHDR_FLAGS, 0);
+    }
+    builder.append_attr_u32_be(NFTA_EXTHDR_OP, op as u32);
+}
+
 fn write_verdict_expr(builder: &mut MessageBuilder, verdict: &Verdict) {
     builder.append_attr_str(NFTA_EXPR_NAME, "immediate");
     let expr_data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
@@ -383,6 +495,39 @@ pub enum RuleExpr {
         dreg: Register,
         /// Metadata key being loaded.
         key: MetaKey,
+    },
+    /// `meta` set: write a register into packet metadata.
+    MetaSet {
+        /// Metadata key being written.
+        key: MetaKey,
+        /// Source register.
+        sreg: Register,
+    },
+    /// `exthdr` load of an extension header / option field.
+    Exthdr {
+        /// Destination register.
+        dreg: Register,
+        /// Header family.
+        op: ExthdrOp,
+        /// Extension header type or option kind.
+        exthdr_type: u8,
+        /// Byte offset within the header / option.
+        offset: u32,
+        /// Number of bytes loaded.
+        len: u32,
+    },
+    /// `exthdr` set: overwrite an extension header / option field.
+    ExthdrSet {
+        /// Source register.
+        sreg: Register,
+        /// Header family.
+        op: ExthdrOp,
+        /// Extension header type or option kind.
+        exthdr_type: u8,
+        /// Byte offset within the header / option.
+        offset: u32,
+        /// Number of bytes written.
+        len: u32,
     },
     /// `cmp` of a register against a value.
     Cmp {
@@ -459,6 +604,7 @@ fn parse_expr(name: &str, data: &[u8]) -> RuleExpr {
         "meta" => parse_meta(data),
         "cmp" => parse_cmp(data),
         "payload" => parse_payload(data),
+        "exthdr" => parse_exthdr(data),
         _ => None,
     };
     decoded.unwrap_or_else(|| RuleExpr::Unknown {
@@ -542,20 +688,66 @@ fn parse_verdict(nest: &[u8]) -> Option<Verdict> {
 
 fn parse_meta(data: &[u8]) -> Option<RuleExpr> {
     let mut dreg = None;
+    let mut sreg = None;
     let mut key = None;
     for (attr, payload) in AttrIter::new(data) {
         match attr {
-            NFTA_META_DREG => dreg = Register::from_u32(get::u32_be(payload).ok()?),
+            NFTA_META_DREG => dreg = Some(Register::from_u32(get::u32_be(payload).ok()?)?),
+            NFTA_META_SREG => sreg = Some(Register::from_u32(get::u32_be(payload).ok()?)?),
             NFTA_META_KEY => key = MetaKey::from_u32(get::u32_be(payload).ok()?),
             _ => {}
         }
     }
-    // SREG-form meta (meta-set, e.g. `meta mark set ...`) has no DREG
-    // and decodes as Unknown.
-    Some(RuleExpr::Meta {
-        dreg: dreg?,
-        key: key?,
-    })
+    let key = key?;
+    match (dreg, sreg) {
+        (Some(dreg), None) => Some(RuleExpr::Meta { dreg, key }),
+        (None, Some(sreg)) => Some(RuleExpr::MetaSet { key, sreg }),
+        _ => None,
+    }
+}
+
+fn parse_exthdr(data: &[u8]) -> Option<RuleExpr> {
+    let mut dreg = None;
+    let mut sreg = None;
+    let mut exthdr_type = None;
+    let mut offset = None;
+    let mut len = None;
+    let mut flags = 0;
+    let mut op = None;
+    for (attr, payload) in AttrIter::new(data) {
+        match attr {
+            NFTA_EXTHDR_DREG => dreg = Some(Register::from_u32(get::u32_be(payload).ok()?)?),
+            NFTA_EXTHDR_SREG => sreg = Some(Register::from_u32(get::u32_be(payload).ok()?)?),
+            NFTA_EXTHDR_TYPE => exthdr_type = Some(get::u8(payload).ok()?),
+            NFTA_EXTHDR_OFFSET => offset = Some(get::u32_be(payload).ok()?),
+            NFTA_EXTHDR_LEN => len = Some(get::u32_be(payload).ok()?),
+            NFTA_EXTHDR_FLAGS => flags = get::u32_be(payload).ok()?,
+            NFTA_EXTHDR_OP => op = ExthdrOp::from_u32(get::u32_be(payload).ok()?),
+            _ => {}
+        }
+    }
+    // Flags (`NFT_EXTHDR_F_PRESENT`) are not modelled: never guess.
+    if flags != 0 {
+        return None;
+    }
+    let (op, exthdr_type, offset, len) = (op?, exthdr_type?, offset?, len?);
+    match (dreg, sreg) {
+        (Some(dreg), None) => Some(RuleExpr::Exthdr {
+            dreg,
+            op,
+            exthdr_type,
+            offset,
+            len,
+        }),
+        (None, Some(sreg)) => Some(RuleExpr::ExthdrSet {
+            sreg,
+            op,
+            exthdr_type,
+            offset,
+            len,
+        }),
+        _ => None,
+    }
 }
 
 fn parse_cmp(data: &[u8]) -> Option<RuleExpr> {
@@ -1127,5 +1319,216 @@ mod decode_tests {
             ..rule
         };
         assert_eq!(no_counter.counter(), None);
+    }
+
+    /// The `NFTA_EXPR_DATA` attributes of the single expression in `exprs`,
+    /// keyed by attribute number.
+    fn data_attrs(exprs: &[Expr]) -> std::collections::BTreeMap<u16, Vec<u8>> {
+        let bytes = encode(exprs);
+        let (_, elem) = AttrIter::new(&bytes).next().expect("one LIST_ELEM");
+        let (_, data) = AttrIter::new(elem)
+            .find(|(attr, _)| *attr == NFTA_EXPR_DATA)
+            .expect("NFTA_EXPR_DATA");
+        attrs_of(data)
+    }
+
+    #[test]
+    fn meta_set_emits_key_and_sreg_but_no_dreg() {
+        let attrs = data_attrs(&[Expr::MetaSet {
+            key: MetaKey::Mark,
+            sreg: Register::R0,
+        }]);
+        assert_eq!(
+            attrs.keys().copied().collect::<Vec<_>>(),
+            [NFTA_META_KEY, NFTA_META_SREG]
+        );
+        assert_eq!(attrs[&NFTA_META_KEY], 3u32.to_be_bytes());
+        assert_eq!(attrs[&NFTA_META_SREG], 1u32.to_be_bytes());
+    }
+
+    #[test]
+    fn exthdr_set_emits_kernel_attribute_layout() {
+        let attrs = data_attrs(&[Expr::ExthdrSet {
+            sreg: Register::R0,
+            op: ExthdrOp::TcpOpt,
+            exthdr_type: TCPOPT_MAXSEG,
+            offset: 2,
+            len: 2,
+        }]);
+        // No FLAGS: nft_exthdr_tcp_set_init() rejects it with EINVAL.
+        assert_eq!(
+            attrs.keys().copied().collect::<Vec<_>>(),
+            [
+                NFTA_EXTHDR_TYPE,
+                NFTA_EXTHDR_OFFSET,
+                NFTA_EXTHDR_LEN,
+                NFTA_EXTHDR_OP,
+                NFTA_EXTHDR_SREG,
+            ]
+        );
+        // NLA_U8 in the kernel policy.
+        assert_eq!(attrs[&NFTA_EXTHDR_TYPE], [TCPOPT_MAXSEG]);
+        assert_eq!(attrs[&NFTA_EXTHDR_OP], 1u32.to_be_bytes());
+    }
+
+    #[test]
+    fn exthdr_set_echo_form_carries_the_flags_the_kernel_dumps() {
+        let mut b = MessageBuilder::new(0, 0);
+        let set = Expr::ExthdrSet {
+            sreg: Register::R0,
+            op: ExthdrOp::TcpOpt,
+            exthdr_type: TCPOPT_MAXSEG,
+            offset: 2,
+            len: 2,
+        };
+        write_expressions_as(&mut b, &[set], WireForm::Echo);
+        let bytes = b.as_bytes()[20..].to_vec();
+        let (_, elem) = AttrIter::new(&bytes).next().expect("one LIST_ELEM");
+        let (_, data) = AttrIter::new(elem)
+            .find(|(attr, _)| *attr == NFTA_EXPR_DATA)
+            .expect("NFTA_EXPR_DATA");
+        assert_eq!(attrs_of(data)[&NFTA_EXTHDR_FLAGS], 0u32.to_be_bytes());
+    }
+
+    #[test]
+    fn roundtrip_meta_set_and_exthdr() {
+        let load = Expr::Exthdr {
+            dreg: Register::R1,
+            op: ExthdrOp::TcpOpt,
+            exthdr_type: TCPOPT_MAXSEG,
+            offset: 2,
+            len: 2,
+        };
+        let set = Expr::ExthdrSet {
+            sreg: Register::R1,
+            op: ExthdrOp::TcpOpt,
+            exthdr_type: TCPOPT_MAXSEG,
+            offset: 2,
+            len: 2,
+        };
+        let meta_set = Expr::MetaSet {
+            key: MetaKey::Mark,
+            sreg: Register::R2,
+        };
+        assert_eq!(
+            parse_expressions(&encode(&[load, set, meta_set])),
+            vec![
+                RuleExpr::Exthdr {
+                    dreg: Register::R1,
+                    op: ExthdrOp::TcpOpt,
+                    exthdr_type: TCPOPT_MAXSEG,
+                    offset: 2,
+                    len: 2,
+                },
+                RuleExpr::ExthdrSet {
+                    sreg: Register::R1,
+                    op: ExthdrOp::TcpOpt,
+                    exthdr_type: TCPOPT_MAXSEG,
+                    offset: 2,
+                    len: 2,
+                },
+                RuleExpr::MetaSet {
+                    key: MetaKey::Mark,
+                    sreg: Register::R2,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn exthdr_with_present_flag_decodes_as_unknown() {
+        // `tcp option maxseg exists`: NFT_EXTHDR_F_PRESENT is not modelled.
+        let data = build_attrs(|b| {
+            b.append_attr_u32_be(NFTA_EXTHDR_DREG, 1);
+            b.append_attr_u8(NFTA_EXTHDR_TYPE, TCPOPT_MAXSEG);
+            b.append_attr_u32_be(NFTA_EXTHDR_OFFSET, 0);
+            b.append_attr_u32_be(NFTA_EXTHDR_LEN, 1);
+            b.append_attr_u32_be(NFTA_EXTHDR_FLAGS, 1);
+            b.append_attr_u32_be(NFTA_EXTHDR_OP, 1);
+        });
+        let decoded = parse_expressions(&build_elem("exthdr", &data));
+        assert!(
+            matches!(decoded.as_slice(), [RuleExpr::Unknown { name, .. }] if name == "exthdr"),
+            "got {decoded:?}"
+        );
+    }
+
+    #[test]
+    fn rule_set_mark_loads_then_sets() {
+        let rule = Rule::new("t", "c").set_mark(0x10);
+        assert_eq!(
+            parse_expressions(&encode(&rule.exprs)),
+            vec![
+                RuleExpr::Immediate {
+                    dreg: Register::R0,
+                    data: 0x10u32.to_ne_bytes().to_vec(),
+                },
+                RuleExpr::MetaSet {
+                    key: MetaKey::Mark,
+                    sreg: Register::R0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rule_clamp_tcp_mss_is_the_nft_statement() {
+        let rule = Rule::new("t", "c").clamp_tcp_mss(1360);
+        let decoded = parse_expressions(&encode(&rule.exprs));
+        // `nft add rule ... tcp option maxseg size set 1360` (nftables
+        // tests/py/any/tcpopt.t.payload): an immediate and the exthdr
+        // write, nothing else — behind nlink's `meta l4proto tcp` guard.
+        // No load-and-compare first: the kernel already refuses to raise
+        // an MSS, and a load would end rule evaluation for SYNs without the
+        // option, skipping whatever follows the clamp in the rule.
+        assert_eq!(
+            decoded,
+            [
+                RuleExpr::Meta {
+                    dreg: Register::R0,
+                    key: MetaKey::L4Proto,
+                },
+                RuleExpr::Cmp {
+                    sreg: Register::R0,
+                    op: CmpOp::Eq,
+                    data: vec![6],
+                },
+                RuleExpr::Immediate {
+                    dreg: Register::R0,
+                    data: vec![0x05, 0x50],
+                },
+                RuleExpr::ExthdrSet {
+                    sreg: Register::R0,
+                    op: ExthdrOp::TcpOpt,
+                    exthdr_type: TCPOPT_MAXSEG,
+                    offset: 2,
+                    len: 2,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rule_match_tcp_flags_masks_the_flags_byte() {
+        let rule =
+            Rule::new("t", "c").match_tcp_flags(TcpFlags::SYN, TcpFlags::SYN | TcpFlags::RST);
+        let decoded = parse_expressions(&encode(&rule.exprs));
+        assert_eq!(
+            decoded[2],
+            RuleExpr::Payload {
+                dreg: Register::R0,
+                base: PayloadBase::Transport,
+                offset: 13,
+                len: 1,
+            }
+        );
+        assert_eq!(
+            decoded[4],
+            RuleExpr::Cmp {
+                sreg: Register::R0,
+                op: CmpOp::Eq,
+                data: vec![TcpFlags::SYN.bits()],
+            }
+        );
     }
 }

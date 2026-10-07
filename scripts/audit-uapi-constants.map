@@ -89,6 +89,8 @@ Register = NFT_REG
     R1 -> 2
     R2 -> 3
     R3 -> 4
+ExthdrOp = NFT_EXTHDR_OP
+    TcpOpt -> TCPOPT
 
 # -------------------------------------------------------------------- ethtool
 EthtoolCmd = ETHTOOL_MSG

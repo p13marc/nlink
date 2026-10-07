@@ -609,6 +609,7 @@ impl Connection<Nftables> {
         builder.append_attr_u32_be(NFTA_SET_KEY_TYPE, set.key_type.type_id());
         builder.append_attr_u32_be(NFTA_SET_KEY_LEN, set.key_type.len());
         builder.append_attr_u32_be(NFTA_SET_FLAGS, set.flags);
+        append_set_desc(&mut builder, &set);
         // Set ID (arbitrary, used for referencing in same batch)
         builder.append_attr_u32_be(NFTA_SET_ID, 1);
 
@@ -1739,6 +1740,7 @@ impl Transaction {
         builder.append_attr_u32_be(NFTA_SET_KEY_TYPE, set.key_type.type_id());
         builder.append_attr_u32_be(NFTA_SET_KEY_LEN, set.key_type.len());
         builder.append_attr_u32_be(NFTA_SET_FLAGS, set.flags);
+        append_set_desc(&mut builder, &set);
         builder.append_attr_u32_be(NFTA_SET_ID, set_id);
         self.messages.push(builder.finish());
         self
@@ -1791,6 +1793,16 @@ impl Transaction {
     #[tracing::instrument(level = "debug", skip_all, fields(method = "commit"))]
     pub async fn commit(self, conn: &Connection<Nftables>) -> Result<()> {
         conn.send_batch(self.messages).await
+    }
+}
+
+/// Append the `NFTA_SET_DESC` nest carrying the set size, if any.
+/// Shared by the imperative and `Transaction` set creation paths.
+fn append_set_desc(builder: &mut MessageBuilder, set: &Set) {
+    if let Some(size) = set.size {
+        let desc = builder.nest_start(NFTA_SET_DESC);
+        builder.append_attr_u32_be(NFTA_SET_DESC_SIZE, size);
+        builder.nest_end(desc);
     }
 }
 
@@ -2153,6 +2165,22 @@ mod transaction_tests {
         let kl = find_attr(body, NFTA_SET_KEY_LEN).expect("NFTA_SET_KEY_LEN missing");
         assert_eq!(u32::from_be_bytes(kl.try_into().unwrap()), 4);
         assert!(find_attr(body, NFTA_SET_ID).is_some(), "NFTA_SET_ID missing");
+    }
+
+    #[test]
+    fn tx_add_set_without_size_emits_no_desc() {
+        let tx = new_tx().add_set(Set::new("filter", "s"));
+        let body = body_after_nfgenmsg(&tx.messages[0]);
+        assert!(find_attr(body, NFTA_SET_DESC).is_none());
+    }
+
+    #[test]
+    fn tx_add_set_size_nests_desc_size() {
+        let tx = new_tx().add_set(Set::new("filter", "s").size(1024));
+        let body = body_after_nfgenmsg(&tx.messages[0]);
+        let desc = find_attr(body, NFTA_SET_DESC).expect("NFTA_SET_DESC missing");
+        let size = find_attr(&desc, NFTA_SET_DESC_SIZE).expect("NFTA_SET_DESC_SIZE missing");
+        assert_eq!(u32::from_be_bytes(size.try_into().unwrap()), 1024);
     }
 
     #[test]
