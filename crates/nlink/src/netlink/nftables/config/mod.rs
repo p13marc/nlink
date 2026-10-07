@@ -39,17 +39,19 @@
 //! # }
 //! ```
 //!
-//! # 0.16 scope
+//! # Scope
 //!
-//! Covers tables, chains, rules, and flowtables. Sets and maps
-//! deferred — they're a separate dimension of nftables state that
-//! warrants its own design pass. The shipped diff uses
-//! **name-based identity** for rules: a `DeclaredRule` matches a
-//! kernel rule by its `handle_key` (caller-supplied); rules
-//! without a key are re-applied on every diff. The full
-//! canonicalization-based diff designed in Plan 157 §4.3 is
-//! deferred — it needs `Rule` type's typed match collection to be
-//! refactored for sortability, which is a separate pass.
+//! Covers tables, chains, rules, flowtables, sets (intervals,
+//! concatenations, timeouts, maps and verdict maps) and named
+//! stateful objects (counters, quotas, limits). A `DeclaredRule`
+//! matches a kernel rule by its key — caller-supplied with
+//! `rule_keyed`, else derived from its content — and declared order is
+//! enforced per chain. Bodies are compared after attribute
+//! normalization, with the live state the kernel echoes (counter
+//! values, quota consumption) left out; sets and objects are compared
+//! by configuration, never by what the packet path has done to them.
+//! See `docs/recipes/nftables-declarative-config.md` and
+//! `docs/recipes/nftables-sets-maps.md`.
 
 mod apply;
 mod diff;

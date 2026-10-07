@@ -18,10 +18,13 @@ on the trusted side — and verify it via conntrack lookups. Uses
 
 Don't use it when:
 
-- You need full nftables expressiveness (named maps with verdicts,
-  flowtables, vmaps, complex set element types). The typed builder
-  covers the firewall sweet spot — for the long tail, drop to the
-  raw `MessageBuilder` or shell out to `nft -f`.
+- You need an expression nlink does not model (`fib`, `socket`,
+  `tproxy`, …). Write it with `Expr::Raw(RawExpr)` — named
+  attributes, still inside the typed rule and the atomic batch — or
+  a whole message with `Transaction::raw`. Sets, maps, verdict maps,
+  intervals, concatenations, timeouts, named objects and flowtables
+  are all typed: see
+  [sets, maps and objects](./nftables-sets-maps.md).
 - You need to inspect or manipulate conntrack entries themselves
   (insert / delete / mark). For that, see the
   [conntrack-programmatic](./conntrack-programmatic.md) recipe —
@@ -386,12 +389,11 @@ conntrack (above), not in `NFT_MSG_GETFLOWTABLE`. See the
   cheap, but if you're generating thousands of dynamic rules consider
   reusing a counter via the rule's `position` to insert near an
   existing counter rule instead.
-- **Set elements need to match the table family.** A set declared
-  `Family::Inet` only accepts `SetKeyType::Ipv4Addr` *or*
-  `SetKeyType::Ipv6Addr` elements that come through an inet chain;
-  IPv6 elements in an inet rule still need a separate
-  `match_saddr_v6_in_set` (currently coverage-gated — drop to
-  `MessageBuilder` for v6 set membership today).
+- **A set holds one address family.** In an `inet` table, keep IPv4
+  and IPv6 blocklists as two sets and match each with
+  `match_in_set(PacketField::Ip4Saddr, ..)` /
+  `match_in_set(PacketField::Ip6Saddr, ..)`; each lookup is guarded by
+  `meta nfproto`, so the other family's packets never reach it.
 - **Conntrack zones.** Multiple firewalls on a single host (e.g.,
   per-tenant CT zones) need `zone()` set on rules. Not yet exposed by
   the typed `Rule` builder — file an issue if you need it.

@@ -38,6 +38,17 @@ All notable changes to this project will be documented in this file.
   a range to the top of the key space — and 0.30 refused interval elements
   outright.
 
+- **Recipes: [nftables sets, maps and objects](docs/recipes/nftables-sets-maps.md)
+  and [ipset → nftables](docs/recipes/ipset-to-nftables.md)**, plus the
+  example `nftables_sets_maps`. Run it as root with `-- --apply`: it
+  applies one declared ruleset with every set kind, sends traffic through
+  it in a throwaway namespace, and shows a second apply doing nothing.
+  The recipes' code compiles as doctests. Stale docs are fixed: the
+  declarative recipe no longer calls maps and objects imperative-only, and
+  no longer says unkeyed rules are re-added every time or that dynamic
+  sets churn; the stateful-firewall recipe no longer points at a
+  `match_saddr_v6_in_set` that never existed.
+
 - **Named stateful objects: counters, quotas and limits, and object maps.**
   - `Object::{counter, quota, limit}` with `ObjectConfig`, `ObjectType`
     (`NFT_OBJECT_*`, audit-mapped), and `ObjectInfo` / `ObjectState` read

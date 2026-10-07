@@ -52,6 +52,9 @@ mod error_handling_patterns {}
 #[doc = include_str!("../../../docs/recipes/events-with-resync.md")]
 mod events_with_resync {}
 
+#[doc = include_str!("../../../docs/recipes/ipset-to-nftables.md")]
+mod ipset_to_nftables {}
+
 #[cfg(feature = "namespace_watcher")]
 #[doc = include_str!("../../../docs/recipes/multi-namespace-events.md")]
 mod multi_namespace_events {}
@@ -69,6 +72,9 @@ mod nftables_declarative_config {}
 #[cfg(feature = "lab")]
 #[doc = include_str!("../../../docs/recipes/nftables-stateful-fw.md")]
 mod nftables_stateful_fw {}
+
+#[doc = include_str!("../../../docs/recipes/nftables-sets-maps.md")]
+mod nftables_sets_maps {}
 
 #[doc = include_str!("../../../docs/recipes/nftables-watch-with-resync.md")]
 mod nftables_watch_with_resync {}

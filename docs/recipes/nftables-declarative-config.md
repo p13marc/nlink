@@ -24,10 +24,10 @@ Don't use it when:
 - One-off rule mutations from CLI tools — the imperative
   [`Connection::<Nftables>::{add_table, add_chain, add_rule}`](../../crates/nlink/src/netlink/nftables/connection.rs)
   methods are simpler.
-- You need full nftables expressiveness with maps, named counters,
-  or quota objects — the declarative layer covers tables, chains,
-  rules, flowtables, and named **sets** (with element-level diff,
-  see below); maps/counters/quotas remain imperative-only.
+- You need an expression nlink does not model — use `Expr::Raw`,
+  which the declarative diff handles too. Sets, maps, verdict maps,
+  timeouts and named counters/quotas/limits are all declarative: see
+  [sets, maps and objects](./nftables-sets-maps.md).
 
 ## Permissions
 
@@ -138,6 +138,14 @@ kernel round-trips it across dumps. The diff:
   → delete (it's ours; it shouldn't be there).
 - Kernel rule without an `nlink:` prefix → left alone (foreign
   rule from `iptables-nft`, hand-edited via `nft -f`, etc.).
+- **Order is enforced.** First match wins, so the chain is put in
+  declared order: a rule declared between two installed ones is
+  inserted there, and rules found out of order are moved — as few as
+  possible, so counters survive. Opt out with
+  `NftDiffOptions::enforce_rule_order(false)`.
+- A rule's `.comment("…")` is stored after the key
+  (`nlink:<key> <comment>`) and compared too. Live state the kernel
+  echoes — counter values, quota consumption — is not.
 
 ```rust,no_run
 # use nlink::{Connection, Nftables};
@@ -151,26 +159,24 @@ assert!(second_diff.is_empty()); // no-op
 # }
 ```
 
-### Anonymous rules (no key) — documented limitation
+### Rules without a key
 
-Rules declared with bare `.rule(...)` (no `handle_key`) have no
-identity for the diff. The library treats them as "always add"
-and emits a `tracing::warn!` so operators notice. Documented
-trade-off; same shape as a `LinkConfig` without a name would be
-in `NetworkConfig` — pathological.
-
-If your config has any rule you want to reconcile across
-applies, use `.rule_keyed(...)`. Operators typically derive
-keys from their config schema:
-`service-foo/ingress/allow`, `firewall-rule-3142`, etc.
+A rule declared with bare `.rule(...)` gets a key derived from its
+chain, body and comment (`~` + a hash; `.N` for identical copies),
+so it converges too. Editing it changes its key, so the old rule is
+deleted and the new one inserted in its place — where a keyed rule
+would be replaced in place, keeping its handle. Give a rule a key with
+`.rule_keyed(...)` when other tools refer to it, or when you want its
+identity to survive an edit; operators typically derive keys from their
+config schema (`service-foo/ingress/allow`, `firewall-rule-3142`).
 
 ### Foreign rules are preserved
 
 Rules in your chains created by other tools (no `nlink:` prefix
 on their comment, or no comment at all) are left alone by the
 diff. The library only deletes rules it owns. If you want a clean
-chain (drop everything not declared), use the imperative
-`conn.del_chain(...)` first.
+chain — everything not declared removed — declare it
+`.exclusive()`.
 
 ### Foreign tables are preserved
 
@@ -249,12 +255,15 @@ exists before the rules that match on it. To read a set's current
 contents directly, use
 [`Connection::<Nftables>::list_set_elements`](../../crates/nlink/src/netlink/nftables/connection.rs).
 
-**Two limitations** (both documented on `DeclaredSet`): only a
-set's *elements* are reconciled in place — its `key_type`/`flags`
-are not (same as a chain's hook/policy; change those by deleting
-and re-declaring). And dynamic/`timeout` sets that the kernel
-populates at runtime should be declared with **no** elements,
-otherwise every apply churns them.
+A changed `key_type`, flags or map data type recreates the set, and
+the rules using it are moved out of its way and back to their places
+in the same batch. A changed size, default timeout or GC interval is
+applied in place (kernel 6.5+). A set that rules fill at runtime
+(`.dynamic()`, or one with timeouts) defaults to
+`SetElementMode::Ensure`: its declared elements are added and the
+ones the packet path put there stay. Intervals, concatenations,
+maps and named objects are in
+[sets, maps and objects](./nftables-sets-maps.md).
 
 The `nlink-nft` demo speaks the matching reconcile DSL:
 

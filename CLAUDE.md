@@ -687,6 +687,13 @@ recipe rather than re-synthesizing:
   the `serde` feature gives a validating JSON/YAML round-trip
   (`NetworkConfig::from_json_str`; #108) — see
   [`docs/library.md`](docs/library.md#declarative-network-configuration).
+- [`nftables-sets-maps`](docs/recipes/nftables-sets-maps.md) — sets of
+  addresses/prefixes/ports/concatenations, rules that fill sets with
+  timeouts (`update @seen`), verdict and value maps, named counters /
+  quotas / limits and object maps; imperative and declarative.
+- [`ipset-to-nftables`](docs/recipes/ipset-to-nftables.md) — every ipset
+  type/option and `-m set` / `-j SET` construct mapped to its nlink call,
+  plus a worked ipset + iptables → `NftablesConfig` migration.
 - [`define-your-own-genl-family`](docs/recipes/define-your-own-genl-family.md)
   — declare a complete custom GENL family in ~30 lines via
   `nlink-macros` (`#[genl_family]` + `#[derive(GenlMessage)]` +

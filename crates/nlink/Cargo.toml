@@ -389,6 +389,10 @@ path = "examples/nftables/firewall.rs"
 name = "nftables_declarative"
 path = "examples/nftables/declarative.rs"
 
+[[example]]
+name = "nftables_sets_maps"
+path = "examples/nftables/sets_maps.rs"
+
 # Connection pool example
 [[example]]
 name = "pool_parallel_dump"

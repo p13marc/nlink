@@ -1278,7 +1278,7 @@ conn.set_limits(
 | `nlink::netlink::nexthop` | Nexthop objects and ECMP groups |
 | `nlink::netlink::mpls` | MPLS routes and encapsulation |
 | `nlink::netlink::srv6` | SRv6 segment routing |
-| `nlink::netlink::nftables` | nftables firewall (tables, chains, rules, named sets incl. declarative `DeclaredSet`, NAT) |
+| `nlink::netlink::nftables` | nftables firewall: tables, chains, rules, NAT, flowtables; sets (intervals, concatenations, timeouts, dynset), maps and verdict maps, named counters/quotas/limits — imperative and declarative (`NftablesConfig`) |
 | `nlink::netlink::genl` | Generic Netlink (WireGuard, MACsec, MPTCP, Ethtool, nl80211 PHY/scan/station/survey, Devlink, DPLL, net_shaper, OpenVPN DCO) |
 | `nlink::netlink::xfrm` | XFRM IPsec SA/SP CRUD + monitor (`Connection<Xfrm>: EventSource`) |
 | `nlink::util` | Parsing utilities, address helpers, name resolution |
