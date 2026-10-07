@@ -216,6 +216,10 @@ async fn every_link_kind_converges() -> nlink::Result<()> {
             ],
         ),
         case(
+            "vrf-mac",
+            vec![NetworkConfig::new().link("vrf0", |l| l.vrf(10).address(MAC_A).up())],
+        ),
+        case(
             "ifb-mac",
             vec![NetworkConfig::new().link("ifb0", |l| l.ifb().address(MAC_A).up())],
         ),
@@ -236,8 +240,32 @@ async fn netkit_converges() -> nlink::Result<()> {
                 l.netkit("nk1").netkit_mode(NetkitMode::L3).up()
             })],
         ),
+        case(
+            "netkit-l2-mac",
+            vec![NetworkConfig::new().link("nk0", |l| {
+                l.netkit("nk1").netkit_mode(NetkitMode::L2).address(MAC_A).up()
+            })],
+        ),
     ];
     assert_converges("nce-netkit", cases).await
+}
+
+/// An L3 netkit has no hardware address. The kernel refuses one with a
+/// bare EOPNOTSUPP; apply says which knob is wrong.
+#[tokio::test]
+async fn netkit_l3_mac_is_refused() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("netkit");
+
+    let ns = TestNamespace::new("nce-netkit-l3mac")?;
+    let conn = ns.connection()?;
+    let err = NetworkConfig::new()
+        .link("nk0", |l| l.netkit("nk1").address(MAC_A).up())
+        .apply(&conn)
+        .await
+        .expect_err("an L3 netkit cannot take a MAC");
+    assert!(err.to_string().contains("L2"), "the error must name the mode: {err}");
+    Ok(())
 }
 
 /// Modifiers on links that already exist: each case's first step builds

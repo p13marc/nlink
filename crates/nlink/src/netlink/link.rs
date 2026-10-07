@@ -2372,6 +2372,7 @@ pub struct NetkitLink {
     scrub: Option<NetkitScrub>,
     peer_scrub: Option<NetkitScrub>,
     mtu: Option<u32>,
+    address: Option<[u8; 6]>,
 }
 
 /// Netkit operating mode.
@@ -2444,6 +2445,7 @@ impl NetkitLink {
             scrub: None,
             peer_scrub: None,
             mtu: None,
+            address: None,
         }
     }
 
@@ -2482,6 +2484,13 @@ impl NetkitLink {
         self.mtu = Some(mtu);
         self
     }
+
+    /// Set the MAC address of the primary interface. L2 mode only: in L3
+    /// mode a netkit device has no hardware address.
+    pub fn address(mut self, address: [u8; 6]) -> Self {
+        self.address = Some(address);
+        self
+    }
 }
 
 impl LinkConfig for NetkitLink {
@@ -2503,6 +2512,9 @@ impl LinkConfig for NetkitLink {
 
         if let Some(mtu) = self.mtu {
             builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+        if let Some(addr) = &self.address {
+            builder.append_attr(IflaAttr::Address as u16, addr);
         }
 
         // IFLA_LINKINFO
@@ -3973,6 +3985,7 @@ pub struct VrfLink {
     name: String,
     table: u32,
     mtu: Option<u32>,
+    address: Option<[u8; 6]>,
 }
 
 impl VrfLink {
@@ -3982,12 +3995,19 @@ impl VrfLink {
             name: name.to_string(),
             table,
             mtu: None,
+            address: None,
         }
     }
 
     /// Set the MTU.
     pub fn mtu(mut self, mtu: u32) -> Self {
         self.mtu = Some(mtu);
+        self
+    }
+
+    /// Set the MAC address.
+    pub fn address(mut self, address: [u8; 6]) -> Self {
+        self.address = Some(address);
         self
     }
 }
@@ -4006,6 +4026,9 @@ impl LinkConfig for VrfLink {
 
         if let Some(mtu) = self.mtu {
             builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+        if let Some(addr) = &self.address {
+            builder.append_attr(IflaAttr::Address as u16, addr);
         }
 
         let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);

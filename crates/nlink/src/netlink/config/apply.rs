@@ -496,7 +496,34 @@ pub async fn apply_diff(
 // Helper functions for applying individual changes
 // ============================================================================
 
+/// Refuse a declared MAC on a link kind that has no hardware address.
+///
+/// ovpn and netkit in L3 mode (netkit's default) are `ARPHRD_NONE`
+/// devices: the kernel refuses `IFLA_ADDRESS` on them (netkit answers a
+/// bare EOPNOTSUPP), and if the address were dropped instead the diff
+/// would ask for it on every apply. Say which knob is wrong instead.
+fn check_declared_address(link: &DeclaredLink) -> Result<()> {
+    if link.address.is_none() {
+        return Ok(());
+    }
+    let reason = match &link.link_type {
+        DeclaredLinkType::Ovpn => "an ovpn link is an L3 device with no hardware address",
+        DeclaredLinkType::Netkit { mode, .. }
+            if *mode != Some(crate::netlink::link::NetkitMode::L2) =>
+        {
+            "a netkit link in L3 mode (the default) has no hardware address; \
+             declare .netkit_mode(NetkitMode::L2) to give it one"
+        }
+        _ => return Ok(()),
+    };
+    Err(Error::InvalidMessage(format!(
+        "link {}: a MAC address is declared, but {reason}",
+        link.name
+    )))
+}
+
 async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()> {
+    check_declared_address(link)?;
     match &link.link_type {
         DeclaredLinkType::Dummy => {
             let mut config = DummyLink::new(&link.name);
@@ -650,6 +677,9 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             if let Some(mtu) = link.mtu {
                 config = config.mtu(mtu);
             }
+            if let Some(addr) = link.address {
+                config = config.address(addr);
+            }
             conn.add_link(config).await?;
         }
         DeclaredLinkType::Ovpn => {
@@ -685,6 +715,9 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             }
             if let Some(mtu) = link.mtu {
                 config = config.mtu(mtu);
+            }
+            if let Some(addr) = link.address {
+                config = config.address(addr);
             }
             conn.add_link(config).await?;
         }
@@ -1126,5 +1159,56 @@ fn convert_bond_mode(mode: BondMode) -> crate::netlink::link::BondMode {
         BondMode::Ieee802_3ad => crate::netlink::link::BondMode::Lacp,
         BondMode::BalanceTlb => crate::netlink::link::BondMode::BalanceTlb,
         BondMode::BalanceAlb => crate::netlink::link::BondMode::BalanceAlb,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::netlink::config::types::LinkState;
+
+    fn link(link_type: DeclaredLinkType, address: Option<[u8; 6]>) -> DeclaredLink {
+        DeclaredLink {
+            name: "l0".into(),
+            link_type,
+            state: LinkState::Unchanged,
+            mtu: None,
+            master: None,
+            address,
+        }
+    }
+
+    fn netkit(mode: Option<crate::netlink::link::NetkitMode>) -> DeclaredLinkType {
+        DeclaredLinkType::Netkit {
+            peer: "l1".into(),
+            mode,
+            primary_policy: None,
+            peer_policy: None,
+            scrub: None,
+            peer_scrub: None,
+        }
+    }
+
+    /// A MAC on a kind with no hardware address is refused by name; on
+    /// any other kind, or with no MAC declared, the check passes.
+    #[test]
+    fn a_mac_on_an_l3_only_kind_is_refused() {
+        use crate::netlink::link::NetkitMode;
+        const MAC: [u8; 6] = [0x02, 0, 0, 0, 0, 1];
+
+        let err = check_declared_address(&link(DeclaredLinkType::Ovpn, Some(MAC)))
+            .expect_err("ovpn has no MAC");
+        assert!(err.to_string().contains("ovpn"), "{err}");
+        for mode in [None, Some(NetkitMode::L3)] {
+            let err = check_declared_address(&link(netkit(mode), Some(MAC)))
+                .expect_err("L3 netkit has no MAC");
+            assert!(err.to_string().contains("L2"), "{err}");
+        }
+
+        let l2 = link(netkit(Some(NetkitMode::L2)), Some(MAC));
+        assert!(check_declared_address(&l2).is_ok());
+        let vrf = link(DeclaredLinkType::Vrf { table: 10 }, Some(MAC));
+        assert!(check_declared_address(&vrf).is_ok());
+        assert!(check_declared_address(&link(DeclaredLinkType::Ovpn, None)).is_ok());
     }
 }
