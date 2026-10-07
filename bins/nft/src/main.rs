@@ -1127,9 +1127,10 @@ fn parse_ruleset(contents: &str) -> Result<NftablesConfig> {
                             })?;
                             match *val {
                                 "const" | "constant" => flags |= SetFlags::CONSTANT,
+                                "interval" => flags |= SetFlags::INTERVAL,
                                 other => {
                                     return Err(loc(format!(
-                                        "unknown set flag `{other}` (only `const` is modelled)"
+                                        "unknown set flag `{other}` (expected `const` or `interval`)"
                                     )));
                                 }
                             }
@@ -1335,6 +1336,10 @@ fn apply_line(txn: Transaction, tokens: &[&str]) -> Result<Transaction> {
                         set = set.constant();
                         tail
                     }
+                    ["flags", "interval", tail @ ..] => {
+                        set = set.interval();
+                        tail
+                    }
                     ["size", n, tail @ ..] => {
                         set = set.size(parse_set_size(Some(n))?);
                         tail
@@ -1425,6 +1430,31 @@ fn parse_elements(s: &str, key_type: &str) -> Result<Vec<SetElement>> {
 /// fallback).
 fn parse_set_element(text: &str, kt: &SetKeyType) -> Result<SetElement> {
     let bad = |m: String| nlink::netlink::Error::InvalidAttribute(m);
+    // Ranges and prefixes, for interval sets: `10.0.0.0/24`, `a-b`.
+    if let Some((addr, len)) = text.split_once('/') {
+        let len: u8 = len
+            .parse()
+            .map_err(|_| bad(format!("invalid prefix length in `{text}`")))?;
+        return match kt {
+            SetKeyType::Ipv4Addr => {
+                let ip: Ipv4Addr = addr
+                    .parse()
+                    .map_err(|_| bad(format!("invalid ipv4 prefix `{text}`")))?;
+                SetElement::ipv4_prefix(ip, len)
+            }
+            SetKeyType::Ipv6Addr => {
+                let ip: Ipv6Addr = addr
+                    .parse()
+                    .map_err(|_| bad(format!("invalid ipv6 prefix `{text}`")))?;
+                SetElement::ipv6_prefix(ip, len)
+            }
+            _ => Err(bad(format!("a prefix needs an address set, not {kt:?}"))),
+        };
+    }
+    if let Some((lo, hi)) = text.split_once('-') {
+        let (lo, hi) = (parse_set_element(lo, kt)?, parse_set_element(hi, kt)?);
+        return Ok(SetElement::range(lo.key().to_vec(), hi.key().to_vec()));
+    }
     match kt {
         SetKeyType::Ipv4Addr => {
             let ip: Ipv4Addr = text
@@ -1874,6 +1904,20 @@ mod tests {
             let spec = format!("add table ip q\nadd set ip q s type ipv4_addr {bad}\n");
             assert!(parse_ruleset(&spec).is_err(), "`{bad}` should be rejected");
         }
+    }
+
+    #[test]
+    fn elements_take_prefixes_and_ranges() {
+        let net = parse_set_element("10.0.0.0/24", &SetKeyType::Ipv4Addr).unwrap();
+        assert_eq!(net.key(), [10, 0, 0, 0]);
+        assert_eq!(net.key_end(), Some(&[10, 0, 0, 255][..]));
+        let ports = parse_set_element("1000-2000", &SetKeyType::InetService).unwrap();
+        assert_eq!(ports.key(), 1000u16.to_be_bytes());
+        assert_eq!(ports.key_end(), Some(&2000u16.to_be_bytes()[..]));
+        let v6 = parse_set_element("2001:db8::/32", &SetKeyType::Ipv6Addr).unwrap();
+        assert!(v6.is_range());
+        assert!(parse_set_element("10.0.0.0/33", &SetKeyType::Ipv4Addr).is_err());
+        assert!(parse_set_element("80/8", &SetKeyType::InetService).is_err());
     }
 
     #[test]
