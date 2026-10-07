@@ -406,7 +406,7 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
         Expr::Meta { dreg, key } => {
             builder.append_attr_str(NFTA_EXPR_NAME, "meta");
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
-            builder.append_attr_u32_be(NFTA_META_DREG, *dreg as u32);
+            builder.append_attr_u32_be(NFTA_META_DREG, dreg.wire());
             builder.append_attr_u32_be(NFTA_META_KEY, *key as u32);
             builder.nest_end(data);
         }
@@ -414,7 +414,7 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             builder.append_attr_str(NFTA_EXPR_NAME, "meta");
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
             builder.append_attr_u32_be(NFTA_META_KEY, *key as u32);
-            builder.append_attr_u32_be(NFTA_META_SREG, *sreg as u32);
+            builder.append_attr_u32_be(NFTA_META_SREG, sreg.wire());
             builder.nest_end(data);
         }
         Expr::Exthdr {
@@ -426,7 +426,7 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
         } => {
             builder.append_attr_str(NFTA_EXPR_NAME, "exthdr");
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
-            builder.append_attr_u32_be(NFTA_EXTHDR_DREG, *dreg as u32);
+            builder.append_attr_u32_be(NFTA_EXTHDR_DREG, dreg.wire());
             write_exthdr_common(builder, *op, *exthdr_type, *offset, *len, true);
             builder.nest_end(data);
         }
@@ -439,7 +439,7 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
         } => {
             builder.append_attr_str(NFTA_EXPR_NAME, "exthdr");
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
-            builder.append_attr_u32_be(NFTA_EXTHDR_SREG, *sreg as u32);
+            builder.append_attr_u32_be(NFTA_EXTHDR_SREG, sreg.wire());
             // The set form rejects NFTA_EXTHDR_FLAGS but dumps it (always 0).
             write_exthdr_common(
                 builder,
@@ -454,7 +454,7 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
         Expr::Cmp { sreg, op, data } => {
             builder.append_attr_str(NFTA_EXPR_NAME, "cmp");
             let expr_data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
-            builder.append_attr_u32_be(NFTA_CMP_SREG, *sreg as u32);
+            builder.append_attr_u32_be(NFTA_CMP_SREG, sreg.wire());
             builder.append_attr_u32_be(NFTA_CMP_OP, *op as u32);
             let cmp_data = builder.nest_start(NFTA_CMP_DATA | 0x8000);
             builder.append_attr(NFTA_DATA_VALUE, data);
@@ -469,7 +469,7 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
         } => {
             builder.append_attr_str(NFTA_EXPR_NAME, "payload");
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
-            builder.append_attr_u32_be(NFTA_PAYLOAD_DREG, *dreg as u32);
+            builder.append_attr_u32_be(NFTA_PAYLOAD_DREG, dreg.wire());
             builder.append_attr_u32_be(NFTA_PAYLOAD_BASE, *base as u32);
             builder.append_attr_u32_be(NFTA_PAYLOAD_OFFSET, *offset);
             builder.append_attr_u32_be(NFTA_PAYLOAD_LEN, *len);
@@ -478,7 +478,7 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
         Expr::Immediate { dreg, data } => {
             builder.append_attr_str(NFTA_EXPR_NAME, "immediate");
             let expr_data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
-            builder.append_attr_u32_be(NFTA_IMMEDIATE_DREG, *dreg as u32);
+            builder.append_attr_u32_be(NFTA_IMMEDIATE_DREG, dreg.wire());
             let imm_data = builder.nest_start(NFTA_IMMEDIATE_DATA | 0x8000);
             builder.append_attr(NFTA_DATA_VALUE, data);
             builder.nest_end(imm_data);
@@ -634,21 +634,21 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
         Expr::Ct { dreg, key } => {
             builder.append_attr_str(NFTA_EXPR_NAME, "ct");
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
-            builder.append_attr_u32_be(NFTA_CT_DREG, *dreg as u32);
+            builder.append_attr_u32_be(NFTA_CT_DREG, dreg.wire());
             builder.append_attr_u32_be(NFTA_CT_KEY, *key as u32);
             builder.nest_end(data);
         }
         Expr::CtSet { key, sreg } => {
             builder.append_attr_str(NFTA_EXPR_NAME, "ct");
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
-            builder.append_attr_u32_be(NFTA_CT_SREG, *sreg as u32);
+            builder.append_attr_u32_be(NFTA_CT_SREG, sreg.wire());
             builder.append_attr_u32_be(NFTA_CT_KEY, *key as u32);
             builder.nest_end(data);
         }
         Expr::Rt { dreg, key } => {
             builder.append_attr_str(NFTA_EXPR_NAME, "rt");
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
-            builder.append_attr_u32_be(NFTA_RT_DREG, *dreg as u32);
+            builder.append_attr_u32_be(NFTA_RT_DREG, dreg.wire());
             builder.append_attr_u32_be(NFTA_RT_KEY, *key as u32);
             builder.nest_end(data);
         }
@@ -661,8 +661,8 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
         } => {
             builder.append_attr_str(NFTA_EXPR_NAME, "byteorder");
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
-            builder.append_attr_u32_be(NFTA_BYTEORDER_SREG, *sreg as u32);
-            builder.append_attr_u32_be(NFTA_BYTEORDER_DREG, *dreg as u32);
+            builder.append_attr_u32_be(NFTA_BYTEORDER_SREG, sreg.wire());
+            builder.append_attr_u32_be(NFTA_BYTEORDER_DREG, dreg.wire());
             builder.append_attr_u32_be(NFTA_BYTEORDER_OP, *op as u32);
             builder.append_attr_u32_be(NFTA_BYTEORDER_LEN, *len);
             builder.append_attr_u32_be(NFTA_BYTEORDER_SIZE, *size);
@@ -677,9 +677,9 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             builder.append_attr_str(NFTA_EXPR_NAME, "lookup");
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
             builder.append_attr_str(NFTA_LOOKUP_SET, set);
-            builder.append_attr_u32_be(NFTA_LOOKUP_SREG, *sreg as u32);
+            builder.append_attr_u32_be(NFTA_LOOKUP_SREG, sreg.wire());
             if let Some(dreg) = dreg {
-                builder.append_attr_u32_be(NFTA_LOOKUP_DREG, *dreg as u32);
+                builder.append_attr_u32_be(NFTA_LOOKUP_DREG, dreg.wire());
             }
             // `nft_lookup_dump` always emits FLAGS (NFT_LOOKUP_F_INV or 0).
             // Without it every declared rule matching `@set` was replaced on
@@ -697,8 +697,8 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
         } => {
             builder.append_attr_str(NFTA_EXPR_NAME, "bitwise");
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
-            builder.append_attr_u32_be(NFTA_BITWISE_SREG, *sreg as u32);
-            builder.append_attr_u32_be(NFTA_BITWISE_DREG, *dreg as u32);
+            builder.append_attr_u32_be(NFTA_BITWISE_SREG, sreg.wire());
+            builder.append_attr_u32_be(NFTA_BITWISE_DREG, dreg.wire());
             builder.append_attr_u32_be(NFTA_BITWISE_LEN, *len);
             // Kernel defaults this to BOOL and echoes it on dump; emit
             // it so the round-trip diff stays byte-clean.

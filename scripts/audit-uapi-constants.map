@@ -3,7 +3,8 @@
 # One stanza per enum. An indented `Variant -> SUFFIX` line handles the cases
 # where the Rust name and the kernel name don't line up under the default
 # CamelCase -> UPPER_SNAKE rule; `Variant -> !skip` marks a variant that has no
-# kernel counterpart at all (an nlink sentinel).
+# kernel counterpart at all (an nlink sentinel); `Variant -> =NAME` names a
+# kernel constant the prefix cannot spell.
 #
 # Anything not listed here must be in audit-uapi-constants.allowlist. See
 # scripts/audit_uapi_constants.py.
@@ -83,12 +84,29 @@ Family = NFPROTO
     Ip -> IPV4
     Ip6 -> IPV6
 # nlink names the four data registers R0..R3; the kernel numbers them 1..4
-# (NFT_REG_VERDICT takes 0).
+# (NFT_REG_VERDICT takes 0). The 32-bit registers are NFT_REG32_*, which the
+# NFT_REG_ prefix cannot spell.
 Register = NFT_REG
     R0 -> 1
     R1 -> 2
     R2 -> 3
     R3 -> 4
+    Reg32_00 -> =NFT_REG32_00
+    Reg32_01 -> =NFT_REG32_01
+    Reg32_02 -> =NFT_REG32_02
+    Reg32_03 -> =NFT_REG32_03
+    Reg32_04 -> =NFT_REG32_04
+    Reg32_05 -> =NFT_REG32_05
+    Reg32_06 -> =NFT_REG32_06
+    Reg32_07 -> =NFT_REG32_07
+    Reg32_08 -> =NFT_REG32_08
+    Reg32_09 -> =NFT_REG32_09
+    Reg32_10 -> =NFT_REG32_10
+    Reg32_11 -> =NFT_REG32_11
+    Reg32_12 -> =NFT_REG32_12
+    Reg32_13 -> =NFT_REG32_13
+    Reg32_14 -> =NFT_REG32_14
+    Reg32_15 -> =NFT_REG32_15
 ExthdrOp = NFT_EXTHDR_OP
     TcpOpt -> TCPOPT
 MetaKey = NFT_META

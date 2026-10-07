@@ -580,7 +580,7 @@ fn chain_has_drifted(declared: &DeclaredChain, current: &ChainInfo) -> bool {
 fn set_has_drifted(declared: &DeclaredSet, current: &SetInfo) -> bool {
     declared.key_type().type_id() != current.key_type
         || declared.key_type().len() != current.key_len
-        || declared.flags() != current.flags
+        || declared.wire_flags() != current.flags
 }
 
 /// Does `rule` reference the set `set`? A plain lookup decodes typed; an
@@ -626,19 +626,20 @@ fn rule_matches(declared: &DeclaredRule, kernel: &RuleInfo) -> bool {
 
 /// The elements to add to and remove from an existing set.
 ///
-/// A plain set compares element identities (key, range end, catch-all). An
-/// interval set compares ranges: if the kernel's ranges, merged where they
-/// touch, are the declared ones merged the same way, nothing changes —
-/// however the kernel happens to split them. Otherwise the kernel ranges
-/// that are not declared go, and the declared ones the kernel does not hold
-/// come — the removals are sent first, so a range that grows is replaced
-/// in one batch.
+/// A plain set compares element identities (key, range end, catch-all), and
+/// so does an interval set of concatenated keys, whose elements the kernel
+/// keeps as written. An interval set of single keys compares ranges: if the
+/// kernel's ranges, merged where they touch, are the declared ones merged
+/// the same way, nothing changes — however the kernel happens to split
+/// them. Otherwise the kernel ranges that are not declared go, and the
+/// declared ones the kernel does not hold come — the removals are sent
+/// first, so a range that grows is replaced in one batch.
 fn element_changes(
     declared: &DeclaredSet,
     current: &[SetElement],
 ) -> (Vec<SetElement>, Vec<SetElement>) {
     use super::super::interval;
-    if declared.flags().contains(super::super::SetFlags::INTERVAL) {
+    if declared.merges_ranges() {
         let wanted: Vec<interval::Range> = declared
             .wire_elements()
             .iter()
@@ -1753,5 +1754,17 @@ mod tests {
         // Same components, different order — a different key entirely.
         let swapped = SetKeyType::Concat(vec![SetKeyType::InetService, SetKeyType::Ipv4Addr]);
         assert!(set_has_drifted(&declared, &set_info(&swapped, 0)));
+    }
+
+    #[test]
+    fn the_concat_flag_the_kernel_reports_for_a_concatenated_interval_set_is_not_drift() {
+        use crate::netlink::nftables::{NFT_SET_CONCAT, NFT_SET_INTERVAL};
+        let concat = SetKeyType::Concat(vec![SetKeyType::Ipv4Addr, SetKeyType::InetService]);
+        let declared = declared_set(concat.clone(), NFT_SET_INTERVAL);
+        let reported = set_info(&concat, NFT_SET_INTERVAL | NFT_SET_CONCAT);
+        assert!(!set_has_drifted(&declared, &reported));
+        // Without it, the set was not made with its field lengths: recreate.
+        assert!(set_has_drifted(&declared, &set_info(&concat, NFT_SET_INTERVAL)));
+        assert!(!declared.merges_ranges(), "each field is its own range");
     }
 }

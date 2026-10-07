@@ -19,6 +19,9 @@ use super::types::SetElement;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WireElement {
     pub(crate) key: Vec<u8>,
+    /// Inclusive range end, in one element (`NFTA_SET_ELEM_KEY_END`): how
+    /// an interval set of concatenated keys stores a range.
+    pub(crate) key_end: Option<Vec<u8>>,
     pub(crate) flags: u32,
 }
 
@@ -66,11 +69,13 @@ pub(crate) fn range_of(element: &SetElement) -> Range {
 pub(crate) fn lower(range: &Range) -> Vec<WireElement> {
     let mut out = vec![WireElement {
         key: range.0.clone(),
+        key_end: None,
         flags: 0,
     }];
     if let Some(end) = increment(&range.1) {
         out.push(WireElement {
             key: end,
+            key_end: None,
             flags: NFT_SET_ELEM_INTERVAL_END,
         });
     }
@@ -168,10 +173,12 @@ mod tests {
             [
                 WireElement {
                     key: 1000u16.to_be_bytes().to_vec(),
+                    key_end: None,
                     flags: 0,
                 },
                 WireElement {
                     key: 2001u16.to_be_bytes().to_vec(),
+                    key_end: None,
                     flags: NFT_SET_ELEM_INTERVAL_END,
                 },
             ]

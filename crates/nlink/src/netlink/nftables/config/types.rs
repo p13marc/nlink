@@ -429,7 +429,7 @@ impl DeclaredSet {
     /// overlapping ranges is an error from the kernel).
     pub(crate) fn wire_elements(&self) -> Vec<SetElement> {
         use crate::netlink::nftables::interval;
-        if self.flags.contains(SetFlags::INTERVAL) {
+        if self.merges_ranges() {
             interval::canonicalize(self.elements.iter().map(interval::range_of).collect())
                 .iter()
                 .map(interval::element_of)
@@ -437,6 +437,20 @@ impl DeclaredSet {
         } else {
             self.elements.clone()
         }
+    }
+
+    /// Whether this is an interval set whose ranges merge where they touch
+    /// — one of single keys. In an interval set of concatenated keys each
+    /// field is a range of its own, the kernel keeps each element as
+    /// written, and overlapping elements are an error.
+    pub(crate) fn merges_ranges(&self) -> bool {
+        self.flags.contains(SetFlags::INTERVAL)
+            && !crate::netlink::nftables::types::ranges_per_field(&self.key_type, self.flags)
+    }
+
+    /// The flags the kernel reports for this set once created.
+    pub(crate) fn wire_flags(&self) -> SetFlags {
+        crate::netlink::nftables::types::wire_flags(&self.key_type, self.flags)
     }
 
     /// The runtime [`Set`] this declaration describes, in `table`.

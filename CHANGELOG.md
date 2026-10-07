@@ -38,6 +38,42 @@ All notable changes to this project will be documented in this file.
   a range to the top of the key space — and 0.30 refused interval elements
   outright.
 
+- **Sets of concatenated keys (ipset `hash:ip,port`, `hash:net,port`).**
+  `SetKeyType::Concat` could declare such a set, but nothing could fill
+  one or match against it. Now:
+  - `SetElement::concat([..])` builds an element from one element per
+    field, each padded to a 4-byte register word; in an interval set a field
+    can be a range or prefix of its own (`10.0.0.0/24 . 1000-2000`).
+  - `Rule::match_concat_in_set(&[PacketField], set)` and
+    `match_concat_not_in_set` load the fields word after word, behind their
+    guards (each once, ahead of the loads), as `nft` lays out
+    `ip daddr . udp dport @s`.
+  - An interval set of concatenated keys is created with `NFT_SET_CONCAT`
+    and its field lengths (`NFTA_SET_DESC_CONCAT`), so the kernel selects
+    `pipapo`, and stores each range as one element with its inclusive end
+    (`NFTA_SET_ELEM_KEY_END`) rather than an end-plus-one element.
+    `list_set_elements` reads it back that way, and the declarative diff
+    compares those elements one by one, since pipapo neither merges nor
+    accepts overlapping ones. A range end before its start is checked field
+    by field.
+  - `Register::Reg32_00..=Reg32_15`, the 32-bit registers
+    (`NFT_REG32_*`). `Register::word(n)` gives the register for word `n` in
+    the form the kernel dumps, and the writer always uses that form
+    (`Register::wire`): `Reg32_04` is written as `NFT_REG_2`. So a rule
+    built with either name converges. Rules that use 32-bit registers now
+    decode typed instead of as `Unknown`.
+
+  `NFTA_SET_FIELD_LEN` is a length in **bytes**: the UAPI header documents
+  it as bits, but `nft_set_desc_concat_parse` reads bytes. Tested on
+  traffic: in a hash set, `ip daddr . udp dport` matches its pairs and not
+  their crossings, and `!= @s` counts exactly the others. In a pipapo set,
+  `127.0.0.0/30 . 1000-2000` matches only inside both ranges. A declared
+  IPv6 concatenation, whose port sits in word 4, converges, and so does a
+  declared interval concatenation, one element at a time. Mutation-checked:
+  dropping `KEY_END`, pairing the readback, packing one word per field, and
+  writing the non-canonical register name each fail a test. The `nlink-nft`
+  DSL does not parse concatenations yet.
+
 - **Set lookups by packet field, and an escape hatch.**
   - `Rule::match_in_set(PacketField, set)` and `match_not_in_set` (`!= @set`,
     iptables `! --match-set`) for IPv4 and IPv6 addresses, TCP/UDP ports,
