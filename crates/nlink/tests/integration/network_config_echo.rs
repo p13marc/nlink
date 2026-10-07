@@ -642,3 +642,47 @@ async fn tbf_without_a_limit_is_refused() -> nlink::Result<()> {
     Ok(())
 }
 
+/// Editing an HTB root's `default_class` cannot be done in place: `htb`
+/// has no change operation, so a same-kind replace is refused. The only
+/// way through is delete + add, which takes every class and filter under
+/// the qdisc with it — including ones nlink does not manage. So the apply
+/// must fail, say so, and leave the tree alone.
+#[tokio::test]
+async fn htb_default_class_edit_is_a_clear_error() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "sch_htb");
+
+    let ns = TestNamespace::new("nce-htb-defcls")?;
+    let conn = ns.connection()?;
+    let installed = dummy_up("d0")
+        .qdisc("d0", |q| q.htb().default_class(0x10))
+        .apply(&conn)
+        .await?;
+    assert!(installed.is_success(), "{installed:?}");
+    // A class nlink did not declare.
+    conn.add_class(
+        "d0",
+        nlink::TcHandle::major_only(1),
+        nlink::TcHandle::new(1, 0x10),
+        nlink::netlink::tc::HtbClassConfig::new(Rate::mbit(10)).build(),
+    )
+    .await?;
+
+    let edited = dummy_up("d0").qdisc("d0", |q| q.htb().default_class(0x20));
+    let err = edited
+        .apply(&conn)
+        .await
+        .expect_err("an HTB default_class edit cannot be applied in place");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("default_class") || msg.contains("default class"),
+        "the error must name what cannot change: {msg}"
+    );
+
+    let classes = conn.get_classes_by_name("d0").await?;
+    assert!(
+        classes.iter().any(|c| c.handle() == nlink::TcHandle::new(1, 0x10)),
+        "the undeclared class 1:10 must survive the refused edit"
+    );
+    Ok(())
+}

@@ -2204,6 +2204,11 @@ impl QdiscBuilder {
     }
 
     /// Set HTB default class.
+    ///
+    /// Fixed for the qdisc's lifetime: the kernel's htb has no change
+    /// operation, so `apply` refuses to edit it on a live HTB root
+    /// (`Error::NotSupported`) rather than delete the root and every class
+    /// and filter under it. Delete the qdisc yourself to change it.
     pub fn default_class(mut self, class: u32) -> Self {
         if let Some(DeclaredQdiscType::Htb { default_class }) = &mut self.qdisc_type {
             *default_class = class;

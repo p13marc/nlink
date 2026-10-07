@@ -938,6 +938,10 @@ async fn replace_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Resul
             }
             return add_qdisc(conn, qdisc).await;
         }
+        DeclaredQdiscType::Htb { .. } => {
+            let cfg = qdisc.qdisc_type.htb_config().expect("matched the Htb arm");
+            refuse_htb_change_in_place(conn, &qdisc.dev, &cfg).await?;
+        }
         _ => {}
     }
 
@@ -957,6 +961,49 @@ async fn replace_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Resul
         }
         other => other,
     }
+}
+
+/// Refuse a declared HTB root that would replace a live HTB root in place.
+///
+/// The diff only asks for that when the declared HTB differs from the
+/// live one — in practice its `default_class`. But `sch_htb` has no
+/// `Qdisc_ops.change`, so a same-kind replace is `qdisc_change()` →
+/// EINVAL, "Change operation not supported by specified qdisc". The only
+/// way to a different `default` is delete + add, and deleting an HTB root
+/// deletes every class, leaf and filter under it — a whole shaping tree
+/// this config does not describe, since `NetworkConfig` declares only the
+/// root qdisc. That is not a side effect to take implicitly, unlike sfq
+/// (whose del+add fallback loses nothing but the qdisc itself). So say
+/// what cannot change and what to do, rather than surface the kernel's
+/// bare EINVAL on every apply.
+///
+/// A live root of another kind is fine: replacing it creates the HTB and
+/// grafts it, no change op involved.
+async fn refuse_htb_change_in_place(
+    conn: &Connection<Route>,
+    dev: &str,
+    declared: &crate::netlink::tc::HtbQdiscConfig,
+) -> Result<()> {
+    use crate::netlink::tc_options::QdiscOptions;
+
+    let live = conn.get_qdiscs_by_name(dev).await?;
+    let Some(root) = live.iter().find(|q| q.is_root() && q.kind() == Some("htb")) else {
+        return Ok(());
+    };
+    let live_params = match root.options() {
+        Some(QdiscOptions::Htb(opts)) => {
+            format!("default_class {:#x}, r2q {}", opts.default_class, opts.rate2quantum)
+        }
+        _ => "unreadable options".to_string(),
+    };
+    Err(Error::NotSupported(format!(
+        "htb on {dev}: the live HTB root ({live_params}) cannot be changed in place to the \
+         declared one (default_class {:#x}, r2q {}). The kernel's htb has no change \
+         operation, so the only way is to delete the root qdisc, which deletes every class \
+         and filter under it; nlink will not do that implicitly. Delete it \
+         (Connection::del_qdisc) and apply again.",
+        declared.default_class, declared.r2q
+    )))
 }
 
 /// True for kinds whose `Qdisc_ops.change` is NULL, so the kernel
