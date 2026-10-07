@@ -144,7 +144,7 @@ fn emit_tlv(out: &mut Vec<u8>, ty: u16, payload: &[u8]) {
 /// nested elem-list inner bytes, *not* including the outer
 /// attribute header). Used by the diff to byte-compare declared
 /// vs kernel rule bodies. Plan 157b v2.
-fn lower_to_expression_bytes(rule: &super::super::types::Rule) -> Vec<u8> {
+pub(crate) fn lower_to_expression_bytes(rule: &super::super::types::Rule) -> Vec<u8> {
     if rule.exprs.is_empty() {
         return Vec::new();
     }
@@ -194,6 +194,11 @@ pub struct RuleAdd {
     pub rule: DeclaredRule,
     /// Where it goes.
     pub placement: RulePlacement,
+    /// Position in the order rule inserts must be sent (shared with
+    /// [`RuleMove`]): inserts before the same anchor go in declared order,
+    /// inserts after one in reverse.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) seq: usize,
 }
 
 /// Why the diff deletes a rule and puts it back.
@@ -204,6 +209,8 @@ pub enum MoveReason {
     /// It references a set this diff deletes and recreates; the kernel
     /// refuses to delete a set a rule is bound to (`EBUSY`).
     BoundToRecreatedSet,
+    /// It is installed out of declared order.
+    Reorder,
 }
 
 /// A rule the diff deletes and re-inserts, keeping (or restoring) its place
@@ -226,6 +233,9 @@ pub struct RuleMove {
     pub rule: DeclaredRule,
     /// Why it moves.
     pub reason: MoveReason,
+    /// See [`RuleAdd`].
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) seq: usize,
 }
 
 /// Elements to add to, or remove from, one set — with the [`Set`] they
@@ -441,6 +451,7 @@ impl NftablesDiff {
             let key = m.rule.handle_key().unwrap_or("<anonymous>");
             let why = match m.reason {
                 MoveReason::BoundToRecreatedSet => "its set is recreated",
+                MoveReason::Reorder => "out of declared order",
             };
             lines.push(format!(
                 "~ rule {:?} {}/{} (handle={} key={key}, re-added: {why}){}",
@@ -587,71 +598,30 @@ fn references_set(rule: &RuleInfo, set: &str) -> bool {
     })
 }
 
-/// Schedule every keyed rule that references a set in `recreated` for
-/// delete + re-insert (see [`NftablesDiff::rules_to_move`]). Rules
-/// already scheduled for deletion are left to that; a pending in-place
-/// replace is turned into the re-insert, since a replace runs after the
-/// DELSET it would have had to precede.
-fn reinsert_rules_bound_to(
-    diff: &mut NftablesDiff,
-    table: &str,
-    family: Family,
-    recreated: &HashSet<&str>,
-    kernel_in_chain: &std::collections::HashMap<String, Vec<&RuleInfo>>,
-    declared_in_chain: &std::collections::HashMap<&str, Vec<&DeclaredRule>>,
-) {
-    let deleted: HashSet<u64> = diff
-        .rules_to_delete
-        .iter()
-        .filter(|(t, f, _, _)| t == table && *f == family)
-        .map(|(_, _, _, h)| h.0)
-        .collect();
-    for (chain, kernel_rules) in kernel_in_chain {
-        let bound: Vec<bool> = kernel_rules
-            .iter()
-            .map(|kr| recreated.iter().any(|set| references_set(kr, set)))
-            .collect();
-        for (i, kr) in kernel_rules.iter().enumerate() {
-            if !bound[i] || deleted.contains(&kr.handle) {
-                continue;
-            }
-            let declared_rule = kr.key.as_deref().and_then(|key| {
-                declared_in_chain
-                    .get(chain.as_str())
-                    .and_then(|rules| rules.iter().find(|r| r.handle_key() == Some(key)))
-            });
-            let Some(declared_rule) = declared_rule else {
-                // Foreign or anonymous: nlink cannot put it back, so the
-                // DELSET will be EBUSY. Say why before it happens.
-                tracing::warn!(
-                    table,
-                    chain = chain.as_str(),
-                    handle = kr.handle,
-                    "a rule nlink does not manage references a set this diff recreates; \
-                     the apply will fail with EBUSY until that rule is removed",
-                );
-                continue;
-            };
-            // The first later rule that stays where it is.
-            let anchor = kernel_rules[i + 1..]
-                .iter()
-                .zip(&bound[i + 1..])
-                .find(|(r, b)| !**b && !deleted.contains(&r.handle))
-                .map(|(r, _)| RuleHandle(r.handle));
-            diff.rules_to_replace.retain(|(t, f, _, h, _)| {
-                !(t == table && *f == family && h.0 == kr.handle)
-            });
-            diff.rules_to_move.push(RuleMove {
-                table: table.to_string(),
-                family,
-                chain: chain.clone(),
-                from: RuleHandle(kr.handle),
-                placement: anchor.map_or(RulePlacement::Append, RulePlacement::Before),
-                rule: (*declared_rule).clone(),
-                reason: MoveReason::BoundToRecreatedSet,
-            });
-        }
+/// Does a declared rule match the kernel rule with its key? Bodies are
+/// compared after `normalize_tlv` and with the live state the kernel echoes
+/// (counter values, quota consumption) zeroed; the human comment — what
+/// follows `nlink:<key> ` — must match too.
+fn rule_matches(declared: &DeclaredRule, kernel: &RuleInfo) -> bool {
+    let canon = |bytes: &[u8]| super::rules::canonicalize_for_compare(normalize_tlv(bytes));
+    let declared_body = canon(&lower_to_expression_bytes(&declared.body));
+    let kernel_body = canon(&kernel.expression_bytes);
+    if declared_body != kernel_body {
+        tracing::trace!(
+            table = %declared.table(),
+            chain = %declared.chain(),
+            key = ?declared.handle_key(),
+            declared_hex = %hex_dump(&declared_body),
+            kernel_hex = %hex_dump(&kernel_body),
+            "rule body differs from the kernel's after normalization",
+        );
+        return false;
     }
+    let kernel_comment = kernel
+        .comment_text
+        .as_deref()
+        .and_then(super::super::userdata::human_comment);
+    declared.body.comment.as_deref() == kernel_comment
 }
 
 /// Has a declared set's size drifted? Unlike the key and flags, a size
@@ -666,7 +636,7 @@ fn set_size_has_drifted(declared: &DeclaredSet, current: &SetInfo) -> bool {
 ///
 /// Mirrors [`DiffOptions`](crate::netlink::config::DiffOptions) on the
 /// `NetworkConfig` side.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct NftDiffOptions {
     /// Delete tables that exist in the kernel but are not declared in this
@@ -693,9 +663,33 @@ pub struct NftDiffOptions {
     /// If you enable this, scope your config to a netns (`nlink::lab` does),
     /// or be certain you own every table on the host.
     pub purge_tables: bool,
+    /// Enforce declared rule order. Default `true`.
+    ///
+    /// First match wins, so order is policy: a rule declared between two
+    /// installed rules is inserted there, and installed rules found out of
+    /// order are moved — as few as possible (the longest run already in
+    /// order stays). Off, installed rules stay wherever they are and only
+    /// new rules are placed.
+    pub enforce_rule_order: bool,
+}
+
+impl Default for NftDiffOptions {
+    fn default() -> Self {
+        Self {
+            purge_tables: false,
+            enforce_rule_order: true,
+        }
+    }
 }
 
 impl NftDiffOptions {
+    /// Enforce declared rule order (the default) or leave installed rules
+    /// where they are. See [`Self::enforce_rule_order`].
+    pub fn enforce_rule_order(mut self, on: bool) -> Self {
+        self.enforce_rule_order = on;
+        self
+    }
+
     /// Enable/disable purging of undeclared tables. See [`Self::purge_tables`]
     /// — it is destructive and unscoped.
     pub fn purge_tables(mut self, on: bool) -> Self {
@@ -714,16 +708,20 @@ impl NftablesConfig {
     /// [`NftDiffOptions::purge_tables`] — and read that method's warning first
     /// (#190).
     ///
-    /// # Rule-identity caveat (0.16)
+    /// # Rule identity and order
     ///
-    /// Rules without a `handle_key` are *always* added — there's
-    /// no diff identity for them. Rules with a `handle_key` are
-    /// matched against kernel rules by the key (the kernel doesn't
-    /// know our keys; we just emit the same set as we declared,
-    /// and any extras are deleted on apply). Full byte-canonical
-    /// diff is a follow-up; this gets the user a working
-    /// declarative apply now with explicit churn-vs-correctness
-    /// trade-off.
+    /// A rule is identified by the key stored in its comment
+    /// (`nlink:<key>`): the `handle_key` given to `rule_keyed`, or — for a
+    /// rule declared with `rule` — a key derived from its chain, body and
+    /// comment. A declared rule whose body or comment changed is replaced in
+    /// place; one that is gone is deleted; rules nlink did not write are
+    /// left alone unless the chain is
+    /// [`exclusive`](super::DeclaredChainBuilder::exclusive). Each chain is
+    /// brought to declared order with as few moves as possible
+    /// ([`NftDiffOptions::enforce_rule_order`]). Live state the kernel
+    /// echoes — counter values, quota consumption — is not drift.
+    ///
+    /// The config is [validated](Self::validate) first.
     pub async fn diff(&self, conn: &Connection<Nftables>) -> Result<NftablesDiff> {
         self.diff_with_options(conn, &NftDiffOptions::default())
             .await
@@ -739,7 +737,11 @@ impl NftablesConfig {
         conn: &Connection<Nftables>,
         options: &NftDiffOptions,
     ) -> Result<NftablesDiff> {
+        self.validate()?;
         let mut diff = NftablesDiff::default();
+        // Order in which rule inserts (new and moved) are sent; see
+        // `RuleAdd::seq`.
+        let mut seq = 0usize;
 
         // Index declared by (family, name) for fast lookup.
         let declared_tables: HashSet<(Family, &str)> = self
@@ -852,11 +854,13 @@ impl NftablesConfig {
                         c.clone(),
                     ));
                 }
-                for r in declared.rules() {
+                for rule in super::rules::effective_rules(declared.rules()) {
                     diff.rules_to_add.push(RuleAdd {
-                        rule: r.clone(),
+                        rule,
                         placement: RulePlacement::Append,
+                        seq,
                     });
+                    seq += 1;
                 }
                 for f in declared.flowtables() {
                     diff.flowtables_to_add.push(f.clone());
@@ -921,171 +925,6 @@ impl NftablesConfig {
                         declared.family(),
                         c.name.clone(),
                     ));
-                }
-            }
-
-            // Rules: per-rule USERDATA-keyed identity (Plan
-            // 157b v2). NetworkConfig-symmetric — each rule is an
-            // individually diffable object keyed by its
-            // user-supplied `handle_key`, which round-trips
-            // through the kernel as
-            // `NFTA_RULE_USERDATA = "nlink:<key>"`.
-            //
-            // Anonymous rules (no `handle_key`): always-add with a
-            // tracing::warn. Documented limitation — same as a
-            // `LinkConfig` without a name in `NetworkConfig`.
-            let current_rules = conn
-                .list_rules(declared.name(), declared.family())
-                .await?;
-            // Per-chain: group declared rules by chain, then
-            // diff against kernel rules in the same chain.
-            use std::collections::HashMap as _HashMap;
-            let kernel_in_chain: _HashMap<String, Vec<&super::super::types::RuleInfo>> =
-                current_rules
-                    .iter()
-                    .fold(_HashMap::new(), |mut acc, r| {
-                        acc.entry(r.chain.clone()).or_default().push(r);
-                        acc
-                    });
-            let declared_in_chain: _HashMap<&str, Vec<&DeclaredRule>> = declared
-                .rules()
-                .iter()
-                .fold(_HashMap::new(), |mut acc, r| {
-                    acc.entry(r.chain()).or_default().push(r);
-                    acc
-                });
-
-            for (chain_name, declared_rules) in &declared_in_chain {
-                let kernel_rules: &[&super::super::types::RuleInfo] = kernel_in_chain
-                    .get(*chain_name)
-                    .map(|v| v.as_slice())
-                    .unwrap_or(&[]);
-
-                // Map: key → kernel rule with that nlink:<key>
-                // comment.
-                let kernel_by_key: _HashMap<&str, &super::super::types::RuleInfo> = kernel_rules
-                    .iter()
-                    .filter_map(|r| r.key.as_deref().map(|c| (c, *r)))
-                    .collect();
-
-                // Track which kernel keys we've claimed so we can
-                // delete the rest in pass 2.
-                let mut declared_keys: HashSet<&str> = HashSet::new();
-
-                // Pass 1: declared rules.
-                for declared_rule in declared_rules {
-                    let Some(key) = declared_rule.handle_key() else {
-                        // Anonymous → always-add. Warn so users
-                        // notice the idempotency gap.
-                        tracing::warn!(
-                            chain = chain_name,
-                            "anonymous rule in declarative config; \
-                             will be added on every apply (use \
-                             rule_keyed for idempotent reconcile)",
-                        );
-                        diff.rules_to_add.push(RuleAdd {
-                            rule: (*declared_rule).clone(),
-                            placement: RulePlacement::Append,
-                        });
-                        continue;
-                    };
-                    declared_keys.insert(key);
-
-                    match kernel_by_key.get(key) {
-                        Some(kr) => {
-                            // Key matches: compare expression
-                            // bytes. If different → in-place
-                            // replace at the kernel handle.
-                            // Plan 178 — pass both sides through
-                            // `normalize_tlv` first: strips the
-                            // `NLA_F_NESTED` hint bit and sorts
-                            // sibling attributes by type so the
-                            // writer's source-order emission and
-                            // the kernel's canonical-order echo
-                            // compare equal when they describe
-                            // the same expression list.
-                            let declared_body = normalize_tlv(
-                                &lower_to_expression_bytes(&declared_rule.body),
-                            );
-                            let kernel_body = normalize_tlv(&kr.expression_bytes);
-                            if declared_body != kernel_body {
-                                tracing::trace!(
-                                    table = %declared.name(),
-                                    chain = chain_name,
-                                    key,
-                                    declared_len = declared_body.len(),
-                                    kernel_len = kernel_body.len(),
-                                    declared_hex = %hex_dump(&declared_body),
-                                    kernel_hex = %hex_dump(&kernel_body),
-                                    "diff body-bytes divergence after normalize (Plan 178)"
-                                );
-                                diff.rules_to_replace.push((
-                                    declared.name().to_string(),
-                                    declared.family(),
-                                    chain_name.to_string(),
-                                    RuleHandle(kr.handle),
-                                    (*declared_rule).clone(),
-                                ));
-                            }
-                            // else: no-op (declared and kernel
-                            // already agree byte-for-byte after
-                            // normalization)
-                        }
-                        None => {
-                            // Not in kernel: add.
-                            diff.rules_to_add.push(RuleAdd {
-                                rule: (*declared_rule).clone(),
-                                placement: RulePlacement::Append,
-                            });
-                        }
-                    }
-                }
-
-                // Pass 2: kernel rules with nlink keys we didn't
-                // declare → delete (they're ours, they shouldn't
-                // be there). Kernel rules without an nlink-prefix
-                // comment (foreign / external) are left alone.
-                for kr in kernel_rules {
-                    let Some(key) = kr.key.as_deref() else { continue };
-                    if !declared_keys.contains(key) {
-                        diff.rules_to_delete.push((
-                            declared.name().to_string(),
-                            declared.family(),
-                            chain_name.to_string(),
-                            RuleHandle(kr.handle),
-                        ));
-                    }
-                }
-            }
-
-            // Pass 3: declared chains with no rules in
-            // declared_in_chain — those chains' kernel rules
-            // (with nlink keys) need cleanup too.
-            for kchain_name in kernel_in_chain.keys() {
-                if declared_in_chain.contains_key(kchain_name.as_str()) {
-                    continue;
-                }
-                // Only act on chains that are in the declared
-                // chain list (or being-added). Drift in chains
-                // we don't manage is left alone.
-                let in_declared_chains = declared
-                    .chains()
-                    .iter()
-                    .any(|c| c.name() == kchain_name);
-                if !in_declared_chains {
-                    continue;
-                }
-                if let Some(krs) = kernel_in_chain.get(kchain_name) {
-                    for kr in krs {
-                        if kr.key.is_some() {
-                            diff.rules_to_delete.push((
-                                declared.name().to_string(),
-                                declared.family(),
-                                kchain_name.clone(),
-                                RuleHandle(kr.handle),
-                            ));
-                        }
-                    }
                 }
             }
 
@@ -1230,22 +1069,6 @@ impl NftablesConfig {
                 }
             }
 
-            // A recreated set must first lose every rule bound to it:
-            // DELSET on a set with bindings is EBUSY, and the rule has not
-            // changed, so nothing above scheduled it. Delete each keyed rule
-            // that references one ahead of the DELSET and put it back after
-            // the new set, before the next rule that survives.
-            if !recreated.is_empty() {
-                reinsert_rules_bound_to(
-                    &mut diff,
-                    declared.name(),
-                    declared.family(),
-                    &recreated,
-                    &kernel_in_chain,
-                    &declared_in_chain,
-                );
-            }
-
             // Kernel sets we no longer declare → delete (full
             // reconcile, same as chains/flowtables). Sets in tables
             // we don't manage never reach here.
@@ -1255,6 +1078,111 @@ impl NftablesConfig {
                         declared.name().to_string(),
                         declared.family(),
                         s.name.clone(),
+                    ));
+                }
+            }
+
+            // Rules. Identity is the key in each rule's `nlink:<key>`
+            // comment — derived from the content for a rule declared
+            // without one — and declared order is enforced per chain,
+            // moving as few rules as possible (`plan_chain`). After the
+            // sets, because a rule bound to a set this diff recreates has
+            // to move out of its way: DELSET on a bound set is EBUSY.
+            let current_rules = conn
+                .list_rules(declared.name(), declared.family())
+                .await?;
+            let effective = super::rules::effective_rules(declared.rules());
+            let mut chain_names: Vec<&str> =
+                declared.chains().iter().map(|c| c.name()).collect();
+            for rule in &effective {
+                if !chain_names.contains(&rule.chain()) {
+                    chain_names.push(rule.chain());
+                }
+            }
+            for chain_name in chain_names {
+                let exclusive = declared
+                    .chains()
+                    .iter()
+                    .any(|c| c.name() == chain_name && c.exclusive());
+                let kernel_rules: Vec<&RuleInfo> = current_rules
+                    .iter()
+                    .filter(|r| r.chain == chain_name)
+                    .collect();
+                let declared_rules: Vec<&DeclaredRule> = effective
+                    .iter()
+                    .filter(|r| r.chain() == chain_name)
+                    .collect();
+                let slots: Vec<super::rules::KernelSlot> = kernel_rules
+                    .iter()
+                    .map(|kr| {
+                        let bound = recreated.iter().any(|set| references_set(kr, set));
+                        if bound && kr.key.is_none() && !exclusive {
+                            // nlink cannot put it back, so the DELSET will be
+                            // EBUSY. Say why before it happens.
+                            tracing::warn!(
+                                table = %declared.name(),
+                                chain = chain_name,
+                                handle = kr.handle,
+                                "a rule nlink does not manage references a set this diff \
+                                 recreates; the apply will fail with EBUSY until that rule \
+                                 is removed",
+                            );
+                        }
+                        super::rules::KernelSlot {
+                            handle: kr.handle,
+                            key: kr.key.clone(),
+                            forced: bound && kr.key.is_some(),
+                        }
+                    })
+                    .collect();
+                let keys: Vec<&str> = declared_rules
+                    .iter()
+                    .map(|r| r.handle_key().expect("effective rules all have keys"))
+                    .collect();
+                let plan = super::rules::plan_chain(
+                    &slots,
+                    &keys,
+                    |i, pos| !rule_matches(declared_rules[i], kernel_rules[pos]),
+                    exclusive,
+                    options.enforce_rule_order,
+                );
+
+                for handle in plan.deletes {
+                    diff.rules_to_delete.push((
+                        declared.name().to_string(),
+                        declared.family(),
+                        chain_name.to_string(),
+                        RuleHandle(handle),
+                    ));
+                }
+                for insert in plan.inserts {
+                    let rule = declared_rules[insert.declared].clone();
+                    match insert.from {
+                        None => diff.rules_to_add.push(RuleAdd {
+                            rule,
+                            placement: insert.placement,
+                            seq,
+                        }),
+                        Some(from) => diff.rules_to_move.push(RuleMove {
+                            table: declared.name().to_string(),
+                            family: declared.family(),
+                            chain: chain_name.to_string(),
+                            from: RuleHandle(from),
+                            placement: insert.placement,
+                            rule,
+                            reason: insert.reason,
+                            seq,
+                        }),
+                    }
+                    seq += 1;
+                }
+                for (handle, i) in plan.replaces {
+                    diff.rules_to_replace.push((
+                        declared.name().to_string(),
+                        declared.family(),
+                        chain_name.to_string(),
+                        RuleHandle(handle),
+                        declared_rules[i].clone(),
                     ));
                 }
             }

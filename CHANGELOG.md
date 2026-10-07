@@ -104,6 +104,15 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **`Rule::comment` is a human comment, written verbatim.** It used to be
+  prefixed with `nlink:` and treated as the declarative key. In an
+  `NftablesConfig` the key is the rule's `handle_key` and the comment
+  follows it (`nlink:<key> <comment>`); an imperative rule's comment is
+  stored exactly as given. `RuleInfo::key` is the key up to the first space.
+  New: `NftablesConfig::validate`, `DeclaredChainBuilder::exclusive` (the
+  chain owns all of its rules — those nlink did not write are deleted),
+  `NftDiffOptions::enforce_rule_order`, `MoveReason::Reorder`.
+
 - **Breaking: the nftables API reshape for 0.30.** One pass, so this cycle's
   features (and later ones) are additive:
   - `Expr::{Lookup, Limit, Log, Masquerade, Redirect}` wrap the new
@@ -139,6 +148,36 @@ All notable changes to this project will be documented in this file.
   agree — and the next attribute worth reading back is no longer a break.
 
 ### Fixed
+
+- **Declared rule order is enforced (#387).** `apply` used to append every
+  new rule to the end of its chain, and the diff never compared order — so a
+  rule declared between two installed ones landed last, and a reordered
+  declaration produced an empty diff. First match wins, so this inverted
+  policy. Each chain is now planned: the longest run of installed rules
+  already in declared order stays put, and every other rule is inserted (or
+  moved) immediately before the next staying rule, or after the last one —
+  as few moves as possible, so counters survive. Opt out with
+  `NftDiffOptions::enforce_rule_order(false)`.
+
+- **A declared `.counter()` rule that had counted was replaced, and reset,
+  on every apply (#388).** The kernel echoes live packet/byte counts, which
+  never matched the zeros nlink writes. Bodies are now compared with a
+  counter's values (and a quota's consumption) zeroed on both sides.
+
+- **Rules declared without a key were re-added on every apply (#389)** — and
+  `nlink-nft reconcile` duplicated its whole ruleset each run. Such a rule
+  now gets a key derived from its chain, body and comment (`~` + FNV-1a-64),
+  so it converges; editing it is a delete + insert in place. The reconcile
+  DSL's chains are `exclusive()`, which also removes the duplicates earlier
+  runs left.
+
+- **Rule identity (#390).** A key that did not fit the kernel's comment was
+  dropped silently, installing the rule without an identity; a keyed rule
+  with a `.comment()` was stored under the comment; and of two kernel rules
+  carrying the same key, the extra one was never deleted. Keys and comments
+  are now validated up front (`NftablesConfig::validate`, which `diff`
+  calls first), the key and the comment are stored together as
+  `nlink:<key> <comment>`, and duplicate keyed rules are deleted.
 
 - **Declared rules using a set lookup, `limit`, `log` or `reject with tcp
   reset` never converged (#374).** Each was installed fine and then

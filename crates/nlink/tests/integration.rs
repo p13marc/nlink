@@ -173,6 +173,11 @@ mod nftables_statements;
 #[path = "integration/nftables_echo.rs"]
 mod nftables_echo;
 
+// Declarative rule identity and order: declared order is enforced with
+// minimal moves, unchanged rules (and their counters) are left alone.
+#[path = "integration/nftables_rules.rs"]
+mod nftables_rules;
+
 // #191-#194, #218 — psched tick conversion. The unit tests pin the
 // bytes nlink emits; these pin that the *kernel* accepts them and
 // reads back what we wrote. Needed because the pre-fix writer and

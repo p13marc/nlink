@@ -241,6 +241,16 @@ pub const NFTA_VERDICT_CHAIN: u16 = 2;
 pub const NFTA_COUNTER_BYTES: u16 = 1;
 pub const NFTA_COUNTER_PACKETS: u16 = 2;
 
+// Quota
+pub const NFTA_QUOTA_BYTES: u16 = 1;
+pub const NFTA_QUOTA_FLAGS: u16 = 2;
+pub const NFTA_QUOTA_CONSUMED: u16 = 4;
+/// `NFT_QUOTA_F_INV` — `quota over`: match once the quota is used up.
+pub const NFT_QUOTA_F_INV: u32 = 1;
+/// `NFT_QUOTA_F_DEPLETED` — set by the kernel once the quota is used up;
+/// live state, never part of a declaration.
+pub const NFT_QUOTA_F_DEPLETED: u32 = 2;
+
 // Bitwise
 pub const NFTA_BITWISE_SREG: u16 = 1;
 pub const NFTA_BITWISE_DREG: u16 = 2;

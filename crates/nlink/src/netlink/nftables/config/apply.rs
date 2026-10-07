@@ -44,15 +44,12 @@ use crate::netlink::{
     protocol::Nftables,
 };
 
-/// A declared rule's body with its `handle_key` as the comment, which the
-/// kernel round-trips as `NFTA_RULE_USERDATA` (the diff identity).
+/// A declared rule's body carrying its key, which is written ahead of any
+/// human comment as `nlink:<key> <comment>` (`NFTA_RULE_USERDATA`) and is
+/// the diff's identity for the rule.
 fn keyed_body(rule: &DeclaredRule) -> Rule {
     let mut body = rule.body.clone();
-    if let Some(key) = rule.handle_key()
-        && body.comment.is_none()
-    {
-        body.comment = Some(key.to_string());
-    }
+    body.key = rule.handle_key.clone();
     body
 }
 
@@ -135,8 +132,9 @@ impl NftablesDiff {
         for (table, family, chain, handle) in &self.rules_to_delete {
             tx = tx.del_rule(table, chain, *family, handle.0);
         }
-        // ...and the rules bound to a set being recreated, which must be
-        // gone before its DELSET (EBUSY otherwise). Re-added in step 8.
+        // ...and the rules being moved: out of declared order, or bound to
+        // a set being recreated, which must be gone before its DELSET
+        // (EBUSY otherwise). Re-inserted in step 12.
         for m in &self.rules_to_move {
             tx = tx.del_rule(&m.table, &m.chain, m.family, m.from.0);
         }
@@ -155,22 +153,22 @@ impl NftablesDiff {
             tx = tx.del_set(table, name, *family);
         }
 
-        // 2. Chain deletes.
+        // 4. Chain deletes.
         for (table, family, name) in &self.chains_to_delete {
             tx = tx.del_chain(table, name, *family);
         }
 
-        // 3. Flowtable deletes.
+        // 5. Flowtable deletes.
         for (family, table, name) in &self.flowtables_to_delete {
             tx = tx.del_flowtable(*family, table, name);
         }
 
-        // 4. Table deletes (cascades any leftover children).
+        // 6. Table deletes (cascades any leftover children).
         for (family, name) in &self.tables_to_delete {
             tx = tx.del_table(name, *family);
         }
 
-        // 5. Table adds (must precede chain/rule/flowtable adds
+        // 7. Table adds (must precede chain/rule/flowtable adds
         //    that reference them). Flagged tables route through
         //    Transaction::add_table_with_flags so they stay
         //    inside the atomic batch.
@@ -182,27 +180,15 @@ impl NftablesDiff {
             }
         }
 
-        // 5b. Table flag updates. NFT_MSG_NEWTABLE updates an existing table,
+        // 7b. Table flag updates. NFT_MSG_NEWTABLE updates an existing table,
         //     so a flag change converges without a delete+recreate — which
         //     would cascade away every chain and rule inside it (#208).
         for (family, name, flags) in &self.tables_to_modify {
             tx = tx.add_table_with_flags(name, *family, *flags);
         }
 
-        // 8. Set adds — after the owning table exists, before the
-        //    rules (step 11) that reference them by `@name`. Re-build
-        //    a runtime `Set` from `DeclaredSet`.
-        for (table_name, family, declared) in &self.sets_to_add {
-            tx = tx.add_set(declared.to_set(table_name, *family));
-        }
-
-        // 9. Set-element adds — after their set is created (step 8 or
-        //    a prior apply), before the rules that match on them.
-        for change in &self.set_elements_to_add {
-            tx = tx.add_set_elements(&change.set, &change.elements);
-        }
-
-        // 6. Chain adds, then chain property updates. Both emit
+        // 8. Chain adds, then chain property updates — before the sets,
+        //    whose elements (a verdict map's jumps) can name chains. Both emit
         //    `NFT_MSG_NEWCHAIN`, which the kernel treats as an
         //    update when the chain already exists — so a drifted
         //    policy/hook/priority converges without a delete+recreate
@@ -213,7 +199,7 @@ impl NftablesDiff {
             tx = tx.add_chain(build_chain(table_name, *family, declared)?);
         }
 
-        // 7. Flowtable adds — **before** the rules.
+        // 9. Flowtable adds — **before** the rules.
         //
         //    A rule carrying `flow add @ft` for a flowtable created in
         //    the same diff is validated when the batch is committed,
@@ -238,23 +224,40 @@ impl NftablesDiff {
             tx = tx.add_flowtable(&runtime);
         }
 
-        // 8a. Rules put back after their set was recreated, each right
-        //     before the next rule that stayed, so chain order holds.
-        for m in &self.rules_to_move {
-            tx = place_rule(tx, keyed_body(&m.rule), m.placement);
+        // 10. Set adds — after the owning table exists, before the
+        //    rules (step 12) that reference them by `@name`. Re-build
+        //    a runtime `Set` from `DeclaredSet`.
+        for (table_name, family, declared) in &self.sets_to_add {
+            tx = tx.add_set(declared.to_set(table_name, *family));
         }
 
-        // 8. Rule adds. Wire `handle_key` → `body.comment` so the
-        //    kernel round-trips it as `NFTA_RULE_USERDATA`
-        //    (Plan 157b v2 — drives per-rule diff identity).
-        for add in &self.rules_to_add {
-            tx = place_rule(tx, keyed_body(&add.rule), add.placement);
+        // 11. Set-element adds — after their set is created (step 10 or
+        //    a prior apply), before the rules that match on them.
+        for change in &self.set_elements_to_add {
+            tx = tx.add_set_elements(&change.set, &change.elements);
         }
 
-        // 7b. Rule in-place replaces — emits
+        // 12. Rule inserts, new and moved, in the order the diff planned:
+        //     inserts before the same anchor in declared order, inserts
+        //     after one in reverse, so the chain ends up in declared
+        //     order. Each anchor is a rule that stays, so its handle is
+        //     valid throughout the batch.
+        let mut inserts: Vec<(usize, &DeclaredRule, RulePlacement)> = self
+            .rules_to_add
+            .iter()
+            .map(|a| (a.seq, &a.rule, a.placement))
+            .chain(self.rules_to_move.iter().map(|m| (m.seq, &m.rule, m.placement)))
+            .collect();
+        inserts.sort_by_key(|(seq, ..)| *seq);
+        for (_, rule, placement) in inserts {
+            tx = place_rule(tx, keyed_body(rule), placement);
+        }
+
+        // 13. Rule in-place replaces, last — emits
         //     `NFT_MSG_NEWRULE | NLM_F_REPLACE | NFTA_RULE_HANDLE`.
         //     Kernel atomically swaps the body at that handle
-        //     (preserves position, no flush). Plan 157b v2.
+        //     (preserves position, no flush). Last, so no insert above
+        //     anchors on a handle a replace has already retired.
         for (_table, _family, _chain, handle, declared) in &self.rules_to_replace {
             tx = tx.replace_rule(keyed_body(declared), handle.0);
         }

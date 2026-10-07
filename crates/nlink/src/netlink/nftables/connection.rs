@@ -509,9 +509,9 @@ impl Connection<Nftables> {
             write_expressions(&mut builder, &rule.exprs);
         }
 
-        // Comment → NFTA_RULE_USERDATA TLV (Plan 157b v2).
-        if let Some(comment) = &rule.comment
-            && let Some(udata) = super::userdata::encode_nlink_comment(comment)
+        // Key and comment → NFTA_RULE_USERDATA TLV.
+        if let Some(udata) =
+            super::userdata::encode_rule_userdata(rule.key.as_deref(), rule.comment.as_deref())?
         {
             builder.append_attr(NFTA_RULE_USERDATA, &udata);
         }
@@ -1610,10 +1610,13 @@ impl Transaction {
         }
 
         // Comment → NFTA_RULE_USERDATA TLV (Plan 157b v2).
-        if let Some(comment) = &rule.comment
-            && let Some(udata) = super::userdata::encode_nlink_comment(comment)
-        {
-            builder.append_attr(NFTA_RULE_USERDATA, &udata);
+        match super::userdata::encode_rule_userdata(rule.key.as_deref(), rule.comment.as_deref()) {
+            Ok(Some(udata)) => builder.append_attr(NFTA_RULE_USERDATA, &udata),
+            Ok(None) => {}
+            Err(e) => {
+                self.defer(e);
+                return self;
+            }
         }
 
         self.messages.push(builder.finish());
@@ -1643,10 +1646,13 @@ impl Transaction {
             write_expressions(&mut builder, &rule.exprs);
         }
 
-        if let Some(comment) = &rule.comment
-            && let Some(udata) = super::userdata::encode_nlink_comment(comment)
-        {
-            builder.append_attr(NFTA_RULE_USERDATA, &udata);
+        match super::userdata::encode_rule_userdata(rule.key.as_deref(), rule.comment.as_deref()) {
+            Ok(Some(udata)) => builder.append_attr(NFTA_RULE_USERDATA, &udata),
+            Ok(None) => {}
+            Err(e) => {
+                self.defer(e);
+                return self;
+            }
         }
 
         self.messages.push(builder.finish());
@@ -1857,6 +1863,32 @@ fn append_set_desc(builder: &mut MessageBuilder, set: &Set) {
     }
 }
 
+/// Check `elements` against the set they go into: everything the writer
+/// cannot encode is an error, never something dropped. Shared by the
+/// element writers and `NftablesConfig::validate`.
+pub(crate) fn check_elements(set: &Set, elements: &[SetElement]) -> Result<()> {
+    // Interval sets and maps need range ends and element data on the wire.
+    // Writing their elements as plain keys would install open-ended
+    // intervals or data-less map entries, so refuse until they are
+    // modelled.
+    if !elements.is_empty() && set.flags.contains(SetFlags::INTERVAL) {
+        return Err(Error::InvalidMessage(format!(
+            "set {}: elements of interval sets are not supported yet",
+            set.name
+        )));
+    }
+    if !elements.is_empty() && set.flags.contains(SetFlags::MAP) {
+        return Err(Error::InvalidMessage(format!(
+            "set {}: elements of maps are not supported yet",
+            set.name
+        )));
+    }
+    for elem in elements {
+        elem.check_for(set)?;
+    }
+    Ok(())
+}
+
 /// Append the `NFTA_SET_ELEM_LIST_*` header + per-element nest used
 /// by both `NEWSETELEM` and `DELSETELEM` messages. Shared by the
 /// imperative `Connection` methods and the `Transaction` builders so
@@ -1866,25 +1898,7 @@ fn append_set_elements(
     set: &Set,
     elements: &[SetElement],
 ) -> Result<()> {
-    // Interval sets and maps need range ends and element data on the wire.
-    // Writing their elements as plain keys would install open-ended
-    // intervals or data-less map entries, so refuse until they are
-    // modelled.
-    if set.flags.contains(SetFlags::INTERVAL) {
-        return Err(Error::InvalidMessage(format!(
-            "set {}: elements of interval sets are not supported yet",
-            set.name
-        )));
-    }
-    if set.flags.contains(SetFlags::MAP) {
-        return Err(Error::InvalidMessage(format!(
-            "set {}: elements of maps are not supported yet",
-            set.name
-        )));
-    }
-    for elem in elements {
-        elem.check_for(set)?;
-    }
+    check_elements(set, elements)?;
 
     let nfgenmsg = NfGenMsg::new(set.family);
     builder.append(&nfgenmsg);
@@ -2787,10 +2801,11 @@ mod userdata_roundtrip_tests {
     }
 
     #[test]
-    fn comment_round_trips_through_transaction_add_rule() {
-        let rule = Rule::new("filter", "input")
+    fn key_and_comment_round_trip_through_transaction_add_rule() {
+        let mut rule = Rule::new("filter", "input")
             .family(Family::Inet)
-            .comment("ssh-accept");
+            .comment("allow ssh");
+        rule.key = Some("ssh-accept".into());
         let tx = Transaction::new().add_rule(rule);
         // Transaction stores raw messages in self.messages.
         let messages = &tx.messages;
@@ -2805,12 +2820,31 @@ mod userdata_roundtrip_tests {
         assert_eq!(
             parsed.key.as_deref(),
             Some("ssh-accept"),
-            "comment should round-trip from emit through parse",
+            "the key should round-trip from emit through parse",
         );
+        assert_eq!(parsed.comment_text.as_deref(), Some("nlink:ssh-accept allow ssh"));
         assert!(
             parsed.userdata_raw.is_some(),
             "raw userdata should also be preserved",
         );
+    }
+
+    #[test]
+    fn an_imperative_comment_is_written_verbatim_with_no_key() {
+        let rule = Rule::new("filter", "input").comment("allow ssh");
+        let tx = Transaction::new().add_rule(rule);
+        let body = body_after_nfgenmsg(&tx.messages[0]);
+        let parsed = super::parse_rule(body, Family::Inet).expect("parse");
+        assert_eq!(parsed.key, None);
+        assert_eq!(parsed.comment_text.as_deref(), Some("allow ssh"));
+    }
+
+    #[test]
+    fn an_overlong_comment_fails_the_transaction_instead_of_vanishing() {
+        let rule = Rule::new("filter", "input").comment(&"x".repeat(128));
+        let tx = Transaction::new().add_rule(rule);
+        assert!(tx.messages.is_empty());
+        assert!(tx.error.is_some());
     }
 
     #[test]
@@ -2824,10 +2858,9 @@ mod userdata_roundtrip_tests {
     }
 
     #[test]
-    fn replace_rule_carries_comment_and_handle() {
-        let rule = Rule::new("filter", "input")
-            .family(Family::Inet)
-            .comment("ssh-accept");
+    fn replace_rule_carries_key_and_handle() {
+        let mut rule = Rule::new("filter", "input").family(Family::Inet);
+        rule.key = Some("ssh-accept".into());
         let tx = Transaction::new().replace_rule(rule, 42);
         let body = body_after_nfgenmsg(&tx.messages[0]);
         let parsed = super::parse_rule(body, Family::Inet).expect("parse");

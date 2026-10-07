@@ -249,9 +249,16 @@ pub struct DeclaredChain {
     pub(crate) policy: Option<Policy>,
     pub(crate) chain_type: Option<ChainType>,
     pub(crate) device: Option<String>,
+    pub(crate) exclusive: bool,
 }
 
 impl DeclaredChain {
+    /// Whether this chain owns all of its rules: a rule nlink did not write
+    /// is deleted rather than left alone. See
+    /// [`DeclaredChainBuilder::exclusive`].
+    pub fn exclusive(&self) -> bool {
+        self.exclusive
+    }
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -285,6 +292,7 @@ pub struct DeclaredChainBuilder {
     policy: Option<Policy>,
     chain_type: Option<ChainType>,
     device: Option<String>,
+    exclusive: bool,
 }
 
 impl DeclaredChainBuilder {
@@ -296,7 +304,17 @@ impl DeclaredChainBuilder {
             policy: None,
             chain_type: None,
             device: None,
+            exclusive: false,
         }
+    }
+
+    /// Own every rule in this chain: rules nlink did not write — added by
+    /// hand, by another tool, or by an older nlink that left rules without
+    /// a key — are deleted instead of left alone. Off by default, because
+    /// a chain shared with other software would lose its rules.
+    pub fn exclusive(mut self) -> Self {
+        self.exclusive = true;
+        self
     }
 
     /// Set the hook (makes this a base chain). Pair with
@@ -349,6 +367,7 @@ impl DeclaredChainBuilder {
             policy: self.policy,
             chain_type: self.chain_type,
             device: self.device,
+            exclusive: self.exclusive,
         }
     }
 }
