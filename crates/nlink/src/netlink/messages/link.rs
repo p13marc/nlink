@@ -26,6 +26,7 @@ mod attr_ids {
     pub const IFLA_NUM_TX_QUEUES: u16 = 31;
     pub const IFLA_NUM_RX_QUEUES: u16 = 32;
     pub const IFLA_CARRIER: u16 = 33;
+    pub const IFLA_LINK_NETNSID: u16 = 37;
     pub const IFLA_MIN_MTU: u16 = 50;
     pub const IFLA_MAX_MTU: u16 = 51;
     pub const IFLA_PERM_ADDRESS: u16 = 54;
@@ -69,6 +70,9 @@ pub struct LinkMessage {
     pub(crate) max_mtu: Option<u32>,
     /// Link index for stacked devices (IFLA_LINK).
     pub(crate) link: Option<u32>,
+    /// The namespace `link` is an ifindex in, when it is not this one
+    /// (IFLA_LINK_NETNSID).
+    pub(crate) link_netnsid: Option<i32>,
     /// Qdisc name (IFLA_QDISC).
     pub(crate) qdisc: Option<String>,
     /// Master device index (IFLA_MASTER).
@@ -610,6 +614,10 @@ impl FromNetlink for LinkMessage {
                 }
                 attr_ids::IFLA_LINK if attr_data.len() >= 4 => {
                     msg.link = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
+                attr_ids::IFLA_LINK_NETNSID if attr_data.len() >= 4 => {
+                    msg.link_netnsid =
+                        Some(i32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
                 }
                 attr_ids::IFLA_QDISC => {
                     msg.qdisc = Some(parse_string_from_bytes(attr_data));

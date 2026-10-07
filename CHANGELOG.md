@@ -616,6 +616,56 @@ All notable changes to this project will be documented in this file.
   fields that differ, so a private-key change no longer rewrites (and
   rebinds) an unchanged port.
 
+- **Changing a declared link's kind parameters did nothing (#417).** The
+  link diff compared MTU, MAC, master and state, and nothing about the
+  kind: a changed VXLAN VNI, VLAN id or protocol, or bond mode on an
+  existing link was an empty diff, and the kernel kept the old value. The
+  diff now reads the kind's `IFLA_INFO_DATA` back and compares the kind
+  itself, VLAN id/protocol/parent, VXLAN VNI/port/remote/local/underlay,
+  macvlan mode/parent, bond mode, `miimon`, delays, `xmit_hash_policy`,
+  `min_links`, `resend_igmp`, `lacp_rate` and `ad_select`, VRF table and
+  netkit mode/policies/scrubbing. Each was checked against the kernel's
+  `changelink` for that kind: what it takes is changed in place
+  (`LinkChanges::set_kind_params`); what it refuses or ignores —
+  `vlan_changelink` silently ignores a new id or protocol, `vxlan_nl2conf`
+  refuses a new VNI or port, bond mode needs a down bond with no ports, VRF
+  has no `changelink` — makes the apply delete the link and create it again
+  (`ConfigDiff::links_to_recreate`), putting back the addresses, routes,
+  qdiscs, ports and stacked links the config declares on it. A recreate
+  that would destroy something the config does not declare is refused with
+  `Error::NotSupported` naming it, as is any netkit mode or scrub change. A
+  bond delay is compared as the kernel stores it, rounded down to a
+  multiple of `miimon`. The VXLAN port's doc comments said the default is
+  4789; the kernel's default is the `vxlan` module's `udp_port`, 8472.
+
+- **A VXLAN's IPv6 local or remote address was silently dropped (#418).**
+  `VxlanLink` stored its endpoints as `Ipv4Addr` and wrote only
+  `IFLA_VXLAN_LOCAL`/`IFLA_VXLAN_GROUP`, so `NetworkConfig`'s `create_link`
+  skipped an IPv6 `vxlan_local`/`vxlan_remote` (a code comment said so) and
+  the link came up as an IPv4 VXLAN with no endpoints; `nlink-ip link add
+  vxlan` did the same with `--local`/`--remote`, and also ignored an
+  unparseable address. `VxlanLink` gained `local6`, `remote6` and `group6`,
+  which write `IFLA_VXLAN_LOCAL6`/`IFLA_VXLAN_GROUP6`; the declarative layer
+  and `nlink-ip` use them; and the link diff reads both families back and
+  compares them — in place within a family, recreating the link across
+  families, which `vxlan_nl2conf` refuses on a live link.
+
+- **`PerHostLimiter::limit_port_range` classified nothing (#416).**
+  `reconcile()` installed no filter for a port range, and `apply()` none for
+  a range wider than 10 ports — for a narrower one, a TCP filter per port
+  with its errors discarded, and nothing for UDP. The rule's class existed
+  and no traffic reached it. `FlowerFilter` gained `dst_port_range` /
+  `src_port_range` (`TCA_FLOWER_KEY_PORT_{DST,SRC}_{MIN,MAX}`, kernel
+  5.2+), and its `parse_params` takes tc(8)'s `dst_port 8000-8100`. A range
+  without TCP/UDP/SCTP as `ip_proto`, which cls_flower would install as a
+  match-all, or with `min >= max`, which it refuses, is an error. Both
+  verbs now build their filters from one list, so a range gets an IPv4 TCP
+  and an IPv4 UDP filter at the two priorities `limit_port` uses (IPv6 is
+  not matched, as with `limit_port`); a one-port range is that port, and
+  `start > end` fails before anything changes. Tested on traffic: UDP to
+  ports inside the range lands in the rule's class, the rest in the default
+  class.
+
 ## [0.29.0] - 2026-10-01
 
 > Upgrading from 0.28.x? See

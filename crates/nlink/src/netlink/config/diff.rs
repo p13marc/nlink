@@ -8,6 +8,7 @@ use std::{
 };
 
 
+use super::kind::{self, KindPlan, KindUpdate, LinkRecreate};
 use super::types::{
     DeclaredAddress, DeclaredLink, DeclaredLinkType, DeclaredQdisc, DeclaredQdiscType,
     DeclaredRoute, DeclaredRouteType, LinkState, NetworkConfig, QdiscParent,
@@ -110,6 +111,12 @@ impl DiffOptions {
 #[non_exhaustive]
 #[must_use = "Diffs do nothing unless passed to `.apply()` or stringified via `Display`"]
 pub struct ConfigDiff {
+    /// Links to delete and create again, because a declared kind
+    /// parameter — a VLAN id, a VXLAN VNI, a bond mode, the kind itself —
+    /// cannot be changed on a live link. Each one is also in
+    /// [`links_to_add`](Self::links_to_add). A refused one
+    /// ([`LinkRecreate::is_refused`]) makes the apply fail instead (#417).
+    pub links_to_recreate: Vec<LinkRecreate>,
     /// Links to create.
     pub links_to_add: Vec<DeclaredLink>,
     /// Links to modify (name, changes).
@@ -187,7 +194,8 @@ impl ConfigDiff {
 
     /// Check if no changes are needed.
     pub fn is_empty(&self) -> bool {
-        self.links_to_add.is_empty()
+        self.links_to_recreate.is_empty()
+            && self.links_to_add.is_empty()
             && self.links_to_modify.is_empty()
             && self.addresses_to_add.is_empty()
             && self.routes_to_add.is_empty()
@@ -199,7 +207,8 @@ impl ConfigDiff {
 
     /// Get the total number of changes.
     pub fn change_count(&self) -> usize {
-        self.links_to_add.len()
+        self.links_to_recreate.len()
+            + self.links_to_add.len()
             + self.links_to_modify.len()
             + self.addresses_to_add.len()
             + self.routes_to_add.len()
@@ -223,6 +232,9 @@ impl ConfigDiff {
         let mut lines = Vec::new();
 
         // Links
+        for recreate in &self.links_to_recreate {
+            lines.push(recreate.to_string());
+        }
         for link in &self.links_to_add {
             lines.push(format!(
                 "+ link {} ({})",
@@ -341,6 +353,15 @@ pub struct LinkChanges {
     /// interface produced an empty diff forever and `apply()` reported
     /// zero changes (#275).
     pub set_address: Option<[u8; 6]>,
+    /// Kind parameters changed in place — a VXLAN remote, local or
+    /// underlay, bond timers and hashing, a macvlan mode, netkit policies
+    /// — one `name old -> new` line each. A parameter the kernel cannot
+    /// change on a live link is not here: it makes the diff recreate the
+    /// link ([`ConfigDiff::links_to_recreate`]) (#417).
+    pub set_kind_params: Vec<String>,
+    /// The attributes behind `set_kind_params`.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) kind_update: Option<KindUpdate>,
 }
 
 impl LinkChanges {
@@ -352,6 +373,7 @@ impl LinkChanges {
             && self.set_master.is_none()
             && !self.unset_master
             && self.set_address.is_none()
+            && self.kind_update.is_none()
     }
 
     /// Get a summary of the changes.
@@ -382,6 +404,7 @@ impl LinkChanges {
                 a[0], a[1], a[2], a[3], a[4], a[5]
             ));
         }
+        parts.extend(self.set_kind_params.iter().cloned());
         parts.join(", ")
     }
 }
@@ -415,6 +438,37 @@ pub async fn compute_diff_with_options(
     let current_routes = conn.get_routes().await?;
     let current_qdiscs = conn.get_qdiscs().await?;
 
+    // Kind parameters (#417): what changes in place, and which links have
+    // to be deleted and created again.
+    let plan = kind::plan(
+        config,
+        &current_links,
+        &current_addresses,
+        &current_routes,
+        &current_qdiscs,
+    );
+    diff.links_to_recreate = plan.recreate.clone();
+    // The rest of the diff compares against the state the apply's
+    // recreates leave behind: a recreated link, and everything the kernel
+    // deletes with it, absent — so what the config declares on it is
+    // added back — and its ports released.
+    let current_links = without_recreated_links(current_links, &plan);
+    let current_addresses: Vec<AddressMessage> = current_addresses
+        .into_iter()
+        .filter(|a| !plan.gone.contains(&a.ifindex()))
+        .collect();
+    let current_routes: Vec<RouteMessage> = current_routes
+        .into_iter()
+        .filter(|r| {
+            r.oif()
+                .is_none_or(|oif| !plan.gone.contains(&oif) && !plan.cycled.contains(&oif))
+        })
+        .collect();
+    let current_qdiscs: Vec<TcMessage> = current_qdiscs
+        .into_iter()
+        .filter(|q| !plan.gone.contains(&q.ifindex()))
+        .collect();
+
     // Build lookup maps
     let link_by_name: HashMap<&str, &LinkMessage> = current_links
         .iter()
@@ -429,7 +483,7 @@ pub async fn compute_diff_with_options(
     // Diff links — pass the ifindex→name map so master changes
     // can be detected by resolving the kernel's master ifindex
     // back to a name (Plan 207b H2).
-    let ipv6_flushed = diff_links(config, &link_by_name, &ifindex_to_name, &mut diff);
+    let ipv6_flushed = diff_links(config, &link_by_name, &ifindex_to_name, &plan, &mut diff);
 
     // Plan 186 §3c — topo-sort `links_to_add` so a child whose
     // parent is also being created in this apply lands AFTER
@@ -460,6 +514,26 @@ pub async fn compute_diff_with_options(
     Ok(diff)
 }
 
+/// The links as the plan's recreates leave them: the deleted ones gone,
+/// and the ports of a deleted master released — no master, and closed if
+/// the master was a bond (`__bond_release_one()` ends in `dev_close()`).
+fn without_recreated_links(links: Vec<LinkMessage>, plan: &KindPlan) -> Vec<LinkMessage> {
+    const IFF_UP: u32 = libc::IFF_UP as u32;
+    links
+        .into_iter()
+        .filter(|l| !plan.gone.contains(&l.ifindex()))
+        .map(|mut l| {
+            if let Some(&closed) = plan.released.get(&l.ifindex()) {
+                l.master = None;
+                if closed {
+                    l.header.ifi_flags &= !IFF_UP;
+                }
+            }
+            l
+        })
+        .collect()
+}
+
 /// Every link of a kind, live or about to be created by `config`.
 fn links_of_kind<'a>(
     current: &HashMap<&'a str, &LinkMessage>,
@@ -486,6 +560,7 @@ fn diff_links<'a>(
     config: &'a NetworkConfig,
     current: &HashMap<&'a str, &LinkMessage>,
     ifindex_to_name: &HashMap<u32, &'a str>,
+    plan: &KindPlan,
     diff: &mut ConfigDiff,
 ) -> HashSet<&'a str> {
     // Note: desired_names would be used for purge mode to find links to remove
@@ -505,7 +580,11 @@ fn diff_links<'a>(
     for declared in &config.links {
         if let Some(existing) = current.get(declared.name.as_str()) {
             // Link exists, check if it needs modification
-            let changes = compute_link_changes(declared, existing, ifindex_to_name, &bonds);
+            let mut changes = compute_link_changes(declared, existing, ifindex_to_name, &bonds);
+            if let Some(update) = plan.updates.get(declared.name.as_str()) {
+                changes.set_kind_params = update.changes.clone();
+                changes.kind_update = Some(update.clone());
+            }
             let existing_master = existing
                 .master()
                 .and_then(|idx| ifindex_to_name.get(&idx).copied());
@@ -539,7 +618,13 @@ fn diff_links<'a>(
             // But only if it's not a physical interface
             if declared.link_type != DeclaredLinkType::Physical {
                 port_set_changes.extend(declared.master.as_deref());
-                diff.links_to_add.push(declared.clone());
+                let mut link = declared.clone();
+                // A recreated link comes back down; one declared without a
+                // state keeps the one it had.
+                if link.state == LinkState::Unchanged && plan.was_up.contains(&link.name) {
+                    link.state = LinkState::Up;
+                }
+                diff.links_to_add.push(link);
             }
         }
     }
@@ -840,7 +925,7 @@ fn diff_addresses(
 /// (`fib_table_insert`: "Invalid prefix for given prefix length"), so an
 /// IPv4 destination is left as declared and the apply reports that error,
 /// as `ip route` does.
-fn kernel_destination(addr: IpAddr, prefix_len: u8) -> IpAddr {
+pub(super) fn kernel_destination(addr: IpAddr, prefix_len: u8) -> IpAddr {
     match addr {
         IpAddr::V4(_) => addr,
         IpAddr::V6(v6) => {

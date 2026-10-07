@@ -542,15 +542,23 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             common,
         } => {
             let mut link = VxlanLink::new(&name, vni).port(dstport);
-            if let Some(ref addr) = remote
-                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>()
-            {
-                link = link.remote(ip);
+            // Either family; an IPv6 or unparseable address used to be
+            // dropped without a word (#418).
+            let parse_ip = |what: &str, addr: &str| {
+                addr.parse::<std::net::IpAddr>()
+                    .map_err(|_| invalid(format!("vxlan: invalid {what} address `{addr}`")))
+            };
+            if let Some(ref addr) = remote {
+                link = match parse_ip("remote", addr)? {
+                    std::net::IpAddr::V4(ip) => link.remote(ip),
+                    std::net::IpAddr::V6(ip) => link.remote6(ip),
+                };
             }
-            if let Some(ref addr) = local
-                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>()
-            {
-                link = link.local(ip);
+            if let Some(ref addr) = local {
+                link = match parse_ip("local", addr)? {
+                    std::net::IpAddr::V4(ip) => link.local(ip),
+                    std::net::IpAddr::V6(ip) => link.local6(ip),
+                };
             }
             if let Some(ref dev_name) = dev {
                 link = link.dev(dev_name);

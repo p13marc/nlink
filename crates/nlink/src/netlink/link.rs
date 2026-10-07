@@ -873,7 +873,7 @@ pub struct VlanLink {
 }
 
 /// VLAN-specific attributes (IFLA_VLAN_*)
-mod vlan {
+pub(crate) mod vlan {
     pub const IFLA_VLAN_ID: u16 = 1;
     pub const IFLA_VLAN_FLAGS: u16 = 2;
     pub const IFLA_VLAN_PROTOCOL: u16 = 5;
@@ -1135,11 +1135,11 @@ pub struct VxlanLink {
     mtu: Option<u32>,
     address: Option<[u8; 6]>,
     /// Local IP address
-    local: Option<Ipv4Addr>,
+    local: Option<std::net::IpAddr>,
     /// Remote IP address (for point-to-point)
-    remote: Option<Ipv4Addr>,
+    remote: Option<std::net::IpAddr>,
     /// Multicast group
-    group: Option<Ipv4Addr>,
+    group: Option<std::net::IpAddr>,
     /// Underlying device
     dev: Option<InterfaceRef>,
     /// UDP port (default 4789)
@@ -1165,7 +1165,7 @@ pub struct VxlanLink {
 }
 
 /// VXLAN-specific attributes (IFLA_VXLAN_*)
-mod vxlan {
+pub(crate) mod vxlan {
     pub const IFLA_VXLAN_ID: u16 = 1;
     pub const IFLA_VXLAN_GROUP: u16 = 2;
     pub const IFLA_VXLAN_LINK: u16 = 3;
@@ -1179,6 +1179,8 @@ mod vxlan {
     pub const IFLA_VXLAN_L2MISS: u16 = 13;
     pub const IFLA_VXLAN_L3MISS: u16 = 14;
     pub const IFLA_VXLAN_PORT: u16 = 15;
+    pub const IFLA_VXLAN_GROUP6: u16 = 16;
+    pub const IFLA_VXLAN_LOCAL6: u16 = 17;
     pub const IFLA_VXLAN_UDP_CSUM: u16 = 18;
 }
 
@@ -1224,21 +1226,49 @@ impl VxlanLink {
         self
     }
 
-    /// Set the local IP address.
+    /// Set the local IPv4 address (`IFLA_VXLAN_LOCAL`). Replaces an
+    /// IPv6 one set with [`local6`](Self::local6).
     pub fn local(mut self, addr: Ipv4Addr) -> Self {
-        self.local = Some(addr);
+        self.local = Some(addr.into());
         self
     }
 
-    /// Set the remote IP address (for point-to-point).
+    /// Set the local IPv6 address (`IFLA_VXLAN_LOCAL6`). Replaces an
+    /// IPv4 one set with [`local`](Self::local).
+    ///
+    /// The local and remote (or group) address must be of the same family;
+    /// the kernel refuses a VXLAN that mixes them.
+    pub fn local6(mut self, addr: std::net::Ipv6Addr) -> Self {
+        self.local = Some(addr.into());
+        self
+    }
+
+    /// Set the remote IPv4 address (for point-to-point,
+    /// `IFLA_VXLAN_GROUP`). Replaces an IPv6 one.
     pub fn remote(mut self, addr: Ipv4Addr) -> Self {
-        self.remote = Some(addr);
+        self.remote = Some(addr.into());
         self
     }
 
-    /// Set the multicast group.
+    /// Set the remote IPv6 address (for point-to-point,
+    /// `IFLA_VXLAN_GROUP6`). Replaces an IPv4 one.
+    pub fn remote6(mut self, addr: std::net::Ipv6Addr) -> Self {
+        self.remote = Some(addr.into());
+        self
+    }
+
+    /// Set the IPv4 multicast group (`IFLA_VXLAN_GROUP`). A remote set
+    /// with [`remote`](Self::remote) or [`remote6`](Self::remote6) takes
+    /// precedence: the kernel has one attribute for both.
     pub fn group(mut self, addr: Ipv4Addr) -> Self {
-        self.group = Some(addr);
+        self.group = Some(addr.into());
+        self
+    }
+
+    /// Set the IPv6 multicast group (`IFLA_VXLAN_GROUP6`). A remote
+    /// takes precedence, as for [`group`](Self::group).
+    pub fn group6(mut self, addr: std::net::Ipv6Addr) -> Self {
+        self.group = Some(addr.into());
         self
     }
 
@@ -1261,7 +1291,9 @@ impl VxlanLink {
         self
     }
 
-    /// Set the UDP port (default 4789).
+    /// Set the UDP destination port. Left unset, the kernel uses the
+    /// `vxlan` module's `udp_port` parameter, which is 8472 unless set —
+    /// set 4789 for the IANA port.
     pub fn port(mut self, port: u16) -> Self {
         self.port = Some(port);
         self
@@ -1357,16 +1389,27 @@ impl LinkConfig for VxlanLink {
         // VNI (required)
         builder.append_attr_u32(vxlan::IFLA_VXLAN_ID, self.vni);
 
-        // Local address
-        if let Some(addr) = self.local {
-            builder.append_attr(vxlan::IFLA_VXLAN_LOCAL, &addr.octets());
+        // Local address. An IPv6 one has its own attribute; it used to be
+        // dropped (#418).
+        match self.local {
+            Some(std::net::IpAddr::V4(addr)) => {
+                builder.append_attr(vxlan::IFLA_VXLAN_LOCAL, &addr.octets())
+            }
+            Some(std::net::IpAddr::V6(addr)) => {
+                builder.append_attr(vxlan::IFLA_VXLAN_LOCAL6, &addr.octets())
+            }
+            None => {}
         }
 
-        // Remote/Group
-        if let Some(addr) = self.remote {
-            builder.append_attr(vxlan::IFLA_VXLAN_GROUP, &addr.octets());
-        } else if let Some(addr) = self.group {
-            builder.append_attr(vxlan::IFLA_VXLAN_GROUP, &addr.octets());
+        // Remote/Group: one attribute per family for either.
+        match self.remote.or(self.group) {
+            Some(std::net::IpAddr::V4(addr)) => {
+                builder.append_attr(vxlan::IFLA_VXLAN_GROUP, &addr.octets())
+            }
+            Some(std::net::IpAddr::V6(addr)) => {
+                builder.append_attr(vxlan::IFLA_VXLAN_GROUP6, &addr.octets())
+            }
+            None => {}
         }
 
         // Underlying device (use resolved parent_index if dev was set)
@@ -1471,7 +1514,7 @@ pub struct MacvlanLink {
 }
 
 /// Macvlan-specific attributes
-mod macvlan {
+pub(crate) mod macvlan {
     pub const IFLA_MACVLAN_MODE: u16 = 1;
 }
 
@@ -2415,7 +2458,7 @@ pub enum NetkitScrub {
 }
 
 /// Netkit-specific attributes (IFLA_NETKIT_*)
-mod netkit {
+pub(crate) mod netkit {
     pub const IFLA_NETKIT_PEER_INFO: u16 = 1;
     /// Unused by nlink, listed so the enum is contiguous — omitting it is
     /// what shifted MODE/POLICY/SCRUB by one (#265).
@@ -3509,7 +3552,7 @@ pub enum AdSelect {
 
 /// IFLA_BOND_* attribute constants (verified against linux/if_link.h, kernel 6.19.6).
 #[allow(dead_code)]
-mod bond_attr {
+pub(crate) mod bond_attr {
     pub const IFLA_BOND_MODE: u16 = 1;
     pub const IFLA_BOND_ACTIVE_SLAVE: u16 = 2;
     pub const IFLA_BOND_MIIMON: u16 = 3;
@@ -3960,7 +4003,7 @@ impl LinkConfig for BondLink {
 // ============================================================================
 
 /// VRF attribute constants.
-mod vrf_attr {
+pub(crate) mod vrf_attr {
     pub const IFLA_VRF_TABLE: u16 = 1;
 }
 
@@ -5275,6 +5318,38 @@ impl Connection<Route> {
             .map_err(|e| e.with_context("set_link_master"))
     }
 
+    /// Change a live link's kind parameters in place.
+    ///
+    /// Sends `RTM_NEWLINK` for the existing ifindex with only
+    /// `IFLA_LINKINFO { IFLA_INFO_KIND, IFLA_INFO_DATA }`. `rtnl_newlink`
+    /// hands `IFLA_INFO_DATA` for an existing device to its kind's
+    /// `changelink` (and answers EOPNOTSUPP for a kind without one), so the
+    /// attributes `write_data` puts in the nest are exactly the parameters
+    /// that change. Whether a kind's `changelink` honours, refuses or
+    /// silently ignores a given parameter differs per kind — the
+    /// declarative diff decides which ones it sends here.
+    pub(crate) async fn change_link_info_data(
+        &self,
+        ifindex: u32,
+        kind: &str,
+        write_data: impl FnOnce(&mut MessageBuilder),
+    ) -> Result<()> {
+        use super::connection::ack_request;
+
+        let mut builder = ack_request(NlMsgType::RTM_NEWLINK);
+        builder.append(&IfInfoMsg::new().with_index(ifindex as i32));
+        let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
+        builder.append_attr_str(IflaInfo::Kind as u16, kind);
+        let data = builder.nest_start(IflaInfo::Data as u16);
+        write_data(&mut builder);
+        builder.nest_end(data);
+        builder.nest_end(linkinfo);
+
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context(format!("change {kind} parameters (ifindex {ifindex})")))
+    }
+
     /// Enslave an interface to a bond or bridge.
     ///
     /// This convenience method handles the required down/master/up sequence:
@@ -5705,5 +5780,53 @@ mod tests {
             IFLA_BRPORT_LEARNING,
             IFLA_BRPORT_ISOLATED,
         );
+    }
+
+    /// The `IFLA_INFO_DATA` attributes a VXLAN builder writes, by type.
+    fn vxlan_info_data(link: &VxlanLink) -> Vec<(u16, Vec<u8>)> {
+        use super::super::attr::AttrIter;
+
+        let mut builder = MessageBuilder::new(0, 0);
+        link.write_to(&mut builder, None);
+        // Attributes follow the 16-byte nlmsghdr.
+        let attrs = &builder.as_bytes()[16..];
+        let linkinfo = AttrIter::new(attrs)
+            .find(|(t, _)| *t == IflaAttr::Linkinfo as u16)
+            .expect("IFLA_LINKINFO")
+            .1;
+        let data = AttrIter::new(linkinfo)
+            .find(|(t, _)| *t == IflaInfo::Data as u16)
+            .expect("IFLA_INFO_DATA")
+            .1;
+        AttrIter::new(data).map(|(t, p)| (t, p.to_vec())).collect()
+    }
+
+    /// IPv6 endpoints go in their own attributes; they used to be
+    /// dropped (#418).
+    #[test]
+    fn vxlan_writes_ipv6_endpoints() {
+        let local: std::net::Ipv6Addr = "fd00::1".parse().unwrap();
+        let remote: std::net::Ipv6Addr = "fd00::2".parse().unwrap();
+        let attrs = vxlan_info_data(&VxlanLink::new("vx0", 7).local6(local).remote6(remote));
+        assert!(attrs.contains(&(vxlan::IFLA_VXLAN_LOCAL6, local.octets().to_vec())));
+        assert!(attrs.contains(&(vxlan::IFLA_VXLAN_GROUP6, remote.octets().to_vec())));
+        assert!(
+            !attrs
+                .iter()
+                .any(|(t, _)| *t == vxlan::IFLA_VXLAN_LOCAL || *t == vxlan::IFLA_VXLAN_GROUP),
+            "no IPv4 endpoint attribute for IPv6 endpoints"
+        );
+
+        let group: std::net::Ipv6Addr = "ff05::7".parse().unwrap();
+        let attrs = vxlan_info_data(&VxlanLink::new("vx0", 7).group6(group));
+        assert!(attrs.contains(&(vxlan::IFLA_VXLAN_GROUP6, group.octets().to_vec())));
+
+        let attrs = vxlan_info_data(
+            &VxlanLink::new("vx0", 7)
+                .local(Ipv4Addr::new(10, 0, 0, 1))
+                .remote(Ipv4Addr::new(10, 0, 0, 2)),
+        );
+        assert!(attrs.contains(&(vxlan::IFLA_VXLAN_LOCAL, vec![10, 0, 0, 1])));
+        assert!(attrs.contains(&(vxlan::IFLA_VXLAN_GROUP, vec![10, 0, 0, 2])));
     }
 }

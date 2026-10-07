@@ -99,6 +99,17 @@ mod link_command {
         ip_cmd().args(["link", "set", "--up"]).assert().failure();
     }
 
+    /// An endpoint that is not an IP address is an error, not dropped
+    /// (#418) — rejected before any request reaches the kernel.
+    #[test]
+    fn test_link_add_vxlan_rejects_a_bad_local() {
+        ip_cmd()
+            .args(["link", "add", "vxlan", "vx0", "--vni", "5", "--local", "not-an-ip"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("invalid local address"));
+    }
+
     #[test]
     fn test_link_alias_l() {
         ip_cmd()

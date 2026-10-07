@@ -421,6 +421,768 @@ async fn link_modifiers_converge() -> nlink::Result<()> {
 }
 
 // ============================================================================
+// Link-kind parameters (#417)
+// ============================================================================
+
+/// The kernel's view of a link, from `ip -d -j link show dev <dev>`.
+///
+/// An independent reader: the diff converging only shows that the diff
+/// and the kernel agree, and a diff that does not compare a parameter
+/// agrees with anything.
+fn ip_link_json(ns: &TestNamespace, dev: &str) -> Result<serde_json::Value, String> {
+    let out = ns
+        .exec("ip", &["-d", "-j", "link", "show", "dev", dev])
+        .map_err(|e| format!("ip link show {dev}: {e}"))?;
+    let mut links: Vec<serde_json::Value> =
+        serde_json::from_str(&out).map_err(|e| format!("ip link show {dev}: {e}: {out}"))?;
+    links.pop().ok_or_else(|| format!("ip link show {dev}: no link"))
+}
+
+/// The value at a dotted path, `Null` where any step is missing.
+fn at_path<'a>(v: &'a serde_json::Value, path: &str) -> &'a serde_json::Value {
+    path.split('.').fold(v, |v, key| &v[key])
+}
+
+/// A sequence of declarations applied to one namespace, and what the
+/// kernel must hold after the last one.
+struct KindCase {
+    name: &'static str,
+    steps: Vec<NetworkConfig>,
+    /// `(device, JSON path in its `ip -d -j link` object, value)`. `Null`
+    /// means the key must be absent.
+    expect: Vec<(&'static str, &'static str, serde_json::Value)>,
+    /// A device the last step must change in place: same ifindex after.
+    in_place: Option<&'static str>,
+}
+
+fn kind_case(
+    name: &'static str,
+    steps: Vec<NetworkConfig>,
+    expect: Vec<(&'static str, &'static str, serde_json::Value)>,
+) -> KindCase {
+    KindCase {
+        name,
+        steps,
+        expect,
+        in_place: None,
+    }
+}
+
+fn in_place(mut c: KindCase, dev: &'static str) -> KindCase {
+    c.in_place = Some(dev);
+    c
+}
+
+async fn run_kind_case(case: &KindCase) -> Result<(), String> {
+    let ns = TestNamespace::new("nce-kind").map_err(|e| e.to_string())?;
+    let conn = ns.connection().map_err(|e| e.to_string())?;
+    let last = case.steps.len() - 1;
+    let mut ifindex_before = None;
+    for (i, step) in case.steps.iter().enumerate() {
+        if i == last
+            && let Some(dev) = case.in_place
+        {
+            ifindex_before = Some(ip_link_json(&ns, dev)?["ifindex"].clone());
+        }
+        let outcome =
+            match tokio::time::timeout(Duration::from_secs(30), converges(&conn, step)).await {
+                Ok(outcome) => outcome,
+                Err(_elapsed) => Err("timed out".to_string()),
+            };
+        outcome.map_err(|why| format!("step {}: {why}", i + 1))?;
+    }
+    let mut wrong = Vec::new();
+    for (dev, path, want) in &case.expect {
+        let link = ip_link_json(&ns, dev)?;
+        // An `ip` older than the link kind prints no `info_data` for it at
+        // all — bookworm's iproute2 6.1 and netkit (6.7), on the CI lane.
+        // That is this cross-check's blind spot, not the kernel's state: the
+        // apply-twice check above already read the link back through nlink.
+        // Say so, rather than fail on a value nobody could print.
+        if path.starts_with("linkinfo.info_data.") && link["linkinfo"]["info_data"].is_null() {
+            eprintln!(
+                "[{}] {dev}: this `ip` does not decode {} link data; {path} not cross-checked",
+                case.name, link["linkinfo"]["info_kind"],
+            );
+            continue;
+        }
+        let have = at_path(&link, path);
+        if have != want {
+            wrong.push(format!("{dev} {path}: kernel has {have}, declared {want}"));
+        }
+    }
+    if let (Some(dev), Some(before)) = (case.in_place, ifindex_before) {
+        let after = ip_link_json(&ns, dev)?["ifindex"].clone();
+        if after != before {
+            wrong.push(format!(
+                "{dev} was recreated (ifindex {before} -> {after}); the change can be made in place"
+            ));
+        }
+    }
+    if wrong.is_empty() {
+        Ok(())
+    } else {
+        Err(wrong.join("\n"))
+    }
+}
+
+async fn assert_kind_cases(cases: Vec<KindCase>) -> nlink::Result<()> {
+    let mut failures = Vec::new();
+    for case in &cases {
+        if let Err(why) = run_kind_case(case).await {
+            failures.push(format!("[{}] {why}", case.name));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} case(s) did not reach the kernel:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+    Ok(())
+}
+
+/// Changing a declared link's kind parameters reaches the kernel, and
+/// converges. The diff compared MTU, MAC, master and state only, so a
+/// changed VNI, VLAN id or bond mode came back as an empty diff and the
+/// kernel kept the old value (#417).
+///
+/// What can be changed on a live link is changed in place (`in_place`
+/// pins the ifindex); what cannot is recreated, and everything the
+/// config declares on it — addresses, routes through it, its master, its
+/// ports, links stacked on it — comes back with it, which the apply-twice
+/// check in each step shows.
+#[tokio::test]
+async fn link_kind_parameter_changes_reach_the_kernel() -> nlink::Result<()> {
+    use serde_json::json;
+    require_root!();
+    nlink::require_modules!("dummy", "8021q", "vxlan", "macvlan", "bonding", "vrf", "bridge");
+
+    let v4 = |a, b, c, d| -> std::net::IpAddr { Ipv4Addr::new(a, b, c, d).into() };
+
+    // A VLAN with addresses and a route through it, in a bridge.
+    let vlan = |id: u16, proto: Option<VlanProtocol>| {
+        NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .link("br0", |l| l.bridge().up())
+            .link("d0.10", |l| {
+                let l = l.vlan("d0", id).master("br0").up();
+                match proto {
+                    Some(p) => l.vlan_protocol(p),
+                    None => l,
+                }
+            })
+            .link("v1", |l| l.vlan("d0", 50).up())
+            .address("v1", "10.4.0.1/24")
+            .unwrap()
+            .address("v1", "fd00:4::1/64")
+            .unwrap()
+            .route("10.40.0.0/16", |r| r.via("10.4.0.254"))
+            .unwrap()
+            .route("2001:db8:40::/48", |r| r.dev("v1"))
+            .unwrap()
+    };
+    let vlan_on = |parent: &str, id: u16| {
+        NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .link("d1", |l| l.dummy().up())
+            .link("v1", |l| l.vlan(parent, id).up())
+            .address("v1", "10.4.0.1/24")
+            .unwrap()
+    };
+
+    // A VXLAN with an address, a route through it, and a bridge master.
+    struct Vx {
+        vni: u32,
+        port: Option<u16>,
+        remote: Option<std::net::IpAddr>,
+        local: Option<std::net::IpAddr>,
+        underlay: Option<&'static str>,
+    }
+    let vx = |p: Vx| {
+        NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .link("d1", |l| l.dummy().up())
+            .address("d0", "10.1.0.1/24")
+            .unwrap()
+            .address("d0", "10.1.0.5/24")
+            .unwrap()
+            .address("d1", "10.2.0.1/24")
+            .unwrap()
+            .link("br0", |l| l.bridge().up())
+            .link("vx0", |l| {
+                let mut l = l.vxlan(p.vni).master("br0").up();
+                if let Some(port) = p.port {
+                    l = l.vxlan_port(port);
+                }
+                if let Some(r) = p.remote {
+                    l = l.vxlan_remote(r);
+                }
+                if let Some(a) = p.local {
+                    l = l.vxlan_local(a);
+                }
+                if let Some(d) = p.underlay {
+                    l = l.vxlan_underlay_dev(d);
+                }
+                l
+            })
+            .address("vx0", "10.5.0.1/24")
+            .unwrap()
+            .route("10.50.0.0/16", |r| r.via("10.5.0.254"))
+            .unwrap()
+    };
+    let base_vx = || Vx {
+        vni: 100,
+        port: Some(4790),
+        remote: Some(v4(10, 1, 0, 2)),
+        local: Some(v4(10, 1, 0, 1)),
+        underlay: Some("d0"),
+    };
+
+    // A bond with two declared ports and an address, and a route through
+    // a port: a bond closes the ports it releases, which flushes it.
+    let bond = |f: fn(nlink::netlink::config::LinkBuilder) -> nlink::netlink::config::LinkBuilder| {
+        NetworkConfig::new()
+            .link("bond0", |l| f(l.bond()).up())
+            .link("d0", |l| l.dummy().master("bond0").up())
+            .link("d1", |l| l.dummy().master("bond0").up())
+            .address("bond0", "10.6.0.1/24")
+            .unwrap()
+            .address("bond0", "fd00:6::1/64")
+            .unwrap()
+            .route("10.60.0.0/16", |r| r.via("10.6.0.254"))
+            .unwrap()
+            .route("10.61.0.0/16", |r| r.dev("d0"))
+            .unwrap()
+    };
+
+    let macvlan = |parent: &str, mode: MacvlanMode| {
+        NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .link("d1", |l| l.dummy().up())
+            .link("mv0", |l| l.macvlan(parent).macvlan_mode(mode).up())
+            .address("mv0", "10.7.0.1/24")
+            .unwrap()
+    };
+
+    let vrf = |table: u32| {
+        NetworkConfig::new()
+            .link("vrf0", |l| l.vrf(table).up())
+            .link("d0", |l| l.dummy().master("vrf0").up())
+            .address("d0", "10.8.0.1/24")
+            .unwrap()
+            .address("d0", "fd00:8::1/64")
+            .unwrap()
+            .route("10.80.0.0/16", |r| r.via("10.8.0.254").table(table))
+            .unwrap()
+    };
+
+    // Q-in-Q: an 802.1ad outer tag with an 802.1Q VLAN stacked on it.
+    let qinq = |outer: u16| {
+        NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .link("s0", |l| l.vlan("d0", outer).vlan_protocol(VlanProtocol::Dot1ad).up())
+            .link("c0", |l| l.vlan("s0", 30).up())
+            .address("c0", "10.9.0.1/24")
+            .unwrap()
+    };
+
+    let cases = vec![
+        kind_case(
+            "vlan-id",
+            vec![vlan(10, None), vlan(20, None)],
+            vec![("d0.10", "linkinfo.info_data.id", json!(20))],
+        ),
+        kind_case(
+            "vlan-protocol",
+            vec![vlan(10, None), vlan(10, Some(VlanProtocol::Dot1ad))],
+            vec![("d0.10", "linkinfo.info_data.protocol", json!("802.1ad"))],
+        ),
+        // An undeclared protocol is the kernel's default, 802.1Q.
+        kind_case(
+            "vlan-protocol-back-to-default",
+            vec![vlan(10, Some(VlanProtocol::Dot1ad)), vlan(10, None)],
+            vec![("d0.10", "linkinfo.info_data.protocol", json!("802.1Q"))],
+        ),
+        kind_case(
+            "vlan-parent",
+            vec![vlan_on("d0", 10), vlan_on("d1", 10)],
+            vec![("v1", "link", json!("d1"))],
+        ),
+        kind_case(
+            "vlan-with-a-vlan-stacked-on-it",
+            vec![qinq(20), qinq(21)],
+            vec![
+                ("s0", "linkinfo.info_data.id", json!(21)),
+                ("c0", "link", json!("s0")),
+                ("c0", "linkinfo.info_data.id", json!(30)),
+            ],
+        ),
+        kind_case(
+            "vxlan-vni",
+            vec![vx(base_vx()), vx(Vx { vni: 200, ..base_vx() })],
+            vec![
+                ("vx0", "linkinfo.info_data.id", json!(200)),
+                ("vx0", "linkinfo.info_data.port", json!(4790)),
+                ("vx0", "linkinfo.info_data.remote", json!("10.1.0.2")),
+            ],
+        ),
+        kind_case(
+            "vxlan-port",
+            vec![vx(base_vx()), vx(Vx { port: Some(4791), ..base_vx() })],
+            vec![("vx0", "linkinfo.info_data.port", json!(4791))],
+        ),
+        in_place(
+            kind_case(
+                "vxlan-remote",
+                vec![vx(base_vx()), vx(Vx { remote: Some(v4(10, 1, 0, 3)), ..base_vx() })],
+                vec![("vx0", "linkinfo.info_data.remote", json!("10.1.0.3"))],
+            ),
+            "vx0",
+        ),
+        in_place(
+            kind_case(
+                "vxlan-remote-removed",
+                vec![vx(base_vx()), vx(Vx { remote: None, ..base_vx() })],
+                vec![("vx0", "linkinfo.info_data.remote", serde_json::Value::Null)],
+            ),
+            "vx0",
+        ),
+        in_place(
+            kind_case(
+                "vxlan-local",
+                vec![vx(base_vx()), vx(Vx { local: Some(v4(10, 1, 0, 5)), ..base_vx() })],
+                vec![("vx0", "linkinfo.info_data.local", json!("10.1.0.5"))],
+            ),
+            "vx0",
+        ),
+        in_place(
+            kind_case(
+                "vxlan-underlay-moved",
+                vec![vx(base_vx()), vx(Vx { underlay: Some("d1"), ..base_vx() })],
+                vec![("vx0", "linkinfo.info_data.link", json!("d1"))],
+            ),
+            "vx0",
+        ),
+        // The kernel keeps a VXLAN's lower device when a change names
+        // none, so dropping the underlay recreates the link.
+        kind_case(
+            "vxlan-underlay-removed",
+            vec![vx(base_vx()), vx(Vx { underlay: None, ..base_vx() })],
+            vec![("vx0", "linkinfo.info_data.link", serde_json::Value::Null)],
+        ),
+        kind_case(
+            "bond-mode",
+            vec![
+                bond(|b| b.bond_mode(BondMode::ActiveBackup).miimon(100)),
+                bond(|b| b.bond_mode(BondMode::BalanceXor).miimon(100)),
+            ],
+            vec![
+                ("bond0", "linkinfo.info_data.mode", json!("balance-xor")),
+                ("d0", "master", json!("bond0")),
+                ("d1", "master", json!("bond0")),
+            ],
+        ),
+        in_place(
+            kind_case(
+                "bond-miimon-and-delays",
+                vec![
+                    bond(|b| b.bond_mode(BondMode::ActiveBackup).miimon(100).bond_updelay(200)),
+                    bond(|b| {
+                        b.bond_mode(BondMode::ActiveBackup)
+                            .miimon(250)
+                            .bond_updelay(500)
+                            .bond_downdelay(750)
+                    }),
+                ],
+                vec![
+                    ("bond0", "linkinfo.info_data.miimon", json!(250)),
+                    ("bond0", "linkinfo.info_data.updelay", json!(500)),
+                    ("bond0", "linkinfo.info_data.downdelay", json!(750)),
+                ],
+            ),
+            "bond0",
+        ),
+        // The kernel keeps a delay as a count of miimon intervals, so a
+        // delay that is not a multiple of miimon is rounded down.
+        kind_case(
+            "bond-updelay-rounded",
+            vec![bond(|b| b.bond_mode(BondMode::ActiveBackup).miimon(100).bond_updelay(150))],
+            vec![("bond0", "linkinfo.info_data.updelay", json!(100))],
+        ),
+        in_place(
+            kind_case(
+                "bond-xmit-min-links-resend-igmp",
+                vec![
+                    bond(|b| b.bond_mode(BondMode::BalanceXor)),
+                    bond(|b| {
+                        b.bond_mode(BondMode::BalanceXor)
+                            .xmit_hash_policy(1)
+                            .min_links(1)
+                            .bond_resend_igmp(3)
+                    }),
+                ],
+                vec![
+                    ("bond0", "linkinfo.info_data.xmit_hash_policy", json!("layer3+4")),
+                    ("bond0", "linkinfo.info_data.min_links", json!(1)),
+                    ("bond0", "linkinfo.info_data.resend_igmp", json!(3)),
+                ],
+            ),
+            "bond0",
+        ),
+        // lacp_rate and ad_select are only taken by a bond that is down.
+        kind_case(
+            "bond-lacp-rate-ad-select",
+            vec![
+                bond(|b| b.bond_mode(BondMode::Ieee802_3ad).miimon(100)),
+                bond(|b| {
+                    b.bond_mode(BondMode::Ieee802_3ad)
+                        .miimon(100)
+                        .bond_lacp_rate(nlink::netlink::config::BondLacpRate::Fast)
+                        .bond_ad_select(nlink::netlink::config::BondAdSelect::Bandwidth)
+                }),
+            ],
+            vec![
+                ("bond0", "linkinfo.info_data.ad_lacp_rate", json!("fast")),
+                ("bond0", "linkinfo.info_data.ad_select", json!("bandwidth")),
+            ],
+        ),
+        in_place(
+            kind_case(
+                "macvlan-mode",
+                vec![macvlan("d0", MacvlanMode::Bridge), macvlan("d0", MacvlanMode::Vepa)],
+                vec![("mv0", "linkinfo.info_data.mode", json!("vepa"))],
+            ),
+            "mv0",
+        ),
+        // Passthru cannot be set or cleared on a live macvlan.
+        kind_case(
+            "macvlan-to-passthru",
+            vec![macvlan("d0", MacvlanMode::Bridge), macvlan("d0", MacvlanMode::Passthru)],
+            vec![("mv0", "linkinfo.info_data.mode", json!("passthru"))],
+        ),
+        kind_case(
+            "macvlan-parent",
+            vec![macvlan("d0", MacvlanMode::Bridge), macvlan("d1", MacvlanMode::Bridge)],
+            vec![("mv0", "link", json!("d1"))],
+        ),
+        kind_case(
+            "vrf-table",
+            vec![vrf(10), vrf(20)],
+            vec![
+                ("vrf0", "linkinfo.info_data.table", json!(20)),
+                ("d0", "master", json!("vrf0")),
+            ],
+        ),
+        kind_case(
+            "kind",
+            vec![
+                NetworkConfig::new().link("x0", |l| l.dummy().up()),
+                NetworkConfig::new().link("x0", |l| l.bridge().up()),
+            ],
+            vec![("x0", "linkinfo.info_kind", json!("bridge"))],
+        ),
+    ];
+    assert_kind_cases(cases).await
+}
+
+/// A VXLAN with IPv6 endpoints. The builder wrote `IFLA_VXLAN_LOCAL` and
+/// `IFLA_VXLAN_GROUP` for IPv4 addresses and dropped IPv6 ones without a
+/// word, so a declared IPv6 `local` (or `remote`) never reached the kernel
+/// and the diff, which did not compare them, said nothing either (#418).
+#[tokio::test]
+async fn vxlan_ipv6_endpoints_reach_the_kernel() -> nlink::Result<()> {
+    use serde_json::json;
+    require_root!();
+    nlink::require_modules!("dummy", "vxlan");
+
+    let ip = |s: &str| -> std::net::IpAddr { s.parse().unwrap() };
+    let vx = |local: Option<&str>, remote: Option<&str>| {
+        let (local, remote) = (local.map(ip), remote.map(ip));
+        NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .address("d0", "fd00:1::1/64")
+            .unwrap()
+            .address("d0", "fd00:1::5/64")
+            .unwrap()
+            .address("d0", "10.1.0.1/24")
+            .unwrap()
+            .link("vx0", |l| {
+                let mut l = l.vxlan(100).vxlan_underlay_dev("d0").vxlan_port(4789).up();
+                if let Some(a) = local {
+                    l = l.vxlan_local(a);
+                }
+                if let Some(a) = remote {
+                    l = l.vxlan_remote(a);
+                }
+                l
+            })
+            .address("vx0", "fd00:2::1/64")
+            .unwrap()
+    };
+    let null = serde_json::Value::Null;
+    let cases = vec![
+        kind_case(
+            "local-and-remote",
+            vec![vx(Some("fd00:1::1"), Some("fd00:1::2"))],
+            vec![
+                ("vx0", "linkinfo.info_data.local6", json!("fd00:1::1")),
+                ("vx0", "linkinfo.info_data.remote6", json!("fd00:1::2")),
+            ],
+        ),
+        kind_case(
+            "local-only",
+            vec![vx(Some("fd00:1::1"), None)],
+            vec![("vx0", "linkinfo.info_data.local6", json!("fd00:1::1"))],
+        ),
+        kind_case(
+            "remote-only",
+            vec![vx(None, Some("fd00:1::2"))],
+            vec![("vx0", "linkinfo.info_data.remote6", json!("fd00:1::2"))],
+        ),
+        in_place(
+            kind_case(
+                "local-changed",
+                vec![
+                    vx(Some("fd00:1::1"), Some("fd00:1::2")),
+                    vx(Some("fd00:1::5"), Some("fd00:1::2")),
+                ],
+                vec![("vx0", "linkinfo.info_data.local6", json!("fd00:1::5"))],
+            ),
+            "vx0",
+        ),
+        in_place(
+            kind_case(
+                "remote-changed-then-removed",
+                vec![
+                    vx(Some("fd00:1::1"), Some("fd00:1::2")),
+                    vx(Some("fd00:1::1"), Some("fd00:1::3")),
+                    vx(Some("fd00:1::1"), None),
+                ],
+                vec![
+                    ("vx0", "linkinfo.info_data.remote6", null.clone()),
+                    ("vx0", "linkinfo.info_data.local6", json!("fd00:1::1")),
+                ],
+            ),
+            "vx0",
+        ),
+        // `vxlan_nl2conf` refuses a change of address family on a live
+        // VXLAN, so this one is recreated.
+        kind_case(
+            "ipv4-to-ipv6",
+            vec![
+                vx(Some("10.1.0.1"), Some("10.1.0.2")),
+                vx(Some("fd00:1::1"), Some("fd00:1::2")),
+            ],
+            vec![
+                ("vx0", "linkinfo.info_data.local6", json!("fd00:1::1")),
+                ("vx0", "linkinfo.info_data.local", null.clone()),
+                ("vx0", "linkinfo.info_data.remote", null.clone()),
+            ],
+        ),
+        kind_case(
+            "ipv6-to-ipv4",
+            vec![
+                vx(Some("fd00:1::1"), Some("fd00:1::2")),
+                vx(Some("10.1.0.1"), Some("10.1.0.2")),
+            ],
+            vec![
+                ("vx0", "linkinfo.info_data.local", json!("10.1.0.1")),
+                ("vx0", "linkinfo.info_data.local6", null.clone()),
+                ("vx0", "linkinfo.info_data.remote6", null),
+            ],
+        ),
+    ];
+    assert_kind_cases(cases).await
+}
+
+/// A recreate that would destroy something the config does not declare
+/// is refused, says what, and leaves the kernel alone.
+#[tokio::test]
+async fn a_recreate_that_would_destroy_undeclared_state_is_refused() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "8021q", "vxlan", "bonding");
+
+    struct Refusal {
+        name: &'static str,
+        /// Applied by nlink; then `extra` runs commands outside it.
+        first: NetworkConfig,
+        extra: Vec<(&'static str, Vec<&'static str>)>,
+        second: NetworkConfig,
+        /// The error must name this.
+        names: &'static str,
+        /// `(device, JSON path, value)` the kernel must still hold.
+        unchanged: (&'static str, &'static str, serde_json::Value),
+    }
+    let vx = |vni: u32| {
+        NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .link("vx0", |l| l.vxlan(vni).vxlan_underlay_dev("d0").vxlan_port(4790).up())
+    };
+    let bond = |mode: BondMode| {
+        NetworkConfig::new()
+            .link("bond0", |l| l.bond().bond_mode(mode).up())
+            .link("d0", |l| l.dummy().master("bond0").up())
+    };
+    let vlan = |id: u16| {
+        NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .link("v1", |l| l.vlan("d0", id).up())
+    };
+    let cases = vec![
+        Refusal {
+            name: "undeclared-address",
+            first: vx(100),
+            extra: vec![("ip", vec!["addr", "add", "10.5.0.9/24", "dev", "vx0"])],
+            second: vx(200),
+            names: "10.5.0.9/24",
+            unchanged: ("vx0", "linkinfo.info_data.id", serde_json::json!(100)),
+        },
+        Refusal {
+            name: "undeclared-route",
+            first: vx(100).address("vx0", "10.5.0.1/24").unwrap(),
+            extra: vec![("ip", vec!["route", "add", "10.55.0.0/16", "via", "10.5.0.254"])],
+            second: vx(200).address("vx0", "10.5.0.1/24").unwrap(),
+            names: "10.55.0.0/16",
+            unchanged: ("vx0", "linkinfo.info_data.id", serde_json::json!(100)),
+        },
+        Refusal {
+            name: "undeclared-port",
+            first: bond(BondMode::ActiveBackup),
+            extra: vec![
+                ("ip", vec!["link", "add", "d9", "type", "dummy"]),
+                ("ip", vec!["link", "set", "d9", "master", "bond0"]),
+            ],
+            second: bond(BondMode::BalanceXor),
+            names: "d9",
+            unchanged: ("bond0", "linkinfo.info_data.mode", serde_json::json!("active-backup")),
+        },
+        Refusal {
+            name: "undeclared-stacked-link",
+            first: vlan(10),
+            extra: vec![(
+                "ip",
+                vec!["link", "add", "link", "v1", "name", "v1.30", "type", "vlan", "id", "30"],
+            )],
+            second: vlan(20),
+            names: "v1.30",
+            unchanged: ("v1", "linkinfo.info_data.id", serde_json::json!(10)),
+        },
+        Refusal {
+            name: "undeclared-qdisc",
+            first: vlan(10),
+            extra: vec![("tc", vec!["qdisc", "add", "dev", "v1", "root", "handle", "1:", "prio"])],
+            second: vlan(20),
+            names: "prio",
+            unchanged: ("v1", "linkinfo.info_data.id", serde_json::json!(10)),
+        },
+    ];
+
+    let mut failures = Vec::new();
+    for case in cases {
+        let ns = TestNamespace::new("nce-refuse")?;
+        let conn = ns.connection()?;
+        let first = case.first.apply(&conn).await?;
+        assert!(first.is_success(), "[{}] {first:?}", case.name);
+        for (cmd, args) in &case.extra {
+            ns.exec(cmd, args)?;
+        }
+        let diff = case.second.diff(&conn).await?;
+        let shown = diff.to_string();
+        match case.second.apply(&conn).await {
+            Ok(r) => failures.push(format!(
+                "[{}] apply succeeded ({:?}); diff was:\n{shown}",
+                case.name, r.summary
+            )),
+            Err(e) if !e.is_not_supported() => failures.push(format!(
+                "[{}] wrong error kind: {e}",
+                case.name
+            )),
+            Err(e) if !e.to_string().contains(case.names) => failures.push(format!(
+                "[{}] the error does not name {}: {e}",
+                case.name, case.names
+            )),
+            Err(_) => {}
+        }
+        if !shown.contains(case.names) {
+            failures.push(format!(
+                "[{}] the diff does not name {}:\n{shown}",
+                case.name, case.names
+            ));
+        }
+        let (dev, path, want) = &case.unchanged;
+        let link = ip_link_json(&ns, dev).map_err(nlink::Error::InvalidMessage)?;
+        if at_path(&link, path) != want {
+            failures.push(format!(
+                "[{}] the kernel changed: {dev} {path} is {}",
+                case.name,
+                at_path(&link, path)
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    Ok(())
+}
+
+/// netkit: the policies change in place; the mode cannot change on a live
+/// pair, and recreating it would delete the peer, which may live in
+/// another namespace — so that is refused.
+#[tokio::test]
+async fn netkit_kind_parameters() -> nlink::Result<()> {
+    use nlink::netlink::config::NetkitPolicy;
+    use serde_json::json;
+    require_root!();
+    nlink::require_modules!("netkit");
+
+    let nk = |mode: NetkitMode, policy: NetkitPolicy, peer: NetkitPolicy| {
+        NetworkConfig::new().link("nk0", |l| {
+            l.netkit("nk1")
+                .netkit_mode(mode)
+                .netkit_primary_policy(policy)
+                .netkit_peer_policy(peer)
+                .up()
+        })
+    };
+    let cases = vec![in_place(
+        kind_case(
+            "netkit-policies",
+            vec![
+                nk(NetkitMode::L2, NetkitPolicy::Forward, NetkitPolicy::Forward),
+                nk(NetkitMode::L2, NetkitPolicy::Blackhole, NetkitPolicy::Blackhole),
+            ],
+            vec![
+                ("nk0", "linkinfo.info_data.policy", json!("blackhole")),
+                ("nk0", "linkinfo.info_data.peer_policy", json!("blackhole")),
+            ],
+        ),
+        "nk0",
+    )];
+    assert_kind_cases(cases).await?;
+
+    let ns = TestNamespace::new("nce-nk-mode")?;
+    let conn = ns.connection()?;
+    let l2 = nk(NetkitMode::L2, NetkitPolicy::Forward, NetkitPolicy::Forward);
+    let applied = l2.apply(&conn).await?;
+    assert!(applied.is_success(), "{applied:?}");
+    let before = ip_link_json(&ns, "nk0").map_err(nlink::Error::InvalidMessage)?;
+    let err = nk(NetkitMode::L3, NetkitPolicy::Forward, NetkitPolicy::Forward)
+        .apply(&conn)
+        .await
+        .expect_err("a netkit mode change cannot be applied");
+    assert!(err.is_not_supported(), "{err}");
+    assert!(err.to_string().contains("mode"), "the error must name the mode: {err}");
+    // Refused before anything changed: the same link, still L2.
+    let link = ip_link_json(&ns, "nk0").map_err(nlink::Error::InvalidMessage)?;
+    assert_eq!(link["ifindex"], before["ifindex"], "the refused apply recreated nk0");
+    if link["linkinfo"]["info_data"].is_null() {
+        eprintln!("this `ip` does not decode netkit link data; the mode is not cross-checked");
+    } else {
+        assert_eq!(at_path(&link, "linkinfo.info_data.mode"), &json!("l2"));
+    }
+    Ok(())
+}
+
+// ============================================================================
 // Addresses
 // ============================================================================
 
