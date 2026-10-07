@@ -388,14 +388,23 @@ impl WireguardConfig {
                 })?;
 
             if changes.has_device_level_change() {
+                // Only the fields that differ, as for peers: rewriting an
+                // unchanged listen port of 0 would rebind the device to a
+                // fresh random port as a side effect of, say, a key change.
                 conn.set_device_by_name(ifname, |mut b| {
-                    if let Some(k) = declared.private_key {
+                    if changes.private_key_set
+                        && let Some(k) = declared.private_key
+                    {
                         b = b.private_key(k);
                     }
-                    if let Some(p) = declared.listen_port {
+                    if changes.listen_port_set
+                        && let Some(p) = declared.listen_port
+                    {
                         b = b.listen_port(p);
                     }
-                    if let Some(fw) = declared.fwmark {
+                    if changes.fwmark_set
+                        && let Some(fw) = declared.fwmark
+                    {
                         b = b.fwmark(fw);
                     }
                     b
@@ -738,6 +747,43 @@ fn parse_fwmark(s: &str) -> Result<u32> {
     parsed.map_err(|_| Error::InvalidMessage(format!("wireguard config: invalid FwMark `{s}`")))
 }
 
+/// Allowed IPs as the kernel's trie holds them: each masked to its prefix
+/// length, each prefix once, in a canonical order.
+fn allowed_ip_set(ips: &[AllowedIp]) -> std::collections::BTreeSet<(IpAddr, u8)> {
+    ips.iter()
+        .map(|ip| {
+            let addr = match ip.addr {
+                IpAddr::V4(v4) => {
+                    let mask = u32::MAX
+                        .checked_shl(32 - u32::from(ip.cidr.min(32)))
+                        .unwrap_or(0);
+                    IpAddr::V4(std::net::Ipv4Addr::from(u32::from(v4) & mask))
+                }
+                IpAddr::V6(v6) => {
+                    let mask = u128::MAX
+                        .checked_shl(128 - u32::from(ip.cidr.min(128)))
+                        .unwrap_or(0);
+                    IpAddr::V6(std::net::Ipv6Addr::from(u128::from(v6) & mask))
+                }
+            };
+            (addr, ip.cidr)
+        })
+        .collect()
+}
+
+/// A private key as the kernel keeps it: X25519-clamped.
+///
+/// `wg_noise_set_static_identity_private_key()` copies the key and runs
+/// `curve25519_clamp_secret()` on it — clear the low three bits and the
+/// top bit, set bit 254 — and `GET_DEVICE` returns that copy. A key from
+/// `wg genkey` is already clamped; any other 32 bytes are not.
+fn clamp_private_key(mut key: [u8; WG_KEY_LEN]) -> [u8; WG_KEY_LEN] {
+    key[0] &= 248;
+    key[31] &= 127;
+    key[31] |= 64;
+    key
+}
+
 // =============================================================================
 // Declared types
 // =============================================================================
@@ -774,12 +820,24 @@ impl DeclaredWgDevice {
         // If the kernel does withhold it — an unprivileged GET, say —
         // `current.private_key` is `None` and the key is written, which
         // is the old behaviour for exactly the case that justified it.
+        //
+        // Compared clamped: the kernel stores (and dumps) the key after
+        // X25519 clamping, so an unclamped declared key — any 32 bytes
+        // that did not come from `wg genkey` — never matched and was
+        // rewritten on every apply (#TBD).
         if let Some(declared) = self.private_key
-            && current.private_key != Some(declared)
+            && current.private_key != Some(clamp_private_key(declared))
         {
             changes.private_key_set = true;
         }
+        // A declared port of 0 asks the kernel to pick one, and the port
+        // it picked is then what `GET_DEVICE` reports — never 0. Compared
+        // literally it never matched, and every apply wrote 0 again, which
+        // `set_port()` takes as "bind a new random port": the device moved
+        // port on every apply and its peers lost it (#TBD). Any port
+        // satisfies a declared 0.
         if let Some(p) = self.listen_port
+            && p != 0
             && current.listen_port != Some(p)
         {
             changes.listen_port_set = true;
@@ -846,6 +904,9 @@ impl DeclaredWgDeviceBuilder {
         self
     }
 
+    /// Set the UDP listen port. 0 lets the kernel pick one, and is then
+    /// satisfied by whatever port it picked (the diff does not rewrite
+    /// it, which would rebind the device to another random port).
     pub fn listen_port(mut self, port: u16) -> Self {
         self.listen_port = Some(port);
         self
@@ -912,10 +973,18 @@ impl DeclaredWgPeer {
     fn diff_against(&self, current: &WgPeer) -> PeerChanges {
         let mut changes = PeerChanges::default();
 
-        // preshared_key — never observable; if declared,
-        // mark dirty (same shape as device.private_key).
-        if self.preshared_key.is_some() {
-            changes.preshared_key_set = true;
+        // preshared_key — compared, not assumed dirty, for the reason
+        // device.private_key is (#281): `get_peer()` puts
+        // WGPEER_A_PRESHARED_KEY in every peer of a GET_DEVICE, which needs
+        // CAP_NET_ADMIN anyway, and the parser maps the all-zero "no key"
+        // to `None`. Marking it dirty whenever declared rewrote every
+        // peer with a PSK on every apply (#TBD). A declared all-zero key
+        // is the kernel's "none", so it compares as `None`.
+        if let Some(psk) = self.preshared_key {
+            let want = (psk != [0u8; WG_KEY_LEN]).then_some(psk);
+            if current.preshared_key != want {
+                changes.preshared_key_set = true;
+            }
         }
         if let Some(ep) = self.endpoint
             && current.endpoint != Some(ep)
@@ -928,14 +997,14 @@ impl DeclaredWgPeer {
                 changes.persistent_keepalive_set = true;
             }
         }
-        // allowed_ips — compare as ordered sets. The kernel
-        // returns them in insertion order; we compare as
-        // multisets via sort+eq to avoid spurious churn.
-        let mut want = self.allowed_ips.clone();
-        let mut have = current.allowed_ips.clone();
-        want.sort_by_key(|a| (a.addr, a.cidr));
-        have.sort_by_key(|a| (a.addr, a.cidr));
-        if want != have {
+        // allowed_ips — compare as sets of what the kernel stores. The
+        // kernel returns them in its own order, so sort; and its trie
+        // keeps each prefix once, masked to its length
+        // (`copy_and_assign_cidr()` in allowedips.c), so `10.0.0.5/24`
+        // dumps as `10.0.0.0/24` and a prefix declared twice dumps once.
+        // Comparing the declaration as written rewrote such a peer on
+        // every apply (#TBD).
+        if allowed_ip_set(&self.allowed_ips) != allowed_ip_set(&current.allowed_ips) {
             changes.allowed_ips_set = true;
         }
 
@@ -1372,6 +1441,85 @@ mod tests {
         assert_eq!(peer.allowed_ips.len(), 1);
     }
 
+    /// Host bits and duplicates do not survive the kernel's trie, so they
+    /// must not count as a difference; a different prefix still does.
+    #[test]
+    fn diff_allowed_ips_compare_masked_and_deduplicated() {
+        let declared = DeclaredWgDeviceBuilder::new("wg0".into())
+            .peer(key(0xbb), |p| {
+                p.allowed_ip(AllowedIp::v4(Ipv4Addr::new(10, 0, 0, 5), 24))
+                    .allowed_ip(AllowedIp::v4(Ipv4Addr::new(10, 0, 0, 0), 24))
+                    .allowed_ip(AllowedIp::v6("fd00::7".parse().unwrap(), 64))
+            })
+            .build();
+        let mut curr = empty_device("wg0");
+        let mut peer = WgPeer::new(key(0xbb));
+        peer.allowed_ips = vec![
+            AllowedIp::v6("fd00::".parse().unwrap(), 64),
+            AllowedIp::v4(Ipv4Addr::new(10, 0, 0, 0), 24),
+        ];
+        curr.peers.push(peer.clone());
+        let allowed_changed = |curr: &WgDevice| {
+            declared
+                .diff_against(curr)
+                .peers_to_modify
+                .iter()
+                .any(|(_, pc)| pc.allowed_ips_set)
+        };
+        assert!(!allowed_changed(&curr));
+
+        peer.allowed_ips[1] = AllowedIp::v4(Ipv4Addr::new(10, 0, 0, 0), 25);
+        curr.peers[0] = peer;
+        assert!(allowed_changed(&curr), "a different prefix length is a change");
+    }
+
+    /// A declared PSK is compared with the dumped one: equal is no change,
+    /// different or missing is, and an all-zero declaration means none.
+    #[test]
+    fn diff_preshared_key_compares_with_the_dump() {
+        let with_psk = |psk| {
+            DeclaredWgDeviceBuilder::new("wg0".into())
+                .peer(key(0xbb), |p| p.preshared_key(psk))
+                .build()
+        };
+        let dumped = |psk: Option<[u8; WG_KEY_LEN]>| {
+            let mut curr = empty_device("wg0");
+            let mut peer = WgPeer::new(key(0xbb));
+            peer.preshared_key = psk;
+            curr.peers.push(peer);
+            curr
+        };
+        let psk_changed = |declared: &DeclaredWgDevice, curr: &WgDevice| {
+            declared
+                .diff_against(curr)
+                .peers_to_modify
+                .iter()
+                .any(|(_, pc)| pc.preshared_key_set)
+        };
+        assert!(!psk_changed(&with_psk(key(0x11)), &dumped(Some(key(0x11)))));
+        assert!(psk_changed(&with_psk(key(0x11)), &dumped(Some(key(0x22)))));
+        assert!(psk_changed(&with_psk(key(0x11)), &dumped(None)));
+        assert!(!psk_changed(&with_psk([0; WG_KEY_LEN]), &dumped(None)));
+    }
+
+    /// The kernel dumps the clamped key, so an unclamped declaration
+    /// matches its clamped echo and a different key still does not.
+    #[test]
+    fn diff_private_key_compares_clamped() {
+        let declared = DeclaredWgDeviceBuilder::new("wg0".into())
+            .private_key([0xaa; WG_KEY_LEN])
+            .build();
+        let mut curr = empty_device("wg0");
+        let mut echo = [0xaa; WG_KEY_LEN];
+        echo[0] = 0xa8;
+        echo[31] = 0x6a;
+        curr.private_key = Some(echo);
+        assert!(!declared.diff_against(&curr).private_key_set);
+
+        curr.private_key = Some(clamp_private_key([0xbb; WG_KEY_LEN]));
+        assert!(declared.diff_against(&curr).private_key_set);
+    }
+
     #[test]
     fn diff_private_key_always_dirty_when_declared() {
         let declared = DeclaredWgDeviceBuilder::new("wg0".into())
@@ -1407,6 +1555,17 @@ mod tests {
         curr.listen_port = Some(12345);
         let changes = declared.diff_against(&curr);
         assert!(changes.listen_port_set);
+    }
+
+    /// 0 asks the kernel to pick; the port it picked satisfies it.
+    #[test]
+    fn diff_listen_port_zero_accepts_the_kernels_choice() {
+        let declared = DeclaredWgDeviceBuilder::new("wg0".into())
+            .listen_port(0)
+            .build();
+        let mut curr = empty_device("wg0");
+        curr.listen_port = Some(41_234);
+        assert!(!declared.diff_against(&curr).listen_port_set);
     }
 
     #[test]

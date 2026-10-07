@@ -260,3 +260,15 @@ mod dump_termination;
 // separate crate, so it sees what a downstream user sees.
 #[path = "integration/api_surface.rs"]
 mod api_surface;
+
+// Every shape the declarative layers can declare must converge: apply,
+// diff empty, apply again with no changes, diff empty again. Each file
+// covers one layer; the cases are tables so a run lists every red shape.
+#[path = "integration/network_config_echo.rs"]
+mod network_config_echo;
+
+#[path = "integration/wireguard_echo.rs"]
+mod wireguard_echo;
+
+#[path = "integration/recipes_echo.rs"]
+mod recipes_echo;

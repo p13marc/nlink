@@ -428,6 +428,19 @@ pub(crate) fn flower_matches(
     true
 }
 
+/// The class a live flower filter sends its matches to
+/// (`TCA_FLOWER_CLASSID`), if it is a flower filter that has one.
+pub(crate) fn flower_classid(live: &TcMessage) -> Option<TcHandle> {
+    use super::types::tc::filter::flower::TCA_FLOWER_CLASSID;
+
+    if live.kind() != Some("flower") {
+        return None;
+    }
+    let attrs = split_attrs(live.raw_options()?);
+    let raw: [u8; 4] = attrs.get(&TCA_FLOWER_CLASSID)?.get(..4)?.try_into().ok()?;
+    Some(TcHandle::from_raw(u32::from_ne_bytes(raw)))
+}
+
 /// Compare desired (rate, ceil) against a live HTB class.
 ///
 /// Compares only the fields the recipes set today; deeper attributes
@@ -656,6 +669,18 @@ fn dst_v4(addr: &str, prefix: u8, classid: TcHandle) -> crate::netlink::filter::
         .priority(1)
         .dst_ipv4(addr.parse().unwrap(), prefix)
         .build()
+}
+
+#[test]
+fn flower_classid_reads_the_target_class() {
+    let cid = TcHandle::new(1, 3);
+    let live = live_flower(&dst_v4("10.0.0.1", 32, cid), ETH_P_IP);
+    assert_eq!(flower_classid(&live), Some(cid));
+    let not_flower = TcMessage {
+        kind: Some("u32".to_string()),
+        ..TcMessage::default()
+    };
+    assert_eq!(flower_classid(&not_flower), None);
 }
 
 #[test]

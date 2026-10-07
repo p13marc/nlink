@@ -1676,7 +1676,9 @@ pub struct TbfConfig {
     pub burst: crate::util::Bytes,
     /// MTU / peak burst.
     pub mtu: u32,
-    /// Buffer limit.
+    /// Queue limit in bytes. **Required**: 0 (the default) is refused when
+    /// the qdisc is written, because the kernel installs a TBF with no
+    /// limit with no queue at all and drops every packet.
     pub limit: crate::util::Bytes,
 }
 
@@ -1722,7 +1724,14 @@ impl TbfConfig {
         self
     }
 
-    /// Set the buffer limit.
+    /// Set the queue limit in bytes — how much may wait for tokens.
+    ///
+    /// Required. `tbf_change()` only gives the qdisc a queue when the limit
+    /// is non-zero, so without one every packet is dropped; `add_qdisc` /
+    /// `replace_qdisc` refuse a zero limit rather than install that, as
+    /// tc(8) refuses a tbf with neither `limit` nor `latency`. A common
+    /// choice is the burst plus what the rate drains in the latency you
+    /// accept: `burst + rate * latency`.
     pub fn limit(mut self, b: crate::util::Bytes) -> Self {
         self.limit = b;
         self
@@ -1854,6 +1863,22 @@ impl QdiscConfig for TbfConfig {
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        // `tbf_change()` only creates the child bfifo when
+        // `qopt->limit > 0`, so a TBF created with limit 0 keeps
+        // `noop_qdisc` as its queue and drops every packet; on an existing
+        // TBF, limit 0 shrinks its bfifo to nothing, with the same result.
+        // tc(8) refuses it ("either \"limit\" or \"latency\" are
+        // required"). `TbfConfig::new()` defaults the limit to 0, so a TBF
+        // built with only a rate and a burst — the shape most callers
+        // reach for — used to install as a black hole.
+        if self.limit.as_u32_saturating() == 0 {
+            return Err(Error::InvalidMessage(
+                "tbf: a queue limit is required — with limit 0 the kernel gives the qdisc no \
+                 queue and it drops every packet (tc(8): \"either limit or latency are \
+                 required\"); set TbfConfig::limit (QdiscBuilder::limit_bytes when declared)"
+                    .into(),
+            ));
+        }
         let rate_bps = self.rate.as_bytes_per_sec();
         let peakrate_bps = self.peakrate.map(|p| p.as_bytes_per_sec());
         let burst = self.burst.as_u32_saturating();
@@ -8724,7 +8749,10 @@ mod psched_wire_tests {
     /// modern kernels prefer it and recompute the bucket from it exactly.
     #[test]
     fn tbf_emits_the_byte_valued_burst_escape_hatch() {
-        let cfg = TbfConfig::new().rate(Rate::mbit(1)).burst(Bytes::kib(32));
+        let cfg = TbfConfig::new()
+            .rate(Rate::mbit(1))
+            .burst(Bytes::kib(32))
+            .limit(Bytes::kib(64));
         let attrs = qdisc_attrs(&cfg);
 
         assert_eq!(u32_at(&attrs, tbf::TCA_TBF_BURST, 0), 32_768);
@@ -8738,13 +8766,34 @@ mod psched_wire_tests {
         let cfg = TbfConfig::new()
             .rate(Rate::mbit(1))
             .peakrate(Rate::mbit(2))
-            .burst(Bytes::kib(32));
+            .burst(Bytes::kib(32))
+            .limit(Bytes::kib(64));
         let attrs = qdisc_attrs(&cfg);
 
         assert_eq!(attrs[&tbf::TCA_TBF_PTAB].len(), 1024);
         assert!(attrs.contains_key(&tbf::TCA_TBF_PBURST));
         // peakrate.rate lives at offset 20 of tc_tbf_qopt.
         assert_eq!(u32_at(&attrs, tbf::TCA_TBF_PARMS, 20), 250_000);
+    }
+
+    /// A TBF with limit 0 has no queue in the kernel — its child stays
+    /// noop_qdisc — and drops every packet. `new()` defaults the limit to
+    /// 0, so this is what a rate-and-burst-only TBF used to install.
+    #[test]
+    fn tbf_without_a_limit_is_refused() {
+        let cfg = TbfConfig::new().rate(Rate::mbit(10)).burst(Bytes::kib(32));
+        let mut builder = MessageBuilder::new(0, 0);
+        let err = cfg
+            .write_options(&mut builder)
+            .expect_err("a zero limit is a black hole, not a qdisc");
+        let msg = err.to_string();
+        assert!(msg.contains("tbf: "), "{msg}");
+        assert!(msg.contains("limit"), "{msg}");
+
+        let mut builder = MessageBuilder::new(0, 0);
+        cfg.limit(Bytes::kib(64))
+            .write_options(&mut builder)
+            .expect("with a limit it is fine");
     }
 
     /// HTB class at 100 mbit with an explicit 15 KiB burst (#193).

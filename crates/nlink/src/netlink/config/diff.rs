@@ -18,6 +18,7 @@ use crate::netlink::{
     error::Result,
     messages::{AddressMessage, LinkMessage, RouteMessage, TcMessage},
     protocol::Route,
+    psched,
     tc::{
         ClsactConfig, IngressConfig, QdiscConfig,
     },
@@ -142,6 +143,14 @@ pub struct ConfigDiff {
     /// RA, DHCP and redirect routes are excluded so dynamic and
     /// auto-configured routing is never clobbered.
     pub routes_to_remove: Vec<DeclaredRoute>,
+
+    /// Declared bridge MTUs to re-assert after the link changes, for
+    /// bridges whose ports change in this apply (`br_mtu_auto_adjust`
+    /// moves a bridge's MTU when ports join or leave). Not a change of its
+    /// own — it only exists alongside the port changes that cause it — so
+    /// it is not counted, shown or serialized.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) bridge_mtus: Vec<(String, u32)>,
 }
 
 impl ConfigDiff {
@@ -420,7 +429,7 @@ pub async fn compute_diff_with_options(
     // Diff links — pass the ifindex→name map so master changes
     // can be detected by resolving the kernel's master ifindex
     // back to a name (Plan 207b H2).
-    diff_links(config, &link_by_name, &ifindex_to_name, &mut diff);
+    let ipv6_flushed = diff_links(config, &link_by_name, &ifindex_to_name, &mut diff);
 
     // Plan 186 §3c — topo-sort `links_to_add` so a child whose
     // parent is also being created in this apply lands AFTER
@@ -433,7 +442,14 @@ pub async fn compute_diff_with_options(
     topo_sort_links_to_add(&mut diff.links_to_add);
 
     // Diff addresses
-    diff_addresses(config, &current_addresses, &ifindex_to_name, opts.purge, &mut diff);
+    diff_addresses(
+        config,
+        &current_addresses,
+        &ifindex_to_name,
+        &ipv6_flushed,
+        opts.purge,
+        &mut diff,
+    );
 
     // Diff routes
     diff_routes(config, &current_routes, &ifindex_to_name, opts, &mut diff);
@@ -444,19 +460,77 @@ pub async fn compute_diff_with_options(
     Ok(diff)
 }
 
-fn diff_links(
-    config: &NetworkConfig,
-    current: &HashMap<&str, &LinkMessage>,
-    ifindex_to_name: &HashMap<u32, &str>,
+/// Every link of a kind, live or about to be created by `config`.
+fn links_of_kind<'a>(
+    current: &HashMap<&'a str, &LinkMessage>,
+    config: &'a NetworkConfig,
+    kind: &str,
+) -> HashSet<&'a str> {
+    current
+        .iter()
+        .filter(|(_, l)| l.kind() == Some(kind))
+        .map(|(name, _)| *name)
+        .chain(
+            config
+                .links
+                .iter()
+                .filter(|l| l.link_type.kind() == Some(kind))
+                .map(|l| l.name.as_str()),
+        )
+        .collect()
+}
+
+/// Diff the links. Returns the links whose IPv6 addresses the apply will
+/// flush as a side effect of their link change (see `diff_addresses`).
+fn diff_links<'a>(
+    config: &'a NetworkConfig,
+    current: &HashMap<&'a str, &LinkMessage>,
+    ifindex_to_name: &HashMap<u32, &'a str>,
     diff: &mut ConfigDiff,
-) {
+) -> HashSet<&'a str> {
     // Note: desired_names would be used for purge mode to find links to remove
     let _desired_names: HashSet<&str> = config.links.iter().map(|l| l.name.as_str()).collect();
+
+    // Every bond, live or about to be created — a port changing to or from
+    // one of these changes state as a side effect (see compute_link_changes).
+    let bonds = links_of_kind(current, config, "bond");
+    // Every VRF: an L3 master, whose ports addrconf flushes on the way in
+    // and out.
+    let vrfs = links_of_kind(current, config, "vrf");
+
+    // Masters whose set of ports this apply changes.
+    let mut port_set_changes: HashSet<&str> = HashSet::new();
+    let mut ipv6_flushed: HashSet<&str> = HashSet::new();
 
     for declared in &config.links {
         if let Some(existing) = current.get(declared.name.as_str()) {
             // Link exists, check if it needs modification
-            let changes = compute_link_changes(declared, existing, ifindex_to_name);
+            let changes = compute_link_changes(declared, existing, ifindex_to_name, &bonds);
+            let existing_master = existing
+                .master()
+                .and_then(|idx| ifindex_to_name.get(&idx).copied());
+            if changes.set_master.is_some() || changes.unset_master {
+                port_set_changes.extend(declared.master.as_deref());
+                port_set_changes.extend(existing_master);
+            }
+            // The link changes that make the kernel drop the link's IPv6
+            // addresses (`addrconf_ifdown()`, unless `keep_addr_on_down`):
+            // going down; joining or leaving an L3 master
+            // (`NETDEV_CHANGEUPPER`, then the VRF cycles the port); and
+            // joining or leaving a bond, which takes the port down (the
+            // bond closes the one it releases; `enslave` downs the one it
+            // adds).
+            let flushing_master = |m: Option<&str>| {
+                m.is_some_and(|m| bonds.contains(m) || vrfs.contains(m))
+            };
+            let master_changes = changes.set_master.is_some() || changes.unset_master;
+            if changes.set_down
+                || (master_changes
+                    && (flushing_master(existing_master)
+                        || flushing_master(changes.set_master.as_deref())))
+            {
+                ipv6_flushed.insert(declared.name.as_str());
+            }
             if !changes.is_empty() {
                 diff.links_to_modify.push((declared.name.clone(), changes));
             }
@@ -464,13 +538,35 @@ fn diff_links(
             // Link doesn't exist, needs to be created
             // But only if it's not a physical interface
             if declared.link_type != DeclaredLinkType::Physical {
+                port_set_changes.extend(declared.master.as_deref());
                 diff.links_to_add.push(declared.clone());
             }
         }
     }
 
+    // A bridge's MTU follows its ports: `br_add_if()` / `br_del_if()` call
+    // `br_mtu_auto_adjust()`, which sets the bridge to its smallest port's
+    // MTU unless `BROPT_MTU_SET_BY_USER` is set — and only `br_change_mtu()`
+    // (an RTM_SETLINK that changes the MTU) sets it, not the IFLA_MTU a
+    // bridge is created with. So a bridge declared with an MTU and given a
+    // port in the same apply ended up at the port's MTU, and the next diff
+    // reported its own MTU as changed. Every declared bridge MTU whose port
+    // set changes here is re-asserted once the links are done.
+    for declared in &config.links {
+        let Some(mtu) = declared.mtu else { continue };
+        let is_bridge = declared.link_type == DeclaredLinkType::Bridge
+            || current
+                .get(declared.name.as_str())
+                .is_some_and(|l| l.kind() == Some("bridge"));
+        if is_bridge && port_set_changes.contains(declared.name.as_str()) {
+            diff.bridge_mtus.push((declared.name.clone(), mtu));
+        }
+    }
+
     // Note: We don't auto-remove links that aren't in the config
     // That requires explicit purge mode
+
+    ipv6_flushed
 }
 
 /// Plan 186 §3c — stable topological sort of `links_to_add`.
@@ -561,6 +657,7 @@ fn compute_link_changes(
     declared: &DeclaredLink,
     existing: &LinkMessage,
     ifindex_to_name: &HashMap<u32, &str>,
+    bonds: &HashSet<&str>,
 ) -> LinkChanges {
     let mut changes = LinkChanges::default();
 
@@ -635,6 +732,24 @@ fn compute_link_changes(
         }
     }
 
+    // A bond opens the port it enslaves and closes the one it releases —
+    // `bond_enslave()` ends in `dev_open()`, `__bond_release_one()` in
+    // `dev_close()` — whatever state the port had. Across a bond master
+    // change the state read above is therefore stale, and the declared one
+    // has to be re-asserted after the change: a port declared up and
+    // released from a bond came back down, and the next diff said `up`.
+    let master_changes = changes.unset_master || changes.set_master.is_some();
+    let leaves_bond = master_changes && existing_master_name.is_some_and(|m| bonds.contains(m));
+    let joins_bond = changes
+        .set_master
+        .as_deref()
+        .is_some_and(|m| bonds.contains(m));
+    match declared.state {
+        LinkState::Up if leaves_bond && !joins_bond => changes.set_up = true,
+        LinkState::Down if joins_bond => changes.set_down = true,
+        _ => {}
+    }
+
     changes
 }
 
@@ -642,6 +757,7 @@ fn diff_addresses(
     config: &NetworkConfig,
     current: &[AddressMessage],
     ifindex_to_name: &HashMap<u32, &str>,
+    ipv6_flushed: &HashSet<&str>,
     purge: bool,
     diff: &mut ConfigDiff,
 ) {
@@ -662,10 +778,17 @@ fn diff_addresses(
         })
         .collect();
 
-    // Find addresses to add
+    // Find addresses to add. An IPv6 address on a link whose change in
+    // this apply makes the kernel drop it (set down, moved into or out of
+    // a VRF or a bond — see `diff_links`) is read here as present and is
+    // gone by the time the address step runs, so it is (re-)added too.
+    // Comparing only against the pre-apply dump left it missing until the
+    // next apply (#TBD). Should the address survive after all
+    // (`keep_addr_on_down`), the add finds it in place and is not counted.
     for declared in &config.addresses {
         let key = (declared.dev.as_str(), declared.address, declared.prefix_len);
-        if !current_set.contains(&key) {
+        let flushed = declared.address.is_ipv6() && ipv6_flushed.contains(declared.dev.as_str());
+        if flushed || !current_set.contains(&key) {
             diff.addresses_to_add.push(declared.clone());
         }
     }
@@ -708,11 +831,42 @@ fn diff_addresses(
     }
 }
 
+/// The destination the kernel stores for a declared route.
+///
+/// IPv6 masks a route's destination to its prefix
+/// (`ipv6_addr_prefix(&rt->fib6_dst.addr, &cfg->fc_dst, cfg->fc_dst_len)`
+/// in `ip6_route_info_create`), so `2001:db8::1/32` is installed — and
+/// dumped — as `2001:db8::/32`. IPv4 refuses host bits instead
+/// (`fib_table_insert`: "Invalid prefix for given prefix length"), so an
+/// IPv4 destination is left as declared and the apply reports that error,
+/// as `ip route` does.
+fn kernel_destination(addr: IpAddr, prefix_len: u8) -> IpAddr {
+    match addr {
+        IpAddr::V4(_) => addr,
+        IpAddr::V6(v6) => {
+            let mask = u128::MAX
+                .checked_shl(128 - u32::from(prefix_len.min(128)))
+                .unwrap_or(0);
+            IpAddr::V6(std::net::Ipv6Addr::from(u128::from(v6) & mask))
+        }
+    }
+}
+
 /// The metric the kernel gives an IPv6 route added without one
 /// (`IP6_RT_PRIO_USER`, include/net/ip6_route.h). IPv4 leaves an
 /// unspecified metric at 0; IPv6 does not, and a diff that assumes it
 /// does never matches its own routes.
 const IP6_RT_PRIO_USER: u32 = 1024;
+
+/// The metric the kernel stores for a declared route: the declared one,
+/// except that IPv6 turns both "none" and 0 into `IP6_RT_PRIO_USER`.
+fn kernel_metric(route: &DeclaredRoute) -> u32 {
+    match (route.metric, route.destination.is_ipv6()) {
+        (None | Some(0), true) => IP6_RT_PRIO_USER,
+        (Some(metric), _) => metric,
+        (None, false) => 0,
+    }
+}
 
 fn diff_routes(
     config: &NetworkConfig,
@@ -773,7 +927,15 @@ fn diff_routes(
     // no-op. If not, queue for add (which uses NLM_F_REPLACE).
     for declared in &config.routes {
         let table = declared.table.unwrap_or(254);
-        let key = (declared.destination, declared.prefix_len, table);
+        // Keyed on the destination the kernel stores, not the declared
+        // one: a declared IPv6 `2001:db8:32::1/48` is dumped as
+        // `2001:db8:32::/48`, and keying on the host bits matched nothing,
+        // so the route was re-added (a replace) on every apply (#TBD).
+        let key = (
+            kernel_destination(declared.destination, declared.prefix_len),
+            declared.prefix_len,
+            table,
+        );
         // `name_to_ifindex` comes from the *pre-apply* link dump, so a
         // config that declares both a link and a route out of it
         // resolves to `None` on the first pass. That mattered: the
@@ -828,14 +990,22 @@ fn diff_routes(
                 // `apply` reporting no changes at the same time,
                 // because the apply path does not go through here
                 // (#366).
-                let kernel_default_metric = if declared.destination.is_ipv6() {
-                    IP6_RT_PRIO_USER
-                } else {
-                    0
-                };
-                let metric_match =
-                    declared.metric.unwrap_or(kernel_default_metric) == r.priority().unwrap_or(0);
-                gw_match && dev_match && metric_match
+                //
+                // An explicit 0 is the same as none for IPv6: the kernel
+                // tests the value, not its presence (`if (cfg->fc_metric
+                // == 0) cfg->fc_metric = IP6_RT_PRIO_USER;` in
+                // `ip6_route_info_create`), so `.metric(0)` installs 1024
+                // and comparing it as 0 re-added the route on every apply
+                // (#TBD).
+                let metric_match = kernel_metric(declared) == r.priority().unwrap_or(0);
+                // Type. The key above admits unicast, blackhole,
+                // unreachable and prohibit alike, and a declared blackhole
+                // has neither gateway nor dev, so without this a declared
+                // `unicast → blackhole` change matched the old unicast
+                // route: the diff came back empty and the kernel kept
+                // forwarding (#TBD).
+                let type_match = r.route_type() == declared.route_type.kernel_type();
+                gw_match && dev_match && metric_match && type_match
             })
             });
 
@@ -865,7 +1035,13 @@ fn diff_routes(
     let desired_keys: HashSet<(IpAddr, u8, u32)> = config
         .routes
         .iter()
-        .map(|r| (r.destination, r.prefix_len, r.table.unwrap_or(254)))
+        .map(|r| {
+            (
+                kernel_destination(r.destination, r.prefix_len),
+                r.prefix_len,
+                r.table.unwrap_or(254),
+            )
+        })
         .collect();
     let tables = opts.purge_table_scope(config);
 
@@ -957,6 +1133,16 @@ fn diff_qdiscs(
     }
 }
 
+/// The smallest quantum fq_codel keeps: `fq_codel_change()` stores
+/// `max(256U, quantum)` (net/sched/sch_fq_codel.c).
+const FQ_CODEL_MIN_QUANTUM: u32 = 256;
+
+/// The largest limit sfq keeps when neither depth nor flows is set, which
+/// nlink never does: `sfq_change()` caps `limit` at `maxdepth * maxflows`,
+/// `SFQ_MAX_DEPTH` (127) times `SFQ_DEFAULT_FLOWS` (128) by default
+/// (net/sched/sch_sfq.c).
+const SFQ_MAX_LIMIT: u32 = 127 * 128;
+
 /// Decide whether the live qdisc already *is* the declared one.
 ///
 /// Compares field by field, through the parsed [`QdiscOptions`] the
@@ -994,24 +1180,49 @@ fn qdisc_params_match(declared: &DeclaredQdiscType, existing: &TcMessage) -> boo
         }
         (DeclaredQdiscType::Tbf { .. }, Some(QdiscOptions::Tbf(live))) => {
             let cfg = declared.tbf_config().expect("matched the Tbf arm");
-            // The kernel echoes the byte-valued TCA_TBF_BURST, so burst is
-            // exact; rate is `tc_ratespec.rate` (or RATE64), limit is
-            // `tc_tbf_qopt.limit`. `peakrate` is PRATE64/`tc_ratespec`
-            // in bytes/sec, and `mtu` comes back through TCA_TBF_PBURST,
-            // which the encoder always sends — both are normalised to
-            // bytes by `parse_tbf_options`, so neither needs the tick
-            // round-trip `codel_round_trip_us` does for fq_codel (#361).
+            // Rate is `tc_ratespec.rate` (or RATE64), peakrate the same
+            // for the peak spec, limit is `tc_tbf_qopt.limit`: all exact.
+            //
+            // Burst and mtu are not. The kernel keeps both buckets as
+            // nanoseconds and `tbf_dump()` echoes them only as psched
+            // ticks — it never sends TCA_TBF_BURST/PBURST back — so the
+            // bytes `parse_tbf_options` recovers are a tick round trip of
+            // what was sent: 32768 at 10 gbit reads back as 32719, the
+            // default mtu of 1514 at 100 mbit as 1513. This used to compare
+            // them exactly, believing the byte attributes were echoed, and
+            // only 1 mbit — the one rate every test used — happens to
+            // survive the trip; at nearly every other rate a declared TBF
+            // was replaced on every apply, forever (#TBD).
+            //
+            // So compare against the declared values pushed through the
+            // same trip. The burst always goes as TCA_TBF_BURST, which
+            // the kernel turns into nanoseconds at the rate. The mtu goes
+            // as TCA_TBF_PBURST — nanoseconds at the peak rate — only when
+            // there is a peak rate; otherwise the kernel keeps the tick
+            // count nlink wrote into `qopt.mtu`, and only the userspace
+            // half of the trip applies.
+            //
             // Compared against the *lowered* config rather than the
             // declared `Option`s, because the lowering's defaults (mtu
             // 1514, no peakrate) are what actually goes on the wire.
-            let declared_peak = cfg
-                .peakrate
-                .map_or(0, |r| r.as_bytes_per_sec());
-            live.rate == cfg.rate.as_bytes_per_sec()
-                && live.burst == cfg.burst.as_u32_saturating()
+            let rate = cfg.rate.as_bytes_per_sec();
+            let peak = cfg.peakrate.map(|r| r.as_bytes_per_sec());
+            let burst = psched::tbf_bucket_round_trip(rate, cfg.burst.as_u32_saturating());
+            let mtu = match peak {
+                Some(peak) => psched::tbf_bucket_round_trip(peak, cfg.mtu),
+                None => psched::tc_calc_xmitsize(rate, psched::tc_calc_xmittime(rate, cfg.mtu)),
+            };
+            // A declaration without a limit never matches, so `apply` gets
+            // to refuse it (`TbfConfig::write_options`) even where an older
+            // apply already installed it: the kernel's limit-0 TBF has no
+            // queue and drops everything, and an empty diff would leave that
+            // black hole looking converged.
+            cfg.limit.as_u32_saturating() != 0
+                && live.rate == rate
+                && live.burst == burst
                 && live.limit == cfg.limit.as_u32_saturating()
-                && live.peakrate == declared_peak
-                && live.mtu == cfg.mtu
+                && live.peakrate == peak.unwrap_or(0)
+                && live.mtu == mtu
         }
         (DeclaredQdiscType::Htb { .. }, Some(QdiscOptions::Htb(live))) => {
             let cfg = declared.htb_config().expect("matched the Htb arm");
@@ -1040,10 +1251,14 @@ fn qdisc_params_match(declared: &DeclaredQdiscType, existing: &TcMessage) -> boo
             // close the gap. Changing `flows` needs the qdisc deleted
             // and re-added, which is the caller's decision to make, not
             // something to churn on (#361).
+            //
+            // `quantum` is compared as the kernel keeps it:
+            // `fq_codel_change()` stores `max(256U, quantum)`, so a declared
+            // 128 reads back as 256 and was replaced on every apply (#TBD).
             limit.is_none_or(|l| live.limit == l)
                 && target_us.is_none_or(|t| codel_round_trip_us(t) == live.target_us)
                 && interval_us.is_none_or(|i| codel_round_trip_us(i) == live.interval_us)
-                && quantum.is_none_or(|q| live.quantum == q)
+                && quantum.is_none_or(|q| live.quantum == q.max(FQ_CODEL_MIN_QUANTUM))
                 && ecn.is_none_or(|e| live.ecn == e)
         }
         (
@@ -1055,8 +1270,12 @@ fn qdisc_params_match(declared: &DeclaredQdiscType, existing: &TcMessage) -> boo
             },
             Some(QdiscOptions::Sfq(live)),
         ) => {
+            // `limit` is compared as the kernel keeps it: `sfq_change()`
+            // caps it at `maxdepth * maxflows`, which for the defaults nlink
+            // leaves in place is 127 * 128, so a declared 20000 reads back
+            // as 16256 and was replaced on every apply (#TBD).
             perturb_secs.is_none_or(|p| live.perturb_period == i32::try_from(p).unwrap_or(i32::MAX))
-                && limit.is_none_or(|l| live.limit == l)
+                && limit.is_none_or(|l| live.limit == l.min(SFQ_MAX_LIMIT))
                 && quantum.is_none_or(|q| live.quantum == q)
         }
         (DeclaredQdiscType::Prio { .. }, Some(QdiscOptions::Prio(live))) => {
@@ -1512,8 +1731,11 @@ mod tests {
         assert!(!qdisc_params_match(&bigger_bucket, &echo));
 
         // 0.28 (#361): peakrate and mtu are part of the comparison too,
-        // so a drift in either is not silently accepted. Both come back
-        // in bytes (PRATE64 and TCA_TBF_PBURST), so no tick round-trip.
+        // so a drift in either is not silently accepted. (This echo is
+        // nlink's own bytes, BURST/PBURST included, which the kernel never
+        // sends; at 1 and 2 mbit the tick round trip is exact, so it
+        // stands in. The kernel's real echo is pinned in
+        // `tbf_burst_and_mtu_are_compared_after_the_kernels_tick_round_trip`.)
         let peaked = tbf(125_000, 32_768, Some(250_000), Some(1600));
         let peaked_echo = live("tbf", Some(declared_options_bytes(&peaked)));
         assert!(qdisc_params_match(&peaked, &peaked_echo));
@@ -1529,6 +1751,65 @@ mod tests {
             !qdisc_params_match(&declared, &peaked_echo),
             "dropping the peakrate must be seen"
         );
+    }
+
+    /// What `tbf_dump()` sends back: `tc_tbf_qopt` alone, with `buffer`
+    /// and `mtu` as psched ticks and no TCA_TBF_BURST/PBURST.
+    fn kernel_tbf_echo(rate: u32, limit: u32, buffer_ticks: u32, mtu_ticks: u32) -> Vec<u8> {
+        use crate::netlink::types::tc::qdisc::{TcRateSpec, tbf};
+        let qopt = tbf::TcTbfQopt {
+            rate: TcRateSpec::new(rate),
+            peakrate: TcRateSpec::default(),
+            limit,
+            buffer: buffer_ticks,
+            mtu: mtu_ticks,
+        };
+        let mut out = Vec::new();
+        out.extend_from_slice(&((4 + tbf::TcTbfQopt::SIZE) as u16).to_ne_bytes());
+        out.extend_from_slice(&tbf::TCA_TBF_PARMS.to_ne_bytes());
+        out.extend_from_slice(qopt.as_bytes());
+        out
+    }
+
+    /// 10 gbit, a 32 KiB burst, the default mtu: a 6.12 kernel dumps
+    /// `buffer` 409 ticks (32768 bytes in nanoseconds at that rate, >> 6)
+    /// and `mtu` 18 ticks, which parse back as 32719 and 1440 bytes. The
+    /// diff compared those against 32768 and 1514 and replaced the qdisc
+    /// on every apply (#TBD).
+    #[test]
+    fn tbf_burst_and_mtu_are_compared_after_the_kernels_tick_round_trip() {
+        let tbf = |burst_bytes| DeclaredQdiscType::Tbf {
+            rate_bps: 1_250_000_000,
+            burst_bytes,
+            limit_bytes: Some(65_536),
+            peakrate_bps: None,
+            mtu: None,
+        };
+        let echo = live("tbf", Some(kernel_tbf_echo(1_250_000_000, 65_536, 409, 18)));
+        assert!(
+            qdisc_params_match(&tbf(32_768), &echo),
+            "the kernel's echo of a declared 10 gbit / 32 KiB TBF must match it"
+        );
+        assert!(
+            !qdisc_params_match(&tbf(65_536), &echo),
+            "a burst that really differs must still be seen"
+        );
+    }
+
+    /// A TBF declared without a limit is never "already there", even when
+    /// the kernel has the limit-0 TBF an older apply installed: that one
+    /// has no queue, and only `apply` can say so (it refuses the write).
+    #[test]
+    fn a_tbf_declared_without_a_limit_never_matches() {
+        let declared = DeclaredQdiscType::Tbf {
+            rate_bps: 1_250_000_000,
+            burst_bytes: 32_768,
+            limit_bytes: None,
+            peakrate_bps: None,
+            mtu: None,
+        };
+        let black_hole = live("tbf", Some(kernel_tbf_echo(1_250_000_000, 0, 409, 18)));
+        assert!(!qdisc_params_match(&declared, &black_hole));
     }
 
     #[test]
@@ -1558,6 +1839,67 @@ mod tests {
         assert!(qdisc_params_match(&prio, &echo));
         let other = DeclaredQdiscType::Prio { bands: Some(4) };
         assert!(!qdisc_params_match(&other, &echo));
+    }
+
+    /// Values the kernel clamps on the way in are compared clamped: a
+    /// 6.12 kernel stores fq_codel quantum 128 as 256 and sfq limit 20000
+    /// as 16256, and both were replaced on every apply (#TBD).
+    #[test]
+    fn kernel_clamped_values_compare_as_clamped() {
+        use crate::netlink::types::tc::qdisc::fq_codel::TCA_FQ_CODEL_QUANTUM;
+        let fq = |quantum| DeclaredQdiscType::FqCodel {
+            limit: None,
+            target_us: None,
+            interval_us: None,
+            flows: None,
+            quantum: Some(quantum),
+            ecn: None,
+        };
+        let echo = live("fq_codel", Some(attr_u32(TCA_FQ_CODEL_QUANTUM, 256)));
+        assert!(qdisc_params_match(&fq(128), &echo));
+        assert!(qdisc_params_match(&fq(256), &echo));
+        assert!(!qdisc_params_match(&fq(300), &echo));
+
+        let sfq = |limit| DeclaredQdiscType::Sfq {
+            perturb_secs: None,
+            limit: Some(limit),
+            quantum: None,
+        };
+        let echo = live("sfq", Some(declared_options_bytes(&sfq(16_256))));
+        assert!(qdisc_params_match(&sfq(20_000), &echo));
+        assert!(qdisc_params_match(&sfq(16_256), &echo));
+        assert!(!qdisc_params_match(&sfq(16_000), &echo));
+    }
+
+    /// IPv6 stores the masked destination; IPv4 refuses host bits, so its
+    /// destination is left for the kernel to reject.
+    #[test]
+    fn route_keys_use_the_destination_the_kernel_stores() {
+        let v6 = |s: &str| IpAddr::V6(s.parse().unwrap());
+        assert_eq!(kernel_destination(v6("2001:db8:32::1"), 48), v6("2001:db8:32::"));
+        assert_eq!(kernel_destination(v6("2001:db8:32::1"), 128), v6("2001:db8:32::1"));
+        assert_eq!(kernel_destination(v6("2001:db8::1"), 0), v6("::"));
+        assert_eq!(kernel_destination(v6("2001:db8:ffff::"), 33), v6("2001:db8:8000::"));
+        let v4 = IpAddr::V4(std::net::Ipv4Addr::new(10, 1, 2, 3));
+        assert_eq!(kernel_destination(v4, 16), v4);
+    }
+
+    #[test]
+    fn ipv6_metric_zero_is_the_kernel_default() {
+        let route = |dst: &str, metric| DeclaredRoute {
+            destination: dst.parse().unwrap(),
+            prefix_len: 48,
+            gateway: None,
+            dev: None,
+            metric,
+            table: None,
+            route_type: DeclaredRouteType::Unicast,
+        };
+        assert_eq!(kernel_metric(&route("2001:db8::", None)), 1024);
+        assert_eq!(kernel_metric(&route("2001:db8::", Some(0))), 1024);
+        assert_eq!(kernel_metric(&route("2001:db8::", Some(7))), 7);
+        assert_eq!(kernel_metric(&route("10.0.0.0", None)), 0);
+        assert_eq!(kernel_metric(&route("10.0.0.0", Some(0))), 0);
     }
 
     // ---- Plan 188 §2.2 — ApplyOptions builders ----

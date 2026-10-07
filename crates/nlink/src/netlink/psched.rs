@@ -269,6 +269,71 @@ pub fn tc_calc_xmitsize(rate_bytes_per_sec: u64, ticks: u32) -> u32 {
     psched().calc_xmitsize(rate_bytes_per_sec, ticks)
 }
 
+/// `PSCHED_SHIFT` (`include/net/pkt_sched.h`): one psched tick is
+/// `1 << 6` ns, and `PSCHED_NS2TICKS(x)` is `x >> 6`.
+const PSCHED_SHIFT: u32 = 6;
+
+/// The kernel's `psched_ratecfg_precompute__()` (net/sched/sch_generic.c):
+/// the multiplier and shift `psched_l2t_ns()` turns a length into
+/// nanoseconds with at `rate_bytes_per_sec`.
+///
+/// ```c
+/// u64 factor = NSEC_PER_SEC;
+/// *mult = 1; *shift = 0;
+/// if (rate <= 0) return;
+/// for (;;) {
+///         *mult = div64_u64(factor, rate);
+///         if (*mult & (1U << 31) || factor & (1ULL << 63))
+///                 break;
+///         factor <<= 1;
+///         (*shift)++;
+/// }
+/// ```
+fn kernel_ratecfg(rate_bytes_per_sec: u64) -> (u32, u32) {
+    if rate_bytes_per_sec == 0 {
+        return (1, 0);
+    }
+    let mut factor: u64 = 1_000_000_000;
+    let mut shift = 0;
+    loop {
+        // `*mult` is a u32; factor / rate starts below 2^32 (factor is
+        // 1e9) and doubles per step, so it reaches bit 31 before it could
+        // overflow.
+        let mult = (factor / rate_bytes_per_sec) as u32;
+        if mult & (1 << 31) != 0 || factor & (1 << 63) != 0 {
+            return (mult, shift);
+        }
+        factor <<= 1;
+        shift += 1;
+    }
+}
+
+/// The kernel's `psched_l2t_ns()` for the rate specs nlink writes
+/// (Ethernet link layer, no overhead, no mpu): nanoseconds to send `len`
+/// bytes at `rate_bytes_per_sec`.
+fn kernel_l2t_ns(rate_bytes_per_sec: u64, len: u32) -> u64 {
+    let (mult, shift) = kernel_ratecfg(rate_bytes_per_sec);
+    (u64::from(len) * u64::from(mult)) >> shift
+}
+
+/// The byte count a TBF bucket handed to the kernel in **bytes** reads
+/// back as.
+///
+/// `tbf_change()` turns the byte-valued `TCA_TBF_BURST` (and
+/// `TCA_TBF_PBURST`) into nanoseconds with `psched_l2t_ns()` and keeps
+/// only that; `tbf_dump()` echoes it as `PSCHED_NS2TICKS()` in the u32
+/// `tc_tbf_qopt.buffer` / `.mtu` and never sends the byte attributes back.
+/// So the bytes a dump yields are `tc_calc_xmitsize()` of that tick count
+/// — exactly what `parse_tbf_options` computes — and they differ from the
+/// declared bytes at most rates (32768 at 10 gbit reads back as 32719).
+/// Comparing a declared bucket against the dump has to go through the
+/// same round trip.
+pub(crate) fn tbf_bucket_round_trip(rate_bytes_per_sec: u64, bytes: u32) -> u32 {
+    // `opt.buffer = PSCHED_NS2TICKS(q->buffer)` assigns into a __u32.
+    let ticks = (kernel_l2t_ns(rate_bytes_per_sec, bytes) >> PSCHED_SHIFT) as u32;
+    tc_calc_xmitsize(rate_bytes_per_sec, ticks)
+}
+
 /// [`Psched::calc_rtable`] against the running kernel's clock.
 pub fn tc_calc_rtable(
     spec: &mut TcRateSpec,
@@ -352,6 +417,40 @@ mod tests {
             assert!(
                 back.abs_diff(size) <= slack,
                 "rate={rate} size={size} ticks={ticks} back={back} slack={slack}",
+            );
+        }
+    }
+
+    /// `psched_ratecfg_precompute__()` worked by hand for 2 gbit
+    /// (250_000_000 B/s): 1e9 / 2.5e8 = 4, doubled 29 times to 2^31.
+    #[test]
+    fn kernel_ratecfg_matches_the_kernel_loop() {
+        assert_eq!(kernel_ratecfg(250_000_000), (1 << 31, 29));
+        // 10 gbit: 1e9 << 32 / 1.25e9 = 3_435_973_836 (bit 31 set).
+        assert_eq!(kernel_ratecfg(1_250_000_000), (3_435_973_836, 32));
+        assert_eq!(kernel_ratecfg(0), (1, 0));
+        // 1514 bytes at 2 gbit: 1514 * 2^31 >> 29 = 6056 ns.
+        assert_eq!(kernel_l2t_ns(250_000_000, 1514), 6056);
+    }
+
+    /// The values a live 6.12 kernel dumped for buckets nlink sent in
+    /// bytes (#TBD). At 1 mbit the round trip is exact, which is why a
+    /// 1 mbit-only test never saw the drift.
+    #[test]
+    fn tbf_bucket_round_trip_matches_the_kernel_dump() {
+        for &(rate, bytes, dumped) in &[
+            (125_000u64, 32_768u32, 32_768u32),
+            (375_000, 32_768, 32_767),
+            (375_000, 10_000, 9_999),
+            (64_000, 10_000, 9_999),
+            (1_250_000_000, 32_768, 32_719),
+            (1_250_000_000, 10_000, 9_920),
+            (250_000_000, 1_514, 1_504),
+        ] {
+            assert_eq!(
+                tbf_bucket_round_trip(rate, bytes),
+                dumped,
+                "rate={rate} bytes={bytes}"
             );
         }
     }

@@ -399,6 +399,12 @@ impl DeclaredLinkType {
 }
 
 /// Link state (up or down).
+///
+/// The default is [`Unchanged`](Self::Unchanged), as for a link declared
+/// through [`LinkBuilder`] without `.up()` or `.down()`. It used to be
+/// `Down`, which is what serde filled in for a JSON/YAML link that omits
+/// `state` — so declaring only a NIC's MTU in a document took the NIC
+/// down.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
@@ -408,9 +414,9 @@ pub enum LinkState {
     /// Interface should be up.
     Up,
     /// Interface should be down.
-    #[default]
     Down,
     /// Don't change the state.
+    #[default]
     Unchanged,
 }
 
@@ -1201,6 +1207,18 @@ impl DeclaredRouteType {
     fn is_unicast(&self) -> bool {
         matches!(self, Self::Unicast)
     }
+
+    /// The `rtm_type` this declares — what `apply` sends and the diff
+    /// compares the dump against.
+    pub(crate) fn kernel_type(self) -> crate::netlink::types::route::RouteType {
+        use crate::netlink::types::route::RouteType;
+        match self {
+            Self::Unicast => RouteType::Unicast,
+            Self::Blackhole => RouteType::Blackhole,
+            Self::Unreachable => RouteType::Unreachable,
+            Self::Prohibit => RouteType::Prohibit,
+        }
+    }
 }
 
 /// Error parsing a route.
@@ -1749,8 +1767,10 @@ pub enum DeclaredQdiscType {
         rate_bps: u64,
         /// Bucket size in bytes (`TbfConfig::burst`).
         burst_bytes: u32,
-        /// Queue limit in bytes (`TbfConfig::limit`); `None` leaves the
-        /// kernel default.
+        /// Queue limit in bytes (`TbfConfig::limit`). **Required** — there
+        /// is no kernel default: a TBF without one has no queue and drops
+        /// every packet, so applying a declaration that leaves this `None`
+        /// is an error. Set it with [`QdiscBuilder::limit_bytes`].
         limit_bytes: Option<u32>,
         /// Peak rate in **bytes** per second (`TbfConfig::peakrate`),
         /// the ceiling a burst may drain at. Requires `mtu` to be
@@ -2073,6 +2093,10 @@ impl QdiscBuilder {
     ///
     /// Before 0.28 this reached netem only, which left fq_codel and sfq
     /// unconfigurable through the builder entirely (#361).
+    ///
+    /// sfq caps its limit at 127 × 128 = 16256 packets (`sfq_change()`,
+    /// default depth times default flows); the diff compares against the
+    /// capped value, so declaring more installs 16256.
     pub fn limit(mut self, packets: u32) -> Self {
         match &mut self.qdisc_type {
             Some(DeclaredQdiscType::Netem { limit, .. })
@@ -2123,6 +2147,9 @@ impl QdiscBuilder {
 
     /// Set the bytes dequeued per round — fq_codel's and sfq's
     /// `quantum`, which mean the same thing. Added in 0.28 (#361).
+    ///
+    /// fq_codel raises anything below 256 to 256 (`fq_codel_change()`), and
+    /// the diff compares against that, so declaring less installs 256.
     pub fn quantum(mut self, bytes: u32) -> Self {
         match &mut self.qdisc_type {
             Some(DeclaredQdiscType::FqCodel { quantum, .. })
@@ -2195,6 +2222,11 @@ impl QdiscBuilder {
     }
 
     /// Set HTB default class.
+    ///
+    /// Fixed for the qdisc's lifetime: the kernel's htb has no change
+    /// operation, so `apply` refuses to edit it on a live HTB root
+    /// (`Error::NotSupported`) rather than delete the root and every class
+    /// and filter under it. Delete the qdisc yourself to change it.
     pub fn default_class(mut self, class: u32) -> Self {
         if let Some(DeclaredQdiscType::Htb { default_class }) = &mut self.qdisc_type {
             *default_class = class;
@@ -2225,6 +2257,9 @@ impl QdiscBuilder {
     /// `100_000_000` for 100 Mbit/s got 800 Mbit/s, silently, the exact
     /// bug the `Rate` newtype exists to make a compile error.
     ///
+    /// Follow it with [`limit_bytes`](Self::limit_bytes): a TBF needs a
+    /// queue limit, and applying one without is an error.
+    ///
     /// ```
     /// use nlink::netlink::config::NetworkConfig;
     /// use nlink::{Bytes, Rate};
@@ -2245,8 +2280,10 @@ impl QdiscBuilder {
         self
     }
 
-    /// Set the TBF queue limit in bytes (`TbfConfig::limit`). No-op for
-    /// other kinds; netem's packet limit is [`QdiscBuilder::limit`].
+    /// Set the TBF queue limit in bytes (`TbfConfig::limit`). Required for
+    /// a TBF: the kernel gives one without a limit no queue, so it drops
+    /// every packet, and `apply` refuses it as tc(8) does. No-op for other
+    /// kinds; netem's packet limit is [`QdiscBuilder::limit`].
     pub fn limit_bytes(mut self, limit: crate::util::Bytes) -> Self {
         if let Some(DeclaredQdiscType::Tbf { limit_bytes, .. }) = &mut self.qdisc_type {
             *limit_bytes = Some(limit.as_u32_saturating());
@@ -3273,6 +3310,20 @@ mod serde_roundtrip_tests {
         assert_eq!(cfg.addresses().len(), 1);
         assert_eq!(cfg.routes().len(), 1);
         assert_eq!(cfg.links()[1].name(), "veth0");
+    }
+
+    /// A link that does not mention `state` is left as it is — what the
+    /// builder does — not taken down. Declaring a physical NIC's MTU in
+    /// JSON used to take the NIC down.
+    #[test]
+    fn a_link_without_a_state_is_left_alone() {
+        let cfg = NetworkConfig::from_json_str(
+            r#"{"links":[{"name":"eth0","link-type":"physical","mtu":9000}]}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.links()[0].state(), LinkState::Unchanged);
+        let built = NetworkConfig::new().link("eth0", |l| l.mtu(9000));
+        assert_eq!(built.links()[0].state(), cfg.links()[0].state());
     }
 
     #[test]

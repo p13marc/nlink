@@ -8,7 +8,7 @@ use super::{
     diff::{ConfigDiff, DiffOptions, LinkChanges, compute_diff_with_options},
     types::{
         BondMode, DeclaredAddress, DeclaredLink, DeclaredLinkType, DeclaredQdisc,
-        DeclaredQdiscType, DeclaredRoute, DeclaredRouteType, MacvlanMode, NetworkConfig,
+        DeclaredQdiscType, DeclaredRoute, MacvlanMode, NetworkConfig,
         QdiscParent,
     },
 };
@@ -265,6 +265,33 @@ pub async fn apply_diff(
         }
     }
 
+    // 2b. Re-assert declared bridge MTUs the port changes above moved.
+    //     `br_mtu_auto_adjust()` sets a bridge to its smallest port's MTU
+    //     when a port joins or leaves, unless the MTU was set through
+    //     RTM_SETLINK — which this is, so it also sticks from now on.
+    if !options.dry_run && !diff.bridge_mtus.is_empty() {
+        let live = conn.get_links().await?;
+        for (name, mtu) in &diff.bridge_mtus {
+            let drifted = live
+                .iter()
+                .find(|l| l.name.as_deref() == Some(name.as_str()))
+                .is_some_and(|l| l.mtu != Some(*mtu));
+            if !drifted {
+                continue;
+            }
+            match conn.set_link_mtu(name.as_str(), *mtu).await {
+                Ok(()) => result
+                    .summary
+                    .push(format!("Restored bridge {name} mtu={mtu} after its ports changed")),
+                Err(e) if options.continue_on_error => result.errors.push(ApplyError {
+                    operation: format!("restore bridge {name} mtu={mtu}"),
+                    error: e,
+                }),
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     // 3. Add addresses
     for addr in &diff.addresses_to_add {
         let op = format!(
@@ -282,6 +309,15 @@ pub async fn apply_diff(
                         addr.address, addr.prefix_len, addr.dev
                     ));
                     result.changes_made += 1;
+                }
+                // A re-add the diff scheduled because the link change was
+                // expected to flush it, where the kernel kept it after all
+                // (`keep_addr_on_down`): the state we wanted, not a change.
+                Err(e) if e.is_already_exists() => {
+                    result.summary.push(format!(
+                        "Address {}/{} on {} already present",
+                        addr.address, addr.prefix_len, addr.dev
+                    ));
                 }
                 Err(e) => {
                     if options.continue_on_error {
@@ -448,6 +484,15 @@ pub async fn apply_diff(
                     ));
                     result.changes_made += 1;
                 }
+                // Gone before we got to it — an IPv6 address the link
+                // change flushed, say. The state we wanted, as for a route
+                // (#335): not a change we made, and not an error.
+                Err(e) if e.is_not_found() || e.errno() == Some(libc::EADDRNOTAVAIL) => {
+                    result.summary.push(format!(
+                        "Address {}/{} on {} already absent",
+                        addr.address, addr.prefix_len, addr.dev
+                    ));
+                }
                 Err(e) => {
                     if options.continue_on_error {
                         result.errors.push(ApplyError {
@@ -469,7 +514,34 @@ pub async fn apply_diff(
 // Helper functions for applying individual changes
 // ============================================================================
 
+/// Refuse a declared MAC on a link kind that has no hardware address.
+///
+/// ovpn and netkit in L3 mode (netkit's default) are `ARPHRD_NONE`
+/// devices: the kernel refuses `IFLA_ADDRESS` on them (netkit answers a
+/// bare EOPNOTSUPP), and if the address were dropped instead the diff
+/// would ask for it on every apply. Say which knob is wrong instead.
+fn check_declared_address(link: &DeclaredLink) -> Result<()> {
+    if link.address.is_none() {
+        return Ok(());
+    }
+    let reason = match &link.link_type {
+        DeclaredLinkType::Ovpn => "an ovpn link is an L3 device with no hardware address",
+        DeclaredLinkType::Netkit { mode, .. }
+            if *mode != Some(crate::netlink::link::NetkitMode::L2) =>
+        {
+            "a netkit link in L3 mode (the default) has no hardware address; \
+             declare .netkit_mode(NetkitMode::L2) to give it one"
+        }
+        _ => return Ok(()),
+    };
+    Err(Error::InvalidMessage(format!(
+        "link {}: a MAC address is declared, but {reason}",
+        link.name
+    )))
+}
+
 async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()> {
+    check_declared_address(link)?;
     match &link.link_type {
         DeclaredLinkType::Dummy => {
             let mut config = DummyLink::new(&link.name);
@@ -623,6 +695,9 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             if let Some(mtu) = link.mtu {
                 config = config.mtu(mtu);
             }
+            if let Some(addr) = link.address {
+                config = config.address(addr);
+            }
             conn.add_link(config).await?;
         }
         DeclaredLinkType::Ovpn => {
@@ -659,6 +734,9 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
             if let Some(mtu) = link.mtu {
                 config = config.mtu(mtu);
             }
+            if let Some(addr) = link.address {
+                config = config.address(addr);
+            }
             conn.add_link(config).await?;
         }
         DeclaredLinkType::Physical => {
@@ -667,20 +745,34 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
         }
     }
 
-    // Set interface up if requested
-    if link.state == super::types::LinkState::Up {
-        conn.set_link_up(&link.name).await?;
+    // Enslave before bringing up: a bond refuses a port that is already
+    // up (see `enslave`).
+    if let Some(master) = &link.master {
+        enslave(conn, &link.name, master).await?;
     }
 
-    // Set master if requested
-    if let Some(master) = &link.master {
-        conn.set_link_master(&link.name, master).await?;
+    match link.state {
+        super::types::LinkState::Up => conn.set_link_up(&link.name).await?,
+        // Created down, but a bond opens the port it enslaves.
+        super::types::LinkState::Down if link.master.is_some() => {
+            conn.set_link_down(&link.name).await?;
+        }
+        _ => {}
     }
 
     Ok(())
 }
 
 async fn modify_link(conn: &Connection<Route>, name: &str, changes: &LinkChanges) -> Result<()> {
+    // Master changes first: enslaving to a bond needs the port down, and
+    // a bond closes the port it releases, so the declared up/down state
+    // is only settled after them.
+    if let Some(master) = &changes.set_master {
+        enslave(conn, name, master).await?;
+    }
+    if changes.unset_master {
+        conn.set_link_nomaster(name).await?;
+    }
     if changes.set_up {
         conn.set_link_up(name).await?;
     }
@@ -693,13 +785,32 @@ async fn modify_link(conn: &Connection<Route>, name: &str, changes: &LinkChanges
     if let Some(address) = changes.set_address {
         conn.set_link_address(name, address).await?;
     }
-    if let Some(master) = &changes.set_master {
-        conn.set_link_master(name, master).await?;
-    }
-    if changes.unset_master {
-        conn.set_link_nomaster(name).await?;
-    }
     Ok(())
+}
+
+/// Make `master` the master of `name`.
+///
+/// A bond refuses a port that is up — `bond_enslave()` (drivers/net/
+/// bonding/bond_main.c) answers EPERM, "Device can not be enslaved while
+/// up" — and opens the port itself once it is enslaved. `create_link`
+/// used to bring a link up before enslaving it, so every bond port
+/// declared `.up()` failed the apply, and so did moving an up link into
+/// a bond. For a bond master the port goes down first, as ifenslave and
+/// systemd-networkd do; other masters take an up port as it is.
+async fn enslave(conn: &Connection<Route>, name: &str, master: &str) -> Result<()> {
+    let master_is_bond = conn
+        .get_link_by_name(master)
+        .await?
+        .is_some_and(|m| m.kind() == Some("bond"));
+    if master_is_bond
+        && conn
+            .get_link_by_name(name)
+            .await?
+            .is_some_and(|port| port.is_up())
+    {
+        conn.set_link_down(name).await?;
+    }
+    conn.set_link_master(name, master).await
 }
 
 async fn add_address(conn: &Connection<Route>, addr: &DeclaredAddress) -> Result<()> {
@@ -740,19 +851,8 @@ async fn add_route(conn: &Connection<Route>, route: &DeclaredRoute) -> Result<()
                 config = config.table(table);
             }
 
-            // Set route type
-            config = match route.route_type {
-                DeclaredRouteType::Unicast => config,
-                DeclaredRouteType::Blackhole => {
-                    config.route_type(crate::netlink::types::route::RouteType::Blackhole)
-                }
-                DeclaredRouteType::Unreachable => {
-                    config.route_type(crate::netlink::types::route::RouteType::Unreachable)
-                }
-                DeclaredRouteType::Prohibit => {
-                    config.route_type(crate::netlink::types::route::RouteType::Prohibit)
-                }
-            };
+            // Set route type — the same mapping the diff compares with.
+            config = config.route_type(route.route_type.kernel_type());
 
             // Plan 207d H3 — use NLM_F_REPLACE so a change to
             // gateway/dev/metric on the same `(dst, prefix, table)`
@@ -781,18 +881,7 @@ async fn add_route(conn: &Connection<Route>, route: &DeclaredRoute) -> Result<()
                 config = config.table(table);
             }
 
-            config = match route.route_type {
-                DeclaredRouteType::Unicast => config,
-                DeclaredRouteType::Blackhole => {
-                    config.route_type(crate::netlink::types::route::RouteType::Blackhole)
-                }
-                DeclaredRouteType::Unreachable => {
-                    config.route_type(crate::netlink::types::route::RouteType::Unreachable)
-                }
-                DeclaredRouteType::Prohibit => {
-                    config.route_type(crate::netlink::types::route::RouteType::Prohibit)
-                }
-            };
+            config = config.route_type(route.route_type.kernel_type());
 
             // Plan 207d H3 — use NLM_F_REPLACE so a change to
             // gateway/dev/metric on the same `(dst, prefix, table)`
@@ -938,6 +1027,10 @@ async fn replace_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Resul
             }
             return add_qdisc(conn, qdisc).await;
         }
+        DeclaredQdiscType::Htb { .. } => {
+            let cfg = qdisc.qdisc_type.htb_config().expect("matched the Htb arm");
+            refuse_htb_change_in_place(conn, &qdisc.dev, &cfg).await?;
+        }
         _ => {}
     }
 
@@ -957,6 +1050,49 @@ async fn replace_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Resul
         }
         other => other,
     }
+}
+
+/// Refuse a declared HTB root that would replace a live HTB root in place.
+///
+/// The diff only asks for that when the declared HTB differs from the
+/// live one — in practice its `default_class`. But `sch_htb` has no
+/// `Qdisc_ops.change`, so a same-kind replace is `qdisc_change()` →
+/// EINVAL, "Change operation not supported by specified qdisc". The only
+/// way to a different `default` is delete + add, and deleting an HTB root
+/// deletes every class, leaf and filter under it — a whole shaping tree
+/// this config does not describe, since `NetworkConfig` declares only the
+/// root qdisc. That is not a side effect to take implicitly, unlike sfq
+/// (whose del+add fallback loses nothing but the qdisc itself). So say
+/// what cannot change and what to do, rather than surface the kernel's
+/// bare EINVAL on every apply.
+///
+/// A live root of another kind is fine: replacing it creates the HTB and
+/// grafts it, no change op involved.
+async fn refuse_htb_change_in_place(
+    conn: &Connection<Route>,
+    dev: &str,
+    declared: &crate::netlink::tc::HtbQdiscConfig,
+) -> Result<()> {
+    use crate::netlink::tc_options::QdiscOptions;
+
+    let live = conn.get_qdiscs_by_name(dev).await?;
+    let Some(root) = live.iter().find(|q| q.is_root() && q.kind() == Some("htb")) else {
+        return Ok(());
+    };
+    let live_params = match root.options() {
+        Some(QdiscOptions::Htb(opts)) => {
+            format!("default_class {:#x}, r2q {}", opts.default_class, opts.rate2quantum)
+        }
+        _ => "unreadable options".to_string(),
+    };
+    Err(Error::NotSupported(format!(
+        "htb on {dev}: the live HTB root ({live_params}) cannot be changed in place to the \
+         declared one (default_class {:#x}, r2q {}). The kernel's htb has no change \
+         operation, so the only way is to delete the root qdisc, which deletes every class \
+         and filter under it; nlink will not do that implicitly. Delete it \
+         (Connection::del_qdisc) and apply again.",
+        declared.default_class, declared.r2q
+    )))
 }
 
 /// True for kinds whose `Qdisc_ops.change` is NULL, so the kernel
@@ -1041,5 +1177,56 @@ fn convert_bond_mode(mode: BondMode) -> crate::netlink::link::BondMode {
         BondMode::Ieee802_3ad => crate::netlink::link::BondMode::Lacp,
         BondMode::BalanceTlb => crate::netlink::link::BondMode::BalanceTlb,
         BondMode::BalanceAlb => crate::netlink::link::BondMode::BalanceAlb,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::netlink::config::types::LinkState;
+
+    fn link(link_type: DeclaredLinkType, address: Option<[u8; 6]>) -> DeclaredLink {
+        DeclaredLink {
+            name: "l0".into(),
+            link_type,
+            state: LinkState::Unchanged,
+            mtu: None,
+            master: None,
+            address,
+        }
+    }
+
+    fn netkit(mode: Option<crate::netlink::link::NetkitMode>) -> DeclaredLinkType {
+        DeclaredLinkType::Netkit {
+            peer: "l1".into(),
+            mode,
+            primary_policy: None,
+            peer_policy: None,
+            scrub: None,
+            peer_scrub: None,
+        }
+    }
+
+    /// A MAC on a kind with no hardware address is refused by name; on
+    /// any other kind, or with no MAC declared, the check passes.
+    #[test]
+    fn a_mac_on_an_l3_only_kind_is_refused() {
+        use crate::netlink::link::NetkitMode;
+        const MAC: [u8; 6] = [0x02, 0, 0, 0, 0, 1];
+
+        let err = check_declared_address(&link(DeclaredLinkType::Ovpn, Some(MAC)))
+            .expect_err("ovpn has no MAC");
+        assert!(err.to_string().contains("ovpn"), "{err}");
+        for mode in [None, Some(NetkitMode::L3)] {
+            let err = check_declared_address(&link(netkit(mode), Some(MAC)))
+                .expect_err("L3 netkit has no MAC");
+            assert!(err.to_string().contains("L2"), "{err}");
+        }
+
+        let l2 = link(netkit(Some(NetkitMode::L2)), Some(MAC));
+        assert!(check_declared_address(&l2).is_ok());
+        let vrf = link(DeclaredLinkType::Vrf { table: 10 }, Some(MAC));
+        assert!(check_declared_address(&vrf).is_ok());
+        assert!(check_declared_address(&link(DeclaredLinkType::Ovpn, None)).is_ok());
     }
 }

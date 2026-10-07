@@ -622,6 +622,7 @@ async fn declarative_qdisc_knobs_reach_the_kernel() -> Result<()> {
     NetworkConfig::new()
         .qdisc("dummy0", |q| {
             q.tbf(Rate::mbit(1), nlink::Bytes::kib(32))
+                .limit_bytes(nlink::Bytes::kib(64))
                 .peakrate(Rate::mbit(2))
                 .mtu(1600)
         })
