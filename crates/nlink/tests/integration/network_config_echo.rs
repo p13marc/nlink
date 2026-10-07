@@ -248,6 +248,46 @@ async fn link_modifiers_converge() -> nlink::Result<()> {
     nlink::require_modules!("dummy", "bridge", "bonding", "vrf");
 
     let cases = vec![
+        // A bridge's MTU follows its ports unless it was set by the
+        // user, so a declared bridge MTU above a port's has to survive
+        // the port joining.
+        case(
+            "bridge-mtu-above-port",
+            vec![
+                NetworkConfig::new()
+                    .link("br0", |l| l.bridge().mtu(9000).up())
+                    .link("d0", |l| l.dummy().mtu(1500).master("br0").up()),
+            ],
+        ),
+        case(
+            "bridge-mtu-below-port",
+            vec![
+                NetworkConfig::new()
+                    .link("br0", |l| l.bridge().mtu(1400).up())
+                    .link("d0", |l| l.dummy().master("br0").up()),
+            ],
+        ),
+        // The bridge's own default, so setting it at creation changes
+        // nothing and cannot mark it user-set.
+        case(
+            "bridge-mtu-1500-jumbo-port",
+            vec![
+                NetworkConfig::new()
+                    .link("br0", |l| l.bridge().mtu(1500).up())
+                    .link("d0", |l| l.dummy().mtu(9000).master("br0").up()),
+            ],
+        ),
+        // A bridge that already exists with an MTU set at creation (as
+        // `ip link add br0 mtu 9000 type bridge` leaves it) gains a port.
+        case(
+            "existing-bridge-mtu-gains-port",
+            vec![
+                NetworkConfig::new().link("br0", |l| l.bridge().mtu(9000).up()),
+                NetworkConfig::new()
+                    .link("br0", |l| l.bridge().mtu(9000).up())
+                    .link("d0", |l| l.dummy().master("br0").up()),
+            ],
+        ),
         case(
             "existing-link-into-bridge",
             vec![

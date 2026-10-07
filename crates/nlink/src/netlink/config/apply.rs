@@ -265,6 +265,33 @@ pub async fn apply_diff(
         }
     }
 
+    // 2b. Re-assert declared bridge MTUs the port changes above moved.
+    //     `br_mtu_auto_adjust()` sets a bridge to its smallest port's MTU
+    //     when a port joins or leaves, unless the MTU was set through
+    //     RTM_SETLINK — which this is, so it also sticks from now on.
+    if !options.dry_run && !diff.bridge_mtus.is_empty() {
+        let live = conn.get_links().await?;
+        for (name, mtu) in &diff.bridge_mtus {
+            let drifted = live
+                .iter()
+                .find(|l| l.name.as_deref() == Some(name.as_str()))
+                .is_some_and(|l| l.mtu != Some(*mtu));
+            if !drifted {
+                continue;
+            }
+            match conn.set_link_mtu(name.as_str(), *mtu).await {
+                Ok(()) => result
+                    .summary
+                    .push(format!("Restored bridge {name} mtu={mtu} after its ports changed")),
+                Err(e) if options.continue_on_error => result.errors.push(ApplyError {
+                    operation: format!("restore bridge {name} mtu={mtu}"),
+                    error: e,
+                }),
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     // 3. Add addresses
     for addr in &diff.addresses_to_add {
         let op = format!(

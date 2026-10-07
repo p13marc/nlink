@@ -143,6 +143,14 @@ pub struct ConfigDiff {
     /// RA, DHCP and redirect routes are excluded so dynamic and
     /// auto-configured routing is never clobbered.
     pub routes_to_remove: Vec<DeclaredRoute>,
+
+    /// Declared bridge MTUs to re-assert after the link changes, for
+    /// bridges whose ports change in this apply (`br_mtu_auto_adjust`
+    /// moves a bridge's MTU when ports join or leave). Not a change of its
+    /// own — it only exists alongside the port changes that cause it — so
+    /// it is not counted, shown or serialized.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) bridge_mtus: Vec<(String, u32)>,
 }
 
 impl ConfigDiff {
@@ -469,10 +477,21 @@ fn diff_links(
         )
         .collect();
 
+    // Masters whose set of ports this apply changes.
+    let mut port_set_changes: HashSet<&str> = HashSet::new();
+
     for declared in &config.links {
         if let Some(existing) = current.get(declared.name.as_str()) {
             // Link exists, check if it needs modification
             let changes = compute_link_changes(declared, existing, ifindex_to_name, &bonds);
+            if changes.set_master.is_some() || changes.unset_master {
+                port_set_changes.extend(declared.master.as_deref());
+                port_set_changes.extend(
+                    existing
+                        .master()
+                        .and_then(|idx| ifindex_to_name.get(&idx).copied()),
+                );
+            }
             if !changes.is_empty() {
                 diff.links_to_modify.push((declared.name.clone(), changes));
             }
@@ -480,8 +499,28 @@ fn diff_links(
             // Link doesn't exist, needs to be created
             // But only if it's not a physical interface
             if declared.link_type != DeclaredLinkType::Physical {
+                port_set_changes.extend(declared.master.as_deref());
                 diff.links_to_add.push(declared.clone());
             }
+        }
+    }
+
+    // A bridge's MTU follows its ports: `br_add_if()` / `br_del_if()` call
+    // `br_mtu_auto_adjust()`, which sets the bridge to its smallest port's
+    // MTU unless `BROPT_MTU_SET_BY_USER` is set — and only `br_change_mtu()`
+    // (an RTM_SETLINK that changes the MTU) sets it, not the IFLA_MTU a
+    // bridge is created with. So a bridge declared with an MTU and given a
+    // port in the same apply ended up at the port's MTU, and the next diff
+    // reported its own MTU as changed. Every declared bridge MTU whose port
+    // set changes here is re-asserted once the links are done.
+    for declared in &config.links {
+        let Some(mtu) = declared.mtu else { continue };
+        let is_bridge = declared.link_type == DeclaredLinkType::Bridge
+            || current
+                .get(declared.name.as_str())
+                .is_some_and(|l| l.kind() == Some("bridge"));
+        if is_bridge && port_set_changes.contains(declared.name.as_str()) {
+            diff.bridge_mtus.push((declared.name.clone(), mtu));
         }
     }
 
