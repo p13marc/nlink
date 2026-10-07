@@ -14,7 +14,7 @@ each `nlink-` prefixed so it never shadows the system tool it mirrors.
 ## Install
 
 ```toml
-nlink = "0.29"
+nlink = "0.30"
 ```
 
 Feature flags: `sockdiag`, `tuntap`, `output`, `namespace_watcher`,

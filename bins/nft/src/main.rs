@@ -174,6 +174,9 @@ enum AddWhat {
         /// Key type: ipv4_addr, ipv6_addr, ether_addr, inet_service, ifindex, mark.
         #[arg(long, default_value = "ipv4_addr")]
         key_type: String,
+        /// Maximum number of elements; a full set refuses adds (ENFILE).
+        #[arg(long)]
+        size: Option<u32>,
     },
     /// Add elements to a set.
     Element {
@@ -793,11 +796,15 @@ async fn main() -> Result<()> {
                 table,
                 name,
                 key_type,
+                size,
             } => {
                 let family = parse_family(&family)?;
                 let kt = parse_key_type(&key_type)?;
-                conn.add_set(Set::new(&table, &name).family(family).key_type(kt))
-                    .await?;
+                let mut set = Set::new(&table, &name).family(family).key_type(kt);
+                if let Some(size) = size {
+                    set = set.size(size);
+                }
+                conn.add_set(set).await?;
                 eprintln!("Set {name} added");
             }
             AddWhat::Element {
@@ -1001,6 +1008,7 @@ fn parse_ruleset(contents: &str) -> Result<NftablesConfig> {
         name: String,
         key_type: SetKeyType,
         flags: u32,
+        size: Option<u32>,
         elements: Vec<SetElement>,
     }
     /// One table and its declared chains + pre-built rules + sets.
@@ -1090,8 +1098,9 @@ fn parse_ruleset(contents: &str) -> Result<NftablesConfig> {
             }
             ["add", "set", family, table, name, rest @ ..] => {
                 let fam = parse_family(family)?;
-                // `type <keytype>` is required; `flags const` optional.
-                let (mut key_type, mut flags) = (None, 0u32);
+                // `type <keytype>` is required; `flags const` and
+                // `size <n>` optional.
+                let (mut key_type, mut flags, mut size) = (None, 0u32, None);
                 let mut i = 0;
                 while i < rest.len() {
                     match rest[i] {
@@ -1118,6 +1127,11 @@ fn parse_ruleset(contents: &str) -> Result<NftablesConfig> {
                             }
                             i += 2;
                         }
+                        "size" => {
+                            let n = parse_set_size(rest.get(i + 1));
+                            size = Some(n.map_err(|e| loc(e.to_string()))?);
+                            i += 2;
+                        }
                         other => {
                             return Err(loc(format!("unknown set option `{other}`")));
                         }
@@ -1135,6 +1149,7 @@ fn parse_ruleset(contents: &str) -> Result<NftablesConfig> {
                     name: (*name).to_string(),
                     key_type,
                     flags,
+                    size,
                     elements: Vec::new(),
                 });
             }
@@ -1225,10 +1240,15 @@ fn parse_ruleset(contents: &str) -> Result<NftablesConfig> {
                     name,
                     key_type,
                     flags,
+                    size,
                     elements,
                 } = ps;
                 tb = tb.set(name, move |sb| {
-                    sb.key_type(key_type).flags(flags).elements(elements)
+                    let sb = sb.key_type(key_type).flags(flags).elements(elements);
+                    match size {
+                        Some(size) => sb.size(size),
+                        None => sb,
+                    }
                 });
             }
             tb
@@ -1296,15 +1316,24 @@ fn apply_line(txn: Transaction, tokens: &[&str]) -> Result<Transaction> {
         ["add", "set", family, table, name, "type", kt, rest @ ..] => {
             let fam = parse_family(family)?;
             let mut set = Set::new(table, name).family(fam).key_type(parse_key_type(kt)?);
-            match rest {
-                [] => {}
-                ["flags", "const"] | ["flags", "constant"] => set = set.constant(),
-                other => {
-                    return Err(err(format!(
-                        "unexpected set tokens `{}` (only `flags const` is modelled)",
-                        other.join(" ")
-                    )));
-                }
+            let mut rest = rest;
+            while !rest.is_empty() {
+                rest = match rest {
+                    ["flags", "const", tail @ ..] | ["flags", "constant", tail @ ..] => {
+                        set = set.constant();
+                        tail
+                    }
+                    ["size", n, tail @ ..] => {
+                        set = set.size(parse_set_size(Some(n))?);
+                        tail
+                    }
+                    other => {
+                        return Err(err(format!(
+                            "unexpected set tokens `{}` (only `flags const` and `size <n>` are modelled)",
+                            other.join(" ")
+                        )));
+                    }
+                };
             }
             Ok(txn.add_set(set))
         }
@@ -1470,6 +1499,17 @@ fn parse_cidr(s: &str) -> Option<(Ipv4Addr, u8)> {
         Some((addr.parse().ok()?, prefix.parse().ok()?))
     } else {
         Some((s.parse().ok()?, 32))
+    }
+}
+
+/// Strict set `size <n>` value: a positive element count.
+fn parse_set_size(tok: Option<&&str>) -> Result<u32> {
+    let s = tok.ok_or_else(|| rule_err("set option `size` requires a value"))?;
+    match s.parse::<u32>() {
+        Ok(n) if n > 0 => Ok(n),
+        _ => Err(rule_err(&format!(
+            "invalid set size `{s}` (expected a positive element count)"
+        ))),
     }
 }
 
@@ -1769,6 +1809,29 @@ mod tests {
         let nat = &cfg.tables()[1];
         assert_eq!(nat.name(), "nat");
         assert_eq!(nat.chains().len(), 1);
+    }
+
+    #[test]
+    fn parse_ruleset_carries_set_size_and_the_upf_rule() {
+        let cfg = parse_ruleset(
+            "
+            add table ip qos
+            add set ip qos throttled type ipv4_addr size 4096
+            add chain ip qos post hook postrouting priority -150
+            add rule ip qos post ip daddr @throttled meta mark set 0x10/0xff
+            add chain ip qos fwd hook forward priority -150
+            add rule ip qos fwd tcp flags syn / syn,rst tcp option maxseg size set rt mtu
+            ",
+        )
+        .expect("valid ruleset");
+        let qos = &cfg.tables()[0];
+        assert_eq!(qos.sets()[0].size(), Some(4096));
+        assert_eq!(qos.rules().len(), 2);
+
+        for bad in ["size", "size 0", "size lots"] {
+            let spec = format!("add table ip q\nadd set ip q s type ipv4_addr {bad}\n");
+            assert!(parse_ruleset(&spec).is_err(), "`{bad}` should be rejected");
+        }
     }
 
     #[test]

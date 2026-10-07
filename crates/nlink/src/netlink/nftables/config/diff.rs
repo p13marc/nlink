@@ -238,6 +238,14 @@ pub struct NftablesDiff {
     pub sets_to_add: Vec<(String, Family, DeclaredSet)>,
     /// Sets to delete — (table, family, name).
     pub sets_to_delete: Vec<(String, Family, String)>,
+    /// Sets whose declared size differs from the kernel's — (owning table,
+    /// owning family, set). Applied in place (`NFT_MSG_NEWSET` without
+    /// `NLM_F_EXCL`, kernel 6.5+), keeping the set's elements and the
+    /// rules bound to it, in a batch [`apply`](Self::apply) commits ahead
+    /// of everything else: the kernel checks element adds against the
+    /// size the set has *before* the commit, so a grown set could not
+    /// take its new elements in the same batch.
+    pub sets_to_resize: Vec<(String, Family, DeclaredSet)>,
     /// Set elements to add — (table, family, set, elements). The
     /// declared keys not yet present in the kernel set.
     pub set_elements_to_add: Vec<(String, Family, String, Vec<SetElement>)>,
@@ -262,6 +270,7 @@ impl NftablesDiff {
             && self.flowtables_to_delete.is_empty()
             && self.sets_to_add.is_empty()
             && self.sets_to_delete.is_empty()
+            && self.sets_to_resize.is_empty()
             && self.set_elements_to_add.is_empty()
             && self.set_elements_to_remove.is_empty()
     }
@@ -281,6 +290,7 @@ impl NftablesDiff {
             + self.flowtables_to_delete.len()
             + self.sets_to_add.len()
             + self.sets_to_delete.len()
+            + self.sets_to_resize.len()
             + self.set_elements_to_add.len()
             + self.set_elements_to_remove.len()
     }
@@ -364,6 +374,13 @@ impl NftablesDiff {
         for (tbl, fam, name) in &self.sets_to_delete {
             lines.push(format!("- set {fam:?} {tbl}/{name}"));
         }
+        for (tbl, fam, s) in &self.sets_to_resize {
+            lines.push(format!(
+                "~ set {fam:?} {tbl}/{} (size={})",
+                s.name(),
+                s.size().map_or_else(|| "-".to_string(), |n| n.to_string()),
+            ));
+        }
         for (tbl, fam, set, elems) in &self.set_elements_to_add {
             lines.push(format!(
                 "+ {} element{} {fam:?} {tbl}/{set}",
@@ -439,6 +456,14 @@ fn set_has_drifted(declared: &DeclaredSet, current: &SetInfo) -> bool {
     declared.key_type().type_id() != current.key_type
         || declared.key_type().len() != current.key_len
         || declared.flags() != current.flags
+}
+
+/// Has a declared set's size drifted? Unlike the key and flags, a size
+/// can be changed in place, so this is reported separately. An
+/// undeclared size is not a claim: the kernel gives every set a `dynset`
+/// writes to a size of 65535, and that is not the config's business.
+fn set_size_has_drifted(declared: &DeclaredSet, current: &SetInfo) -> bool {
+    declared.size().is_some_and(|size| current.size != Some(size))
 }
 
 /// Options controlling [`NftablesConfig::diff_with_options`].
@@ -939,6 +964,15 @@ impl NftablesConfig {
                     }
                     continue;
                 }
+                if let Some(current) = current_set
+                    && set_size_has_drifted(s, current)
+                {
+                    diff.sets_to_resize.push((
+                        declared.name().to_string(),
+                        declared.family(),
+                        s.clone(),
+                    ));
+                }
                 if current_set_names.contains(s.name()) {
                     // Set exists on both sides → element-level diff.
                     // Read the kernel's current elements and compute
@@ -1405,6 +1439,7 @@ mod tests {
             key_type: key_type.type_id(),
             key_len: key_type.len(),
             handle: 1,
+            size: None,
         }
     }
 
@@ -1413,8 +1448,42 @@ mod tests {
             name: "s".to_string(),
             key_type,
             flags,
+            size: None,
             elements: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_declared_size_drifts_only_against_a_different_kernel_size() {
+        let mut declared = declared_set(SetKeyType::Ipv4Addr, 0);
+        let mut current = set_info(&SetKeyType::Ipv4Addr, 0);
+
+        // No declared size is no claim — not even against the 65535 the
+        // kernel gives a set a `dynset` writes to.
+        current.size = Some(65535);
+        assert!(!set_size_has_drifted(&declared, &current));
+
+        declared.size = Some(1024);
+        assert!(set_size_has_drifted(&declared, &current));
+        current.size = None;
+        assert!(set_size_has_drifted(&declared, &current));
+        current.size = Some(1024);
+        assert!(!set_size_has_drifted(&declared, &current));
+
+        // A size is changed in place, not by recreating the set.
+        current.size = Some(16);
+        assert!(!set_has_drifted(&declared, &current));
+    }
+
+    #[test]
+    fn a_resize_renders_and_counts() {
+        let mut d = NftablesDiff::default();
+        let mut s = declared_set(SetKeyType::Ipv4Addr, 0);
+        s.size = Some(4096);
+        d.sets_to_resize.push(("t".to_string(), Family::Ip, s));
+        assert!(!d.is_empty());
+        assert_eq!(d.change_count(), 1);
+        assert!(d.to_string().contains("~ set Ip t/s (size=4096)"), "{d}");
     }
 
     #[test]

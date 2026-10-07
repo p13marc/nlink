@@ -2477,7 +2477,11 @@ impl SetElement {
 }
 
 /// Set info parsed from a dump.
+///
+/// `#[non_exhaustive]` since 0.30: the kernel keeps adding set attributes
+/// worth reading back, and each one used to be a breaking change here.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SetInfo {
     /// Table name.
     pub table: String,
@@ -2493,6 +2497,10 @@ pub struct SetInfo {
     pub key_len: u32,
     /// Kernel handle.
     pub handle: u64,
+    /// Maximum element count (`NFTA_SET_DESC_SIZE`), if the set has one.
+    /// The kernel can report one nobody declared: a set a `dynset`
+    /// expression writes to is given 65535.
+    pub size: Option<u32>,
 }
 
 /// Convert a prefix length to a network mask of `width` bytes.
