@@ -1842,6 +1842,19 @@ impl Transaction {
         self
     }
 
+    /// Add a message nlink does not model — see [`RawMessage`]. It goes in
+    /// the batch like any other operation and commits atomically with it.
+    pub fn raw(mut self, message: RawMessage) -> Self {
+        let mut builder = MessageBuilder::new(
+            nft_msg_type(message.msg),
+            NLM_F_REQUEST | message.flags,
+        );
+        builder.append(&NfGenMsg::new(message.family));
+        builder.append_bytes(&message.attrs);
+        self.messages.push(builder.finish());
+        self
+    }
+
     /// Commit the transaction atomically. If a builder method recorded an
     /// error, that error is returned and nothing is sent.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "commit"))]
@@ -1850,6 +1863,48 @@ impl Transaction {
             return Err(error);
         }
         conn.send_batch(self.messages).await
+    }
+}
+
+/// An nftables message nlink does not model, for
+/// [`Transaction::raw`]: an `NFT_MSG_*` type, the family, extra
+/// `NLM_F_*` flags (`NLM_F_REQUEST` is always set) and the attribute bytes
+/// that follow the `nfgenmsg` header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RawMessage {
+    /// `NFT_MSG_*` message type (the low byte; the nftables subsystem is
+    /// added).
+    pub msg: u8,
+    /// Address family for the `nfgenmsg` header.
+    pub family: Family,
+    /// `NLM_F_*` flags besides `NLM_F_REQUEST` (e.g. `NLM_F_CREATE`).
+    pub flags: u16,
+    /// Attributes, already encoded.
+    pub attrs: Vec<u8>,
+}
+
+impl RawMessage {
+    /// An empty message of type `msg` for `family`.
+    pub fn new(msg: u8, family: Family) -> Self {
+        Self {
+            msg,
+            family,
+            flags: 0,
+            attrs: Vec::new(),
+        }
+    }
+
+    /// Set the extra `NLM_F_*` flags.
+    pub fn flags(mut self, flags: u16) -> Self {
+        self.flags = flags;
+        self
+    }
+
+    /// Set the attribute bytes.
+    pub fn attrs(mut self, attrs: Vec<u8>) -> Self {
+        self.attrs = attrs;
+        self
     }
 }
 

@@ -1702,41 +1702,91 @@ impl Rule {
     }
 
     /// Match source IPv4 address against a named set (`ip saddr @set`).
+    /// Same as `match_in_set(PacketField::Ip4Saddr, set)`.
     ///
-    /// Prepends the `meta nfproto ipv4` guard the address matchers carry:
+    /// Behind the `meta nfproto ipv4` guard the address matchers carry:
     /// without it, in an `inet` chain an IPv6 packet had bytes 4..8 of its
     /// source address looked up as if they were an IPv4 address.
-    pub fn match_saddr_in_set(mut self, set: &str) -> Self {
-        use super::expr::Expr;
-        self.push_nfproto_ipv4();
-        // Load source IP from network header offset 12
-        self.exprs.push(Expr::Payload {
-            dreg: Register::R0,
-            base: PayloadBase::Network,
-            offset: 12,
-            len: 4,
-        });
+    pub fn match_saddr_in_set(self, set: &str) -> Self {
+        self.match_in_set(PacketField::Ip4Saddr, set)
+    }
+
+    /// Match destination IPv4 address against a named set
+    /// (`ip daddr @set`). Same as `match_in_set(PacketField::Ip4Daddr, set)`.
+    pub fn match_daddr_in_set(self, set: &str) -> Self {
+        self.match_in_set(PacketField::Ip4Daddr, set)
+    }
+
+    /// Match `field` against a named set: `<field> @<set>` — `ip6 saddr @s`,
+    /// `tcp dport @ports`, `meta mark @marks`, … The set's key type must be
+    /// `field.key_type()`.
+    pub fn match_in_set(mut self, field: PacketField, set: &str) -> Self {
+        self.push_field_load(field);
         self.exprs
             .push(super::expr::LookupExpr::new(set, Register::R0).into());
         self
     }
 
-    /// Match destination IPv4 address against a named set
-    /// (`ip daddr @set`), behind the same `meta nfproto ipv4` guard as
-    /// [`match_saddr_in_set`](Self::match_saddr_in_set).
-    pub fn match_daddr_in_set(mut self, set: &str) -> Self {
-        use super::expr::Expr;
-        self.push_nfproto_ipv4();
-        // Load destination IP from network header offset 16
-        self.exprs.push(Expr::Payload {
-            dreg: Register::R0,
-            base: PayloadBase::Network,
-            offset: 16,
-            len: 4,
-        });
-        self.exprs
-            .push(super::expr::LookupExpr::new(set, Register::R0).into());
+    /// Match `field` when it is *not* in a named set: `<field> != @<set>` —
+    /// iptables `-m set ! --match-set`. Packets that fail the field's
+    /// protocol guard (an IPv6 packet, for an IPv4 field) do not match.
+    pub fn match_not_in_set(mut self, field: PacketField, set: &str) -> Self {
+        self.push_field_load(field);
+        self.exprs.push(
+            super::expr::LookupExpr::new(set, Register::R0)
+                .invert()
+                .into(),
+        );
         self
+    }
+
+    /// Load `field` into `R0` behind the protocol guard `nft` emits for it.
+    pub(crate) fn push_field_load(&mut self, field: PacketField) {
+        let payload = |base, offset, len| Expr::Payload {
+            dreg: Register::R0,
+            base,
+            offset,
+            len,
+        };
+        let load = match field {
+            PacketField::Ip4Saddr | PacketField::Ip4Daddr => {
+                self.push_nfproto_ipv4();
+                let offset = if field == PacketField::Ip4Saddr { 12 } else { 16 };
+                payload(PayloadBase::Network, offset, 4)
+            }
+            PacketField::Ip6Saddr | PacketField::Ip6Daddr => {
+                self.push_nfproto_ipv6();
+                let offset = if field == PacketField::Ip6Saddr { 8 } else { 24 };
+                payload(PayloadBase::Network, offset, 16)
+            }
+            PacketField::TcpSport | PacketField::TcpDport => {
+                self.push_meta_eq(MetaKey::L4Proto, IPPROTO_TCP);
+                let offset = if field == PacketField::TcpSport { 0 } else { 2 };
+                payload(PayloadBase::Transport, offset, 2)
+            }
+            PacketField::UdpSport | PacketField::UdpDport => {
+                self.push_meta_eq(MetaKey::L4Proto, IPPROTO_UDP);
+                let offset = if field == PacketField::UdpSport { 0 } else { 2 };
+                payload(PayloadBase::Transport, offset, 2)
+            }
+            PacketField::Mark => Expr::Meta {
+                dreg: Register::R0,
+                key: MetaKey::Mark,
+            },
+            PacketField::Iif => Expr::Meta {
+                dreg: Register::R0,
+                key: MetaKey::Iif,
+            },
+            PacketField::Oif => Expr::Meta {
+                dreg: Register::R0,
+                key: MetaKey::Oif,
+            },
+            PacketField::L4Proto => Expr::Meta {
+                dreg: Register::R0,
+                key: MetaKey::L4Proto,
+            },
+        };
+        self.exprs.push(load);
     }
 
     /// Match layer-4 protocol (e.g., TCP=6, UDP=17, ICMP=1).
@@ -2392,6 +2442,60 @@ impl SetKeyType {
                 parts.iter().map(|t| t.len().next_multiple_of(4)).sum()
             }
         }
+    }
+}
+
+/// A packet field a rule can look up in a set, map or verdict map — with
+/// the protocol guard `nft` puts in front of it, and the [`SetKeyType`] a
+/// set must have to hold it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum PacketField {
+    /// `ip saddr` (behind `meta nfproto ipv4`).
+    Ip4Saddr,
+    /// `ip daddr`.
+    Ip4Daddr,
+    /// `ip6 saddr` (behind `meta nfproto ipv6`).
+    Ip6Saddr,
+    /// `ip6 daddr`.
+    Ip6Daddr,
+    /// `tcp sport` (behind `meta l4proto tcp`).
+    TcpSport,
+    /// `tcp dport`.
+    TcpDport,
+    /// `udp sport` (behind `meta l4proto udp`).
+    UdpSport,
+    /// `udp dport`.
+    UdpDport,
+    /// `meta mark`.
+    Mark,
+    /// `meta iif` — an interface index, resolved in the rule's netns.
+    Iif,
+    /// `meta oif`.
+    Oif,
+    /// `meta l4proto`.
+    L4Proto,
+}
+
+impl PacketField {
+    /// The key type a set must have to hold this field.
+    pub fn key_type(self) -> SetKeyType {
+        match self {
+            Self::Ip4Saddr | Self::Ip4Daddr => SetKeyType::Ipv4Addr,
+            Self::Ip6Saddr | Self::Ip6Daddr => SetKeyType::Ipv6Addr,
+            Self::TcpSport | Self::TcpDport | Self::UdpSport | Self::UdpDport => {
+                SetKeyType::InetService
+            }
+            Self::Mark => SetKeyType::Mark,
+            Self::Iif | Self::Oif => SetKeyType::IfIndex,
+            Self::L4Proto => SetKeyType::InetProto,
+        }
+    }
+
+    /// Bytes the field occupies in a register.
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(self) -> u32 {
+        self.key_type().len()
     }
 }
 

@@ -15,6 +15,26 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Set lookups by packet field, and an escape hatch.**
+  - `Rule::match_in_set(PacketField, set)` and `match_not_in_set` (`!= @set`,
+    iptables `! --match-set`) for IPv4 and IPv6 addresses, TCP/UDP ports,
+    the mark, `iif`/`oif` and `l4proto` — each behind the guard `nft` puts in
+    front of it. `PacketField::key_type()` names the set key type it needs.
+    `match_saddr_in_set` / `match_daddr_in_set` are now shorthands for it.
+  - `Expr::Raw(RawExpr)` writes an expression nlink does not model (`fib`,
+    `socket`, `notrack`, …) from its name and attribute bytes, with an
+    optional `echo` for the declarative diff and `RawExpr::without_data`
+    for expressions dumped with no data nest. `Transaction::raw(RawMessage)`
+    does the same for whole messages.
+  - `NftablesEvent::{NewSetElements, DelSetElements, NewGen}`: element
+    changes and committed generations, which used to be dropped.
+  - `nlink-nft` rules take `ip|ip6 saddr|daddr [!=] @set` and
+    `tcp|udp sport|dport [!=] @set`.
+
+  Tested on traffic: an IPv6 set matches `::1` and not IPv4, a port set
+  counts member ports only, `!= @set` counts only non-members, and a raw
+  `notrack` really untracks — and its declared rule converges.
+
 - **nftables write statements: `meta mark set`, TCP MSS clamping, set
   size.** Three things `nft` does that nlink could not express, so a
   firewall needing them still had to shell out to `nft`/`iptables`:

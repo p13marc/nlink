@@ -129,6 +129,65 @@ pub enum Expr {
         /// the same owning table as this rule.
         flowtable: String,
     },
+    /// An expression nlink does not model, as raw bytes — see [`RawExpr`].
+    Raw(RawExpr),
+}
+
+/// An expression nlink does not model: its `NFTA_EXPR_NAME` and the raw
+/// `NFTA_EXPR_DATA` payload, written as given. The escape hatch for the
+/// long tail of `nft` expressions (`fib`, `socket`, `tproxy`, `queue`, …).
+///
+/// The declarative diff compares a rule body byte for byte with the
+/// kernel's echo of it. Where the kernel dumps an expression differently
+/// from how it was sent — an attribute filled in, or one it does not echo —
+/// give the dumped payload as [`echo`](Self::echo) and the diff compares
+/// against that instead. An expression the kernel dumps with no data at all
+/// (no `dump` callback, like `notrack`) is [`without_data`](Self::without_data):
+/// an empty data nest is not the same thing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RawExpr {
+    /// Expression name (`"fib"`, `"socket"`, `"notrack"`, …).
+    pub name: String,
+    /// `NFTA_EXPR_DATA` payload — the expression's attributes — or `None`
+    /// for an expression with no data nest at all.
+    pub data: Option<Vec<u8>>,
+    /// The payload the kernel dumps for it, if it differs from `data`.
+    pub echo: Option<Vec<u8>>,
+}
+
+impl RawExpr {
+    /// `name` with the attribute bytes `data` (an empty `data` writes an
+    /// empty nest, as the kernel dumps for `masq`).
+    pub fn new(name: impl Into<String>, data: Vec<u8>) -> Self {
+        Self {
+            name: name.into(),
+            data: Some(data),
+            echo: None,
+        }
+    }
+
+    /// `name` with no `NFTA_EXPR_DATA` nest, for expressions the kernel
+    /// dumps without one (`notrack`).
+    pub fn without_data(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            data: None,
+            echo: None,
+        }
+    }
+
+    /// What the kernel dumps for this expression, when that is not `data`.
+    pub fn echo(mut self, dumped: Vec<u8>) -> Self {
+        self.echo = Some(dumped);
+        self
+    }
+}
+
+impl From<RawExpr> for Expr {
+    fn from(e: RawExpr) -> Self {
+        Expr::Raw(e)
+    }
 }
 
 // The expressions most likely to grow carry a `#[non_exhaustive]` payload
@@ -651,6 +710,18 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             builder.append_attr(NFTA_DATA_VALUE, xor);
             builder.nest_end(xor_nest);
             builder.nest_end(data);
+        }
+        Expr::Raw(RawExpr { name, data, echo }) => {
+            builder.append_attr_str(NFTA_EXPR_NAME, name);
+            let payload = match (form, echo) {
+                (WireForm::Echo, Some(echo)) => Some(echo),
+                _ => data.as_ref(),
+            };
+            if let Some(payload) = payload {
+                let nest = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+                builder.append_bytes(payload);
+                builder.nest_end(nest);
+            }
         }
         Expr::FlowOffload { flowtable } => {
             builder.append_attr_str(NFTA_EXPR_NAME, "flow_offload");
@@ -2393,5 +2464,72 @@ mod decode_tests {
             rule.exprs.as_slice(),
             [Expr::Log(LogExpr { group: Some(3), .. }), Expr::Masquerade(_)]
         ));
+    }
+
+    // ---- set lookups by packet field, and the raw escape hatch.
+
+    #[test]
+    fn match_in_set_loads_the_field_behind_its_guard() {
+        let rule = Rule::new("t", "c").match_in_set(PacketField::Ip6Daddr, "s6");
+        assert_eq!(
+            parse_expressions(&encode(&rule.exprs)),
+            [
+                RuleExpr::Meta {
+                    dreg: Register::R0,
+                    key: MetaKey::NfProto,
+                },
+                RuleExpr::Cmp {
+                    sreg: Register::R0,
+                    op: CmpOp::Eq,
+                    data: vec![10],
+                },
+                RuleExpr::Payload {
+                    dreg: Register::R0,
+                    base: PayloadBase::Network,
+                    offset: 24,
+                    len: 16,
+                },
+                RuleExpr::Lookup {
+                    set: "s6".into(),
+                    sreg: Register::R0,
+                    dreg: None,
+                    invert: false,
+                },
+            ]
+        );
+        let ports = Rule::new("t", "c").match_not_in_set(PacketField::UdpDport, "p");
+        let decoded = parse_expressions(&encode(&ports.exprs));
+        assert_eq!(
+            decoded[2],
+            RuleExpr::Payload {
+                dreg: Register::R0,
+                base: PayloadBase::Transport,
+                offset: 2,
+                len: 2,
+            }
+        );
+        assert!(matches!(&decoded[3], RuleExpr::Lookup { invert: true, .. }));
+        assert_eq!(PacketField::UdpDport.key_type(), SetKeyType::InetService);
+    }
+
+    #[test]
+    fn raw_expressions_write_their_payload_or_no_nest() {
+        let bytes = build_attrs(|b| {
+            b.append_attr_u32_be(NFTA_META_DREG, 1);
+            b.append_attr_u32_be(NFTA_META_KEY, MetaKey::Mark as u32);
+        });
+        // A raw `meta` written from bytes decodes like the typed one.
+        assert_eq!(
+            parse_expressions(&encode(&[RawExpr::new("meta", bytes).into()])),
+            [RuleExpr::Meta {
+                dreg: Register::R0,
+                key: MetaKey::Mark,
+            }]
+        );
+        // `without_data` writes the name and nothing else.
+        let notrack = encode(&[RawExpr::without_data("notrack").into()]);
+        let (_, elem) = AttrIter::new(&notrack).next().unwrap();
+        let attrs: Vec<u16> = AttrIter::new(elem).map(|(t, _)| t).collect();
+        assert_eq!(attrs, [NFTA_EXPR_NAME]);
     }
 }
