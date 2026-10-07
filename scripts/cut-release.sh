@@ -1,61 +1,106 @@
 #!/usr/bin/env bash
-# scripts/cut-release.sh — orchestrate an nlink release cut.
+# scripts/cut-release.sh — cut an nlink release on this Forgejo forge.
 #
-# Walks the Plan 167 sequence end-to-end with confirmation prompts
-# at the irreversible steps. Bakes in the three friction points
-# surfaced during the 0.16 cut (Plan 175):
+# The sequence the 0.27.0–0.29.0 cuts followed by hand, with a
+# confirmation at every irreversible step:
 #
-#   §3.1  `cargo publish -p nlink --dry-run` fails because the
-#         matching `nlink-macros` version isn't on crates.io yet —
-#         skip with an explanatory note instead of pretending to
-#         validate.
-#   §3.2  CHANGELOG `## [Unreleased]` → `## [X.Y.Z] - YYYY-MM-DD`
-#         promotion is otherwise manual + easy to forget.
-#   §3.3  GitHub release body has a 125000-character limit; the
-#         nlink CHANGELOG is bigger. Length-detect + fall back to
-#         a "highlights + link to the full file" template.
-#
-# The script asks for confirmation at every irreversible step
-# (publish + merge + tag-push) — pressing Enter advances, anything
-# else aborts. Designed for a maintainer working alone; no CI
-# automation hooks.
+#   1. Pre-flight: tools, `fj` signed in, clean tree, master == origin/master,
+#      workspace version == X.Y.Z, no tag yet, a non-empty [Unreleased], the
+#      migration guide for a minor release, README in sync.
+#   2. Release branch `release/X.Y.Z` with one commit `X.Y.Z`: CHANGELOG
+#      [Unreleased] promoted to [X.Y.Z] - date (a fresh empty [Unreleased]
+#      above it), plus whatever you edit while the script waits (the
+#      CLAUDE.md "Active work" narrative).
+#   3. `cargo publish -p nlink-macros --dry-run`. Not nlink's: it resolves
+#      nlink-macros X.Y.Z on crates.io, which is not there yet (Plan 175).
+#   4. Push, open the PR "release: X.Y.Z", wait for every check to pass.
+#   5. Merge it — then CHECK master has the release commit. On 2026-10-07
+#      Forgejo printed "Merged" for three PRs that never reached master.
+#   6. IRREVERSIBLE: tag X.Y.Z (bare semver; a `v` tag does not fire
+#      release.yml, #249) on the merge commit and push it. release.yml
+#      creates the Forgejo release and attaches the tarball + SHA256SUMS.
+#   7. IRREVERSIBLE: dispatch publish-crates.yml on the tag. It runs the
+#      semver gate, then publishes nlink-macros, then nlink. It runs on the
+#      `ubuntu-24.04` lane, which can sit Pending for hours: the script
+#      waits for crates.io rather than reading a slow lane as a failure.
+#   8. What is left by hand: the GitHub mirror's release, deleting a
+#      per-cycle `plans/` directory, and anything the run printed.
 #
 # Usage:
-#   ./scripts/cut-release.sh 0.17.0
+#   scripts/cut-release.sh X.Y.Z [--dry-run] [--from N]
 #
-# Pre-conditions:
-#   - clean working tree
-#   - currently on the cycle branch (e.g. `0.17`)
-#   - cargo logged in to crates.io (`cargo login`)
-#   - gh CLI authenticated (`gh auth status`)
+#   --dry-run  Run the read-only checks, show the CHANGELOG promotion as a
+#              diff, and print every command that would change something —
+#              without running any of them. Check failures are reported,
+#              not fatal.
+#   --from N   Resume at phase N (2-7) after an interruption — e.g. a CI
+#              wait you cut short. Phases before N are assumed done.
 #
-# Run from the repo root.
+# Pre-conditions: run from the repo root, on master, with `fj` signed in
+# (`fj whoami`). Publishing itself happens in CI with the repository's
+# CARGO_REGISTRY_TOKEN, so no local `cargo login` is needed.
 
 set -euo pipefail
 
-# ---- arg parsing ----
-
-VERSION="${1:-}"
-if [[ -z "$VERSION" ]]; then
-    echo "usage: $0 <X.Y.Z>" >&2
-    exit 2
-fi
+VERSION=""
+DRY_RUN=0
+FROM=1
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run) DRY_RUN=1 ;;
+        --from) FROM="${2:?--from needs a phase number}"; shift ;;
+        -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
+        *) VERSION="$1" ;;
+    esac
+    shift
+done
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "ERROR: version '$VERSION' is not in X.Y.Z form" >&2
+    echo "usage: $0 <X.Y.Z> [--dry-run] [--from N]" >&2
     exit 2
 fi
-
-# Cycle branch is the major.minor (`0.17` for `0.17.0`); next cycle
-# is `0.<minor+1>` (so cutting 0.17.0 opens 0.18 afterwards).
-CYCLE_BRANCH="${VERSION%.*}"
-NEXT_MINOR=$((${CYCLE_BRANCH##*.} + 1))
-NEXT_CYCLE="${CYCLE_BRANCH%.*}.${NEXT_MINOR}"
+PATCH="${VERSION##*.}"
+BRANCH="release/$VERSION"
+TITLE="release: $VERSION"
+CI_TIMEOUT_SECS="${CI_TIMEOUT_SECS:-14400}"       # 4 h: a lane can sit Pending
+PUBLISH_TIMEOUT_SECS="${PUBLISH_TIMEOUT_SECS:-21600}"
+FAILED_CHECKS=0
 
 # ---- helpers ----
 
+step() {
+    echo
+    echo "==========================================================================="
+    echo "  $1"
+    echo "==========================================================================="
+}
+
+fail() {
+    echo "ERROR: $*" >&2
+    if (( DRY_RUN )); then
+        FAILED_CHECKS=$((FAILED_CHECKS + 1))
+    else
+        exit 1
+    fi
+}
+
+# Run a command that changes something; in --dry-run, only print it.
+run() {
+    if (( DRY_RUN )); then
+        printf '  [dry-run] would run:'
+        printf ' %q' "$@"
+        echo
+    else
+        "$@"
+    fi
+}
+
 confirm() {
-    # Read from /dev/tty so piping doesn't auto-confirm.
     local msg=$1
+    if (( DRY_RUN )); then
+        echo "  [dry-run] would ask: $msg"
+        return
+    fi
+    # Read from /dev/tty so piping doesn't auto-confirm.
     printf '\n[CONFIRM] %s — press Enter to continue, anything else to abort: ' "$msg"
     local reply
     read -r reply </dev/tty
@@ -65,265 +110,250 @@ confirm() {
     fi
 }
 
-step() {
-    echo
-    echo "==========================================================================="
-    echo "  $1"
-    echo "==========================================================================="
+phase() { (( $1 >= FROM )); }
+
+# fj decorates its output with Unicode isolates (U+2068/U+2069) and style
+# markers, even in a pipe; strip them so it can be grepped.
+fj_plain() {
+    fj --style minimal "$@" 2>&1 | sed -e 's/\xe2\x81\xa8//g' -e 's/\xe2\x81\xa9//g' -e 's/STYLE()//g'
 }
 
-check_clean_tree() {
+previous_release() {
+    git tag --list '[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname \
+        | grep -vx "$VERSION" | head -1
+}
+
+# The open PR for the release branch, by its title.
+release_pr_number() {
+    fj_plain pr search "$TITLE" | grep -oE '#[0-9]+' | head -1 | tr -d '#'
+}
+
+# ---- phase 1: pre-flight ----
+
+preflight() {
+    step "Phase 1 — Pre-flight checks"
+    local tool
+    for tool in git cargo fj python3; do
+        command -v "$tool" >/dev/null || fail "'$tool' is not installed"
+    done
+    fj_plain whoami | grep -q "signed into" || fail "fj is not signed in (run 'fj auth login')"
+
     if ! git diff --quiet HEAD || [[ -n "$(git status --porcelain)" ]]; then
-        echo "ERROR: working tree is not clean. Commit or stash first." >&2
-        git status --short >&2
-        exit 1
+        fail "working tree is not clean"
     fi
-}
-
-check_on_release_branch() {
+    git fetch -q origin
     local current
     current=$(git rev-parse --abbrev-ref HEAD)
-    if [[ "$current" != "$CYCLE_BRANCH" ]]; then
-        echo "ERROR: expected to be on '$CYCLE_BRANCH' (the $VERSION cycle branch); on '$current'" >&2
-        exit 1
-    fi
-}
+    [[ "$current" == master ]] || fail "on '$current'; a cut starts from master"
+    [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/master)" ]] \
+        || fail "local master is not origin/master (pull first)"
 
-check_cargo_metadata_version() {
-    # Plan 175 §7: the workspace version is bumped manually mid-
-    # cycle; validate the arg matches before we mutate anything.
     local meta_version
     meta_version=$(cargo metadata --no-deps --format-version 1 \
-                   | python3 -c 'import json,sys; d=json.load(sys.stdin); [print(p["version"]) for p in d["packages"] if p["name"]=="nlink"]')
-    if [[ "$meta_version" != "$VERSION" ]]; then
-        echo "ERROR: Cargo.toml says nlink is at $meta_version, but cutting $VERSION." >&2
-        echo "       Bump workspace.package.version in the root Cargo.toml first." >&2
-        exit 1
+        | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(p["version"] for p in d["packages"] if p["name"]=="nlink"))')
+    [[ "$meta_version" == "$VERSION" ]] \
+        || fail "the workspace says nlink $meta_version, not $VERSION (bump both pins in the root Cargo.toml)"
+
+    if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null \
+        || git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1; then
+        fail "tag $VERSION already exists"
     fi
+
+    grep -q '^## \[Unreleased\]$' CHANGELOG.md || fail "CHANGELOG.md has no '## [Unreleased]' line"
+    ! grep -q "^## \[$VERSION\]" CHANGELOG.md || fail "CHANGELOG.md already has '## [$VERSION]'"
+    local unreleased_lines
+    unreleased_lines=$(awk '/^## \[Unreleased\]$/{f=1; next} f && /^## \[/{exit} f && NF' CHANGELOG.md | wc -l)
+    (( unreleased_lines > 0 )) || fail "CHANGELOG.md's [Unreleased] section is empty"
+
+    local prev
+    prev=$(previous_release)
+    if [[ "$PATCH" == 0 && -n "$prev" ]]; then
+        local guide="docs/migration_guide/${prev}-to-${VERSION}.md"
+        [[ -f "$guide" ]] || fail "no migration guide at $guide (every minor release gets one)"
+        grep -q "${prev}-to-${VERSION}.md" docs/migration_guide/README.md \
+            || fail "docs/migration_guide/README.md does not list $guide"
+    fi
+    if [[ -x scripts/check-readme.sh ]]; then
+        scripts/check-readme.sh >/dev/null || fail "scripts/check-readme.sh failed"
+    fi
+
+    echo "Pre-flight: cutting $VERSION (previous release ${prev:-none})."
+    echo
+    echo "REMINDER: hardware-only features (XFRM offload, devlink rate,"
+    echo "          net_shaper) have no CI coverage. Walk the manual checklist"
+    echo "          in docs/release-validation-manual.md before merging this cut."
+    confirm "hardware checklist walked (or skipped on purpose)"
 }
 
-check_cargo_login() {
-    if [[ ! -f "$HOME/.cargo/credentials.toml" ]] && [[ ! -f "$HOME/.cargo/credentials" ]]; then
-        echo "ERROR: not logged in to crates.io. Run 'cargo login' first." >&2
-        exit 1
-    fi
-}
-
-check_gh_auth() {
-    if ! gh auth status >/dev/null 2>&1; then
-        echo "ERROR: gh CLI not authenticated. Run 'gh auth login' first." >&2
-        exit 1
-    fi
-}
+# ---- phase 2: release branch + commit ----
 
 promote_changelog() {
-    local date
-    date=$(date +%Y-%m-%d)
-    # Insert the new version header BELOW the Unreleased line. The
-    # Unreleased section stays at the top (empty) for any post-cut
-    # hotfix entries; its previous contents move under the new
-    # `## [X.Y.Z]` heading.
-    if ! grep -q '^## \[Unreleased\]$' CHANGELOG.md; then
-        echo "ERROR: CHANGELOG.md missing '## [Unreleased]' line" >&2
-        exit 1
-    fi
-    if grep -q "^## \[$VERSION\]" CHANGELOG.md; then
-        echo "ERROR: CHANGELOG.md already has a '## [$VERSION]' section" >&2
-        exit 1
-    fi
-    # Portable sed: write to a tempfile so we don't depend on
-    # GNU sed's -i (macOS sed differs).
-    awk -v v="$VERSION" -v d="$date" '
-        /^## \[Unreleased\]$/ {
-            print
-            print ""
-            print "## [" v "] - " d
-            next
-        }
+    # The [Unreleased] contents move under `## [X.Y.Z] - date`; an empty
+    # [Unreleased] stays on top for the next cycle.
+    local out=$1
+    awk -v v="$VERSION" -v d="$(date +%Y-%m-%d)" '
+        /^## \[Unreleased\]$/ { print; print ""; print "## [" v "] - " d; next }
         { print }
-    ' CHANGELOG.md > CHANGELOG.md.new && mv CHANGELOG.md.new CHANGELOG.md
-    echo "CHANGELOG: promoted [Unreleased] → [$VERSION] - $date"
+    ' CHANGELOG.md > "$out"
 }
 
-push_branch() {
-    git push origin "$CYCLE_BRANCH"
-}
-
-wait_for_ci_green() {
-    local pr_number
-    pr_number=$(gh pr list --head "$CYCLE_BRANCH" --json number --jq '.[0].number')
-    if [[ -z "$pr_number" ]]; then
-        echo "ERROR: no PR open for branch '$CYCLE_BRANCH'. Open one first (draft is fine)." >&2
-        exit 1
+release_commit() {
+    step "Phase 2 — Release branch and the $VERSION commit"
+    local promoted
+    promoted=$(mktemp)
+    promote_changelog "$promoted"
+    diff -u CHANGELOG.md "$promoted" | head -20 || true
+    if (( DRY_RUN )); then
+        rm -f "$promoted"
+        run git switch -c "$BRANCH"
+        echo "  [dry-run] would write the promoted CHANGELOG.md shown above"
+        run git commit -am "$VERSION"
+        return
     fi
-    # Status echoes go to stderr so command substitution captures
-    # ONLY the bare PR number on stdout. The 0.17 cut surfaced this:
-    # without the `>&2` redirect, `PR_NUMBER=$(wait_for_ci_green)`
-    # captured the status text plus the gh-checks tabular output
-    # into the variable, breaking the subsequent `gh pr merge`.
-    echo "Watching CI on PR #$pr_number (Ctrl-C to abort)..." >&2
-    # `gh pr checks --watch` polls; both its progress + the final
-    # tabular pass/fail report belong on stderr from our caller's
-    # perspective. Non-zero exit if any check fails.
-    gh pr checks "$pr_number" --watch >&2
-    echo "All checks green on PR #$pr_number." >&2
-    echo "$pr_number"
+    git switch -c "$BRANCH"
+    mv "$promoted" CHANGELOG.md
+    echo
+    echo "Now update CLAUDE.md's 'Active work' (this cycle shipped, its lessons)"
+    echo "and anything else that belongs in the release commit. Leave the"
+    echo "edits in the working tree; the script commits them with CHANGELOG.md."
+    confirm "release edits done"
+    git --no-pager diff --stat
+    confirm "commit these as '$VERSION'"
+    git commit -qam "$VERSION"
 }
 
-merge_pr() {
-    local pr_number=$1
-    # Mark ready if it's a draft; --merge for a merge commit (matches
-    # the 0.16 cycle's chosen strategy). Squash/rebase strategies are
-    # equally valid — change to --squash/--rebase here if convention
-    # shifts.
-    gh pr ready "$pr_number" 2>/dev/null || true
-    gh pr merge "$pr_number" --merge --subject "$VERSION cycle — release-branch CI green; merging to master for $VERSION cut"
-    git checkout master
-    git pull --ff-only
+# ---- phase 3: publish dry-run ----
+
+publish_dry_run() {
+    step "Phase 3 — Publish dry-run"
+    run cargo publish -p nlink-macros --dry-run
+    echo "Skipping 'cargo publish -p nlink --dry-run': it resolves nlink-macros"
+    echo "$VERSION on crates.io, which is only there after the real publish."
 }
 
-tag_release() {
-    # Repo convention is bare X.Y.Z (no `v` prefix) — matches every
-    # tag from 0.1.0 through 0.15.x. v0.16.0 was a one-off outlier.
-    git tag -a "$VERSION" -m "nlink $VERSION"
-    echo "Tag $VERSION created locally (not yet pushed)."
+# ---- phase 4: PR + CI ----
+
+open_pr_and_wait() {
+    step "Phase 4 — Push, open the PR, wait for CI"
+    run git push -u origin "$BRANCH"
+    if (( DRY_RUN )); then
+        run fj pr create --base master --head "$BRANCH" --body "Release $VERSION." "$TITLE"
+        echo "  [dry-run] would poll 'fj pr status <n>' until every check passes"
+        return
+    fi
+    local pr
+    pr=$(release_pr_number || true)
+    if [[ -z "$pr" ]]; then
+        fj pr create --base master --head "$BRANCH" \
+            --body "Release $VERSION: the CHANGELOG promoted to [$VERSION]. See CHANGELOG.md and docs/migration_guide/." \
+            "$TITLE"
+        pr=$(release_pr_number)
+    fi
+    echo "PR #$pr. Waiting for CI (up to $((CI_TIMEOUT_SECS / 3600)) h; Ctrl-C and --from 4 to resume)."
+    local deadline=$(( $(date +%s) + CI_TIMEOUT_SECS ))
+    while :; do
+        local status
+        status=$(fj_plain pr status "$pr")
+        if grep -qE '(Failure|Error|Cancel)' <<<"$status"; then
+            echo "$status" >&2
+            fail "a check failed on PR #$pr"
+        fi
+        if grep -q ' — ' <<<"$status" && ! grep -qE '^- .*(Pending|Running|Waiting)' <<<"$status" \
+            && grep -qE '^- .*Success' <<<"$status"; then
+            echo "$status"
+            break
+        fi
+        (( $(date +%s) < deadline )) || fail "CI still not green on PR #$pr; resume with --from 4"
+        echo "  $(grep -cE '^- .*(Pending|Running|Waiting)' <<<"$status") check(s) pending..."
+        sleep 60
+    done
 }
 
-wait_for_macros_indexed() {
-    # crates.io index propagation is usually <30s but occasionally
-    # slower. Poll `cargo search` (no auth needed) for up to 5 min.
-    local deadline=$(( $(date +%s) + 300 ))
-    while (( $(date +%s) < deadline )); do
-        if cargo search nlink-macros 2>/dev/null \
-           | grep -qE "^nlink-macros = \"$VERSION\""; then
-            echo "nlink-macros $VERSION indexed on crates.io."
-            return 0
+# ---- phase 5: merge + verify ----
+
+merge_and_verify() {
+    step "Phase 5 — Merge to master, and check it really merged"
+    local pr release_sha
+    release_sha=$(git rev-parse --verify -q "$BRANCH" || echo "<release commit>")
+    pr=$( (( DRY_RUN )) && echo "<n>" || release_pr_number )
+    confirm "merge PR #$pr into master"
+    run fj pr merge "$pr" -M merge -d
+    if (( DRY_RUN )); then
+        echo "  [dry-run] would check that $release_sha is an ancestor of origin/master"
+        return
+    fi
+    local i
+    for i in 1 2 3 4 5 6; do
+        git fetch -q origin
+        if git merge-base --is-ancestor "$release_sha" origin/master; then
+            echo "master has the release commit $release_sha."
+            git switch -q master
+            git merge -q --ff-only origin/master
+            return
         fi
         sleep 10
-        echo "  ... still waiting for nlink-macros $VERSION to appear"
     done
-    echo "ERROR: timed out waiting for nlink-macros $VERSION on crates.io." >&2
-    echo "       Check https://crates.io/crates/nlink-macros manually, then" >&2
-    echo "       run 'cargo publish -p nlink' yourself once it's live." >&2
-    exit 1
+    fail "Forgejo said merged, but origin/master does not contain $release_sha. Re-open the PR from $BRANCH and merge again (see the forgejo-pr-workflow note)."
 }
 
-extract_changelog_section() {
-    # Print the contents of the `## [VERSION]` section, up to (but
-    # not including) the next `## [`.
-    awk -v v="$VERSION" '
-        $0 == "## [" v "]" || $0 ~ "^## \\[" v "\\] " { in_section=1; next }
-        in_section && /^## \[/ { exit }
-        in_section { print }
-    ' CHANGELOG.md
+# ---- phase 6: tag ----
+
+tag_release() {
+    step "Phase 6 — Tag $VERSION (IRREVERSIBLE)"
+    local target
+    target=$( (( DRY_RUN )) && echo "origin/master" || git rev-parse origin/master )
+    confirm "tag $target as $VERSION and push the tag — this fires release.yml"
+    run git tag -a "$VERSION" -m "nlink $VERSION" "$target"
+    run git push origin "refs/tags/$VERSION"
+    echo "release.yml creates the Forgejo release with the tarball and SHA256SUMS."
 }
 
-build_highlights_body() {
-    # Used when the full CHANGELOG section exceeds the GitHub release
-    # body limit. The reader gets a concise heading + a link to the
-    # full file on the freshly-pushed tag.
-    local repo
-    repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
-    cat <<EOF
-# nlink $VERSION
+# ---- phase 7: publish ----
 
-The full CHANGELOG for this release is too long for a GitHub
-release body (limit: 125000 chars). Read it at:
-
-https://github.com/$repo/blob/$VERSION/CHANGELOG.md#$(echo "$VERSION" | tr . -)---$(date +%Y-%m-%d)
-
-## Highlights
-
-$(extract_changelog_section | head -80)
-
-...
-
-(See the full CHANGELOG link above for the rest.)
-EOF
-}
-
-create_github_release() {
-    local body
-    body=$(extract_changelog_section)
-    local max_len=125000
-    if [[ ${#body} -gt $max_len ]]; then
-        echo "CHANGELOG section is ${#body} chars (> $max_len limit); using highlights body."
-        body=$(build_highlights_body)
+publish() {
+    step "Phase 7 — Publish to crates.io (IRREVERSIBLE)"
+    local breaking=no
+    # In 0.x, a minor release is the breaking one (the semver-checks
+    # convention: the first breaking PR of a cycle bumps the minor).
+    [[ "$PATCH" == 0 ]] && breaking=yes
+    confirm "dispatch publish-crates.yml on $VERSION (allow_breaking=$breaking) — publishes nlink-macros, then nlink"
+    run fj actions dispatch publish-crates.yml "$VERSION" -I "allow_breaking=$breaking"
+    if (( DRY_RUN )); then
+        echo "  [dry-run] would wait for nlink $VERSION on crates.io"
+        return
     fi
-    gh release create "$VERSION" \
-        --title "nlink $VERSION" \
-        --notes "$body" \
-        --verify-tag
-}
-
-open_next_branch() {
-    git checkout -b "$NEXT_CYCLE"
-    git push -u origin "$NEXT_CYCLE"
-    echo "Next cycle branch '$NEXT_CYCLE' open. Bump workspace version when the first $NEXT_CYCLE-breaking change lands."
+    echo "Dispatched. If fj refuses the inputs, dispatch 'Publish crates' from the"
+    echo "Actions tab on tag $VERSION with allow_breaking=$breaking instead."
+    echo "Waiting for crates.io (the ubuntu-24.04 lane can sit Pending for hours)."
+    local deadline=$(( $(date +%s) + PUBLISH_TIMEOUT_SECS ))
+    until cargo search nlink --limit 1 2>/dev/null | grep -qE "^nlink = \"$VERSION\""; do
+        (( $(date +%s) < deadline )) || fail "nlink $VERSION not on crates.io yet; check 'fj actions tasks'"
+        sleep 120
+        fj_plain actions tasks | grep -i "publish" | head -2 | sed 's/^/  /' || true
+    done
+    echo "nlink $VERSION is on crates.io."
 }
 
 # ---- main ----
 
-step "Phase 1 — Pre-flight checks"
-check_clean_tree
-check_on_release_branch
-check_cargo_metadata_version
-check_cargo_login
-check_gh_auth
-echo "Pre-flight OK: clean tree, on branch '$CYCLE_BRANCH', Cargo.toml at $VERSION, cargo + gh authenticated."
-echo
-echo "REMINDER: hardware-only features (XFRM offload / devlink rate /"
-echo "          net_shaper) have no CI coverage. Walk the manual"
-echo "          checklist before merging this cut:"
-echo "          docs/release-validation-manual.md"
-confirm "hardware checklist walked (or skipped intentionally)"
+phase 1 && preflight
+phase 2 && release_commit
+phase 3 && publish_dry_run
+phase 4 && open_pr_and_wait
+phase 5 && merge_and_verify
+phase 6 && tag_release
+phase 7 && publish
 
-step "Phase 2 — CHANGELOG promotion"
-promote_changelog
-git --no-pager diff CHANGELOG.md
-confirm "CHANGELOG promoted; review the diff above"
-git add CHANGELOG.md
-git commit -m "chore(release): promote [Unreleased] → [$VERSION] - $(date +%Y-%m-%d)"
-
-step "Phase 3 — Push branch and wait for CI"
-push_branch
-PR_NUMBER=$(wait_for_ci_green)
-
-step "Phase 4 — Publish dry-runs"
-echo "Running 'cargo publish -p nlink-macros --dry-run'..."
-cargo publish -p nlink-macros --dry-run
-echo
-echo "NOTE: skipping 'cargo publish -p nlink --dry-run' — known false"
-echo "      negative because nlink-macros $VERSION isn't on crates.io"
-echo "      yet (Plan 175 §3.1). The real publish below handles the"
-echo "      ordering: macros first, wait for index propagation, then nlink."
-confirm "dry-run clean — ready to merge to master"
-
-step "Phase 5 — Merge PR to master"
-merge_pr "$PR_NUMBER"
-echo "Merged PR #$PR_NUMBER; now on master."
-
-step "Phase 6 — Tag locally"
-tag_release
-confirm "Tag created locally — about to PUBLISH to crates.io (IRREVERSIBLE)"
-
-step "Phase 7 — Publish to crates.io"
-echo "Publishing nlink-macros first..."
-cargo publish -p nlink-macros
-wait_for_macros_indexed
-echo "Publishing nlink..."
-cargo publish -p nlink
-
-step "Phase 8 — Push tag and create GitHub release"
-git push origin "$VERSION"
-create_github_release
-echo "GitHub release published: https://github.com/$(gh repo view --json nameWithOwner --jq .nameWithOwner)/releases/tag/$VERSION"
-
-step "Phase 9 — Open next cycle branch"
-confirm "About to open the next cycle branch '$NEXT_CYCLE' from master"
-open_next_branch
-
-echo
-echo "==========================================================================="
-echo "  Cut complete. $VERSION published; '$NEXT_CYCLE' is the next cycle branch."
-echo "==========================================================================="
+step "Done"
+if (( DRY_RUN )); then
+    echo "Dry run: $FAILED_CHECKS check(s) failed; nothing was changed."
+    (( FAILED_CHECKS == 0 )) || exit 1
+    exit 0
+fi
+cat <<EOF
+$VERSION is tagged and published. Left by hand:
+  - the GitHub mirror's release (gh is not used from here);
+  - deleting a per-cycle plans/ directory, if the cycle had one;
+  - the next cycle stays on master; bump the workspace version with its
+    first breaking PR.
+EOF

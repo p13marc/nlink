@@ -309,6 +309,14 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **`scripts/cut-release.sh` runs on this forge again (#358).** It was
+  written against `gh` and a per-cycle branch, and its first pre-flight check
+  failed on a missing binary, so the last cuts were done by hand around it.
+  It now drives the flow those cuts followed with `fj`: a `release/X.Y.Z`
+  branch and PR, a merge that is checked against master, a bare-semver tag
+  that fires `release.yml`, and a `publish-crates.yml` dispatch. It has a
+  `--dry-run` that changes nothing and `--from N` to resume.
+
 - **`Rule::comment` is a human comment, written verbatim.** It used to be
   prefixed with `nlink:` and treated as the declarative key. In an
   `NftablesConfig` the key is the rule's `handle_key` and the comment

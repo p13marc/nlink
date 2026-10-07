@@ -900,16 +900,38 @@ so `cargo publish -p nlink` resolves the dep on crates.io;
 publishing nlink before nlink-macros fails with "no matching
 version found."
 
-Use `scripts/cut-release.sh X.Y.Z` (Plan 175) to walk the full
-cut: pre-flight, CHANGELOG promotion, CI green-gate, dry-runs,
-merge, tag, publish (macros → index-poll → nlink), GitHub release
-(length-aware body), next-cycle branch. The script confirms at
-every irreversible step. Manual equivalent for emergencies:
+Cut with `scripts/cut-release.sh X.Y.Z` — `--dry-run` first, which runs the
+checks and prints every command without changing anything (#358). It walks the
+flow the 0.27–0.29 cuts used, on this Forgejo forge with `fj`:
+
+1. Pre-flight: `fj` signed in, clean tree on an up-to-date master, workspace
+   version == X.Y.Z, no tag yet, a non-empty `[Unreleased]`, the migration
+   guide for a minor release (and its row in the guides' README), README in
+   sync.
+2. A `release/X.Y.Z` branch with one commit `X.Y.Z`: `[Unreleased]` promoted
+   to `[X.Y.Z] - date`, plus the CLAUDE.md "Active work" update, made while
+   the script waits.
+3. `cargo publish -p nlink-macros --dry-run` (see the gotcha below).
+4. Push, open "release: X.Y.Z", wait until every check passes (`--from 4`
+   resumes a wait cut short).
+5. Merge, then **check master has the release commit** — `fj pr merge` has
+   printed "Merged" for PRs that never landed.
+6. Tag the merge commit `X.Y.Z` (bare semver — a `v` tag does not fire
+   `release.yml`, #249) and push it: `release.yml` creates the Forgejo
+   release with the tarball and `SHA256SUMS`.
+7. Dispatch `publish-crates.yml` on the tag (`allow_breaking=yes` for a
+   minor): semver gate, then nlink-macros, then nlink, with the repository's
+   `CARGO_REGISTRY_TOKEN`. It runs on the `ubuntu-24.04` lane, which can sit
+   Pending for hours; the script waits for crates.io rather than read that as
+   a failure.
+
+The script confirms before every irreversible step (merge, tag, publish). It
+does not touch the GitHub mirror. Manual equivalent for emergencies, with
+`cargo login` done:
 
 ```bash
 cargo publish -p nlink-macros
-# wait ~30s for crates.io to index
-cargo publish -p nlink
+cargo publish -p nlink   # blocks until the index has nlink-macros
 ```
 
 **Dry-run gotcha**: `cargo publish -p nlink --dry-run` will FAIL
