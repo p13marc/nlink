@@ -362,6 +362,9 @@ pub const NFTA_SET_KEY_TYPE: u16 = 4;
 pub const NFTA_SET_KEY_LEN: u16 = 5;
 pub const NFTA_SET_DATA_TYPE: u16 = 6;
 pub const NFTA_SET_DATA_LEN: u16 = 7;
+/// `NFT_DATA_VERDICT` — a verdict map's `NFTA_SET_DATA_TYPE`. The kernel
+/// reserves every type with these top bits and accepts only this one.
+pub const NFT_DATA_VERDICT: u32 = 0xffff_ff00;
 // Values below are the kernel `enum nft_set_attributes` positions.
 // `NFTA_SET_ID` was previously (wrongly) 16 and `NFTA_SET_HANDLE` 17,
 // which collided: a `NEWSET` carried its set id under attribute 16
@@ -403,6 +406,9 @@ pub const NFTA_SET_ELEM_FLAGS: u16 = 3;
 pub const NFTA_SET_ELEM_TIMEOUT: u16 = 4;
 /// `NFTA_SET_ELEM_EXPIRATION` — milliseconds the element has left (u64).
 pub const NFTA_SET_ELEM_EXPIRATION: u16 = 5;
+/// `NFTA_SET_ELEM_OBJREF` — the stateful object an object-map element
+/// maps to, by name.
+pub const NFTA_SET_ELEM_OBJREF: u16 = 9;
 /// `NFTA_SET_ELEM_KEY_END` — the inclusive end of a range, in the same
 /// element: how an interval set of concatenated keys stores one.
 pub const NFTA_SET_ELEM_KEY_END: u16 = 10;

@@ -38,6 +38,40 @@ All notable changes to this project will be documented in this file.
   a range to the top of the key space — and 0.30 refused interval elements
   outright.
 
+- **Maps and verdict maps (`vmap`).**
+  - `Set::map(SetDataType)` and `Set::vmap()`, plus the same on
+    `DeclaredSetBuilder`. `SetDataType::{Verdict, Value(SetKeyType)}`, and
+    the new `SetKeyType::ClassId`. A map is written with `NFT_SET_MAP` and
+    its `NFTA_SET_DATA_TYPE`, which is `NFT_DATA_VERDICT` for a verdict map.
+    A value map also gets `NFTA_SET_DATA_LEN`; the kernel sizes a verdict
+    itself. `SetInfo::{data_type, data_len}` read them back.
+  - `SetElement::value(SetElement)` and `SetElement::verdict(Verdict)`, plus
+    `SetElement::classid(TcHandle)`. An element's data is checked against
+    the map's type and length before anything is sent. It is written in
+    `NFTA_SET_ELEM_DATA`, an object reference as `NFTA_SET_ELEM_OBJREF`. In
+    an interval map the data goes on the range's start, the only place the
+    kernel accepts it, and reads back on the range. A delete names the key
+    alone.
+  - `Rule::{vmap, vmap_concat, set_mark_from_map, set_priority_from_map}`
+    (`ip daddr vmap @vm`, `meta mark set ip daddr map @m`, `meta priority
+    set ... map @p`).
+  - Declaratively, a changed data type recreates the map. An element whose
+    data changed is removed and added in the same batch, in either element
+    mode. An interval map's touching ranges are never merged, since they
+    may map to different values.
+
+  Tested on traffic:
+  - a verdict map jumps each destination to its own chain (3 and 5
+    packets counted), and reads back with its verdicts;
+  - a value map marks each destination, and the rules after it count by
+    mark;
+  - declared verdict, value and interval maps converge, and changing one
+    element's data replaces just that element.
+
+  Mutation-checked: comparing elements without their data, merging an
+  interval map's ranges, and dropping a range's data on readback each fail
+  a test.
+
 - **Set timeouts and `dynset`: rules that add to, refresh and delete from a
   set (ipset `timeout`, `SET --add-set`/`--del-set`).**
   - `Set::{dynamic, timeout, per_element_timeouts, gc_interval}` (and the

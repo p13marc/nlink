@@ -1840,6 +1840,58 @@ impl Rule {
         self
     }
 
+    /// `<field> vmap @<map>`: the verdict the map holds for `field` decides
+    /// the packet — accept, drop, or jump to a chain ([`Set::vmap`]). A
+    /// packet whose field is not in the map goes on to the next rule.
+    pub fn vmap(mut self, field: PacketField, map: &str) -> Self {
+        self.push_field_load(field);
+        self.push_map_lookup(map, Register::Verdict);
+        self
+    }
+
+    /// `<field> . <field> vmap @<map>`: [`vmap`](Self::vmap) on a
+    /// concatenation, laid out as [`match_concat_in_set`](Self::match_concat_in_set)
+    /// does.
+    pub fn vmap_concat(mut self, fields: &[PacketField], map: &str) -> Self {
+        self.push_concat_load(fields);
+        self.push_map_lookup(map, Register::Verdict);
+        self
+    }
+
+    /// `meta mark set <field> map @<map>`: set the packet mark to the value
+    /// the map holds for `field` — a map of [`SetKeyType::Mark`] values. A
+    /// packet whose field is not in the map stops at this rule, unmarked.
+    pub fn set_mark_from_map(self, field: PacketField, map: &str) -> Self {
+        self.set_meta_from_map(MetaKey::Mark, field, map)
+    }
+
+    /// `meta priority set <field> map @<map>`: the TC class the map holds
+    /// for `field` — a map of [`SetKeyType::ClassId`] values
+    /// ([`SetElement::classid`]). HTB sends the packet straight to that
+    /// class, as with [`set_priority`](Self::set_priority).
+    pub fn set_priority_from_map(self, field: PacketField, map: &str) -> Self {
+        self.set_meta_from_map(MetaKey::Priority, field, map)
+    }
+
+    fn set_meta_from_map(mut self, key: MetaKey, field: PacketField, map: &str) -> Self {
+        self.push_field_load(field);
+        self.push_map_lookup(map, Register::R0);
+        self.exprs.push(Expr::MetaSet {
+            key,
+            sreg: Register::R0,
+        });
+        self
+    }
+
+    /// Look the key in `R0` up in `map`, loading what it maps to into `dreg`.
+    fn push_map_lookup(&mut self, map: &str, dreg: Register) {
+        self.exprs.push(
+            super::expr::LookupExpr::new(map, Register::R0)
+                .dreg(dreg)
+                .into(),
+        );
+    }
+
     /// Add `field` to a set from the packet path: `add @<set> { <field>
     /// [timeout T] }` — ipset `SET --add-set`. An element already there is
     /// left alone (its timeout keeps running). `timeout` overrides the
@@ -2495,6 +2547,10 @@ pub enum SetKeyType {
     InetService,
     /// Interface index (4 bytes).
     IfIndex,
+    /// A TC class id, `major:minor` (4 bytes, host order) — what
+    /// `meta priority` holds. A value type for priority maps
+    /// ([`Rule::set_priority_from_map`]).
+    ClassId,
     /// Mark value (4 bytes).
     Mark,
     /// IP protocol number — single u8 padded to 4 bytes
@@ -2535,6 +2591,7 @@ impl SetKeyType {
             Self::InetService => 13,  // TYPE_INET_SERVICE
             Self::Mark => 19,         // TYPE_MARK
             Self::IfIndex => 20,      // TYPE_IFINDEX
+            Self::ClassId => 23,      // TYPE_CLASSID
             Self::Concat(parts) => {
                 // nft's `concat_subtype_add(type, sub) = type << TYPE_BITS | sub`,
                 // applied left-to-right across the component list. That puts
@@ -2559,7 +2616,7 @@ impl SetKeyType {
     /// concatenation: whether any of its fields is.
     pub fn is_host_order(&self) -> bool {
         match self {
-            Self::Mark | Self::IfIndex => true,
+            Self::Mark | Self::IfIndex | Self::ClassId => true,
             Self::Concat(parts) => parts.iter().any(Self::is_host_order),
             _ => false,
         }
@@ -2590,6 +2647,7 @@ impl SetKeyType {
             Self::EtherAddr => 6,
             Self::InetService => 2,
             Self::IfIndex => 4,
+            Self::ClassId => 4,
             Self::Mark => 4,
             Self::InetProto => 1,
             Self::Concat(parts) => {
@@ -2735,6 +2793,39 @@ impl std::ops::BitOrAssign for SetFlags {
     }
 }
 
+/// What a map maps its keys to.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SetDataType {
+    /// A verdict: a verdict map (`vmap`), whose lookup decides the packet
+    /// or jumps to a chain.
+    Verdict,
+    /// A value of this type: a mark, a class id, an address, …
+    Value(SetKeyType),
+}
+
+impl SetDataType {
+    /// `NFTA_SET_DATA_TYPE`: `NFT_DATA_VERDICT` for a verdict map, else the
+    /// value type's nft datatype id (the kernel stores it opaquely).
+    pub(crate) fn type_id(&self) -> u32 {
+        match self {
+            Self::Verdict => super::NFT_DATA_VERDICT,
+            Self::Value(value) => value.type_id(),
+        }
+    }
+
+    /// `NFTA_SET_DATA_LEN`, for a value map. The kernel sizes a verdict
+    /// itself.
+    pub(crate) fn len(&self) -> Option<u32> {
+        match self {
+            Self::Verdict => None,
+            Self::Value(value) => Some(value.len()),
+        }
+    }
+}
+
 /// Set builder.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[derive(Debug, Clone)]
@@ -2748,6 +2839,7 @@ pub struct Set {
     pub(crate) size: Option<u32>,
     pub(crate) timeout: Option<std::time::Duration>,
     pub(crate) gc_interval: Option<std::time::Duration>,
+    pub(crate) data_type: Option<SetDataType>,
 }
 
 impl Set {
@@ -2762,7 +2854,22 @@ impl Set {
             size: None,
             timeout: None,
             gc_interval: None,
+            data_type: None,
         }
+    }
+
+    /// Make this a map (`NFT_SET_MAP`): each element maps its key to a
+    /// value of `data` — [`SetElement::value`] or [`SetElement::verdict`].
+    /// Read it with [`Rule::set_mark_from_map`], [`Rule::vmap`] and the like.
+    pub fn map(mut self, data: SetDataType) -> Self {
+        self.flags |= SetFlags::MAP;
+        self.data_type = Some(data);
+        self
+    }
+
+    /// A verdict map (`vmap`): `map(SetDataType::Verdict)`.
+    pub fn vmap(self) -> Self {
+        self.map(SetDataType::Verdict)
     }
 
     /// Let rules add, refresh and delete elements from the packet path
@@ -2865,9 +2972,15 @@ impl Set {
         self
     }
 
-    /// The flags as written; see [`wire_flags`].
+    /// The flags as written; see [`wire_flags`]. A set with a data type is
+    /// a map, whatever its flags say.
     pub(crate) fn wire_flags(&self) -> SetFlags {
-        wire_flags(&self.key_type, self.flags)
+        let flags = wire_flags(&self.key_type, self.flags);
+        if self.data_type.is_some() {
+            flags | SetFlags::MAP
+        } else {
+            flags
+        }
     }
 
     /// See [`ranges_per_field`].
@@ -3059,6 +3172,27 @@ impl SetElement {
         self.key_end.is_some()
     }
 
+    /// Map this element's key to a value, in a map of values
+    /// ([`Set::map`]): built like a key — `SetElement::ipv4(a)
+    /// .value(SetElement::mark(0x10))`. Only the value's key bytes are used.
+    pub fn value(mut self, value: SetElement) -> Self {
+        self.data = Some(SetElementData::Value(value.key));
+        self
+    }
+
+    /// Map this element's key to a verdict, in a verdict map
+    /// ([`Set::vmap`]): `SetElement::port(22).verdict(Verdict::Accept)`.
+    pub fn verdict(mut self, verdict: Verdict) -> Self {
+        self.data = Some(SetElementData::Verdict(verdict));
+        self
+    }
+
+    /// A class id element (`meta priority`), as [`Rule::set_priority`]
+    /// writes it: host order.
+    pub fn classid(class: crate::TcHandle) -> Self {
+        Self::new(u32::from(class).to_ne_bytes().to_vec())
+    }
+
     /// Give this element its own timeout. The set needs timeouts
     /// ([`Set::timeout`] or [`Set::per_element_timeouts`]).
     ///
@@ -3108,7 +3242,9 @@ impl SetElement {
     /// Validate this element against the set it is written to. Only what
     /// the writer can encode passes; anything else is an error rather
     /// than something silently dropped.
-    pub(crate) fn check_for(&self, set: &Set) -> Result<()> {
+    /// A `deleting` element is named by its key alone: what it maps to and
+    /// its timeout are not checked, and not sent.
+    pub(crate) fn check_for(&self, set: &Set, deleting: bool) -> Result<()> {
         let want = set.key_type.len() as usize;
         if self.key.len() != want {
             return Err(Error::InvalidMessage(format!(
@@ -3144,11 +3280,32 @@ impl SetElement {
                 }
             }
         }
-        if self.data.is_some() {
-            return Err(Error::InvalidMessage(format!(
-                "set {}: element data needs a map",
-                set.name
-            )));
+        if deleting {
+            return Ok(());
+        }
+        match (&set.data_type, &self.data) {
+            (None, None) => {}
+            (None, Some(_)) => {
+                return Err(Error::InvalidMessage(format!(
+                    "set {}: element data needs a map (`Set::map`)",
+                    set.name
+                )));
+            }
+            (Some(_), None) => {
+                return Err(Error::InvalidMessage(format!(
+                    "set {}: an element of a map needs data (`SetElement::value` or `::verdict`)",
+                    set.name
+                )));
+            }
+            (Some(SetDataType::Verdict), Some(SetElementData::Verdict(_))) => {}
+            (Some(SetDataType::Value(ty)), Some(SetElementData::Value(value)))
+                if value.len() == ty.len() as usize => {}
+            (Some(want), Some(got)) => {
+                return Err(Error::InvalidMessage(format!(
+                    "set {}: element data {got:?} does not fit the map's {want:?}",
+                    set.name
+                )));
+            }
         }
         if self.timeout.is_some() && !set.flags.contains(SetFlags::TIMEOUT) {
             return Err(Error::InvalidMessage(format!(
@@ -3166,6 +3323,18 @@ impl SetElement {
             flags,
             ..Self::new(key)
         }
+    }
+
+    /// This start element as a range ending at `end` (inclusive).
+    pub(crate) fn ending_at(mut self, end: Vec<u8>) -> Self {
+        self.key_end = Some(end);
+        self
+    }
+
+    /// With the map data read back.
+    pub(crate) fn with_data(mut self, data: Option<SetElementData>) -> Self {
+        self.data = data;
+        self
     }
 
     /// With the timeout and time left read back.
@@ -3218,6 +3387,11 @@ pub struct SetInfo {
     pub timeout: Option<std::time::Duration>,
     /// Garbage-collection interval (`NFTA_SET_GC_INTERVAL`), if set.
     pub gc_interval: Option<std::time::Duration>,
+    /// A map's data type (`NFTA_SET_DATA_TYPE`): `NFT_DATA_VERDICT` for a
+    /// verdict map, else an nft datatype id.
+    pub data_type: Option<u32>,
+    /// A map's data length in bytes (`NFTA_SET_DATA_LEN`).
+    pub data_len: Option<u32>,
 }
 
 /// The inclusive range a prefix covers: `addr` with its host bits cleared,
@@ -3348,6 +3522,27 @@ mod tests {
         assert_eq!(e.key(), [1, 2, 3, 4, 5, 6, 0, 0, 6, 0, 0, 0]);
         let key = SetKeyType::Concat(vec![SetKeyType::EtherAddr, SetKeyType::InetProto]);
         assert_eq!(e.key().len(), key.len() as usize);
+    }
+
+    #[test]
+    fn map_lookups_load_into_the_verdict_or_a_data_register() {
+        use super::super::expr::LookupExpr;
+        let vmap = Rule::new("t", "c").vmap(PacketField::TcpDport, "vm");
+        let last = format!("{:?}", vmap.exprs.last().unwrap());
+        let want = LookupExpr::new("vm", Register::R0).dreg(Register::Verdict);
+        assert_eq!(last, format!("{:?}", Expr::from(want)));
+
+        let mark = Rule::new("t", "c").set_mark_from_map(PacketField::Ip4Saddr, "m");
+        let tail: Vec<String> = mark.exprs[mark.exprs.len() - 2..]
+            .iter()
+            .map(|e| format!("{e:?}"))
+            .collect();
+        let lookup = LookupExpr::new("m", Register::R0).dreg(Register::R0);
+        let set = Expr::MetaSet {
+            key: MetaKey::Mark,
+            sreg: Register::R0,
+        };
+        assert_eq!(tail, [format!("{:?}", Expr::from(lookup)), format!("{set:?}")]);
     }
 
     #[test]

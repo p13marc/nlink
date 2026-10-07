@@ -110,6 +110,7 @@ impl super::types::NftablesConfig {
                 crate::netlink::nftables::connection::check_elements(
                     &set.to_set(table.name(), table.family()),
                     set.elements(),
+                    crate::netlink::nftables::connection::ElementWrite::Add,
                 )?;
             }
         }

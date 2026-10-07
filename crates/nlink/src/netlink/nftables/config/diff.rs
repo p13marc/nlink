@@ -1,6 +1,6 @@
 //! `NftablesDiff` — what changes between declared and current.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::types::{
     DeclaredChain, DeclaredFlowtable, DeclaredRule, DeclaredSet, DeclaredTable, NftablesConfig,
@@ -591,6 +591,12 @@ fn set_has_drifted(declared: &DeclaredSet, current: &SetInfo) -> bool {
     declared.key_type().type_id() != current.key_type
         || declared.key_type().len() != current.key_len
         || declared.wire_flags() != current.flags
+        || declared.data_type().map(|d| d.type_id()) != current.data_type
+        // The kernel sizes a verdict itself; only a value's length is ours.
+        || declared
+            .data_type()
+            .and_then(|d| d.len())
+            .is_some_and(|len| current.data_len != Some(len))
 }
 
 /// Does `rule` reference the set `set`? A plain lookup decodes typed; an
@@ -635,7 +641,8 @@ fn rule_matches(declared: &DeclaredRule, kernel: &RuleInfo) -> bool {
 }
 
 /// The elements to add to and remove from an existing set. In
-/// [`SetElementMode::Ensure`] nothing is removed.
+/// [`SetElementMode::Ensure`] nothing undeclared is removed; a declared map
+/// element whose data changed is replaced in either mode.
 ///
 /// A plain set compares element identities (key, range end, catch-all), and
 /// so does an interval set of concatenated keys, whose elements the kernel
@@ -676,23 +683,28 @@ fn element_changes(
         };
         return (to_add, to_remove);
     }
-    let declared_ids: HashSet<_> = declared.elements().iter().map(SetElement::identity).collect();
-    let current_ids: HashSet<_> = current.iter().map(SetElement::identity).collect();
+    // A map element whose data changed is removed and added again; the
+    // removals go first in the batch.
+    let declared_by_id: HashMap<_, _> = declared
+        .elements()
+        .iter()
+        .map(|e| (e.identity(), e.data()))
+        .collect();
+    let current_by_id: HashMap<_, _> = current.iter().map(|e| (e.identity(), e.data())).collect();
     let to_add = declared
         .elements()
         .iter()
-        .filter(|e| !current_ids.contains(&e.identity()))
+        .filter(|e| current_by_id.get(&e.identity()) != Some(&e.data()))
         .cloned()
         .collect();
-    let to_remove = if ensure {
-        Vec::new()
-    } else {
-        current
-            .iter()
-            .filter(|e| !declared_ids.contains(&e.identity()))
-            .cloned()
-            .collect()
-    };
+    let to_remove = current
+        .iter()
+        .filter(|e| match declared_by_id.get(&e.identity()) {
+            None => !ensure,
+            Some(data) => *data != e.data(),
+        })
+        .cloned()
+        .collect();
     (to_add, to_remove)
 }
 
@@ -1671,6 +1683,8 @@ mod tests {
             size: None,
             timeout: None,
             gc_interval: None,
+            data_type: None,
+            data_len: None,
         }
     }
 
@@ -1684,6 +1698,7 @@ mod tests {
             timeout: None,
             gc_interval: None,
             element_mode: None,
+            data_type: None,
             elements: Vec::new(),
         }
     }
@@ -1718,6 +1733,32 @@ mod tests {
         assert_eq!(update.timeout(), Some(ms(30_000)));
         assert_eq!(update.gc_interval(), Some(ms(5_000)));
         assert_eq!(update.size(), Some(10));
+    }
+
+    #[test]
+    fn a_map_element_whose_data_changed_is_replaced_and_a_data_type_change_recreates() {
+        use crate::netlink::nftables::{SetDataType, Verdict};
+        let a = std::net::Ipv4Addr::new(10, 0, 0, 1);
+        let mut declared = declared_set(SetKeyType::Ipv4Addr, 0);
+        declared.data_type = Some(SetDataType::Verdict);
+        declared.flags = SetFlags::MAP;
+        declared.elements = vec![SetElement::ipv4(a).verdict(Verdict::Drop)];
+        let kernel = [SetElement::ipv4(a).verdict(Verdict::Accept)];
+        let (add, remove) = element_changes(&declared, &kernel);
+        assert_eq!((add.len(), remove.len()), (1, 1));
+        assert_eq!(remove[0].data(), kernel[0].data());
+        // Even in Ensure mode: the element is declared.
+        declared.element_mode = Some(SetElementMode::Ensure);
+        assert_eq!(element_changes(&declared, &kernel).1.len(), 1);
+        // Same data: nothing to do.
+        assert_eq!(element_changes(&declared, &declared.elements.clone()), (vec![], vec![]));
+
+        let mut current = set_info(&SetKeyType::Ipv4Addr, crate::netlink::nftables::NFT_SET_MAP);
+        current.data_type = Some(crate::netlink::nftables::NFT_DATA_VERDICT);
+        current.data_len = Some(16);
+        assert!(!set_has_drifted(&declared, &current), "the kernel sizes a verdict");
+        current.data_type = Some(19);
+        assert!(set_has_drifted(&declared, &current));
     }
 
     #[test]
