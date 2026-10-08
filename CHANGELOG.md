@@ -25,11 +25,12 @@ All notable changes to this project will be documented in this file.
 > - the `NftablesDiff` collections are typed.
 >
 > Every declarative layer was then checked by applying twice and asserting
-> the second apply does nothing. That found 20 bugs outside nftables
-> (#398–#418) — TBF never converged at most rates, bond ports could not be
-> applied, WireGuard keys were rewritten on every run, a changed VNI or VLAN
-> id never reached the kernel, among others — and a dozen inside it
-> (#374–#377, #387–#390, #395, #396). Several runtime
+> the second apply does nothing. That found 26 bugs outside nftables
+> (#398–#418, #424–#428, #431) — TBF never converged at most rates, bond
+> ports could not be applied, WireGuard keys were rewritten on every run, a
+> changed VNI or VLAN id never reached the kernel, a link recreate could
+> destroy FDB and neighbour state, flower filters installed as match-alls,
+> among others — and a dozen inside it (#374–#377, #387–#390, #395, #396). Several runtime
 > behaviours change; read
 > [`docs/migration_guide/0.29.0-to-0.30.0.md`](docs/migration_guide/0.29.0-to-0.30.0.md).
 

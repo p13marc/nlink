@@ -813,7 +813,8 @@ Recipes: `nftables-sets-maps`, `ipset-to-nftables`. The public nftables types
 were reshaped once (PR #386) so that all of it, and what comes next, is
 additive. And the apply-twice discipline from 0.27 was finally applied to
 every declarative layer: `network_config_echo.rs`, `wireguard_echo.rs` and
-`recipes_echo.rs` found 20 bugs outside nftables (#398–#418); the nftables
+`recipes_echo.rs` and what fixing them turned up found 26 bugs outside
+nftables (#398–#418, #424–#428, #431); the nftables
 diff got order enforcement, derived keys and live-state-blind comparison
 (#387–#390).
 
