@@ -25,13 +25,6 @@ pub struct CommonLinkArgs {
     #[arg(long)]
     pub address: Option<String>,
 
-    /// Number of TX queues.
-    #[arg(long)]
-    pub numtxqueues: Option<u32>,
-
-    /// Number of RX queues.
-    #[arg(long)]
-    pub numrxqueues: Option<u32>,
 }
 
 /// Link type subcommands.
@@ -380,27 +373,137 @@ pub enum LinkAddType {
 }
 
 /// Add a link with the specified type.
+impl LinkAddType {
+    fn parts(&self) -> (&str, &'static str, &CommonLinkArgs) {
+        match self {
+            Self::Dummy { name, common, .. } => (name, "dummy", common),
+            Self::Veth { name, common, .. } => (name, "veth", common),
+            Self::Bridge { name, common, .. } => (name, "bridge", common),
+            Self::Bond { name, common, .. } => (name, "bond", common),
+            Self::Vlan { name, common, .. } => (name, "vlan", common),
+            Self::Vxlan { name, common, .. } => (name, "vxlan", common),
+            Self::Macvlan { name, common, .. } => (name, "macvlan", common),
+            Self::Macvtap { name, common, .. } => (name, "macvtap", common),
+            Self::Ipvlan { name, common, .. } => (name, "ipvlan", common),
+            Self::Vrf { name, common, .. } => (name, "vrf", common),
+            Self::Gre { name, common, .. } => (name, "gre", common),
+            Self::Gretap { name, common, .. } => (name, "gretap", common),
+            Self::Ipip { name, common, .. } => (name, "ipip", common),
+            Self::Sit { name, common, .. } => (name, "sit", common),
+            Self::Vti { name, common, .. } => (name, "vti", common),
+            Self::Vti6 { name, common, .. } => (name, "vti6", common),
+            Self::Ip6gre { name, common, .. } => (name, "ip6gre", common),
+            Self::Ip6gretap { name, common, .. } => (name, "ip6gretap", common),
+            Self::Wireguard { name, common, .. } => (name, "wireguard", common),
+        }
+    }
+
+    fn name(&self) -> &str {
+        self.parts().0
+    }
+
+    fn kind_and_common(&self) -> (&'static str, &CommonLinkArgs) {
+        let (_, kind, common) = self.parts();
+        (kind, common)
+    }
+
+    /// Why this kind cannot take `--address`, if it cannot.
+    fn no_mac(&self) -> Option<&'static str> {
+        match self {
+            Self::Ipvlan { .. } => Some("an ipvlan shares its parent's MAC"),
+            Self::Gre { .. }
+            | Self::Ipip { .. }
+            | Self::Sit { .. }
+            | Self::Vti { .. }
+            | Self::Vti6 { .. }
+            | Self::Ip6gre { .. }
+            | Self::Wireguard { .. } => Some("it is a layer-3 device with no MAC"),
+            _ => None,
+        }
+    }
+}
+
+/// The common options, checked before anything is created. Each kind puts
+/// what its create message can carry into it ([`create`] `take`s those);
+/// whatever is left is set on the new link right after.
+struct Pending {
+    mtu: Option<u32>,
+    txqlen: Option<u32>,
+    address: Option<[u8; 6]>,
+}
+
+impl Pending {
+    fn parse(link_type: &LinkAddType) -> Result<Self> {
+        let (kind, common) = link_type.kind_and_common();
+        let address = match &common.address {
+            None => None,
+            Some(addr) => {
+                if let Some(why) = link_type.no_mac() {
+                    return Err(invalid(format!("{kind}: --address is not supported: {why}")));
+                }
+                Some(parse_mac(addr)?)
+            }
+        };
+        Ok(Self {
+            mtu: common.mtu,
+            txqlen: common.txqlen,
+            address,
+        })
+    }
+
+    async fn apply(&self, conn: &Connection<Route>, name: &str) -> Result<()> {
+        if let Some(mtu) = self.mtu {
+            conn.set_link_mtu(name, mtu).await?;
+        }
+        if let Some(txqlen) = self.txqlen {
+            conn.set_link_txqlen(name, txqlen).await?;
+        }
+        if let Some(mac) = self.address {
+            conn.set_link_address(name, mac).await?;
+        }
+        Ok(())
+    }
+}
+
+/// Create a link. Every option is checked before anything is sent, so a bad
+/// one leaves nothing behind; what the kind's create message cannot carry
+/// (`--txqlen` always, `--mtu` on some tunnels) is set right after, and if
+/// that fails the new link is deleted again — as one `ip link add` would
+/// leave nothing. These options used to be dropped without a word (#428).
 pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Result<()> {
+    let name = link_type.name().to_string();
+    let mut pending = Pending::parse(&link_type)?;
+    create(conn, link_type, &mut pending).await?;
+    if let Err(e) = pending.apply(conn, &name).await {
+        let _ = conn.del_link(name.as_str()).await;
+        return Err(e);
+    }
+    Ok(())
+}
+
+async fn create(
+    conn: &Connection<Route>,
+    link_type: LinkAddType,
+    pending: &mut Pending,
+) -> Result<()> {
     match link_type {
-        LinkAddType::Dummy { name, common } => {
+        LinkAddType::Dummy { name, .. } => {
             let mut link = DummyLink::new(&name);
-            if let Some(mtu) = common.mtu {
+            if let Some(mtu) = pending.mtu.take() {
                 link = link.mtu(mtu);
             }
-            if let Some(ref addr) = common.address {
-                let mac = parse_mac(addr)?;
+            if let Some(mac) = pending.address.take() {
                 link = link.address(mac);
             }
             conn.add_link(link).await
         }
 
-        LinkAddType::Veth { name, peer, common } => {
+        LinkAddType::Veth { name, peer, .. } => {
             let mut link = VethLink::new(&name, &peer);
-            if let Some(mtu) = common.mtu {
+            if let Some(mtu) = pending.mtu.take() {
                 link = link.mtu(mtu);
             }
-            if let Some(ref addr) = common.address {
-                let mac = parse_mac(addr)?;
+            if let Some(mac) = pending.address.take() {
                 link = link.address(mac);
             }
             conn.add_link(link).await
@@ -415,7 +518,7 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             ageing_time,
             priority,
             vlan_filtering,
-            common,
+            ..
         } => {
             let mut link = BridgeLink::new(&name);
             if stp {
@@ -440,11 +543,10 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             if vlan_filtering {
                 link = link.vlan_filtering(true);
             }
-            if let Some(mtu) = common.mtu {
+            if let Some(mtu) = pending.mtu.take() {
                 link = link.mtu(mtu);
             }
-            if let Some(ref addr) = common.address {
-                let mac = parse_mac(addr)?;
+            if let Some(mac) = pending.address.take() {
                 link = link.address(mac);
             }
             conn.add_link(link).await
@@ -461,7 +563,7 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             arp_interval,
             arp_ip_target,
             lacp_rate,
-            common,
+            ..
         } => {
             let mode_val = parse_bond_mode(&mode)?;
             let mut link = BondLink::new(&name).mode(mode_val);
@@ -484,19 +586,16 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             if let Some(v) = arp_interval {
                 link = link.arp_interval(v);
             }
-            if let Some(ref target) = arp_ip_target
-                && let Ok(ip) = target.parse::<std::net::Ipv4Addr>()
-            {
-                link = link.arp_ip_target(ip);
+            if let Some(ref target) = arp_ip_target {
+                link = link.arp_ip_target(parse_v4("bond", "arp_ip_target", target)?);
             }
             if let Some(ref rate) = lacp_rate {
                 link = link.lacp_rate(parse_lacp_rate(rate)?);
             }
-            if let Some(mtu) = common.mtu {
+            if let Some(mtu) = pending.mtu.take() {
                 link = link.mtu(mtu);
             }
-            if let Some(ref addr) = common.address {
-                let mac = parse_mac(addr)?;
+            if let Some(mac) = pending.address.take() {
                 link = link.address(mac);
             }
             conn.add_link(link).await
@@ -507,7 +606,7 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             link: parent,
             id,
             protocol,
-            common,
+            ..
         } => {
             let mut link = VlanLink::new(&name, &parent, id);
             match protocol.to_lowercase().as_str() {
@@ -519,11 +618,10 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
                     )));
                 }
             }
-            if let Some(mtu) = common.mtu {
+            if let Some(mtu) = pending.mtu.take() {
                 link = link.mtu(mtu);
             }
-            if let Some(ref addr) = common.address {
-                let mac = parse_mac(addr)?;
+            if let Some(mac) = pending.address.take() {
                 link = link.address(mac);
             }
             conn.add_link(link).await
@@ -539,7 +637,7 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             ttl,
             learning,
             nolearning,
-            common,
+            ..
         } => {
             let mut link = VxlanLink::new(&name, vni).port(dstport);
             // Either family; an IPv6 or unparseable address used to be
@@ -571,11 +669,10 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             } else if nolearning {
                 link = link.learning(false);
             }
-            if let Some(mtu) = common.mtu {
+            if let Some(mtu) = pending.mtu.take() {
                 link = link.mtu(mtu);
             }
-            if let Some(ref addr) = common.address {
-                let mac = parse_mac(addr)?;
+            if let Some(mac) = pending.address.take() {
                 link = link.address(mac);
             }
             conn.add_link(link).await
@@ -585,15 +682,14 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             name,
             link: parent,
             mode,
-            common,
+            ..
         } => {
             let mode_val = parse_macvlan_mode(&mode)?;
             let mut link = MacvlanLink::new(&name, &parent).mode(mode_val);
-            if let Some(mtu) = common.mtu {
+            if let Some(mtu) = pending.mtu.take() {
                 link = link.mtu(mtu);
             }
-            if let Some(ref addr) = common.address {
-                let mac = parse_mac(addr)?;
+            if let Some(mac) = pending.address.take() {
                 link = link.address(mac);
             }
             conn.add_link(link).await
@@ -603,15 +699,14 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             name,
             link: parent,
             mode,
-            common,
+            ..
         } => {
             let mode_val = parse_macvlan_mode(&mode)?;
             let mut link = MacvtapLink::new(&name, &parent).mode(mode_val);
-            if let Some(mtu) = common.mtu {
+            if let Some(mtu) = pending.mtu.take() {
                 link = link.mtu(mtu);
             }
-            if let Some(ref addr) = common.address {
-                let mac = parse_mac(addr)?;
+            if let Some(mac) = pending.address.take() {
                 link = link.address(mac);
             }
             conn.add_link(link).await
@@ -621,24 +716,23 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             name,
             link: parent,
             mode,
-            common,
+            ..
         } => {
             let mode_val = parse_ipvlan_mode(&mode)?;
             let mut link = IpvlanLink::new(&name, &parent).mode(mode_val);
-            if let Some(mtu) = common.mtu {
+            if let Some(mtu) = pending.mtu.take() {
                 link = link.mtu(mtu);
             }
-            // Note: ipvlan inherits MAC from parent, cannot set address
             conn.add_link(link).await
         }
 
         LinkAddType::Vrf {
             name,
             table,
-            common,
+            ..
         } => {
             let mut link = VrfLink::new(&name, table);
-            if let Some(mtu) = common.mtu {
+            if let Some(mtu) = pending.mtu.take() {
                 link = link.mtu(mtu);
             }
             conn.add_link(link).await
@@ -650,16 +744,12 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             local,
             ttl,
             key,
-            common,
+            ..
         } => {
-            let remote_ip: std::net::Ipv4Addr = remote.parse().map_err(|_| {
-                nlink::netlink::Error::InvalidMessage("invalid remote IP address".into())
-            })?;
+            let remote_ip = parse_v4("gre", "remote", &remote)?;
             let mut link = GreLink::new(&name).remote(remote_ip);
-            if let Some(ref addr) = local
-                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>()
-            {
-                link = link.local(ip);
+            if let Some(ref addr) = local {
+                link = link.local(parse_v4("gre", "local", addr)?);
             }
             if let Some(t) = ttl {
                 link = link.ttl(t);
@@ -667,7 +757,7 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             if let Some(k) = key {
                 link = link.key(k);
             }
-            if let Some(mtu) = common.mtu {
+            if let Some(mtu) = pending.mtu.take() {
                 link = link.mtu(mtu);
             }
             conn.add_link(link).await
@@ -679,16 +769,12 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             local,
             ttl,
             key,
-            common,
+            ..
         } => {
-            let remote_ip: std::net::Ipv4Addr = remote.parse().map_err(|_| {
-                nlink::netlink::Error::InvalidMessage("invalid remote IP address".into())
-            })?;
+            let remote_ip = parse_v4("gretap", "remote", &remote)?;
             let mut link = GretapLink::new(&name).remote(remote_ip);
-            if let Some(ref addr) = local
-                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>()
-            {
-                link = link.local(ip);
+            if let Some(ref addr) = local {
+                link = link.local(parse_v4("gretap", "local", addr)?);
             }
             if let Some(t) = ttl {
                 link = link.ttl(t);
@@ -696,7 +782,7 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             if let Some(k) = key {
                 link = link.key(k);
             }
-            if let Some(mtu) = common.mtu {
+            if let Some(mtu) = pending.mtu.take() {
                 link = link.mtu(mtu);
             }
             conn.add_link(link).await
@@ -707,21 +793,17 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             remote,
             local,
             ttl,
-            common,
+            ..
         } => {
-            let remote_ip: std::net::Ipv4Addr = remote.parse().map_err(|_| {
-                nlink::netlink::Error::InvalidMessage("invalid remote IP address".into())
-            })?;
+            let remote_ip = parse_v4("ipip", "remote", &remote)?;
             let mut link = IpipLink::new(&name).remote(remote_ip);
-            if let Some(ref addr) = local
-                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>()
-            {
-                link = link.local(ip);
+            if let Some(ref addr) = local {
+                link = link.local(parse_v4("ipip", "local", addr)?);
             }
             if let Some(t) = ttl {
                 link = link.ttl(t);
             }
-            if let Some(mtu) = common.mtu {
+            if let Some(mtu) = pending.mtu.take() {
                 link = link.mtu(mtu);
             }
             conn.add_link(link).await
@@ -732,21 +814,17 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             remote,
             local,
             ttl,
-            common,
+            ..
         } => {
-            let remote_ip: std::net::Ipv4Addr = remote.parse().map_err(|_| {
-                nlink::netlink::Error::InvalidMessage("invalid remote IP address".into())
-            })?;
+            let remote_ip = parse_v4("sit", "remote", &remote)?;
             let mut link = SitLink::new(&name).remote(remote_ip);
-            if let Some(ref addr) = local
-                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>()
-            {
-                link = link.local(ip);
+            if let Some(ref addr) = local {
+                link = link.local(parse_v4("sit", "local", addr)?);
             }
             if let Some(t) = ttl {
                 link = link.ttl(t);
             }
-            if let Some(mtu) = common.mtu {
+            if let Some(mtu) = pending.mtu.take() {
                 link = link.mtu(mtu);
             }
             conn.add_link(link).await
@@ -758,18 +836,14 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             remote,
             ikey,
             okey,
-            common,
+            ..
         } => {
             let mut link = VtiLink::new(&name);
-            if let Some(ref addr) = local
-                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>()
-            {
-                link = link.local(ip);
+            if let Some(ref addr) = local {
+                link = link.local(parse_v4("vti", "local", addr)?);
             }
-            if let Some(ref addr) = remote
-                && let Ok(ip) = addr.parse::<std::net::Ipv4Addr>()
-            {
-                link = link.remote(ip);
+            if let Some(ref addr) = remote {
+                link = link.remote(parse_v4("vti", "remote", addr)?);
             }
             if let Some(k) = ikey {
                 link = link.ikey(k);
@@ -777,7 +851,6 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             if let Some(k) = okey {
                 link = link.okey(k);
             }
-            let _ = common; // VTI doesn't support MTU in link creation
             conn.add_link(link).await
         }
 
@@ -787,18 +860,14 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             remote,
             ikey,
             okey,
-            common,
+            ..
         } => {
             let mut link = Vti6Link::new(&name);
-            if let Some(ref addr) = local
-                && let Ok(ip) = addr.parse::<std::net::Ipv6Addr>()
-            {
-                link = link.local(ip);
+            if let Some(ref addr) = local {
+                link = link.local(parse_v6("vti6", "local", addr)?);
             }
-            if let Some(ref addr) = remote
-                && let Ok(ip) = addr.parse::<std::net::Ipv6Addr>()
-            {
-                link = link.remote(ip);
+            if let Some(ref addr) = remote {
+                link = link.remote(parse_v6("vti6", "remote", addr)?);
             }
             if let Some(k) = ikey {
                 link = link.ikey(k);
@@ -806,7 +875,6 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             if let Some(k) = okey {
                 link = link.okey(k);
             }
-            let _ = common;
             conn.add_link(link).await
         }
 
@@ -815,23 +883,18 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             local,
             remote,
             ttl,
-            common,
+            ..
         } => {
             let mut link = Ip6GreLink::new(&name);
-            if let Some(ref addr) = local
-                && let Ok(ip) = addr.parse::<std::net::Ipv6Addr>()
-            {
-                link = link.local(ip);
+            if let Some(ref addr) = local {
+                link = link.local(parse_v6("ip6gre", "local", addr)?);
             }
-            if let Some(ref addr) = remote
-                && let Ok(ip) = addr.parse::<std::net::Ipv6Addr>()
-            {
-                link = link.remote(ip);
+            if let Some(ref addr) = remote {
+                link = link.remote(parse_v6("ip6gre", "remote", addr)?);
             }
             if let Some(t) = ttl {
                 link = link.ttl(t);
             }
-            let _ = common;
             conn.add_link(link).await
         }
 
@@ -840,29 +903,24 @@ pub async fn add_link(conn: &Connection<Route>, link_type: LinkAddType) -> Resul
             local,
             remote,
             ttl,
-            common,
+            ..
         } => {
             let mut link = Ip6GretapLink::new(&name);
-            if let Some(ref addr) = local
-                && let Ok(ip) = addr.parse::<std::net::Ipv6Addr>()
-            {
-                link = link.local(ip);
+            if let Some(ref addr) = local {
+                link = link.local(parse_v6("ip6gretap", "local", addr)?);
             }
-            if let Some(ref addr) = remote
-                && let Ok(ip) = addr.parse::<std::net::Ipv6Addr>()
-            {
-                link = link.remote(ip);
+            if let Some(ref addr) = remote {
+                link = link.remote(parse_v6("ip6gretap", "remote", addr)?);
             }
             if let Some(t) = ttl {
                 link = link.ttl(t);
             }
-            let _ = common;
             conn.add_link(link).await
         }
 
-        LinkAddType::Wireguard { name, common } => {
+        LinkAddType::Wireguard { name, .. } => {
             let mut link = WireguardLink::new(&name);
-            if let Some(mtu) = common.mtu {
+            if let Some(mtu) = pending.mtu.take() {
                 link = link.mtu(mtu);
             }
             conn.add_link(link).await
@@ -877,6 +935,37 @@ fn parse_mac(addr: &str) -> Result<[u8; 6]> {
 
 fn invalid(msg: String) -> nlink::netlink::Error {
     nlink::netlink::Error::InvalidMessage(msg)
+}
+
+/// An IPv4 address option of an IPv4-only kind: an IPv6 address names the
+/// kind that takes one instead of being dropped.
+fn parse_v4(kind: &str, what: &str, addr: &str) -> Result<std::net::Ipv4Addr> {
+    match addr.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => Ok(ip),
+        Ok(std::net::IpAddr::V6(_)) => {
+            let instead = match kind {
+                "gre" => " (use ip6gre)",
+                "gretap" => " (use ip6gretap)",
+                "vti" => " (use vti6)",
+                _ => "",
+            };
+            Err(invalid(format!(
+                "{kind}: {what} address `{addr}` is IPv6, but {kind} takes IPv4{instead}"
+            )))
+        }
+        Err(_) => Err(invalid(format!("{kind}: invalid {what} address `{addr}`"))),
+    }
+}
+
+/// An IPv6 address option of an IPv6 tunnel.
+fn parse_v6(kind: &str, what: &str, addr: &str) -> Result<std::net::Ipv6Addr> {
+    match addr.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(ip)) => Ok(ip),
+        Ok(std::net::IpAddr::V4(_)) => Err(invalid(format!(
+            "{kind}: {what} address `{addr}` is IPv4, but {kind} takes IPv6"
+        ))),
+        Err(_) => Err(invalid(format!("{kind}: invalid {what} address `{addr}`"))),
+    }
 }
 
 fn parse_bond_mode(mode: &str) -> Result<BondMode> {
