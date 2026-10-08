@@ -704,6 +704,21 @@ All notable changes to this project will be documented in this file.
   ports inside the range lands in the rule's class, the rest in the default
   class.
 
+- **A flower filter's exact port was dropped for every protocol but TCP and
+  UDP (#424).** `FlowerFilter` wrote `src_port`/`dst_port` only under
+  `ip_proto` TCP or UDP. With SCTP, any other protocol or no `ip_proto` at
+  all, the port was left out and the filter installed as a match-all for
+  the protocol: an SCTP port rule claimed every SCTP packet. It now writes
+  `TCA_FLOWER_KEY_SCTP_{SRC,DST}` under SCTP, which `fl_set_key` reads there,
+  and an exact port on any other protocol, or on none, is a `flower: …`
+  error from `write_options`, as a port range has been since #416. So is an
+  `ip_proto`, port, `ip_tos`, `ip_ttl` or `tcp_flags` under an ethertype
+  other than IPv4 or IPv6 (ARP, a VLAN tag): `fl_set_key` reads them only
+  under those two, and the old check refused only a missing ethertype.
+  `FlowerFilter::ip_proto_sctp()` is new, and `parse_params` takes tc(8)'s
+  `ip_proto sctp`. Tested on traffic: SCTP to the filter's port lands in its
+  class; SCTP to other ports, and UDP to that port, in the default class.
+
 ## [0.29.0] - 2026-10-01
 
 > Upgrading from 0.28.x? See
