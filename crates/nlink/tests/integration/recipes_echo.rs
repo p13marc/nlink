@@ -210,6 +210,16 @@ async fn per_host_limiter_shapes_converge() -> nlink::Result<()> {
                 Recipe::Host(ph().limit_port_range(9000, 9100, Rate::mbit(5))),
             ],
         ),
+        // A port rule's four filters (#425) come and go with its shape.
+        case(
+            "port-becomes-address-and-back",
+            vec![
+                Recipe::Host(ph().limit_port(80, Rate::mbit(5))),
+                Recipe::Host(ph().limit_ip(v6("fd00::7"), Rate::mbit(5))),
+                Recipe::Host(ph().limit_port_range(8000, 8100, Rate::mbit(5))),
+                Recipe::Host(ph().limit_ip(v4(10, 0, 0, 7), Rate::mbit(5))),
+            ],
+        ),
         case(
             "src-ip-v4",
             vec![Recipe::Host(ph().limit_src_ip(v4(10, 0, 0, 2), Rate::mbit(5)))],
@@ -278,8 +288,13 @@ fn send_udp(ns: &TestNamespace, targets: &[std::net::SocketAddr], count: usize) 
     let targets = targets.to_vec();
     std::thread::spawn(move || {
         let _ns = nlink::netlink::namespace::enter(&name).expect("enter test netns");
-        let socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind");
         for target in &targets {
+            let any = if target.is_ipv4() {
+                "0.0.0.0:0"
+            } else {
+                "[::]:0"
+            };
+            let socket = std::net::UdpSocket::bind(any).expect("bind");
             for _ in 0..count {
                 socket.send_to(b"nlink", target).expect("send");
             }
@@ -287,6 +302,28 @@ fn send_udp(ns: &TestNamespace, targets: &[std::net::SocketAddr], count: usize) 
     })
     .join()
     .expect("UDP thread panicked");
+}
+
+/// Send `count` TCP SYNs from inside `ns` to each of `targets`: one per
+/// connection attempt. The SYN goes out inside `connect(2)`; the attempt
+/// is then abandoned before the first retransmission (1 s), and closing a
+/// socket in `SYN_SENT` sends nothing.
+fn send_tcp_syns(ns: &TestNamespace, targets: &[std::net::SocketAddr], count: usize) {
+    let name = ns.name().to_string();
+    let targets = targets.to_vec();
+    std::thread::spawn(move || {
+        let _ns = nlink::netlink::namespace::enter(&name).expect("enter test netns");
+        for target in &targets {
+            for _ in 0..count {
+                match std::net::TcpStream::connect_timeout(target, Duration::from_millis(1)) {
+                    Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
+                    other => panic!("SYN to {target}: expected a timeout, got {other:?}"),
+                }
+            }
+        }
+    })
+    .join()
+    .expect("TCP thread panicked");
 }
 
 /// A `PerHostLimiter` port range classifies the ports in the range, and
@@ -356,6 +393,167 @@ async fn per_host_port_range_classifies_only_the_range() -> nlink::Result<()> {
                      counted {default:?} (want {want_default})"
                 ));
             }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
+/// `PerHostLimiter`'s port rules classify IPv6 as well as IPv4. Their
+/// flower filters were IPv4-only, so TCP or UDP over IPv6 to a limited
+/// port went to the default class, unshaped (#425).
+///
+/// Both families, both protocols, both verbs: TCP SYNs and UDP datagrams
+/// to a `limit_port` port, to ports inside and outside a
+/// `limit_port_range`, counted on the class each lands in.
+#[tokio::test]
+async fn per_host_port_rules_classify_both_families() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "sch_htb", "sch_fq_codel", "cls_flower");
+
+    const PER_PORT: usize = 3;
+    // Rule 0 (class 1:2) is one port, rule 1 (class 1:3) a range.
+    let port_rule = [5353u16];
+    let range_rule = [8000u16, 8001, 8050, 8100];
+    let outside = [7999u16, 8101, 9000];
+    let peers = [
+        ("IPv4", IpAddr::V4(Ipv4Addr::new(10, 41, 0, 2))),
+        ("IPv6", v6("fd41::2")),
+    ];
+
+    let mut failures = Vec::new();
+    for verb in ["apply", "reconcile"] {
+        let ns = TestNamespace::new("rce-ph-v6")?;
+        let conn = ns.connection()?;
+        conn.add_link(nlink::netlink::link::DummyLink::new("d0"))
+            .await?;
+        conn.set_link_up("d0").await?;
+        ns.add_addr("d0", "10.41.0.1/24")?;
+        ns.exec(
+            "ip",
+            &["-6", "addr", "add", "fd41::1/64", "dev", "d0", "nodad"],
+        )?;
+
+        let limiter = PerHostLimiter::new("d0", Rate::mbit(100))
+            .limit_port(port_rule[0], Rate::mbit(50))
+            .limit_port_range(8000, 8100, Rate::mbit(50));
+        match verb {
+            "apply" => limiter.apply(&conn).await?,
+            _ => {
+                let _ = limiter.reconcile(&conn).await?;
+            }
+        }
+        let again = limiter.reconcile(&conn).await?;
+        if !again.is_noop() {
+            failures.push(format!(
+                "[{verb}] reconcile after {verb} was not a no-op: {again:?}"
+            ));
+        }
+
+        let packets = || async {
+            let classes = conn.get_classes_by_name("d0").await?;
+            let count = |minor: u16| {
+                classes
+                    .iter()
+                    .find(|c| c.handle() == nlink::TcHandle::new(1, minor))
+                    .map_or(0, |c| c.packets())
+            };
+            nlink::Result::Ok([count(2), count(3), count(0xffff)])
+        };
+        for (family, peer) in peers {
+            let at = |ports: &[u16]| -> Vec<std::net::SocketAddr> {
+                ports
+                    .iter()
+                    .map(|p| std::net::SocketAddr::new(peer, *p))
+                    .collect()
+            };
+            let targets: Vec<_> = [at(&port_rule), at(&range_rule), at(&outside)].concat();
+
+            let before = packets().await?;
+            send_udp(&ns, &targets, PER_PORT);
+            send_tcp_syns(&ns, &targets, PER_PORT);
+            let after = packets().await?;
+
+            // Each port gets PER_PORT datagrams and PER_PORT SYNs.
+            let got: Vec<u64> = after.iter().zip(before).map(|(a, b)| a - b).collect();
+            let want: Vec<u64> = [port_rule.len(), range_rule.len(), outside.len()]
+                .iter()
+                .map(|ports| (2 * ports * PER_PORT) as u64)
+                .collect();
+            if got != want {
+                failures.push(format!(
+                    "[{verb}] {family}: (port class 1:2, range class 1:3, default 1:ffff) \
+                     counted {got:?} packets, want {want:?}"
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
+/// A rule that changes shape keeps no filter of its old one. A port rule
+/// turned into an address rule left its other filters — the IPv4 UDP one
+/// at `index + 101` and, since #425, the IPv6 ones — classifying that
+/// port's traffic into the class the address rule now owns. Removing the
+/// rule outright already took them, by the class they point at (#413).
+#[tokio::test]
+async fn per_host_rule_changing_shape_leaves_no_old_filter() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "sch_htb", "sch_fq_codel", "cls_flower");
+
+    let ph = || PerHostLimiter::new("d0", Rate::mbit(10));
+    let ip = v4(10, 0, 0, 1);
+    let cases = [
+        (
+            "port to address",
+            ph().limit_port(80, Rate::mbit(5)),
+            ph().limit_ip(ip, Rate::mbit(5)),
+        ),
+        (
+            "range to address",
+            ph().limit_port_range(8000, 8100, Rate::mbit(5)),
+            ph().limit_ip(ip, Rate::mbit(5)),
+        ),
+        (
+            "port rule removed",
+            ph().limit_ip(ip, Rate::mbit(5))
+                .limit_port(80, Rate::mbit(5)),
+            ph().limit_ip(ip, Rate::mbit(5)),
+        ),
+    ];
+
+    let mut failures = Vec::new();
+    for (name, before, after) in cases {
+        let ns = TestNamespace::new("rce-ph-shape")?;
+        let conn = ns.connection()?;
+        conn.add_link(nlink::netlink::link::DummyLink::new("d0"))
+            .await?;
+        conn.set_link_up("d0").await?;
+        let ifindex = conn
+            .get_link_by_name("d0")
+            .await?
+            .expect("d0 exists")
+            .ifindex();
+
+        let _ = before.reconcile(&conn).await?;
+        let _ = after.reconcile(&conn).await?;
+        let again = after.reconcile(&conn).await?;
+        if !again.is_noop() {
+            failures.push(format!(
+                "[{name}] second reconcile was not a no-op: {again:?}"
+            ));
+        }
+        let left: Vec<u16> = conn
+            .get_filters_by_parent_index(ifindex, nlink::TcHandle::major_only(1))
+            .await?
+            .iter()
+            .map(|f| f.priority())
+            .collect();
+        if left != [1] {
+            failures.push(format!(
+                "[{name}] filters left at priorities {left:?}; the address rule has one, at 1"
+            ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));

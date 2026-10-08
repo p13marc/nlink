@@ -638,7 +638,12 @@ async fn port_rules_install_with_their_match_keys() -> nlink::Result<()> {
         .iter()
         .filter(|f| f.handle_raw() != 0 && f.kind() == Some("flower"))
         .collect();
-    assert_eq!(installed.len(), 2, "expected a TCP and a UDP filter");
+    // TCP and UDP, for IPv4 and for IPv6 (#425).
+    assert_eq!(
+        installed.len(),
+        4,
+        "expected TCP and UDP filters for both families"
+    );
 
     for f in installed {
         let raw = f
