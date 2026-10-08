@@ -408,6 +408,24 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`nlink-ip link add` dropped options it could not apply (#428).** A
+  `--local` or `--remote` it could not parse was skipped on
+  gre/gretap/ipip/sit/vti/vti6/ip6gre/ip6gretap, so was an IPv6 address
+  given to an IPv4 tunnel (and the reverse), and so was a bond's
+  `--arp-ip-target`. The tunnel was created without it. `--txqlen` was
+  accepted by every kind and applied by none, `--mtu` was discarded on
+  vti/vti6/ip6gre/ip6gretap, and `--numtxqueues`/`--numrxqueues` were
+  never applied at all. Now:
+  - every option is checked before anything is created; an address of the
+    wrong family names the tunnel kind that takes it;
+  - `--mtu`, `--txqlen` and `--address` reach every kind, set right after
+    creation where the kind's create message cannot carry them. If that
+    fails the new link is deleted again, as one `ip link add` would leave
+    nothing;
+  - `--address` on a kind with no MAC of its own (the layer-3 tunnels,
+    WireGuard, ipvlan) is an error;
+  - the two queue-count options are gone.
+
 - **A declared dynamic or timeout set lost its runtime elements on every
   apply (#395).** The documented way to declare a set that rules populate
   was to declare it with no elements. But the diff reconciled every set's

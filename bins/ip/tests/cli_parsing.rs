@@ -110,6 +110,122 @@ mod link_command {
             .stderr(predicate::str::contains("invalid local address"));
     }
 
+    /// Each of these used to be dropped without a word, and the link created
+    /// without it (#428). Every one fails before anything is sent.
+    fn link_add_fails(args: &[&str], message: &str) {
+        let mut full = vec!["link", "add"];
+        full.extend_from_slice(args);
+        ip_cmd()
+            .args(&full)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(message));
+    }
+
+    #[test]
+    fn test_link_add_tunnel_addresses_are_checked() {
+        link_add_fails(
+            &["gre", "gre9", "--remote", "192.0.2.1", "--local", "not-an-ip"],
+            "gre: invalid local address `not-an-ip`",
+        );
+        link_add_fails(
+            &["gre", "gre9", "--remote", "192.0.2.1", "--local", "2001:db8::1"],
+            "gre: local address `2001:db8::1` is IPv6, but gre takes IPv4 (use ip6gre)",
+        );
+        link_add_fails(
+            &["ipip", "ipip9", "--remote", "nope"],
+            "ipip: invalid remote address `nope`",
+        );
+        link_add_fails(
+            &["vti", "vti9", "--remote", "2001:db8::1"],
+            "vti: remote address `2001:db8::1` is IPv6, but vti takes IPv4 (use vti6)",
+        );
+        link_add_fails(
+            &["ip6gre", "ip6gre9", "--remote", "192.0.2.1"],
+            "ip6gre: remote address `192.0.2.1` is IPv4, but ip6gre takes IPv6",
+        );
+        link_add_fails(
+            &["vti6", "vti69", "--local", "fe80::1%x"],
+            "vti6: invalid local address `fe80::1%x`",
+        );
+        link_add_fails(
+            &["bond", "bond9", "--arp-ip-target", "10.0.0.256"],
+            "bond: invalid arp_ip_target address `10.0.0.256`",
+        );
+    }
+
+    #[test]
+    fn test_link_add_address_on_a_kind_without_one_is_refused() {
+        link_add_fails(
+            &["gre", "gre9", "--remote", "192.0.2.1", "--address", "02:00:00:00:00:01"],
+            "gre: --address is not supported: it is a layer-3 device with no MAC",
+        );
+        link_add_fails(
+            &["ipvlan", "ipv9", "--link", "lo", "--address", "02:00:00:00:00:01"],
+            "ipvlan: --address is not supported: an ipvlan shares its parent's MAC",
+        );
+        link_add_fails(
+            &["dummy", "d9", "--address", "not-a-mac"],
+            "invalid MAC address",
+        );
+    }
+
+    /// Where a network namespace can be created — as root, with sudo; it
+    /// skips otherwise: `--mtu` and `--txqlen` reach a kind whose create
+    /// message cannot carry them, and a link whose post-create step fails is
+    /// deleted again. (`euid == 0` is not the test: CI's unprivileged
+    /// containers run as root without `ip` or the right to make a netns.)
+    #[test]
+    fn test_link_add_sets_what_the_create_cannot_carry_as_root() {
+        struct Netns(&'static str);
+        impl Drop for Netns {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("ip").args(["netns", "del", self.0]).status();
+            }
+        }
+        let created = std::process::Command::new("ip")
+            .args(["netns", "add", "nlink-ip-t428"])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if !created {
+            eprintln!("skipping: cannot create a network namespace here (run as root)");
+            return;
+        }
+        let ns = Netns("nlink-ip-t428");
+        let in_ns = |args: &[&str]| {
+            let mut cmd = std::process::Command::new("ip");
+            cmd.args(["netns", "exec", ns.0, env!("CARGO_BIN_EXE_nlink-ip")]).args(args);
+            cmd.output().unwrap()
+        };
+        let link = |dev: &str| {
+            let out = std::process::Command::new("ip")
+                .args(["-n", ns.0, "-j", "link", "show", "dev", dev])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+
+        let out = in_ns(&["link", "add", "vti", "vti1", "--remote", "192.0.2.1", "--mtu", "1300", "--txqlen", "77"]);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let shown = link("vti1");
+        assert!(shown.contains("\"mtu\":1300") && shown.contains("\"txqlen\":77"), "{shown}");
+
+        let out = in_ns(&["link", "add", "vti", "vti2", "--remote", "192.0.2.9", "--mtu", "70000"]);
+        assert!(!out.status.success(), "an MTU of 70000 must fail");
+        assert_eq!(link("vti2"), "", "the failed link must not be left behind");
+    }
+
+    #[test]
+    fn test_link_add_queue_counts_are_not_offered() {
+        // They were accepted by every kind and never applied.
+        ip_cmd()
+            .args(["link", "add", "dummy", "d9", "--numtxqueues", "4"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("unexpected argument"));
+    }
+
     #[test]
     fn test_link_alias_l() {
         ip_cmd()
