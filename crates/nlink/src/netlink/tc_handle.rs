@@ -198,12 +198,14 @@ pub enum TcHandleParseError {
 /// |-------------|---------------------------------------------|
 /// | `1..=49`    | Operator-installed filters                  |
 /// | `50..=99`   | Reserved for future library use             |
-/// | `100..=199` | nlink recipe helpers (`PerPeerImpairer`,    |
-/// |             | `PerHostLimiter`)                           |
+/// | `100..=199` | nlink recipe helpers (`PerPeerImpairer`)    |
 /// | `200..=999` | Application-specific                        |
 /// | `1000..`    | System / catch-alls                         |
 ///
-/// Helpers in this crate construct values in the recipe band by default.
+/// `PerPeerImpairer` installs in the recipe band. `PerHostLimiter` does
+/// not (#434): rule `i`'s address or IPv4 TCP filter is at `i + 1`, and a
+/// port rule's IPv4 UDP, IPv6 TCP and IPv6 UDP filters at `i + 101`,
+/// `i + 201` and `i + 301`.
 /// Outside callers can use [`FilterPriority::new`] for any value or the
 /// [`recipe`](Self::recipe), [`app`](Self::app), [`system`](Self::system)
 /// constructors as documentation-bearing shortcuts.

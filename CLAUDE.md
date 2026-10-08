@@ -202,9 +202,10 @@ for q in &qdiscs {
 ```
 
 `FilterPriority` is a `u16` with documented bands (operator 1..=49,
-recipe 100..=199, app 200..=999, system 1000..). nlink helpers
-like `PerPeerImpairer` and `PerHostLimiter` install in the recipe
-band so they don't fight operator-installed rules.
+recipe 100..=199, app 200..=999, system 1000..). `PerPeerImpairer`
+installs in the recipe band so it doesn't fight operator-installed
+rules. `PerHostLimiter` does not yet — its filters sit at `i + 1` and,
+for port rules, `i + 101/201/301` (#434).
 
 ## TC API conventions
 

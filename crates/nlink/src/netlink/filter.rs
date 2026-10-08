@@ -984,6 +984,13 @@ impl FlowerFilter {
         self
     }
 
+    /// Match SCTP packets. Its ports are matched like TCP's and UDP's
+    /// ([`dst_port`](Self::dst_port), [`dst_port_range`](Self::dst_port_range)).
+    pub fn ip_proto_sctp(mut self) -> Self {
+        self.ip_proto = Some(flower::IPPROTO_SCTP);
+        self
+    }
+
     /// Match source IPv4 address with prefix length.
     pub fn src_ipv4(mut self, addr: Ipv4Addr, prefix_len: u8) -> Self {
         if self.eth_type.is_none() {
@@ -1021,6 +1028,13 @@ impl FlowerFilter {
     }
 
     /// Match source port. Replaces a [`src_port_range`](Self::src_port_range).
+    ///
+    /// cls_flower reads a port only for TCP, UDP or SCTP, so the filter
+    /// must also set [`ip_proto_tcp`](Self::ip_proto_tcp) /
+    /// [`ip_proto_udp`](Self::ip_proto_udp) /
+    /// [`ip_proto_sctp`](Self::ip_proto_sctp) and an ethertype. Installing
+    /// one that does not is an error rather than the match-all the kernel
+    /// would make of it.
     pub fn src_port(mut self, port: u16) -> Self {
         self.src_port = Some(port);
         self.src_port_range = None;
@@ -1028,7 +1042,8 @@ impl FlowerFilter {
     }
 
     /// Match destination port. Replaces a
-    /// [`dst_port_range`](Self::dst_port_range).
+    /// [`dst_port_range`](Self::dst_port_range). The same rules as
+    /// [`src_port`](Self::src_port) apply.
     pub fn dst_port(mut self, port: u16) -> Self {
         self.dst_port = Some(port);
         self.dst_port_range = None;
@@ -1043,8 +1058,9 @@ impl FlowerFilter {
     /// [`src_port`](Self::src_port) — and reads a range only for TCP, UDP
     /// or SCTP, so the filter must also set
     /// [`ip_proto_tcp`](Self::ip_proto_tcp) / [`ip_proto_udp`](Self::ip_proto_udp)
-    /// / `ip_proto(132)` and an ethertype. Installing one that does not is
-    /// an error rather than the match-all the kernel would make of it.
+    /// / [`ip_proto_sctp`](Self::ip_proto_sctp) and an ethertype. Installing
+    /// one that does not is an error rather than the match-all the kernel
+    /// would make of it.
     pub fn src_port_range(mut self, min: u16, max: u16) -> Self {
         self.src_port_range = Some((min, max));
         self.src_port = None;
@@ -1162,14 +1178,15 @@ impl FlowerFilter {
     /// Recognised tokens:
     ///
     /// - `classid <handle>` (alias `flowid`) — target class id (`1:10`)
-    /// - `ip_proto <name|num>` — `tcp` / `udp` / `icmp` / `icmpv6` or
-    ///   bare u8
+    /// - `ip_proto <name|num>` — `tcp` / `udp` / `sctp` / `icmp` /
+    ///   `icmpv6` or bare u8
     /// - `src_ip <addr[/prefix]>` / `dst_ip <addr[/prefix]>` — IPv4 or
     ///   IPv6 (auto-detected via `:` presence). Bare address means
     ///   `/32` (v4) or `/128` (v6). Sets `eth_type` if not already set.
     /// - `src_port <port|min-max>` / `dst_port <port|min-max>` — a range
     ///   (`8000-8100`, inclusive, `min` below `max`) is a port-range key,
-    ///   as in tc(8)
+    ///   as in tc(8). Either needs `ip_proto` `tcp`, `udp` or `sctp`, in any
+    ///   order; installing one without is an error
     /// - `src_mac <mac>` / `dst_mac <mac>` — `xx:xx:xx:xx:xx:xx`
     /// - `eth_type <name|hex>` — `ip` / `ipv4` / `ipv6` / `arp` / `vlan`
     ///   / `802.1q` / `802.1ad`, or hex (`0x800`)
@@ -1377,11 +1394,12 @@ fn parse_flower_ip_proto(s: &str) -> crate::Result<u8> {
     Ok(match s {
         "tcp" => flower::IPPROTO_TCP,
         "udp" => flower::IPPROTO_UDP,
+        "sctp" => flower::IPPROTO_SCTP,
         "icmp" => flower::IPPROTO_ICMP,
         "icmpv6" => flower::IPPROTO_ICMPV6,
         other => other.parse::<u8>().map_err(|_| {
             Error::InvalidMessage(format!(
-                "flower: invalid ip_proto `{other}` (expected tcp/udp/icmp/icmpv6 or 0-255)"
+                "flower: invalid ip_proto `{other}` (expected tcp/udp/sctp/icmp/icmpv6 or 0-255)"
             ))
         })?,
     })
@@ -1607,8 +1625,11 @@ impl FilterConfig for FlowerFilter {
         // port without it makes the kernel ACK the request and install
         // a classifier that matches *everything*, which is worse than
         // any error: a rule meant for one port silently claims the
-        // whole interface. Refuse instead (#288).
-        if self.eth_type.is_none() {
+        // whole interface. Refuse instead (#288) — and the same for any
+        // other ethertype, which drops them just as silently (ARP, or a
+        // VLAN tag: nlink writes no TCA_FLOWER_KEY_VLAN_ETH_TYPE, so
+        // `n_proto` is never set to the inner protocol) (#424).
+        if !matches!(self.eth_type, Some(0x0800 | 0x86DD)) {
             let unusable = [
                 self.ip_proto.map(|_| "ip_proto"),
                 self.src_port.map(|_| "src_port"),
@@ -1623,36 +1644,61 @@ impl FilterConfig for FlowerFilter {
             .flatten()
             .collect::<Vec<_>>();
             if !unusable.is_empty() {
+                let other = match self.eth_type {
+                    Some(t) => format!(" (this one is {t:#06x})"),
+                    None => String::new(),
+                };
                 return Err(Error::InvalidMessage(format!(
-                    "flower: {} needs an ethertype — cls_flower discards L3/L4 keys \
-                     unless TCA_FLOWER_KEY_ETH_TYPE says IPv4 or IPv6, and would \
-                     install this as a match-all filter. Call .ipv4() or .ipv6() \
-                     (an address setter such as .dst_ipv4() implies one)",
+                    "flower: {} needs an ethertype of IPv4 or IPv6{other} — cls_flower \
+                     discards L3/L4 keys unless TCA_FLOWER_KEY_ETH_TYPE says IPv4 or \
+                     IPv6, and would install this as a match-all filter. Call .ipv4() \
+                     or .ipv6() (an address setter such as .dst_ipv4() implies one)",
                     unusable.join(", ")
                 )));
             }
         }
 
-        // Port ranges, checked the way `fl_set_key_port_range` would — but
-        // that is only reached for TCP, UDP and SCTP; for any other
-        // protocol the kernel ACKs and drops the range, which again leaves
-        // a match-all.
-        for (what, range) in [
-            ("src_port", self.src_port_range),
-            ("dst_port", self.dst_port_range),
+        // Ports, checked the way `fl_set_key` reads them. An exact port is
+        // read from the key of the filter's own protocol —
+        // TCA_FLOWER_KEY_{TCP,UDP,SCTP}_{SRC,DST}, each only under its
+        // `ip_proto` — and a range by `fl_set_key_port_range`, which is
+        // only reached for those three as well. For any other protocol, or
+        // none, the kernel ACKs and drops the port, which leaves a
+        // match-all (#416, #424).
+        let has_ports = matches!(
+            self.ip_proto,
+            Some(flower::IPPROTO_TCP | flower::IPPROTO_UDP | flower::IPPROTO_SCTP)
+        );
+        let proto = match self.ip_proto {
+            Some(p) => format!("ip_proto {p}"),
+            None => "no ip_proto".to_string(),
+        };
+        for (what, exact, range) in [
+            ("src_port", self.src_port, self.src_port_range),
+            ("dst_port", self.dst_port, self.dst_port_range),
         ] {
-            let Some((min, max)) = range else { continue };
-            if min >= max {
-                return Err(Error::InvalidMessage(format!(
-                    "flower: {what} range {min}-{max} is invalid: the kernel needs min below \
-                     max (a single port is .{what}({min}))"
-                )));
+            if let Some((min, max)) = range {
+                if min >= max {
+                    return Err(Error::InvalidMessage(format!(
+                        "flower: {what} range {min}-{max} is invalid: the kernel needs min \
+                         below max (a single port is .{what}({min}))"
+                    )));
+                }
+                if !has_ports {
+                    return Err(Error::InvalidMessage(format!(
+                        "flower: a {what} range needs ip_proto tcp, udp or sctp, not {proto} — \
+                         cls_flower reads port ranges for those only, and would install this \
+                         as a match-all"
+                    )));
+                }
             }
-            let l4 = [flower::IPPROTO_TCP, flower::IPPROTO_UDP, flower::IPPROTO_SCTP];
-            if !self.ip_proto.is_some_and(|p| l4.contains(&p)) {
+            if let Some(port) = exact
+                && !has_ports
+            {
                 return Err(Error::InvalidMessage(format!(
-                    "flower: a {what} range needs ip_proto tcp, udp or sctp — cls_flower \
-                     reads port ranges for those only, and would install this as a match-all"
+                    "flower: {what} {port} needs ip_proto tcp, udp or sctp, not {proto} — \
+                     cls_flower reads ports for those only, and would install this as a \
+                     match-all"
                 )));
             }
         }
@@ -1705,20 +1751,30 @@ impl FilterConfig for FlowerFilter {
             builder.append_attr(flower::TCA_FLOWER_KEY_IPV6_DST_MASK, &mask.octets());
         }
 
-        // Add ports
-        if let Some(port) = self.src_port {
-            if self.ip_proto == Some(flower::IPPROTO_TCP) {
-                builder.append_attr(flower::TCA_FLOWER_KEY_TCP_SRC, &port.to_be_bytes());
-            } else if self.ip_proto == Some(flower::IPPROTO_UDP) {
-                builder.append_attr(flower::TCA_FLOWER_KEY_UDP_SRC, &port.to_be_bytes());
+        // Exact ports: the protocol's own keys, network order. No mask —
+        // `fl_set_key_val` fills an absent one with all-ones. The checks
+        // above leave no port on any other protocol.
+        let port_keys = match self.ip_proto {
+            Some(flower::IPPROTO_TCP) => Some((
+                flower::TCA_FLOWER_KEY_TCP_SRC,
+                flower::TCA_FLOWER_KEY_TCP_DST,
+            )),
+            Some(flower::IPPROTO_UDP) => Some((
+                flower::TCA_FLOWER_KEY_UDP_SRC,
+                flower::TCA_FLOWER_KEY_UDP_DST,
+            )),
+            Some(flower::IPPROTO_SCTP) => Some((
+                flower::TCA_FLOWER_KEY_SCTP_SRC,
+                flower::TCA_FLOWER_KEY_SCTP_DST,
+            )),
+            _ => None,
+        };
+        if let Some((src_key, dst_key)) = port_keys {
+            if let Some(port) = self.src_port {
+                builder.append_attr(src_key, &port.to_be_bytes());
             }
-        }
-
-        if let Some(port) = self.dst_port {
-            if self.ip_proto == Some(flower::IPPROTO_TCP) {
-                builder.append_attr(flower::TCA_FLOWER_KEY_TCP_DST, &port.to_be_bytes());
-            } else if self.ip_proto == Some(flower::IPPROTO_UDP) {
-                builder.append_attr(flower::TCA_FLOWER_KEY_UDP_DST, &port.to_be_bytes());
+            if let Some(port) = self.dst_port {
+                builder.append_attr(dst_key, &port.to_be_bytes());
             }
         }
 
@@ -6543,5 +6599,115 @@ fn flower_unusable_port_ranges_are_refused() {
         flower_option_ids(&FlowerFilter::new().ipv6().ip_proto(132).dst_port_range(80, 90)).is_ok(),
         "SCTP takes a range"
     );
+}
+
+// ========================================================================
+// #424 — an exact port cls_flower does not read is a match-all
+// ========================================================================
+
+/// The `(type, payload)` pairs `write_options` emits.
+fn flower_option_attrs(f: &FlowerFilter) -> crate::Result<Vec<(u16, Vec<u8>)>> {
+    let mut builder = MessageBuilder::new(0, 0);
+    let start = builder.len();
+    f.write_options(&mut builder)?;
+    let blob = builder.as_bytes()[start..].to_vec();
+    Ok(crate::netlink::attr::AttrIter::new(&blob)
+        .map(|(t, p)| (t, p.to_vec()))
+        .collect())
+}
+
+/// `fl_set_key` reads an exact port from the key of the filter's own
+/// `ip_proto`: `TCA_FLOWER_KEY_SCTP_{SRC,DST}` for SCTP. A TCP or UDP key
+/// would be ignored there, and so would no key at all.
+#[test]
+fn flower_sctp_ports_are_written_as_sctp_keys() {
+    let port_keys = [
+        flower::TCA_FLOWER_KEY_TCP_SRC,
+        flower::TCA_FLOWER_KEY_TCP_DST,
+        flower::TCA_FLOWER_KEY_UDP_SRC,
+        flower::TCA_FLOWER_KEY_UDP_DST,
+        flower::TCA_FLOWER_KEY_SCTP_SRC,
+        flower::TCA_FLOWER_KEY_SCTP_DST,
+    ];
+    for f in [
+        FlowerFilter::new().ipv4().ip_proto(flower::IPPROTO_SCTP).src_port(5000).dst_port(80),
+        FlowerFilter::new().ipv6().ip_proto_sctp().src_port(5000).dst_port(80),
+    ] {
+        let attrs = flower_option_attrs(&f).expect("accepted");
+        let ports: Vec<_> = attrs.iter().filter(|(t, _)| port_keys.contains(t)).collect();
+        assert_eq!(
+            ports,
+            [
+                &(flower::TCA_FLOWER_KEY_SCTP_SRC, 5000u16.to_be_bytes().to_vec()),
+                &(flower::TCA_FLOWER_KEY_SCTP_DST, 80u16.to_be_bytes().to_vec()),
+            ],
+            "{attrs:?}"
+        );
+    }
+
+    // TCP and UDP keep their own keys.
+    let udp = flower_option_attrs(&FlowerFilter::new().ipv4().ip_proto_udp().src_port(53))
+        .expect("accepted");
+    assert!(udp.contains(&(flower::TCA_FLOWER_KEY_UDP_SRC, 53u16.to_be_bytes().to_vec())));
+}
+
+/// A port `fl_set_key` would not read — on a protocol without ports, on no
+/// `ip_proto` at all, or under an ethertype that is not IP — is refused,
+/// not shipped as the match-all the kernel would make of it.
+#[test]
+fn flower_exact_ports_cls_flower_would_drop_are_refused() {
+    let cases = [
+        (FlowerFilter::new().ipv4().ip_proto_icmp().dst_port(80), "dst_port 80"),
+        (FlowerFilter::new().ipv6().ip_proto(47).src_port(80), "src_port 80"),
+        (FlowerFilter::new().ipv4().dst_port(80), "dst_port 80"),
+        (
+            FlowerFilter::new()
+                .dst_ipv6("fd00::1".parse().unwrap(), 128)
+                .src_port(80),
+            "src_port 80",
+        ),
+    ];
+    for (f, what) in cases {
+        let crate::Error::InvalidMessage(err) = flower_option_ids(&f).expect_err(what) else {
+            panic!("{what}: not an InvalidMessage");
+        };
+        assert!(
+            err.starts_with("flower: ")
+                && err.contains(what)
+                && err.contains("needs ip_proto tcp, udp or sctp"),
+            "{what}: {err}"
+        );
+    }
+
+    // `fl_set_key` reads `ip_proto` only under an IPv4 or IPv6 ethertype;
+    // under ARP it is dropped, and the port with it.
+    let f = FlowerFilter::parse_params(&["eth_type", "arp", "ip_proto", "tcp", "dst_port", "80"])
+        .expect("parses");
+    let crate::Error::InvalidMessage(err) = flower_option_ids(&f).expect_err("ARP") else {
+        panic!("ARP: not an InvalidMessage");
+    };
+    assert!(
+        err.starts_with("flower: ") && err.contains("needs an ethertype"),
+        "{err}"
+    );
+}
+
+/// tc(8)'s `ip_proto sctp dst_port 80` parses, in any order, and installs
+/// the SCTP key.
+#[test]
+fn flower_parse_params_sctp_ports() {
+    for params in [
+        &["eth_type", "ipv4", "ip_proto", "sctp", "dst_port", "80"][..],
+        &["dst_port", "80", "ip_proto", "sctp", "eth_type", "ipv6"][..],
+        &["eth_type", "ipv4", "ip_proto", "132", "dst_port", "80"][..],
+    ] {
+        let f = FlowerFilter::parse_params(params).expect("tc(8) takes this");
+        assert_eq!(f.ip_proto, Some(flower::IPPROTO_SCTP), "{params:?}");
+        let attrs = flower_option_attrs(&f).expect("accepted");
+        assert!(
+            attrs.contains(&(flower::TCA_FLOWER_KEY_SCTP_DST, 80u16.to_be_bytes().to_vec())),
+            "{params:?}: {attrs:?}"
+        );
+    }
 }
 }

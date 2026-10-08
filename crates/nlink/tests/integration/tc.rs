@@ -1169,3 +1169,161 @@ async fn test_filter_with_chain() -> Result<()> {
 
     Ok(())
 }
+
+// ============================================================================
+// #424 — an exact SCTP port is a match, not a match-all
+// ============================================================================
+
+/// Send `count` SCTP packets from inside `ns` to `dst` on each of `ports`.
+///
+/// Through a raw IPv4 socket, so no `sctp` module is needed: the kernel
+/// writes the IP header (protocol 132) and this writes the 12-byte SCTP
+/// common header — source port, destination port, verification tag,
+/// checksum. The flow dissector reads an SCTP packet's ports from its first
+/// four bytes, as it does TCP's and UDP's, and nothing on the egress path
+/// looks at the rest.
+fn send_sctp(ns: &TestNamespace, dst: std::net::Ipv4Addr, ports: &[u16], count: usize) {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    let name = ns.name().to_string();
+    let ports = ports.to_vec();
+    std::thread::spawn(move || {
+        let _ns = nlink::netlink::namespace::enter(&name).expect("enter test netns");
+        // SAFETY: socket(2) with constant arguments.
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_RAW, libc::IPPROTO_SCTP) };
+        assert!(
+            fd >= 0,
+            "raw SCTP socket: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: `fd` was just returned by socket(2) and nothing else owns it.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let to = libc::sockaddr_in {
+            sin_family: libc::AF_INET as libc::sa_family_t,
+            sin_port: 0,
+            sin_addr: libc::in_addr {
+                s_addr: u32::from(dst).to_be(),
+            },
+            sin_zero: [0; 8],
+        };
+        for port in &ports {
+            let mut header = [0u8; 12];
+            header[..2].copy_from_slice(&40000u16.to_be_bytes());
+            header[2..4].copy_from_slice(&port.to_be_bytes());
+            for _ in 0..count {
+                // SAFETY: `header` and `to` are live for the call and their
+                // lengths are the ones passed.
+                let sent = unsafe {
+                    libc::sendto(
+                        fd.as_raw_fd(),
+                        header.as_ptr().cast(),
+                        header.len(),
+                        0,
+                        (&to as *const libc::sockaddr_in).cast(),
+                        std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                    )
+                };
+                assert_eq!(
+                    sent,
+                    header.len() as isize,
+                    "sendto: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
+    })
+    .join()
+    .expect("SCTP thread panicked");
+}
+
+/// A flower filter for one SCTP destination port classifies that port and
+/// nothing else. `FlowerFilter` wrote an exact port only for TCP and UDP, so
+/// an SCTP port filter installed as `ip_proto sctp` alone and claimed every
+/// SCTP packet (#424).
+///
+/// The traffic leaves through a dummy device, so every packet is classified
+/// by the HTB root and counted on the class it lands in.
+#[tokio::test]
+async fn flower_sctp_port_classifies_only_its_port() -> Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "sch_htb", "cls_flower");
+    use nlink::netlink::types::tc::filter::flower::TCA_FLOWER_KEY_SCTP_DST;
+
+    let (ns, conn) = setup_tc_ns("flower-sctp").await?;
+    ns.add_addr("dummy0", "10.42.0.1/24")?;
+
+    let htb = HtbQdiscConfig::new().default_class(0x30).build();
+    conn.add_qdisc_full("dummy0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb)
+        .await?;
+    for minor in [0x10, 0x30] {
+        let class = HtbClassConfig::new(nlink::Rate::mbit(100)).build();
+        conn.add_class(
+            "dummy0",
+            TcHandle::major_only(1),
+            TcHandle::new(1, minor),
+            class,
+        )
+        .await?;
+    }
+    let filter = FlowerFilter::new()
+        .classid(TcHandle::new(1, 0x10))
+        .ipv4()
+        .ip_proto(132)
+        .dst_port(5001)
+        .build();
+    conn.add_filter_full("dummy0", TcHandle::major_only(1), None, 0x0800, 1, filter)
+        .await?;
+
+    // The kernel holds the SCTP port key…
+    let mut failures = Vec::new();
+    let filters = conn.get_filters_by_name("dummy0").await?;
+    let flower = filters
+        .iter()
+        .find(|f| f.kind() == Some("flower"))
+        .expect("flower filter installed");
+    let sctp_dst = nlink::netlink::AttrIter::new(flower.raw_options().unwrap_or_default())
+        .find(|(ty, _)| *ty == TCA_FLOWER_KEY_SCTP_DST)
+        .map(|(_, payload)| payload.to_vec());
+    if sctp_dst != Some(5001u16.to_be_bytes().to_vec()) {
+        failures.push(format!(
+            "the installed filter's TCA_FLOWER_KEY_SCTP_DST is {sctp_dst:?}, want port 5001"
+        ));
+    }
+
+    // …and classifies by it: port 5001 into 1:10, other SCTP ports and
+    // UDP to the same port into the default class.
+    const PER_PORT: usize = 5;
+    let peer = std::net::Ipv4Addr::new(10, 42, 0, 2);
+    send_sctp(&ns, peer, &[5001], PER_PORT);
+    send_sctp(&ns, peer, &[5002, 80], PER_PORT);
+    {
+        let name = ns.name().to_string();
+        std::thread::spawn(move || {
+            let _ns = nlink::netlink::namespace::enter(&name).expect("enter test netns");
+            let socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind");
+            for _ in 0..PER_PORT {
+                socket.send_to(b"nlink", (peer, 5001)).expect("send");
+            }
+        })
+        .join()
+        .expect("UDP thread panicked");
+    }
+
+    let classes = conn.get_classes_by_name("dummy0").await?;
+    let count = |minor: u16| {
+        classes
+            .iter()
+            .find(|c| c.handle() == TcHandle::new(1, minor))
+            .map(|c| c.packets())
+    };
+    let (port, default) = (count(0x10), count(0x30));
+    let (want_port, want_default) = (PER_PORT as u64, 3 * PER_PORT as u64);
+    if port != Some(want_port) || default != Some(want_default) {
+        failures.push(format!(
+            "port class 1:10 counted {port:?} packets (want {want_port}), default class 1:30 \
+             counted {default:?} (want {want_default})"
+        ));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}

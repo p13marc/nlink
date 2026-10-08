@@ -697,12 +697,46 @@ All notable changes to this project will be documented in this file.
   5.2+), and its `parse_params` takes tc(8)'s `dst_port 8000-8100`. A range
   without TCP/UDP/SCTP as `ip_proto`, which cls_flower would install as a
   match-all, or with `min >= max`, which it refuses, is an error. Both
-  verbs now build their filters from one list, so a range gets an IPv4 TCP
-  and an IPv4 UDP filter at the two priorities `limit_port` uses (IPv6 is
-  not matched, as with `limit_port`); a one-port range is that port, and
+  verbs now build their filters from one list, so a range gets the TCP and
+  UDP filters `limit_port` gets, at the same priorities (IPv4 only, as
+  `limit_port` was until #425); a one-port range is that port, and
   `start > end` fails before anything changes. Tested on traffic: UDP to
   ports inside the range lands in the rule's class, the rest in the default
   class.
+
+- **A flower filter's exact port was dropped for every protocol but TCP and
+  UDP (#424).** `FlowerFilter` wrote `src_port`/`dst_port` only under
+  `ip_proto` TCP or UDP. With SCTP, any other protocol or no `ip_proto` at
+  all, the port was left out and the filter installed as a match-all for
+  the protocol: an SCTP port rule claimed every SCTP packet. It now writes
+  `TCA_FLOWER_KEY_SCTP_{SRC,DST}` under SCTP, which `fl_set_key` reads there,
+  and an exact port on any other protocol, or on none, is a `flower: …`
+  error from `write_options`, as a port range has been since #416. So is an
+  `ip_proto`, port, `ip_tos`, `ip_ttl` or `tcp_flags` under an ethertype
+  other than IPv4 or IPv6 (ARP, a VLAN tag): `fl_set_key` reads them only
+  under those two, and the old check refused only a missing ethertype.
+  `FlowerFilter::ip_proto_sctp()` is new, and `parse_params` takes tc(8)'s
+  `ip_proto sctp`. Tested on traffic: SCTP to the filter's port lands in its
+  class; SCTP to other ports, and UDP to that port, in the default class.
+
+- **`PerHostLimiter` port rules did not shape IPv6 (#425).** `limit_port`
+  and `limit_port_range` installed flower filters for IPv4 only, so TCP and
+  UDP over IPv6 to a limited port went to the default class. A port rule
+  now has four filters: IPv4 TCP at its priority (`index + 1`), IPv4 UDP
+  100 above it, IPv6 TCP and UDP 200 and 300 above it — one ethertype per
+  priority, since the kernel refuses a second there. `apply()` and
+  `reconcile()` still build them from one list. Two things came with it:
+  a port rule that becomes an address rule no longer leaves its other
+  filters behind — `reconcile()` kept them, classifying the port's traffic
+  into the class the address rule now owns, which was already true of the
+  IPv4 UDP filter; and rules whose filters would need the same priority (a
+  port rule with another rule 100, 200 or 300 places after it, so only past
+  100 rules) are refused before anything changes, where the kernel used to
+  refuse the second filter mid-apply or `reconcile()` rewrote one of them
+  forever. Tested on traffic: TCP SYNs and UDP datagrams over IPv4 and
+  IPv6, to a port rule, inside and outside a range rule, land in exactly
+  the classes they should after either verb, and a reconcile after either
+  is a no-op.
 
 ## [0.29.0] - 2026-10-01
 
