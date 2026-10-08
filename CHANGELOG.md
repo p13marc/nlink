@@ -738,6 +738,32 @@ All notable changes to this project will be documented in this file.
   the classes they should after either verb, and a reconcile after either
   is a no-op.
 
+- **A link recreate (#417) destroyed FDB entries, neighbours, nexthop
+  objects and multipath routes without asking (#426).** The refusal checked
+  addresses, routes by `RTA_OIF`, qdiscs, ports and stacked links. Deleting
+  a link also takes its permanent, static and externally learned FDB
+  entries — a VXLAN's head-end replication list (`bridge fdb append
+  00:00:00:00:00:00 ... dst`), a bridge's static entries for the port, and
+  for a bridge every entry in its database — its permanent, externally
+  learned and proxy neighbours (`neigh_ifdown`), its nexthop objects
+  (`nexthop_flush_dev`), and routes through it that carry no `RTA_OIF`:
+  multipath routes (an IPv4 one goes whole — `fib_sync_down_dev` counts
+  every nexthop dead on unregister) and routes through a nexthop object or
+  group (`RTA_NH_ID`). None of these can be declared, so each now blocks the
+  recreate and is named in the error and in `LinkRecreate::blocked_by`. The
+  kernel's own FDB entries do not block: the address-list entries
+  `ndo_dflt_fdb_dump` reports as `self permanent` (multicast joins, the MACs
+  of links stacked on the device), a bridge port's or bridge's own MAC, and
+  a VXLAN's default remote. The ports of a recreated bond or VRF are
+  flushed on the way out (`__bond_release_one` closes them;
+  `fib_netdev_event` and `addrconf_notify` flush a port leaving an L3
+  master), so their undeclared routes — outside the VRF's own table — IPv6
+  addresses, neighbours and nexthop objects block too. Two fixes made this
+  possible: `RouteMessage::nh_id()` reads `RTA_NH_ID`, and an FDB entry's
+  `NDA_DST` is decoded by length — it was decoded by family, which is
+  `AF_BRIDGE`, so `FdbEntry::dst()` (and `nlink-bridge fdb show`) never
+  showed a VXLAN remote.
+
 ## [0.29.0] - 2026-10-01
 
 > Upgrading from 0.28.x? See

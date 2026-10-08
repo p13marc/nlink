@@ -547,8 +547,11 @@ impl Connection<Route> {
             .collect())
     }
 
-    /// Get all bridge neighbor entries (AF_BRIDGE FDB dump).
-    async fn get_bridge_neighbors(&self) -> Result<Vec<NeighborMessage>> {
+    /// Get all bridge neighbor entries (AF_BRIDGE FDB dump): every
+    /// device's, not one bridge's — `rtnl_fdb_dump` walks each device,
+    /// the bridge database entries of a port and the device's own
+    /// (`ndo_fdb_dump`, or its unicast/multicast address lists).
+    pub(crate) async fn get_bridge_neighbors(&self) -> Result<Vec<NeighborMessage>> {
         use super::{message::NLMSG_HDRLEN, parse::FromNetlink};
 
         let ndmsg = NdMsg::new().with_family(AF_BRIDGE);

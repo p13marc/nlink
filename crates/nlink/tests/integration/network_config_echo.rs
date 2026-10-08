@@ -718,6 +718,20 @@ async fn link_kind_parameter_changes_reach_the_kernel() -> nlink::Result<()> {
                 ("c0", "linkinfo.info_data.id", json!(30)),
             ],
         ),
+        // The macvlan's own MAC is in the VLAN's unicast address list, so
+        // `bridge fdb` shows it on v1 as `self permanent`: the kernel's
+        // entry, put back when the macvlan is, not undeclared state (#426).
+        kind_case(
+            "vlan-with-a-macvlan-stacked-on-it",
+            vec![
+                vlan_on("d0", 10).link("mv0", |l| l.macvlan("v1").up()),
+                vlan_on("d0", 20).link("mv0", |l| l.macvlan("v1").up()),
+            ],
+            vec![
+                ("v1", "linkinfo.info_data.id", json!(20)),
+                ("mv0", "link", json!("v1")),
+            ],
+        ),
         kind_case(
             "vxlan-vni",
             vec![vx(base_vx()), vx(Vx { vni: 200, ..base_vx() })],
@@ -882,6 +896,24 @@ async fn link_kind_parameter_changes_reach_the_kernel() -> nlink::Result<()> {
             ],
             vec![("x0", "linkinfo.info_kind", json!("bridge"))],
         ),
+        // A bridge's database goes with it, but the entries the kernel
+        // made — the port's local MAC, per VLAN too, and the bridge's own
+        // multicast list — are not undeclared state (#426).
+        kind_case(
+            "kind-of-a-bridge-with-a-port",
+            vec![
+                NetworkConfig::new()
+                    .link("x0", |l| l.bridge().up())
+                    .link("d0", |l| l.dummy().master("x0").up()),
+                NetworkConfig::new()
+                    .link("x0", |l| l.bond().up())
+                    .link("d0", |l| l.dummy().master("x0").up()),
+            ],
+            vec![
+                ("x0", "linkinfo.info_kind", json!("bond")),
+                ("d0", "master", json!("x0")),
+            ],
+        ),
     ];
     assert_kind_cases(cases).await
 }
@@ -998,10 +1030,15 @@ async fn vxlan_ipv6_endpoints_reach_the_kernel() -> nlink::Result<()> {
 
 /// A recreate that would destroy something the config does not declare
 /// is refused, says what, and leaves the kernel alone.
+///
+/// `NetworkConfig` cannot declare FDB entries, neighbours, multipath
+/// routes or nexthop objects, so every one of those on a link the apply
+/// would delete is undeclared state — and so is what the kernel flushes
+/// from the ports of a deleted VRF or bond as they leave it (#426).
 #[tokio::test]
 async fn a_recreate_that_would_destroy_undeclared_state_is_refused() -> nlink::Result<()> {
     require_root!();
-    nlink::require_modules!("dummy", "8021q", "vxlan", "bonding");
+    nlink::require_modules!("dummy", "8021q", "vxlan", "bonding", "bridge", "vrf");
 
     struct Refusal {
         name: &'static str,
@@ -1028,6 +1065,42 @@ async fn a_recreate_that_would_destroy_undeclared_state_is_refused() -> nlink::R
         NetworkConfig::new()
             .link("d0", |l| l.dummy().up())
             .link("v1", |l| l.vlan("d0", id).up())
+    };
+    // A VXLAN that is a bridge port, with a remote: the kernel's own FDB
+    // entries (the default remote, the port's local MAC) do not block it.
+    let bridged_vx = |vni: u32| {
+        NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .link("br0", |l| l.bridge().up())
+            .link("vx0", |l| {
+                l.vxlan(vni)
+                    .vxlan_underlay_dev("d0")
+                    .vxlan_port(4790)
+                    .vxlan_remote(Ipv4Addr::new(10, 1, 0, 2).into())
+                    .master("br0")
+                    .up()
+            })
+    };
+    // A VLAN with addresses, next to a second link a multipath route or a
+    // nexthop group can also use.
+    let addressed_vlan = |id: u16| {
+        vlan(id)
+            .link("d1", |l| l.dummy().up())
+            .address("v1", "10.5.0.1/24")
+            .unwrap()
+            .address("v1", "fd00:5::1/64")
+            .unwrap()
+            .address("d1", "10.6.0.1/24")
+            .unwrap()
+            .address("d1", "fd00:6::1/64")
+            .unwrap()
+    };
+    let vrf = |table: u32| {
+        NetworkConfig::new()
+            .link("vrf0", |l| l.vrf(table).up())
+            .link("d0", |l| l.dummy().master("vrf0").up())
+            .address("d0", "10.8.0.1/24")
+            .unwrap()
     };
     let cases = vec![
         Refusal {
@@ -1075,6 +1148,166 @@ async fn a_recreate_that_would_destroy_undeclared_state_is_refused() -> nlink::R
             second: vlan(20),
             names: "prio",
             unchanged: ("v1", "linkinfo.info_data.id", serde_json::json!(10)),
+        },
+        // Head-end replication: one all-zeros FDB entry per remote VTEP.
+        Refusal {
+            name: "undeclared-fdb-flood-entry",
+            first: vx(100),
+            extra: vec![(
+                "bridge",
+                vec![
+                    "fdb", "append", "00:00:00:00:00:00", "dev", "vx0", "dst", "192.0.2.1",
+                    "permanent",
+                ],
+            )],
+            second: vx(200),
+            names: "192.0.2.1",
+            unchanged: ("vx0", "linkinfo.info_data.id", serde_json::json!(100)),
+        },
+        Refusal {
+            name: "undeclared-fdb-unicast-entry",
+            first: vx(100),
+            extra: vec![(
+                "bridge",
+                vec![
+                    "fdb", "add", "02:00:5e:10:00:41", "dev", "vx0", "dst", "192.0.2.5",
+                    "permanent",
+                ],
+            )],
+            second: vx(200),
+            names: "02:00:5e:10:00:41",
+            unchanged: ("vx0", "linkinfo.info_data.id", serde_json::json!(100)),
+        },
+        // A static entry in a bridge's FDB, for the port being recreated.
+        Refusal {
+            name: "undeclared-fdb-entry-in-the-bridge",
+            first: bridged_vx(100),
+            extra: vec![(
+                "bridge",
+                vec!["fdb", "add", "02:00:5e:10:00:42", "dev", "vx0", "master", "static"],
+            )],
+            second: bridged_vx(200),
+            names: "02:00:5e:10:00:42",
+            unchanged: ("vx0", "linkinfo.info_data.id", serde_json::json!(100)),
+        },
+        Refusal {
+            name: "undeclared-permanent-neighbour",
+            first: addressed_vlan(10),
+            extra: vec![(
+                "ip",
+                vec![
+                    "neigh", "add", "10.5.0.7", "lladdr", "02:00:5e:10:00:07", "nud", "permanent",
+                    "dev", "v1",
+                ],
+            )],
+            second: addressed_vlan(20),
+            names: "10.5.0.7",
+            unchanged: ("v1", "linkinfo.info_data.id", serde_json::json!(10)),
+        },
+        Refusal {
+            name: "undeclared-permanent-v6-neighbour",
+            first: addressed_vlan(10),
+            extra: vec![(
+                "ip",
+                vec![
+                    "-6", "neigh", "add", "fd00:5::7", "lladdr", "02:00:5e:10:00:08", "nud",
+                    "permanent", "dev", "v1",
+                ],
+            )],
+            second: addressed_vlan(20),
+            names: "fd00:5::7",
+            unchanged: ("v1", "linkinfo.info_data.id", serde_json::json!(10)),
+        },
+        Refusal {
+            name: "undeclared-proxy-neighbour",
+            first: addressed_vlan(10),
+            extra: vec![("ip", vec!["neigh", "add", "proxy", "10.5.0.8", "dev", "v1"])],
+            second: addressed_vlan(20),
+            names: "10.5.0.8",
+            unchanged: ("v1", "linkinfo.info_data.id", serde_json::json!(10)),
+        },
+        // A multipath route's nexthops are in RTA_MULTIPATH; it has no oif.
+        Refusal {
+            name: "undeclared-multipath-route",
+            first: addressed_vlan(10),
+            extra: vec![(
+                "ip",
+                vec![
+                    "route", "add", "10.56.0.0/16", "nexthop", "via", "10.5.0.254", "dev", "v1",
+                    "nexthop", "via", "10.6.0.254", "dev", "d1",
+                ],
+            )],
+            second: addressed_vlan(20),
+            names: "10.56.0.0/16",
+            unchanged: ("v1", "linkinfo.info_data.id", serde_json::json!(10)),
+        },
+        Refusal {
+            name: "undeclared-multipath-v6-route",
+            first: addressed_vlan(10),
+            extra: vec![(
+                "ip",
+                vec![
+                    "-6", "route", "add", "2001:db8:56::/48", "nexthop", "via", "fd00:5::fe", "dev",
+                    "v1", "nexthop", "via", "fd00:6::fe", "dev", "d1",
+                ],
+            )],
+            second: addressed_vlan(20),
+            names: "2001:db8:56::/48",
+            unchanged: ("v1", "linkinfo.info_data.id", serde_json::json!(10)),
+        },
+        // A nexthop object on the link: deleted with it, and so is every
+        // route that uses it.
+        Refusal {
+            name: "undeclared-nexthop-object",
+            first: addressed_vlan(10),
+            extra: vec![(
+                "ip",
+                vec!["nexthop", "add", "id", "5", "via", "10.5.0.253", "dev", "v1"],
+            )],
+            second: addressed_vlan(20),
+            names: "nexthop id 5",
+            unchanged: ("v1", "linkinfo.info_data.id", serde_json::json!(10)),
+        },
+        // A route through a nexthop group: no oif, and its nexthops are
+        // objects, not RTA_MULTIPATH entries of its own.
+        Refusal {
+            name: "undeclared-route-through-a-nexthop-group",
+            first: addressed_vlan(10),
+            extra: vec![
+                ("ip", vec!["nexthop", "add", "id", "6", "via", "10.5.0.253", "dev", "v1"]),
+                ("ip", vec!["nexthop", "add", "id", "7", "via", "10.6.0.253", "dev", "d1"]),
+                ("ip", vec!["nexthop", "add", "id", "8", "group", "6/7"]),
+                ("ip", vec!["route", "add", "10.57.0.0/16", "nhid", "8"]),
+            ],
+            second: addressed_vlan(20),
+            names: "10.57.0.0/16",
+            unchanged: ("v1", "linkinfo.info_data.id", serde_json::json!(10)),
+        },
+        // A VRF releases its ports when it is deleted, and the kernel
+        // flushes what hangs off a port that leaves an L3 master: its
+        // routes (`fib_disable_ip`, forced, for NETDEV_CHANGEUPPER) and its
+        // neighbours (`arp_ifdown`).
+        Refusal {
+            name: "undeclared-neighbour-on-a-port",
+            first: vrf(10),
+            extra: vec![(
+                "ip",
+                vec![
+                    "neigh", "add", "10.8.0.7", "lladdr", "02:00:5e:10:00:09", "nud", "permanent",
+                    "dev", "d0",
+                ],
+            )],
+            second: vrf(20),
+            names: "10.8.0.7",
+            unchanged: ("vrf0", "linkinfo.info_data.table", serde_json::json!(10)),
+        },
+        Refusal {
+            name: "undeclared-route-through-a-port",
+            first: vrf(10),
+            extra: vec![("ip", vec!["route", "add", "10.88.0.0/16", "dev", "d0"])],
+            second: vrf(20),
+            names: "10.88.0.0/16",
+            unchanged: ("vrf0", "linkinfo.info_data.table", serde_json::json!(10)),
         },
     ];
 

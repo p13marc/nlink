@@ -439,13 +439,21 @@ pub async fn compute_diff_with_options(
     let current_qdiscs = conn.get_qdiscs().await?;
 
     // Kind parameters (#417): what changes in place, and which links have
-    // to be deleted and created again.
+    // to be deleted and created again. A recreate also destroys FDB
+    // entries, neighbours and nexthop objects, which no declaration can
+    // describe, so those are read too — only when there is one (#426).
+    let extras = if kind::recreates_any(config, &current_links) {
+        kind::LinkExtras::read(conn).await?
+    } else {
+        kind::LinkExtras::default()
+    };
     let plan = kind::plan(
         config,
         &current_links,
         &current_addresses,
         &current_routes,
         &current_qdiscs,
+        &extras,
     );
     diff.links_to_recreate = plan.recreate.clone();
     // The rest of the diff compares against the state the apply's
