@@ -1327,3 +1327,78 @@ async fn flower_sctp_port_classifies_only_its_port() -> Result<()> {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     Ok(())
 }
+
+/// A flower filter for one VLAN id classifies that VLAN and nothing else.
+/// `FlowerFilter` had no way to set a VLAN ethertype, and `cls_flower` reads
+/// `vlan_id` only under one, so `.vlan_id(10)` installed a match-all (#431).
+///
+/// VLANs 10 and 20 sit on a dummy device with an HTB root; the filter is
+/// installed for every protocol, so a match-all would claim VLAN 20 and the
+/// untagged traffic too.
+#[tokio::test]
+async fn flower_vlan_id_classifies_only_its_vlan() -> Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "8021q", "sch_htb", "cls_flower");
+    use nlink::netlink::link::VlanLink;
+
+    let (ns, conn) = setup_tc_ns("flower-vlan").await?;
+    ns.add_addr("dummy0", "10.42.0.1/24")?;
+    for (id, net) in [(10u16, "10.10.0.1/24"), (20, "10.20.0.1/24")] {
+        let name = format!("dummy0.{id}");
+        conn.add_link(VlanLink::new(&name, "dummy0", id)).await?;
+        conn.set_link_up(name.as_str()).await?;
+        ns.add_addr(&name, net)?;
+    }
+
+    let htb = HtbQdiscConfig::new().default_class(0x30).build();
+    conn.add_qdisc_full("dummy0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb)
+        .await?;
+    for minor in [0x10, 0x30] {
+        let class = HtbClassConfig::new(nlink::Rate::mbit(100)).build();
+        conn.add_class(
+            "dummy0",
+            TcHandle::major_only(1),
+            TcHandle::new(1, minor),
+            class,
+        )
+        .await?;
+    }
+    let filter = FlowerFilter::new()
+        .classid(TcHandle::new(1, 0x10))
+        .vlan_id(10)
+        .build();
+    conn.add_filter_full("dummy0", TcHandle::major_only(1), None, 0x0003, 1, filter)
+        .await?;
+
+    const PER_TARGET: usize = 5;
+    {
+        let name = ns.name().to_string();
+        std::thread::spawn(move || {
+            let _ns = nlink::netlink::namespace::enter(&name).expect("enter test netns");
+            let socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind");
+            for peer in ["10.10.0.2:9", "10.20.0.2:9", "10.42.0.2:9"] {
+                for _ in 0..PER_TARGET {
+                    socket.send_to(b"nlink", peer).expect("send");
+                }
+            }
+        })
+        .join()
+        .expect("UDP thread panicked");
+    }
+
+    let classes = conn.get_classes_by_name("dummy0").await?;
+    let count = |minor: u16| {
+        classes
+            .iter()
+            .find(|c| c.handle() == TcHandle::new(1, minor))
+            .map(|c| c.packets())
+    };
+    let (vlan, default) = (count(0x10), count(0x30));
+    let (want_vlan, want_default) = (PER_TARGET as u64, 2 * PER_TARGET as u64);
+    assert!(
+        vlan == Some(want_vlan) && default == Some(want_default),
+        "VLAN class 1:10 counted {vlan:?} packets (want {want_vlan}), default class 1:30 \
+         counted {default:?} (want {want_default})"
+    );
+    Ok(())
+}

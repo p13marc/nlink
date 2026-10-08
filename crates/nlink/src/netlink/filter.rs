@@ -954,6 +954,19 @@ impl FlowerFilter {
         self
     }
 
+    /// Match 802.1Q-tagged frames — the ethertype [`vlan_id`](Self::vlan_id)
+    /// and [`vlan_prio`](Self::vlan_prio) are read under.
+    pub fn vlan(mut self) -> Self {
+        self.eth_type = Some(0x8100);
+        self
+    }
+
+    /// Match 802.1AD (QinQ) outer-tagged frames.
+    pub fn qinq(mut self) -> Self {
+        self.eth_type = Some(0x88A8);
+        self
+    }
+
     /// Set IP protocol.
     pub fn ip_proto(mut self, proto: u8) -> Self {
         self.ip_proto = Some(proto);
@@ -1108,15 +1121,21 @@ impl FlowerFilter {
         self
     }
 
-    /// Match VLAN ID.
+    /// Match VLAN ID. `cls_flower` reads it only under a VLAN ethertype, so
+    /// this implies [`vlan`](Self::vlan) (802.1Q) unless one is set —
+    /// [`qinq`](Self::qinq) for an 802.1AD tag. Under any other ethertype
+    /// the filter is refused (#431).
     pub fn vlan_id(mut self, id: u16) -> Self {
         self.vlan_id = Some(id);
+        self.eth_type.get_or_insert(0x8100);
         self
     }
 
-    /// Match VLAN priority.
+    /// Match VLAN priority; like [`vlan_id`](Self::vlan_id), implies 802.1Q
+    /// unless an ethertype is set.
     pub fn vlan_prio(mut self, prio: u8) -> Self {
         self.vlan_prio = Some(prio);
+        self.eth_type.get_or_insert(0x8100);
         self
     }
 
@@ -1132,7 +1151,8 @@ impl FlowerFilter {
         self
     }
 
-    /// Match TCP flags with mask.
+    /// Match TCP flags with mask. Needs `ip_proto tcp`: `cls_flower` reads
+    /// the flags only there, so anything else is refused (#431).
     pub fn tcp_flags(mut self, flags: u16, mask: u16) -> Self {
         self.tcp_flags = Some((flags, mask));
         self
@@ -1656,6 +1676,41 @@ impl FilterConfig for FlowerFilter {
                     unusable.join(", ")
                 )));
             }
+        }
+
+        // TCP flags are read only under `ip_proto tcp`, and the VLAN keys only
+        // when TCA_FLOWER_KEY_ETH_TYPE is a VLAN tag (`is_vlan_key` →
+        // `eth_type_vlan`; nlink does not model TCA_FLOWER_KEY_NUM_OF_VLANS,
+        // the other way in). Anywhere else the kernel ACKs and drops them,
+        // leaving a match-all (#431).
+        if self.tcp_flags.is_some() && self.ip_proto != Some(flower::IPPROTO_TCP) {
+            let proto = match self.ip_proto {
+                Some(p) => format!("ip_proto {p}"),
+                None => "no ip_proto".to_string(),
+            };
+            return Err(Error::InvalidMessage(format!(
+                "flower: tcp_flags needs ip_proto tcp, not {proto} — cls_flower reads TCP \
+                 flags only for TCP, and would install this as a match-all"
+            )));
+        }
+        if (self.vlan_id.is_some() || self.vlan_prio.is_some())
+            && !matches!(self.eth_type, Some(0x8100 | 0x88A8))
+        {
+            let what = match (self.vlan_id, self.vlan_prio) {
+                (Some(_), Some(_)) => "vlan_id and vlan_prio",
+                (Some(_), None) => "vlan_id",
+                _ => "vlan_prio",
+            };
+            let ethertype = match self.eth_type {
+                Some(t) => format!("ethertype {t:#06x}"),
+                None => "no ethertype".to_string(),
+            };
+            return Err(Error::InvalidMessage(format!(
+                "flower: {what} needs an 802.1Q or 802.1AD ethertype, not {ethertype} — \
+                 cls_flower reads VLAN keys only under a VLAN tag, and would install this \
+                 as a match-all. Matching an IP header inside a VLAN \
+                 (TCA_FLOWER_KEY_VLAN_ETH_TYPE) is not modelled by FlowerFilter"
+            )));
         }
 
         // Ports, checked the way `fl_set_key` reads them. An exact port is
@@ -6709,5 +6764,58 @@ fn flower_parse_params_sctp_ports() {
             "{params:?}: {attrs:?}"
         );
     }
+}
+
+// ========================================================================
+// #431 — tcp_flags and VLAN keys cls_flower does not read are a match-all
+// ========================================================================
+
+/// `fl_set_key` reads TCP flags only under `ip_proto tcp`, and the VLAN keys
+/// only under an 802.1Q/802.1AD ethertype. Anywhere else they were written,
+/// ACKed and ignored.
+#[test]
+fn flower_tcp_flags_and_vlan_keys_cls_flower_would_drop_are_refused() {
+    let cases = [
+        (FlowerFilter::new().ipv4().ip_proto_udp().tcp_flags(0x02, 0x02), "tcp_flags needs ip_proto tcp"),
+        (FlowerFilter::new().ipv4().tcp_flags(0x02, 0x12), "tcp_flags needs ip_proto tcp"),
+        (FlowerFilter::new().ipv4().vlan_id(10), "vlan_id needs an 802.1Q or 802.1AD ethertype"),
+        (FlowerFilter::new().vlan_prio(3).arp(), "vlan_prio needs an 802.1Q"),
+        (
+            FlowerFilter::new().vlan_id(10).vlan_prio(3).ipv6(),
+            "vlan_id and vlan_prio needs",
+        ),
+    ];
+    for (f, why) in cases {
+        let crate::Error::InvalidMessage(err) = flower_option_ids(&f).expect_err(why) else {
+            panic!("{why}: not an InvalidMessage");
+        };
+        assert!(err.starts_with("flower: ") && err.contains(why), "{why}: {err}");
+    }
+    let ids = flower_option_ids(&FlowerFilter::new().ipv4().ip_proto_tcp().tcp_flags(0x02, 0x12))
+        .expect("TCP takes flags");
+    assert!(ids.contains(&flower::TCA_FLOWER_KEY_TCP_FLAGS));
+}
+
+/// The typed builder had no way to set a VLAN ethertype, so `.vlan_id(10)`
+/// could only ever install a match-all. It now implies 802.1Q, and
+/// `.qinq()` picks 802.1AD.
+#[test]
+fn flower_vlan_keys_imply_a_vlan_ethertype() {
+    let ethertype = |f: FlowerFilter| {
+        let mut builder = MessageBuilder::new(0, 0);
+        let start = builder.len();
+        f.write_options(&mut builder).expect("accepted");
+        let blob = builder.as_bytes()[start..].to_vec();
+        crate::netlink::attr::AttrIter::new(&blob)
+            .find(|(t, _)| *t == flower::TCA_FLOWER_KEY_ETH_TYPE)
+            .map(|(_, p)| u16::from_be_bytes(p.try_into().unwrap()))
+    };
+    assert_eq!(ethertype(FlowerFilter::new().vlan_id(10)), Some(0x8100));
+    assert_eq!(ethertype(FlowerFilter::new().vlan_prio(5)), Some(0x8100));
+    assert_eq!(ethertype(FlowerFilter::new().qinq().vlan_id(10)), Some(0x88A8));
+    assert_eq!(ethertype(FlowerFilter::new().vlan().vlan_id(10)), Some(0x8100));
+    // tc(8)'s spelling still works.
+    let parsed = FlowerFilter::parse_params(&["vlan_id", "10"]).unwrap();
+    assert_eq!(ethertype(parsed), Some(0x8100));
 }
 }
