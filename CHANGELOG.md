@@ -408,6 +408,19 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **A flower `vlan_id`, `vlan_prio` or `tcp_flags` match could install as a
+  match-all (#431).** `fl_set_key` reads the VLAN keys only when
+  `TCA_FLOWER_KEY_ETH_TYPE` is a VLAN tag (`is_vlan_key` →
+  `eth_type_vlan`), and the TCP flags only under `ip_proto tcp`; anywhere
+  else the kernel ACKs and ignores them. The typed builder could not even
+  set a VLAN ethertype, so `FlowerFilter::vlan_id(10)` always claimed every
+  packet: on a dummy carrying VLANs 10 and 20, a `vlan_id 10` filter
+  counted all 15 packets sent, 10 of them untagged or on VLAN 20. Now
+  `vlan_id`/`vlan_prio` imply 802.1Q unless an ethertype is set, `vlan()`
+  and `qinq()` set one explicitly, and `write_options` refuses VLAN keys
+  under any other ethertype and `tcp_flags` without `ip_proto tcp`, with a
+  `flower: …` error — the same rule #424 applies to ports.
+
 - **`nlink-ip link add` dropped options it could not apply (#428).** A
   `--local` or `--remote` it could not parse was skipped on
   gre/gretap/ipip/sit/vti/vti6/ip6gre/ip6gretap, so was an IPv6 address
