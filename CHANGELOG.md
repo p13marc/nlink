@@ -409,6 +409,14 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`RouteMessage::netlink_len` undercounted what `write_to` writes
+  (#439).** It left out `RTA_SRC`, `RTA_IIF`, `RTA_PREF`, `RTA_EXPIRES` and
+  `RTA_MULTIPATH`, and sized every address by the route's family, so an IPv4
+  route through an IPv6 gateway (or a multipath nexthop of the other family)
+  was counted short too: a fully populated IPv4 route encodes to 144 bytes
+  and was reported as 68. It now mirrors the writer attribute for attribute
+  and sizes each address by its own family.
+
 - **A VLAN declared down on a lower device the apply brought up ended up
   (#436), and one declared up on a lower device declared down failed only
   on the second apply (#437).** The kernel couples a VLAN's state to its

@@ -545,32 +545,27 @@ fn parse_multipath(data: &[u8], family: u8) -> Vec<ParsedNextHop> {
 }
 
 impl ToNetlink for RouteMessage {
+    /// The length `write_to` writes, attribute for attribute. Each address
+    /// is sized by its own family — an IPv4 route can have an IPv6 gateway
+    /// (RFC 5549), and a multipath nexthop's gateway is its own — not the
+    /// route's. It used to leave out `RTA_SRC`, `RTA_IIF`, `RTA_PREF`,
+    /// `RTA_EXPIRES` and `RTA_MULTIPATH` (#439).
     fn netlink_len(&self) -> usize {
-        let mut len = RtMsg::SIZE;
-
-        if self.destination.is_some() {
-            len += nla_size(if self.is_ipv4() { 4 } else { 16 });
-        }
-        if self.gateway.is_some() {
-            len += nla_size(if self.is_ipv4() { 4 } else { 16 });
-        }
-        if self.oif.is_some() {
-            len += nla_size(4);
-        }
-        if self.priority.is_some() {
-            len += nla_size(4);
-        }
-        if self.prefsrc.is_some() {
-            len += nla_size(if self.is_ipv4() { 4 } else { 16 });
-        }
-        if self.table.is_some() {
-            len += nla_size(4);
-        }
-        if self.nh_id.is_some() {
-            len += nla_size(4);
-        }
-
-        len
+        let ip = |addr: &Option<IpAddr>| addr.as_ref().map_or(0, ip_attr_size);
+        let u32_attr = |value: Option<u32>| value.map_or(0, |_| nla_size(4));
+        RtMsg::SIZE
+            + ip(&self.destination)
+            + ip(&self.gateway)
+            + u32_attr(self.oif)
+            + u32_attr(self.priority)
+            + ip(&self.prefsrc)
+            + u32_attr(self.table)
+            + ip(&self.source)
+            + u32_attr(self.iif)
+            + self.pref.map_or(0, |_| nla_size(1))
+            + u32_attr(self.expires)
+            + self.multipath.as_deref().map_or(0, multipath_attr_size)
+            + u32_attr(self.nh_id)
     }
 
     fn write_to(&self, buf: &mut Vec<u8>) -> Result<usize> {
@@ -627,6 +622,25 @@ impl ToNetlink for RouteMessage {
 /// Calculate aligned attribute size.
 fn nla_size(payload_len: usize) -> usize {
     (4 + payload_len + 3) & !3
+}
+
+/// The size of an address attribute, as `write_attr_ip` writes it.
+fn ip_attr_size(addr: &IpAddr) -> usize {
+    nla_size(match addr {
+        IpAddr::V4(_) => 4,
+        IpAddr::V6(_) => 16,
+    })
+}
+
+/// The size of an `RTA_MULTIPATH` attribute, as `write_attr_multipath`
+/// writes it: per nexthop an 8-byte `struct rtnexthop` and its gateway
+/// attribute, each nexthop 4-byte aligned.
+fn multipath_attr_size(nexthops: &[ParsedNextHop]) -> usize {
+    let body: usize = nexthops
+        .iter()
+        .map(|nh| (8 + nh.gateway.as_ref().map_or(0, ip_attr_size) + 3) & !3)
+        .sum();
+    (4 + body + 3) & !3
 }
 
 fn write_attr_u32(buf: &mut Vec<u8>, attr_type: u16, value: u32) {
@@ -928,6 +942,51 @@ mod tests {
         assert_eq!(parsed.destination, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0))));
         assert_eq!(parsed.oif, Some(7));
         assert_eq!(parsed.priority, Some(100));
+    }
+
+    /// `netlink_len` is what `write_to` writes, for every attribute and
+    /// family mix. It left out five attributes, so `to_bytes` sized its
+    /// buffer short for any route carrying them (#439).
+    #[test]
+    fn netlink_len_matches_what_write_to_writes() {
+        use std::net::Ipv6Addr;
+        let v4 = |d| IpAddr::V4(Ipv4Addr::new(10, 0, 0, d));
+        let v6 = |d| IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, d));
+        let nh = |ifindex, gateway| ParsedNextHop {
+            ifindex,
+            weight: 1,
+            flags: 0,
+            gateway,
+        };
+        let full = |dst: IpAddr, gw: IpAddr, other: IpAddr| {
+            RouteMessageBuilder::new()
+                .destination(dst, 24)
+                .source(dst, 24)
+                .gateway(gw)
+                .prefsrc(dst)
+                .iif(3)
+                .oif(7)
+                .priority(100)
+                .table(254)
+                .pref(1)
+                .expires(3600)
+                .multipath(vec![nh(7, Some(gw)), nh(8, None), nh(9, Some(other))])
+                .nh_id(42)
+                .build()
+        };
+        let cases = [
+            ("bare", RouteMessageBuilder::new().build()),
+            ("ipv4, every attribute", full(v4(0), v4(1), v4(2))),
+            ("ipv6, every attribute", full(v6(0), v6(1), v6(2))),
+            // An IPv4 route through an IPv6 gateway, and nexthops of both.
+            ("mixed families", full(v4(0), v6(1), v4(2))),
+        ];
+        for (name, msg) in cases {
+            let mut buf = Vec::new();
+            let written = msg.write_to(&mut buf).unwrap();
+            assert_eq!(msg.netlink_len(), written, "{name}");
+            assert_eq!(msg.to_bytes().unwrap().len(), written, "{name}");
+        }
     }
 
     // --------- Plan 202 — parse_multipath ---------
