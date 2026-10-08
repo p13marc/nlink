@@ -1217,6 +1217,25 @@ async fn a_recreate_that_would_destroy_undeclared_state_is_refused() -> nlink::R
             names: "192.0.2.1",
             unchanged: ("vx0", "linkinfo.info_data.id", serde_json::json!(100)),
         },
+        // A remote on another VXLAN that sends through the recreated link:
+        // the entry would keep naming its old ifindex (#438).
+        Refusal {
+            name: "undeclared-fdb-entry-via-the-link",
+            first: vlan(10),
+            extra: vec![
+                ("ip", vec!["link", "add", "vx9", "type", "vxlan", "id", "9", "dstport", "4791"]),
+                (
+                    "bridge",
+                    vec![
+                        "fdb", "append", "00:00:00:00:00:00", "dev", "vx9", "dst", "192.0.2.9",
+                        "via", "v1",
+                    ],
+                ),
+            ],
+            second: vlan(20),
+            names: "via v1",
+            unchanged: ("v1", "linkinfo.info_data.id", serde_json::json!(10)),
+        },
         Refusal {
             name: "undeclared-fdb-unicast-entry",
             first: vx(100),
