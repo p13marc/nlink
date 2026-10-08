@@ -1046,6 +1046,22 @@ pub(crate) fn plan(
                     blocked_by.push(fdb_label(e, &names));
                 }
             }
+            // Entries on another device that send *through* this one — a
+            // VXLAN remote with `via` (`NDA_IFINDEX`, the rdst's
+            // remote_ifindex). Deleting the link leaves them naming its old
+            // ifindex: `bridge fdb` shows `via if10`, and the new link is
+            // never used (#438). Entries on a device recreated with it go
+            // anyway.
+            for e in extras.fdb.iter().filter(|e| {
+                e.ifindex_attr == Some(l.ifindex()) && !members.contains(&e.ifindex())
+            }) {
+                if fdb_entry_is_users(e, &by_index, &link_macs) {
+                    blocked_by.push(format!(
+                        "{} via {name}, which would point at the deleted {name}",
+                        fdb_label(e, &names)
+                    ));
+                }
+            }
             undeclarable_on(l.ifindex(), name, extras, &mut blocked_by);
         }
 
