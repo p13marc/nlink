@@ -708,4 +708,31 @@ impl Connection<Route> {
             .filter(|n| n.ifindex() == ifindex)
             .collect())
     }
+
+    /// Get the proxy entries (`ip neigh show proxy`), every family.
+    ///
+    /// They are not in the plain dump: `neigh_dump_info` walks the proxy
+    /// table instead of the neighbour table only when the request's
+    /// `ndm_flags` is exactly `NTF_PROXY`.
+    pub(crate) async fn get_proxy_neighbors(
+        &self,
+    ) -> Result<Vec<super::messages::NeighborMessage>> {
+        use super::{message::{NLM_F_DUMP, NLMSG_HDRLEN}, parse::FromNetlink};
+
+        let mut ndmsg = NdMsg::new();
+        ndmsg.ndm_flags = ntf::PROXY;
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_GETNEIGH, NLM_F_REQUEST | NLM_F_DUMP);
+        builder.append(&ndmsg);
+
+        let mut parsed = Vec::new();
+        for response in self.send_dump(builder).await? {
+            if response.len() < NLMSG_HDRLEN {
+                continue;
+            }
+            if let Ok(msg) = super::messages::NeighborMessage::from_bytes(&response[NLMSG_HDRLEN..]) {
+                parsed.push(msg);
+            }
+        }
+        Ok(parsed)
+    }
 }

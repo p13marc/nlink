@@ -738,6 +738,53 @@ All notable changes to this project will be documented in this file.
   the classes they should after either verb, and a reconcile after either
   is a no-op.
 
+- **A link recreate (#417) destroyed FDB entries, neighbours, nexthop
+  objects and multipath routes without asking (#426).** The refusal checked
+  addresses, routes by `RTA_OIF`, qdiscs, ports and stacked links. Deleting
+  a link also takes its permanent, static and externally learned FDB
+  entries — a VXLAN's head-end replication list (`bridge fdb append
+  00:00:00:00:00:00 ... dst`), a bridge's static entries for the port, and
+  for a bridge every entry in its database — its permanent, externally
+  learned and proxy neighbours (`neigh_ifdown`), its nexthop objects
+  (`nexthop_flush_dev`), and routes through it that carry no `RTA_OIF`:
+  multipath routes (an IPv4 one goes whole — `fib_sync_down_dev` counts
+  every nexthop dead on unregister) and routes through a nexthop object or
+  group (`RTA_NH_ID`). None of these can be declared, so each now blocks the
+  recreate and is named in the error and in `LinkRecreate::blocked_by`. The
+  kernel's own FDB entries do not block: the address-list entries
+  `ndo_dflt_fdb_dump` reports as `self permanent` (multicast joins, the MACs
+  of links stacked on the device), a bridge port's or bridge's own MAC, and
+  a VXLAN's default remote. The ports of a recreated bond or VRF are
+  flushed on the way out (`__bond_release_one` closes them;
+  `fib_netdev_event` and `addrconf_notify` flush a port leaving an L3
+  master), so their undeclared routes — outside the VRF's own table — IPv6
+  addresses, neighbours and nexthop objects block too. Two fixes made this
+  possible: `RouteMessage::nh_id()` reads `RTA_NH_ID`, and an FDB entry's
+  `NDA_DST` is decoded by length — it was decoded by family, which is
+  `AF_BRIDGE`, so `FdbEntry::dst()` (and `nlink-bridge fdb show`) never
+  showed a VXLAN remote.
+
+- **Declared routes through a link set down, or moved into or out of a VRF
+  or a bond, were lost until the next apply (#427).** Those link changes
+  make the kernel flush every route through the link, in both families and
+  every table: `fib_netdev_event` on NETDEV_DOWN, and on NETDEV_CHANGEUPPER
+  to or from an L3 master (forced, whatever the nexthop's scope);
+  `addrconf_notify` → `addrconf_ifdown` → `rt6_disable_ip` for IPv6. A
+  bond takes its port down on the way in (`bond_enslave` refuses an up
+  port) and closes it on the way out; a VRF cycles it. The diff read the
+  routes before the link step ran, found the declared ones present and left
+  them out, so the second apply was not a no-op and traffic was misrouted
+  in between. The diff now leaves the routes through such links out of the
+  comparison, so the declared ones are added back in the same apply — as
+  #409 does for IPv6 addresses — and does the same for a VLAN on such a
+  link, which `vlan_device_event` takes down with it (its IPv6 addresses,
+  which #409 missed, too). A route add that finds the route present is
+  reported as already there, not counted and not an error. A route declared
+  through a link declared down cannot exist (the kernel refuses one by
+  device with `ENETDOWN`, and one by a gateway it can no longer reach with
+  `ENETUNREACH`), and the apply that takes the link down now fails with that
+  error instead of reporting success and leaving the next apply to fail.
+
 ## [0.29.0] - 2026-10-01
 
 > Upgrading from 0.28.x? See

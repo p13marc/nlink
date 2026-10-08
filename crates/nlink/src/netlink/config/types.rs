@@ -305,7 +305,11 @@ impl DeclaredLink {
 /// a VRF's table — the kernel cannot change on a live link, so the apply
 /// deletes the link and creates it again, putting back what the config
 /// declares on it (see [`ConfigDiff::links_to_recreate`]). It refuses
-/// instead if the link carries something the config does not declare.
+/// instead if the link carries something the config does not declare —
+/// including what a config cannot declare: FDB entries someone added,
+/// permanent and proxy neighbours, nexthop objects, multipath routes and
+/// routes through a nexthop object, on the link or on the ports a deleted
+/// bond or VRF flushes as it releases them.
 /// A netkit pair's mode and scrubbing are never changed: recreating the
 /// pair would delete a peer that usually lives in another namespace.
 ///

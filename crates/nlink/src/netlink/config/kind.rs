@@ -45,6 +45,26 @@
 //! peer usually lives in another namespace, which no declaration here
 //! describes.
 //!
+//! Some of what a deleted link takes with it cannot be declared at all,
+//! so wherever it exists it blocks the recreate (#426): FDB entries a user
+//! or a controller added (a VXLAN's head-end replication list, a bridge's
+//! static entries), permanent and proxy neighbours (`neigh_ifdown`),
+//! nexthop objects (`nexthop_flush_dev`), and multipath and nexthop-object
+//! routes through the link, whose dump carries no `RTA_OIF` for it (an
+//! IPv4 multipath route goes whole: `fib_sync_down_dev` counts every
+//! nexthop dead on NETDEV_UNREGISTER). The kernel's own FDB entries are
+//! told apart by what makes them: a device's unicast and multicast address
+//! lists (`ndo_dflt_fdb_dump` — the stack's multicast joins, and the MACs
+//! of links stacked on it), a bridge port's or bridge's own MAC, and a
+//! VXLAN's default remote (`__vxlan_dev_create`).
+//!
+//! The ports of a deleted bond or VRF stay, but leaving it flushes them as
+//! a link going down does — `__bond_release_one` closes the port, and an
+//! L3-master change makes `fib_netdev_event` and `addrconf_notify` flush
+//! its routes, IPv6 addresses and neighbours — so what of that the config
+//! does not declare blocks too; except routes in the deleted VRF's own
+//! table, which nothing reaches once the VRF is gone.
+//!
 //! An optional parameter left undeclared is compared against the
 //! kernel's default where that default is fixed in the kernel (a VLAN's
 //! 802.1Q, no VXLAN remote/local/underlay, netkit's L3 mode and forward
@@ -59,12 +79,20 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use super::types::{DeclaredLink, DeclaredLinkType, NetworkConfig, QdiscParent};
 use crate::netlink::{
     attr::AttrIter,
+    connection::Connection,
+    error::Result,
     link::{
         BondMode as KernelBondMode, MacvlanMode as KernelMacvlanMode, NetkitMode, NetkitPolicy,
         NetkitScrub, VlanProtocol, bond_attr, macvlan, netkit, vlan, vrf_attr, vxlan,
     },
-    messages::{AddressMessage, LinkMessage, RouteMessage, TcMessage},
-    types::{addr::Scope, route::RouteProtocol},
+    messages::{AddressMessage, LinkMessage, NeighborMessage, RouteMessage, TcMessage},
+    nexthop::Nexthop,
+    protocol::Route,
+    types::{
+        addr::Scope,
+        neigh::{ntf, nud},
+        route::RouteProtocol,
+    },
 };
 
 /// A link the apply deletes and creates again, because a declared
@@ -609,6 +637,244 @@ pub(crate) struct KindPlan {
     pub(crate) updates: HashMap<String, KindUpdate>,
 }
 
+/// What hangs off the links beyond the four dumps every diff takes (links,
+/// addresses, routes, qdiscs), and a recreate destroys with them. Read
+/// only when the plan recreates a link ([`recreates_any`]).
+#[derive(Debug, Default)]
+pub(crate) struct LinkExtras {
+    /// The `AF_BRIDGE` neighbour dump: every device's FDB entries.
+    pub(crate) fdb: Vec<NeighborMessage>,
+    /// ARP and ND entries.
+    pub(crate) neighbours: Vec<NeighborMessage>,
+    /// Proxy entries, which the neighbour dump leaves out.
+    pub(crate) proxies: Vec<NeighborMessage>,
+    /// Nexthop objects.
+    pub(crate) nexthops: Vec<Nexthop>,
+}
+
+impl LinkExtras {
+    pub(crate) async fn read(conn: &Connection<Route>) -> Result<Self> {
+        let nexthops = match conn.get_nexthops().await {
+            Ok(nexthops) => nexthops,
+            // A kernel without nexthop objects (before 5.3) has no
+            // RTM_GETNEXTHOP handler, and no nexthop objects either.
+            Err(e) if e.is_not_supported() => Vec::new(),
+            Err(e) => return Err(e),
+        };
+        Ok(Self {
+            fdb: conn.get_bridge_neighbors().await?,
+            neighbours: conn.get_neighbors().await?,
+            proxies: conn.get_proxy_neighbors().await?,
+            nexthops,
+        })
+    }
+}
+
+/// True when some declared link has a parameter the kernel cannot change
+/// on it, so the plan recreates (or refuses to recreate) it.
+pub(crate) fn recreates_any(config: &NetworkConfig, links: &[LinkMessage]) -> bool {
+    let names: HashMap<u32, &str> = links
+        .iter()
+        .filter_map(|l| l.name.as_deref().map(|n| (l.ifindex(), n)))
+        .collect();
+    config.links.iter().any(|link| {
+        links
+            .iter()
+            .find(|l| l.name.as_deref() == Some(link.name.as_str()))
+            .is_some_and(|live| {
+                let d = compare(link, live, &names);
+                !d.recreate.is_empty() || !d.refuse.is_empty()
+            })
+    })
+}
+
+/// `downed`, and the VLANs the kernel takes down with them, transitively:
+/// `vlan_device_event` closes every up VLAN on a lower device that goes
+/// down, unless it was created with `loose_binding`, and opens them all
+/// again when the lower device comes back up.
+pub(crate) fn with_vlans_on(links: &[LinkMessage], downed: &HashSet<u32>) -> HashSet<u32> {
+    let mut out = downed.clone();
+    let mut queue: VecDeque<u32> = downed.iter().copied().collect();
+    while let Some(lower) = queue.pop_front() {
+        for l in links {
+            let follows = l.kind() == Some("vlan")
+                && l.link() == Some(lower)
+                && l.link_netnsid.is_none()
+                && l.is_up()
+                && !loose_binding(l);
+            if follows && out.insert(l.ifindex()) {
+                queue.push_back(l.ifindex());
+            }
+        }
+    }
+    out
+}
+
+/// `IFLA_VLAN_FLAGS` is a `struct ifla_vlan_flags { flags, mask }`.
+fn loose_binding(vlan_link: &LinkMessage) -> bool {
+    InfoData::of(vlan_link)
+        .u32(vlan::IFLA_VLAN_FLAGS)
+        .is_some_and(|flags| flags & vlan::VLAN_FLAG_LOOSE_BINDING != 0)
+}
+
+/// The devices each nexthop object sends through: its own, or for a group
+/// its members' (the kernel does not nest groups).
+fn nexthop_devices(nexthops: &[Nexthop]) -> HashMap<u32, Vec<u32>> {
+    let own: HashMap<u32, u32> = nexthops
+        .iter()
+        .filter_map(|nh| nh.ifindex().map(|dev| (nh.id(), dev)))
+        .collect();
+    nexthops
+        .iter()
+        .map(|nh| {
+            let devs = match nh.group() {
+                Some(members) => members.iter().filter_map(|m| own.get(&m.id()).copied()).collect(),
+                None => nh.ifindex().into_iter().collect(),
+            };
+            (nh.id(), devs)
+        })
+        .collect()
+}
+
+/// How a route goes through `dev`, if it does: its own output interface,
+/// one of its multipath nexthops, or the nexthop object it uses. The last
+/// two dump no `RTA_OIF` (a nexthop object's only while
+/// `nexthop_compat_mode` is on), so checking `oif` alone missed them.
+fn route_through(
+    r: &RouteMessage,
+    dev: u32,
+    nh_devs: &HashMap<u32, Vec<u32>>,
+) -> Option<&'static str> {
+    if r.nh_id()
+        .and_then(|id| nh_devs.get(&id))
+        .is_some_and(|devs| devs.contains(&dev))
+    {
+        return Some("through a nexthop object on");
+    }
+    if r.oif() == Some(dev) {
+        return Some("");
+    }
+    r.multipath()
+        .is_some_and(|hops| hops.iter().any(|h| h.ifindex == dev))
+        .then_some("with a multipath nexthop on")
+}
+
+fn route_label(r: &RouteMessage, name: &str, how: &str) -> String {
+    let dst = r.destination.unwrap_or(if r.is_ipv4() {
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+    } else {
+        IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+    });
+    let nhid = r.nh_id().map(|id| format!(" nhid {id}")).unwrap_or_default();
+    if how.is_empty() {
+        format!("route {dst}/{}{nhid} dev {name} table {}", r.dst_len(), r.table_id())
+    } else {
+        format!("route {dst}/{}{nhid} table {}, {how} {name}", r.dst_len(), r.table_id())
+    }
+}
+
+fn mac_str(mac: &[u8]) -> String {
+    mac.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":")
+}
+
+/// True for an FDB entry the kernel did not make itself — one a user or a
+/// controller added, which nothing puts back once its link is deleted.
+///
+/// Only entries that stay count: `permanent`, `static` (NUD_NOARP) and
+/// externally learned ones. A learned entry ages out and is learned again.
+/// Of the rest, the kernel's own are:
+/// - on a VXLAN, its default remote: the all-zeros entry
+///   `__vxlan_dev_create` adds for the remote it was created with, which
+///   `vxlan_fdb_info` dumps without `NDA_PORT` or `NDA_VNI`;
+/// - any other `self` entry is the device's unicast or multicast address
+///   list (`ndo_dflt_fdb_dump`): the stack's multicast joins, and the MACs
+///   of links stacked on it (`dev_uc_add` by a macvlan, a VLAN or a bond's
+///   upper with its own address). A user can add a unicast one
+///   (`bridge fdb add MAC dev X self permanent`), and that is told apart by
+///   being no link's MAC; a multicast one cannot be told apart;
+/// - in a bridge's database, a port's or the bridge's own MAC, which the
+///   bridge adds as a `local` entry, dumped as permanent (`fdb_to_nud`).
+fn fdb_entry_is_users(
+    e: &NeighborMessage,
+    by_index: &HashMap<u32, &LinkMessage>,
+    link_macs: &HashSet<&[u8]>,
+) -> bool {
+    let Some(mac) = e.lladdr().filter(|m| m.len() == 6) else {
+        return false;
+    };
+    let state = e.header.ndm_state;
+    let flags = e.header.ndm_flags;
+    let ext_learned = flags & ntf::EXT_LEARNED != 0;
+    if state & (nud::PERMANENT | nud::NOARP) == 0 && !ext_learned {
+        return false;
+    }
+    let dev = by_index.get(&e.ifindex());
+    if flags & ntf::SELF != 0 {
+        if let Some(vx) = dev.filter(|d| d.kind() == Some("vxlan")) {
+            let data = InfoData::of(vx);
+            let default_remote = data
+                .ipv4(vxlan::IFLA_VXLAN_GROUP)
+                .map(IpAddr::V4)
+                .or_else(|| data.ipv6(vxlan::IFLA_VXLAN_GROUP6).map(IpAddr::V6));
+            let is_default = mac.iter().all(|b| *b == 0)
+                && e.port().is_none()
+                && e.vni().is_none()
+                && default_remote.is_some()
+                && e.destination().copied() == default_remote;
+            return !is_default;
+        }
+        let multicast = mac[0] & 1 != 0;
+        return !multicast && !link_macs.contains(mac);
+    }
+    let own_mac = dev.and_then(|d| d.address()) == Some(mac);
+    !(state & nud::PERMANENT != 0 && !ext_learned && own_mac)
+}
+
+fn fdb_label(e: &NeighborMessage, names: &HashMap<u32, &str>) -> String {
+    let mac = e.lladdr().map(mac_str).unwrap_or_default();
+    let dev = names.get(&e.ifindex()).copied().unwrap_or("?");
+    let mut s = format!("fdb entry {mac} dev {dev}");
+    if let Some(dst) = e.destination() {
+        s.push_str(&format!(" dst {dst}"));
+    }
+    // Not the VLAN: one `bridge fdb add` without one makes an entry per
+    // VLAN of the port as well as the untagged one, and it is one thing to
+    // remove.
+    if let Some(master) = e.master() {
+        s.push_str(&format!(" master {}", names.get(&master).copied().unwrap_or("?")));
+    }
+    s
+}
+
+/// What deleting or flushing one link destroys that cannot be declared:
+/// its user-made neighbours and proxy entries, and its nexthop objects.
+fn undeclarable_on(
+    ifindex: u32,
+    name: &str,
+    extras: &LinkExtras,
+    blocked_by: &mut Vec<String>,
+) {
+    for n in extras.neighbours.iter().filter(|n| n.ifindex() == ifindex) {
+        let permanent = n.header.ndm_state & nud::PERMANENT != 0;
+        let ext_learned = n.header.ndm_flags & ntf::EXT_LEARNED != 0;
+        if !(permanent || ext_learned) {
+            continue;
+        }
+        let Some(dst) = n.destination() else { continue };
+        let what = if permanent { "permanent" } else { "externally learned" };
+        blocked_by.push(format!("neighbour {dst} dev {name} ({what})"));
+    }
+    for p in extras.proxies.iter().filter(|p| p.ifindex() == ifindex) {
+        if let Some(dst) = p.destination() {
+            blocked_by.push(format!("proxy neighbour {dst} dev {name}"));
+        }
+    }
+    for nh in extras.nexthops.iter().filter(|nh| nh.ifindex() == Some(ifindex)) {
+        let via = nh.gateway().map(|g| format!(" via {g}")).unwrap_or_default();
+        blocked_by.push(format!("nexthop id {}{via} dev {name}", nh.id()));
+    }
+}
+
 /// Compare every declared link's kind parameters with the live links, and
 /// work out what a recreate takes with it.
 pub(crate) fn plan(
@@ -617,6 +883,7 @@ pub(crate) fn plan(
     addresses: &[AddressMessage],
     routes: &[RouteMessage],
     qdiscs: &[TcMessage],
+    extras: &LinkExtras,
 ) -> KindPlan {
     let mut plan = KindPlan::default();
     let names: HashMap<u32, &str> = links
@@ -627,6 +894,14 @@ pub(crate) fn plan(
         .iter()
         .filter_map(|l| l.name.as_deref().map(|n| (n, l)))
         .collect();
+    let by_index: HashMap<u32, &LinkMessage> = links.iter().map(|l| (l.ifindex(), l)).collect();
+    // Tunnels and loopback have an all-zeros address, which is no MAC.
+    let link_macs: HashSet<&[u8]> = links
+        .iter()
+        .filter_map(|l| l.address())
+        .filter(|a| a.iter().any(|b| *b != 0))
+        .collect();
+    let nh_devs = nexthop_devices(&extras.nexthops);
     let declared: HashMap<&str, &DeclaredLink> =
         config.links.iter().map(|l| (l.name.as_str(), l)).collect();
 
@@ -671,6 +946,14 @@ pub(crate) fn plan(
         })
         .collect();
     let name_of = |ifindex: u32| names.get(&ifindex).copied().unwrap_or("?");
+    let route_key = |r: &RouteMessage| {
+        let dst = r.destination.unwrap_or(if r.is_ipv4() {
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        } else {
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+        });
+        (dst, r.dst_len(), r.table_id())
+    };
 
     for (seed, reason, refuse) in seeds {
         if plan.gone.contains(&seed.ifindex()) {
@@ -721,21 +1004,13 @@ pub(crate) fn plan(
                     blocked_by.push(format!("address {addr}/{} on {name}", a.prefix_len()));
                 }
             }
-            for r in routes.iter().filter(|r| r.oif() == Some(l.ifindex())) {
-                if r.protocol() == RouteProtocol::Kernel {
+            for r in routes {
+                if r.protocol() == RouteProtocol::Kernel || declared_routes.contains(&route_key(r))
+                {
                     continue;
                 }
-                let dst = r.destination.unwrap_or(if r.is_ipv4() {
-                    IpAddr::V4(Ipv4Addr::UNSPECIFIED)
-                } else {
-                    IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
-                });
-                if !declared_routes.contains(&(dst, r.dst_len(), r.table_id())) {
-                    blocked_by.push(format!(
-                        "route {dst}/{} dev {name} table {}",
-                        r.dst_len(),
-                        r.table_id()
-                    ));
+                if let Some(how) = route_through(r, l.ifindex(), &nh_devs) {
+                    blocked_by.push(route_label(r, name, how));
                 }
             }
             for q in qdiscs.iter().filter(|q| q.ifindex() == l.ifindex()) {
@@ -762,18 +1037,86 @@ pub(crate) fn plan(
                     ));
                 }
             }
-            for port in links
-                .iter()
-                .filter(|p| p.master() == Some(l.ifindex()) && !members.contains(&p.ifindex()))
-            {
-                let port_name = name_of(port.ifindex());
-                if !declared.contains_key(port_name) {
-                    blocked_by.push(format!(
-                        "link {port_name}, a port of {name}, which the kernel releases"
-                    ));
+            // The link's FDB entries, and — for a bridge — every entry in
+            // its database, whichever port it is on.
+            for e in extras.fdb.iter().filter(|e| {
+                e.ifindex() == l.ifindex() || e.master() == Some(l.ifindex())
+            }) {
+                if fdb_entry_is_users(e, &by_index, &link_macs) {
+                    blocked_by.push(fdb_label(e, &names));
                 }
             }
+            undeclarable_on(l.ifindex(), name, extras, &mut blocked_by);
         }
+
+        // The ports of every deleted master, which the kernel releases.
+        let ports: Vec<(&LinkMessage, &LinkMessage)> = closure
+            .iter()
+            .flat_map(|(l, _)| {
+                links
+                    .iter()
+                    .filter(|p| p.master() == Some(l.ifindex()) && !members.contains(&p.ifindex()))
+                    .map(move |p| (*l, p))
+            })
+            .collect();
+        for (master, port) in &ports {
+            let port_name = name_of(port.ifindex());
+            if !declared.contains_key(port_name) {
+                blocked_by.push(format!(
+                    "link {port_name}, a port of {}, which the kernel releases",
+                    name_of(master.ifindex())
+                ));
+            }
+        }
+        // The ports a bond closes or a VRF unlinks on the way out, and the
+        // VLANs on them, lose their routes, IPv6 addresses, neighbours and
+        // nexthop objects, as a link going down does. What the config
+        // declares there is put back; what it does not is gone — except the
+        // routes in a deleted VRF's own table, which nothing reaches once
+        // the VRF is gone.
+        let flushing: HashSet<u32> = ports
+            .iter()
+            .filter(|(m, _)| matches!(m.kind(), Some("bond" | "vrf")))
+            .map(|(_, p)| p.ifindex())
+            .collect();
+        let old_tables: HashSet<u32> = closure
+            .iter()
+            .filter(|(l, _)| l.kind() == Some("vrf"))
+            .filter_map(|(l, _)| InfoData::of(l).u32(vrf_attr::IFLA_VRF_TABLE))
+            .collect();
+        let mut flushed: Vec<u32> = with_vlans_on(links, &flushing).into_iter().collect();
+        flushed.sort_unstable();
+        for ifindex in flushed {
+            let name = name_of(ifindex);
+            for a in addresses.iter().filter(|a| a.ifindex() == ifindex) {
+                let Some(addr) = a.address.filter(|a| a.is_ipv6()) else { continue };
+                if a.scope() != Scope::Universe {
+                    continue;
+                }
+                let is_declared = config.addresses.iter().any(|d| {
+                    d.dev == name && d.address == addr && d.prefix_len == a.prefix_len()
+                });
+                if !is_declared {
+                    blocked_by.push(format!("address {addr}/{} on {name}", a.prefix_len()));
+                }
+            }
+            for r in routes {
+                if r.protocol() == RouteProtocol::Kernel
+                    || declared_routes.contains(&route_key(r))
+                    || old_tables.contains(&r.table_id())
+                {
+                    continue;
+                }
+                if let Some(how) = route_through(r, ifindex, &nh_devs) {
+                    blocked_by.push(route_label(r, name, how));
+                }
+            }
+            undeclarable_on(ifindex, name, extras, &mut blocked_by);
+        }
+
+        // A bridge entry is dumped once per VLAN as well as once without.
+        let mut seen_reasons = HashSet::new();
+        blocked_by.retain(|b| seen_reasons.insert(b.clone()));
 
         if !blocked_by.is_empty() {
             plan.recreate.push(LinkRecreate {
@@ -801,16 +1144,12 @@ pub(crate) fn plan(
                 reason,
                 blocked_by: Vec::new(),
             });
-            let master_kind = l.kind();
-            for port in links
-                .iter()
-                .filter(|p| p.master() == Some(l.ifindex()) && !members.contains(&p.ifindex()))
-            {
-                let closes = master_kind == Some("bond");
-                plan.released.insert(port.ifindex(), closes);
-                if closes || master_kind == Some("vrf") {
-                    plan.cycled.insert(port.ifindex());
-                }
+        }
+        for (master, port) in &ports {
+            let closes = master.kind() == Some("bond");
+            plan.released.insert(port.ifindex(), closes);
+            if flushing.contains(&port.ifindex()) {
+                plan.cycled.insert(port.ifindex());
             }
         }
     }
@@ -951,6 +1290,157 @@ mod tests {
                 "bond updelay 100 -> 500".to_string()
             ]
         );
+    }
+
+    fn link_at(ifindex: i32, name: &str, kind: &str, data: Vec<u8>, mac: [u8; 6]) -> LinkMessage {
+        let mut l = live(kind, data);
+        l.header.ifi_index = ifindex;
+        l.header.ifi_flags = libc::IFF_UP as u32;
+        l.name = Some(name.into());
+        l.address = Some(mac.to_vec());
+        l
+    }
+
+    fn fdb(ifindex: u32, mac: [u8; 6], state: u16, flags: u8) -> NeighborMessage {
+        let mut e = crate::netlink::messages::NeighborMessageBuilder::new()
+            .ifindex(ifindex)
+            .lladdr(mac.to_vec())
+            .build();
+        e.header.ndm_family = libc::AF_BRIDGE as u8;
+        e.header.ndm_state = state;
+        e.header.ndm_flags = flags;
+        e
+    }
+
+    /// The kernel's own FDB entries do not block a recreate; one a user
+    /// added does (#426).
+    #[test]
+    fn fdb_entries_the_kernel_makes_are_told_from_the_ones_a_user_adds() {
+        const OWN: [u8; 6] = [0x02, 0, 0, 0, 0, 1];
+        const UPPER: [u8; 6] = [0x02, 0, 0, 0, 0, 2];
+        const OTHER: [u8; 6] = [0x02, 0, 0, 0, 0, 9];
+        const ZEROS: [u8; 6] = [0; 6];
+        let remote = Ipv4Addr::new(10, 1, 0, 2);
+        let mut vx_data = attr(vxlan::IFLA_VXLAN_ID, &100u32.to_ne_bytes());
+        vx_data.extend(attr(vxlan::IFLA_VXLAN_GROUP, &remote.octets()));
+        let links = [
+            link_at(2, "d0", "dummy", Vec::new(), OWN),
+            link_at(3, "vx0", "vxlan", vx_data, OWN),
+            link_at(4, "mv0", "macvlan", Vec::new(), UPPER),
+        ];
+        let by_index: HashMap<u32, &LinkMessage> = links.iter().map(|l| (l.ifindex(), l)).collect();
+        let macs: HashSet<&[u8]> = links.iter().filter_map(|l| l.address()).collect();
+        let users = |e: NeighborMessage| fdb_entry_is_users(&e, &by_index, &macs);
+        let perm = nud::PERMANENT | nud::NOARP;
+        let with_dst = |mut e: NeighborMessage, dst: Ipv4Addr| {
+            e.destination = Some(IpAddr::V4(dst));
+            e
+        };
+
+        // A device's address lists: multicast joins, a stacked link's MAC.
+        assert!(!users(fdb(2, [0x33, 0x33, 0, 0, 0, 1], nud::PERMANENT, ntf::SELF)));
+        assert!(!users(fdb(2, UPPER, nud::PERMANENT, ntf::SELF)));
+        // `bridge fdb add MAC dev d0 self permanent`.
+        assert!(users(fdb(2, OTHER, nud::PERMANENT, ntf::SELF)));
+        // A VXLAN's default remote, and a second remote appended to it.
+        let default = fdb(3, ZEROS, nud::PERMANENT | nud::REACHABLE, ntf::SELF);
+        assert!(!users(with_dst(default, remote)));
+        let appended = fdb(3, ZEROS, perm, ntf::SELF);
+        assert!(users(with_dst(appended, Ipv4Addr::new(192, 0, 2, 1))));
+        // The same remote on another port is not the default either.
+        let mut other_port = with_dst(fdb(3, ZEROS, perm, ntf::SELF), remote);
+        other_port.port = Some(4791);
+        assert!(users(other_port));
+        // Learned entries age out; externally learned ones stay.
+        assert!(!users(with_dst(fdb(3, OTHER, nud::REACHABLE, ntf::SELF), remote)));
+        assert!(users(with_dst(
+            fdb(3, OTHER, nud::REACHABLE, ntf::SELF | ntf::EXT_LEARNED),
+            remote
+        )));
+        // A bridge's database: the port's own MAC is the kernel's local
+        // entry; a static or another permanent one is a user's.
+        let in_bridge = |mac, state| {
+            let mut e = fdb(2, mac, state, 0);
+            e.master = Some(9);
+            e
+        };
+        assert!(!users(in_bridge(OWN, nud::PERMANENT)));
+        assert!(users(in_bridge(OTHER, nud::PERMANENT)));
+        assert!(users(in_bridge(OTHER, nud::NOARP)));
+        assert!(!users(in_bridge(OTHER, nud::REACHABLE)));
+    }
+
+    /// A multipath route and a nexthop-object route dump no `RTA_OIF` for
+    /// the link they go through (#426).
+    #[test]
+    fn a_route_goes_through_a_link_by_oif_multipath_or_nexthop_object() {
+        use crate::netlink::messages::{ParsedNextHop, RouteMessageBuilder};
+        let nh = |id, ifindex, group: Option<Vec<u32>>| Nexthop {
+            id,
+            gateway: None,
+            ifindex,
+            family: libc::AF_INET as u8,
+            flags: 0,
+            protocol: 0,
+            scope: 0,
+            blackhole: false,
+            fdb: false,
+            group: group.map(|ids| {
+                ids.into_iter()
+                    .map(|id| crate::netlink::nexthop::NexthopGroupMember { id, weight: 1 })
+                    .collect()
+            }),
+            group_type: None,
+            resilient: None,
+        };
+        let nh_devs = nexthop_devices(&[nh(5, Some(2), None), nh(6, Some(3), None), nh(7, None, Some(vec![5, 6]))]);
+        let hop = |ifindex| ParsedNextHop {
+            ifindex,
+            weight: 1,
+            flags: 0,
+            gateway: None,
+        };
+
+        let single = RouteMessageBuilder::new().oif(2).build();
+        assert_eq!(route_through(&single, 2, &nh_devs), Some(""));
+        assert_eq!(route_through(&single, 3, &nh_devs), None);
+        let multipath = RouteMessageBuilder::new().multipath(vec![hop(3), hop(2)]).build();
+        assert!(route_through(&multipath, 2, &nh_devs).is_some());
+        assert!(route_through(&multipath, 4, &nh_devs).is_none());
+        // `nexthop_compat_mode` off: the id is all the route carries.
+        let object = RouteMessageBuilder::new().nh_id(5).build();
+        assert!(route_through(&object, 2, &nh_devs).is_some());
+        assert!(route_through(&object, 3, &nh_devs).is_none());
+        let group = RouteMessageBuilder::new().nh_id(7).build();
+        assert!(route_through(&group, 3, &nh_devs).is_some());
+    }
+
+    /// A VLAN goes down with its lower device unless it was created with
+    /// `loose_binding`, and a VLAN that is down already has nothing to
+    /// lose.
+    #[test]
+    fn vlans_follow_their_lower_device_down() {
+        let flags = |f: u32| {
+            let mut payload = f.to_ne_bytes().to_vec();
+            payload.extend(u32::MAX.to_ne_bytes());
+            attr(vlan::IFLA_VLAN_FLAGS, &payload)
+        };
+        let vlan_on = |ifindex, lower, f| {
+            let mut l = link_at(ifindex, "v", "vlan", flags(f), [0x02, 0, 0, 0, 0, ifindex as u8]);
+            l.link = Some(lower);
+            l
+        };
+        let mut down = vlan_on(6, 2, 1);
+        down.header.ifi_flags = 0;
+        let links = [
+            link_at(2, "d0", "dummy", Vec::new(), [0x02, 0, 0, 0, 0, 2]),
+            vlan_on(3, 2, vlan::VLAN_FLAG_REORDER_HDR),
+            vlan_on(4, 3, vlan::VLAN_FLAG_REORDER_HDR),
+            vlan_on(5, 2, vlan::VLAN_FLAG_LOOSE_BINDING),
+            down,
+        ];
+        let got = with_vlans_on(&links, &HashSet::from([2]));
+        assert_eq!(got, HashSet::from([2, 3, 4]));
     }
 
     #[test]

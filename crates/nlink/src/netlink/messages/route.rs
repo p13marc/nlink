@@ -24,6 +24,8 @@ mod attr_ids {
     pub const RTA_TABLE: u16 = 15;
     pub const RTA_PREF: u16 = 20;
     pub const RTA_EXPIRES: u16 = 23;
+    /// The nexthop object a route uses (`RTA_NH_ID`, kernel 5.3+).
+    pub const RTA_NH_ID: u16 = 30;
 }
 
 /// Header size of `struct rtnexthop`
@@ -61,6 +63,12 @@ pub struct RouteMessage {
     /// `None` if the route is single-path; `Some(vec)` with the
     /// parsed nexthop chain otherwise.
     pub(crate) multipath: Option<Vec<ParsedNextHop>>,
+    /// The nexthop object the route uses (`RTA_NH_ID`), for a route
+    /// added with `nhid`. Its egress lives in the object (see
+    /// [`Connection::get_nexthops`](crate::netlink::Connection::get_nexthops)):
+    /// the kernel dumps `RTA_OIF` / `RTA_MULTIPATH` alongside only while
+    /// `net.ipv4.nexthop_compat_mode` is on.
+    pub(crate) nh_id: Option<u32>,
 }
 
 /// One nexthop parsed from an `RTA_MULTIPATH` chain. Plan 202.
@@ -183,6 +191,18 @@ impl RouteMessage {
     /// weighted-multipath routes.
     pub fn multipath(&self) -> Option<&[ParsedNextHop]> {
         self.multipath.as_deref()
+    }
+
+    /// Get the id of the nexthop object the route uses (`RTA_NH_ID`), for
+    /// a route added with `nhid`. `None` for a route that carries its own
+    /// nexthops.
+    ///
+    /// The object holds the route's egress. The kernel also dumps it as
+    /// `RTA_OIF` / `RTA_GATEWAY` (or `RTA_MULTIPATH` for a group) only
+    /// while `net.ipv4.nexthop_compat_mode` is on, so [`oif`](Self::oif)
+    /// can be `None` for a route that does go out of an interface.
+    pub fn nh_id(&self) -> Option<u32> {
+        self.nh_id
     }
 
     // =========================================================================
@@ -424,6 +444,9 @@ impl FromNetlink for RouteMessage {
                 attr_ids::RTA_EXPIRES if attr_data.len() >= 4 => {
                     msg.expires = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
                 }
+                attr_ids::RTA_NH_ID if attr_data.len() >= 4 => {
+                    msg.nh_id = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
+                }
                 attr_ids::RTA_MULTIPATH => {
                     // Plan 202 — parse the nexthop chain.
                     // Defensive guards live inside the helper:
@@ -543,6 +566,9 @@ impl ToNetlink for RouteMessage {
         if self.table.is_some() {
             len += nla_size(4);
         }
+        if self.nh_id.is_some() {
+            len += nla_size(4);
+        }
 
         len
     }
@@ -589,6 +615,9 @@ impl ToNetlink for RouteMessage {
         }
         if let Some(ref nexthops) = self.multipath {
             write_attr_multipath(buf, attr_ids::RTA_MULTIPATH, nexthops);
+        }
+        if let Some(nh_id) = self.nh_id {
+            write_attr_u32(buf, attr_ids::RTA_NH_ID, nh_id);
         }
 
         Ok(buf.len() - start)
@@ -819,6 +848,12 @@ impl RouteMessageBuilder {
         self
     }
 
+    /// Set the nexthop object the route uses (`RTA_NH_ID`).
+    pub fn nh_id(mut self, id: u32) -> Self {
+        self.msg.nh_id = Some(id);
+        self
+    }
+
     /// Build the message.
     pub fn build(self) -> RouteMessage {
         self.msg
@@ -875,6 +910,7 @@ mod tests {
             .pref(0)
             .expires(3600)
             .multipath(nexthops.clone())
+            .nh_id(42)
             .build();
 
         let mut buf = Vec::new();
@@ -887,6 +923,7 @@ mod tests {
         assert_eq!(parsed.pref, Some(0));
         assert_eq!(parsed.expires, Some(3600));
         assert_eq!(parsed.multipath, Some(nexthops));
+        assert_eq!(parsed.nh_id, Some(42));
         // Spot-check the pre-existing fields too.
         assert_eq!(parsed.destination, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0))));
         assert_eq!(parsed.oif, Some(7));

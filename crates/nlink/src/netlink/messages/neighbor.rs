@@ -248,7 +248,7 @@ impl FromNetlink for NeighborMessage {
             // Match attribute type
             match attr_type & 0x3FFF {
                 attr_ids::NDA_DST => {
-                    if let Ok(addr) = parse_ip_addr(attr_data, header.ndm_family) {
+                    if let Some(addr) = parse_dst(attr_data, header.ndm_family) {
                         msg.destination = Some(addr);
                     }
                 }
@@ -293,8 +293,8 @@ impl ToNetlink for NeighborMessage {
     fn netlink_len(&self) -> usize {
         let mut len = NdMsg::SIZE;
 
-        if self.destination.is_some() {
-            len += nla_size(if self.is_ipv4() { 4 } else { 16 });
+        if let Some(dst) = self.destination {
+            len += nla_size(if dst.is_ipv4() { 4 } else { 16 });
         }
         if let Some(ref lladdr) = self.lladdr {
             len += nla_size(lladdr.len());
@@ -367,6 +367,24 @@ impl ToNetlink for NeighborMessage {
         }
 
         Ok(buf.len() - start)
+    }
+}
+
+/// Decode `NDA_DST`.
+///
+/// An ARP or ND entry's family says how wide the address is. An FDB entry
+/// (`AF_BRIDGE`) carries the VXLAN remote it points at, in either family,
+/// and only the length tells which (`vxlan_nla_put_addr` writes 4 or 16
+/// bytes). This used to decode by family alone, so the remote of every FDB
+/// entry read as absent (`FdbEntry::dst()` was always `None`).
+fn parse_dst(data: &[u8], family: u8) -> Option<IpAddr> {
+    if family == libc::AF_INET as u8 || family == libc::AF_INET6 as u8 {
+        return parse_ip_addr(data, family).ok();
+    }
+    match data.len() {
+        4 => <[u8; 4]>::try_from(data).ok().map(IpAddr::from),
+        16 => <[u8; 16]>::try_from(data).ok().map(IpAddr::from),
+        _ => None,
     }
 }
 
@@ -620,5 +638,27 @@ mod tests {
         // Spot-check pre-existing fields.
         assert_eq!(parsed.vlan, Some(100));
         assert_eq!(parsed.destination, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+    }
+
+    /// An FDB entry (`AF_BRIDGE`) carries a VXLAN remote of either family
+    /// in `NDA_DST`; only its length says which.
+    #[test]
+    fn an_fdb_entry_s_remote_is_decoded_by_length() {
+        for dst in [
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            IpAddr::V6("2001:db8::1".parse().unwrap()),
+        ] {
+            let mut msg = NeighborMessageBuilder::new()
+                .ifindex(2)
+                .destination(dst)
+                .lladdr(vec![0; 6])
+                .build();
+            msg.header.ndm_family = libc::AF_BRIDGE as u8;
+            let mut buf = Vec::new();
+            msg.write_to(&mut buf).unwrap();
+            assert_eq!(buf.len(), msg.netlink_len());
+            let parsed = NeighborMessage::parse(&mut buf.as_slice()).unwrap();
+            assert_eq!(parsed.destination, Some(dst));
+        }
     }
 }
