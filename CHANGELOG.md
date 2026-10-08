@@ -409,6 +409,17 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **A VLAN declared down on a lower device the apply brought up ended up
+  (#436), and one declared up on a lower device declared down failed only
+  on the second apply (#437).** The kernel couples a VLAN's state to its
+  lower device's: `vlan_device_event()` brings every VLAN up when the lower
+  device comes up and closes it when the lower goes down, and
+  `vlan_dev_open()` refuses a VLAN whose lower is down (ENETDOWN). Now a
+  declared-down VLAN whose lower device comes up in the apply is taken down
+  again after the link changes, and a VLAN declared up on a lower device
+  declared down is refused by `diff`/`apply` before anything changes —
+  the kernel cannot hold that state.
+
 - **A flower `vlan_id`, `vlan_prio` or `tcp_flags` match could install as a
   match-all (#431).** `fl_set_key` reads the VLAN keys only when
   `TCA_FLOWER_KEY_ETH_TYPE` is a VLAN tag (`is_vlan_key` →

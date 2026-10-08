@@ -347,6 +347,31 @@ pub async fn apply_diff(
         }
     }
 
+    // 2c. Take declared-down VLANs down again where their lower device came
+    //     up above: `vlan_device_event()` brings every VLAN on it up (#436).
+    if !options.dry_run && !diff.vlans_held_down.is_empty() {
+        let live = conn.get_links().await?;
+        for name in &diff.vlans_held_down {
+            let brought_up = live
+                .iter()
+                .find(|l| l.name.as_deref() == Some(name.as_str()))
+                .is_some_and(|l| l.is_up());
+            if !brought_up {
+                continue;
+            }
+            match conn.set_link_down(name.as_str()).await {
+                Ok(()) => result
+                    .summary
+                    .push(format!("Took VLAN {name} down again after its lower device came up")),
+                Err(e) if options.continue_on_error => result.errors.push(ApplyError {
+                    operation: format!("take VLAN {name} down"),
+                    error: e,
+                }),
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     // 3. Add addresses
     for addr in &diff.addresses_to_add {
         let op = format!(

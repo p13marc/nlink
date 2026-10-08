@@ -158,6 +158,14 @@ pub struct ConfigDiff {
     /// it is not counted, shown or serialized.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) bridge_mtus: Vec<(String, u32)>,
+
+    /// Declared-down VLANs to take down again after the link changes, for
+    /// VLANs whose lower device comes up in this apply: `vlan_device_event()`
+    /// brings up every VLAN on a device that comes up (#436). Like
+    /// `bridge_mtus`, a consequence of other changes rather than one of its
+    /// own, so it is not counted, shown or serialized.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) vlans_held_down: Vec<String>,
 }
 
 impl ConfigDiff {
@@ -430,6 +438,7 @@ pub async fn compute_diff_with_options(
     conn: &Connection<Route>,
     opts: &DiffOptions,
 ) -> Result<ConfigDiff> {
+    check_vlan_states(config)?;
     let mut diff = ConfigDiff::default();
 
     // Fetch current state
@@ -680,6 +689,40 @@ fn diff_links<'a>(
         }
     }
 
+    // A device that comes up brings every VLAN on it up with it
+    // (`vlan_device_event()`, NETDEV_UP, for each VLAN without loose
+    // binding) — so a VLAN declared down on a lower device this apply brings
+    // up ended the apply up, and converged only on the next one (#436). The
+    // lower devices coming up here: set up, or created or recreated up.
+    let coming_up: HashSet<&str> = diff
+        .links_to_modify
+        .iter()
+        .filter(|(_, changes)| changes.set_up)
+        .map(|(name, _)| name.as_str())
+        .chain(
+            diff.links_to_add
+                .iter()
+                .filter(|l| l.state == LinkState::Up)
+                .map(|l| l.name.as_str()),
+        )
+        .collect();
+    for declared in &config.links {
+        if declared.state != LinkState::Down {
+            continue;
+        }
+        let lower = match &declared.link_type {
+            DeclaredLinkType::Vlan { parent, .. } => Some(parent.as_str()),
+            _ => current
+                .get(declared.name.as_str())
+                .filter(|l| l.kind() == Some("vlan"))
+                .and_then(|l| l.link())
+                .and_then(|idx| ifindex_to_name.get(&idx).copied()),
+        };
+        if lower.is_some_and(|lower| coming_up.contains(lower)) {
+            diff.vlans_held_down.push(declared.name.clone());
+        }
+    }
+
     // Note: We don't auto-remove links that aren't in the config
     // That requires explicit purge mode
 
@@ -768,6 +811,37 @@ fn topo_sort_links_to_add(links: &mut Vec<DeclaredLink>) {
         remaining = next_remaining;
     }
     *links = out;
+}
+
+/// Refuse a VLAN declared up on a lower device declared down (#437). The
+/// kernel cannot hold that state: `vlan_dev_open()` refuses to open a VLAN
+/// whose lower device is down (ENETDOWN), and `vlan_device_event()` closes
+/// every VLAN on a device that goes down — so the first apply ended with the
+/// VLAN down and the second failed. (Only a VLAN with loose binding follows
+/// neither rule, and `NetworkConfig` does not declare one.)
+fn check_vlan_states(config: &NetworkConfig) -> Result<()> {
+    for declared in &config.links {
+        let DeclaredLinkType::Vlan { parent, .. } = &declared.link_type else {
+            continue;
+        };
+        if declared.state != LinkState::Up {
+            continue;
+        }
+        let lower_down = config
+            .links
+            .iter()
+            .any(|l| l.name == *parent && l.state == LinkState::Down);
+        if lower_down {
+            return Err(crate::Error::InvalidMessage(format!(
+                "link {}: a VLAN declared up on {parent}, which is declared down, cannot \
+                 be up — the kernel refuses to open a VLAN whose lower device is down \
+                 (ENETDOWN) and closes it when the lower device goes down; declare one \
+                 of them differently",
+                declared.name
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn compute_link_changes(

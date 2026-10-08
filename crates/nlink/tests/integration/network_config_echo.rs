@@ -121,6 +121,59 @@ fn dummy_up(name: &str) -> NetworkConfig {
 // Links
 // ============================================================================
 
+/// A VLAN declared down stays down when the apply brings its lower device
+/// up. `vlan_device_event()` brings up every VLAN on a device that comes up,
+/// so it ended the apply up and converged only on the next one (#436).
+#[tokio::test]
+async fn a_vlan_declared_down_stays_down_when_its_lower_device_comes_up() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "8021q");
+
+    let lower = |up: bool| {
+        NetworkConfig::new().link("d0", |l| if up { l.dummy().up() } else { l.dummy().down() })
+    };
+    let with_vlan = |cfg: NetworkConfig| cfg.link("d0.10", |l| l.vlan("d0", 10).down());
+    let cases = vec![
+        // The lower device is set up while the VLAN on it is declared down.
+        case(
+            "lower-set-up",
+            vec![with_vlan(lower(false)), with_vlan(lower(true))],
+        ),
+        // Both created by one apply: the VLAN is made down, then the lower
+        // device comes up under it.
+        case("both-created", vec![with_vlan(lower(true))]),
+    ];
+    assert_converges("nce-vlan-down", cases).await
+}
+
+/// A VLAN declared up on a lower device declared down is refused before
+/// anything changes. The kernel cannot hold it (`vlan_dev_open()` is ENETDOWN
+/// while the lower device is down), and the first apply used to end with the
+/// VLAN down and the second fail (#437).
+#[tokio::test]
+async fn a_vlan_declared_up_on_a_lower_device_declared_down_is_refused() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "8021q");
+
+    let ns = TestNamespace::new("nce-vlan-up")?;
+    let conn = ns.connection()?;
+    let cfg = NetworkConfig::new()
+        .link("d0", |l| l.dummy().down())
+        .link("d0.10", |l| l.vlan("d0", 10).up());
+    for (what, outcome) in [
+        ("diff", cfg.diff(&conn).await.map(drop)),
+        ("apply", cfg.apply(&conn).await.map(drop)),
+    ] {
+        let err = outcome.expect_err(what).to_string();
+        assert!(err.contains("d0.10") && err.contains("declared down"), "{what}: {err}");
+    }
+    assert!(
+        conn.get_link_by_name("d0").await?.is_none(),
+        "the refused apply must not have created anything"
+    );
+    Ok(())
+}
+
 /// Every link kind, created by the apply.
 #[tokio::test]
 async fn every_link_kind_converges() -> nlink::Result<()> {
