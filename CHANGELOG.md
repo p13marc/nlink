@@ -764,6 +764,27 @@ All notable changes to this project will be documented in this file.
   `AF_BRIDGE`, so `FdbEntry::dst()` (and `nlink-bridge fdb show`) never
   showed a VXLAN remote.
 
+- **Declared routes through a link set down, or moved into or out of a VRF
+  or a bond, were lost until the next apply (#427).** Those link changes
+  make the kernel flush every route through the link, in both families and
+  every table: `fib_netdev_event` on NETDEV_DOWN, and on NETDEV_CHANGEUPPER
+  to or from an L3 master (forced, whatever the nexthop's scope);
+  `addrconf_notify` → `addrconf_ifdown` → `rt6_disable_ip` for IPv6. A
+  bond takes its port down on the way in (`bond_enslave` refuses an up
+  port) and closes it on the way out; a VRF cycles it. The diff read the
+  routes before the link step ran, found the declared ones present and left
+  them out, so the second apply was not a no-op and traffic was misrouted
+  in between. The diff now leaves the routes through such links out of the
+  comparison, so the declared ones are added back in the same apply — as
+  #409 does for IPv6 addresses — and does the same for a VLAN on such a
+  link, which `vlan_device_event` takes down with it (its IPv6 addresses,
+  which #409 missed, too). A route add that finds the route present is
+  reported as already there, not counted and not an error. A route declared
+  through a link declared down cannot exist (the kernel refuses one by
+  device with `ENETDOWN`, and one by a gateway it can no longer reach with
+  `ENETUNREACH`), and the apply that takes the link down now fails with that
+  error instead of reporting success and leaving the next apply to fail.
+
 ## [0.29.0] - 2026-10-01
 
 > Upgrading from 0.28.x? See

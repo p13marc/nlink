@@ -403,6 +403,18 @@ pub async fn apply_diff(
                     ));
                     result.changes_made += 1;
                 }
+                // A re-add the diff scheduled because a link change was
+                // expected to flush the route (#427), where the kernel kept
+                // it: the state we wanted, not a change. `replace_route`
+                // asks for NLM_F_CREATE | NLM_F_REPLACE, which the kernel
+                // answers EEXIST only with NLM_F_EXCL, so this is the
+                // address step's rule kept for a route added any other way.
+                Err(e) if e.is_already_exists() => {
+                    result.summary.push(format!(
+                        "Route {}/{} already present",
+                        route.destination, route.prefix_len
+                    ));
+                }
                 Err(e) => {
                     if options.continue_on_error {
                         result.errors.push(ApplyError {

@@ -467,10 +467,7 @@ pub async fn compute_diff_with_options(
         .collect();
     let current_routes: Vec<RouteMessage> = current_routes
         .into_iter()
-        .filter(|r| {
-            r.oif()
-                .is_none_or(|oif| !plan.gone.contains(&oif) && !plan.cycled.contains(&oif))
-        })
+        .filter(|r| r.oif().is_none_or(|oif| !plan.gone.contains(&oif)))
         .collect();
     let current_qdiscs: Vec<TcMessage> = current_qdiscs
         .into_iter()
@@ -491,7 +488,34 @@ pub async fn compute_diff_with_options(
     // Diff links — pass the ifindex→name map so master changes
     // can be detected by resolving the kernel's master ifindex
     // back to a name (Plan 207b H2).
-    let ipv6_flushed = diff_links(config, &link_by_name, &ifindex_to_name, &plan, &mut diff);
+    let flushing = diff_links(config, &link_by_name, &ifindex_to_name, &plan, &mut diff);
+
+    // The links this apply flushes: the ones its link changes take down or
+    // move across an L3 master, the ports a recreated bond or VRF releases
+    // (#417), and the VLANs the kernel takes down with any of them
+    // (`vlan_device_event`). The kernel drops their routes, in both
+    // families, and their IPv6 addresses: `fib_netdev_event` on
+    // NETDEV_DOWN, and — forced, whatever the route's scope — on
+    // NETDEV_CHANGEUPPER to or from an L3 master; `addrconf_notify` ->
+    // `addrconf_ifdown` -> `rt6_disable_ip` for IPv6 on both. The dumps
+    // above were taken before the link step, so what is declared on these
+    // links reads as present and would be left out; the routes through them
+    // are dropped from the comparison so the declared ones are added back
+    // in the same apply (#427), and so are their IPv6 addresses (#409).
+    let downed: HashSet<u32> = flushing
+        .iter()
+        .filter_map(|name| link_by_name.get(name).map(|l| l.ifindex()))
+        .chain(plan.cycled.iter().copied())
+        .collect();
+    let flushed = kind::with_vlans_on(&current_links, &downed);
+    let flushed_names: HashSet<&str> = flushed
+        .iter()
+        .filter_map(|ifindex| ifindex_to_name.get(ifindex).copied())
+        .collect();
+    let current_routes: Vec<RouteMessage> = current_routes
+        .into_iter()
+        .filter(|r| r.oif().is_none_or(|oif| !flushed.contains(&oif)))
+        .collect();
 
     // Plan 186 §3c — topo-sort `links_to_add` so a child whose
     // parent is also being created in this apply lands AFTER
@@ -508,7 +532,7 @@ pub async fn compute_diff_with_options(
         config,
         &current_addresses,
         &ifindex_to_name,
-        &ipv6_flushed,
+        &flushed_names,
         opts.purge,
         &mut diff,
     );
@@ -562,8 +586,8 @@ fn links_of_kind<'a>(
         .collect()
 }
 
-/// Diff the links. Returns the links whose IPv6 addresses the apply will
-/// flush as a side effect of their link change (see `diff_addresses`).
+/// Diff the links. Returns the links whose change in this apply makes the
+/// kernel flush their routes and IPv6 addresses (see `compute_diff`).
 fn diff_links<'a>(
     config: &'a NetworkConfig,
     current: &HashMap<&'a str, &LinkMessage>,
@@ -583,7 +607,7 @@ fn diff_links<'a>(
 
     // Masters whose set of ports this apply changes.
     let mut port_set_changes: HashSet<&str> = HashSet::new();
-    let mut ipv6_flushed: HashSet<&str> = HashSet::new();
+    let mut flushing: HashSet<&str> = HashSet::new();
 
     for declared in &config.links {
         if let Some(existing) = current.get(declared.name.as_str()) {
@@ -600,11 +624,11 @@ fn diff_links<'a>(
                 port_set_changes.extend(declared.master.as_deref());
                 port_set_changes.extend(existing_master);
             }
-            // The link changes that make the kernel drop the link's IPv6
-            // addresses (`addrconf_ifdown()`, unless `keep_addr_on_down`):
-            // going down; joining or leaving an L3 master
-            // (`NETDEV_CHANGEUPPER`, then the VRF cycles the port); and
-            // joining or leaving a bond, which takes the port down (the
+            // The link changes that make the kernel drop the link's routes
+            // and IPv6 addresses (`addrconf_ifdown()`, unless
+            // `keep_addr_on_down`): going down; joining or leaving an L3
+            // master (`NETDEV_CHANGEUPPER`, then the VRF cycles the port);
+            // and joining or leaving a bond, which takes the port down (the
             // bond closes the one it releases; `enslave` downs the one it
             // adds).
             let flushing_master = |m: Option<&str>| {
@@ -616,7 +640,7 @@ fn diff_links<'a>(
                     && (flushing_master(existing_master)
                         || flushing_master(changes.set_master.as_deref())))
             {
-                ipv6_flushed.insert(declared.name.as_str());
+                flushing.insert(declared.name.as_str());
             }
             if !changes.is_empty() {
                 diff.links_to_modify.push((declared.name.clone(), changes));
@@ -659,7 +683,7 @@ fn diff_links<'a>(
     // Note: We don't auto-remove links that aren't in the config
     // That requires explicit purge mode
 
-    ipv6_flushed
+    flushing
 }
 
 /// Plan 186 §3c — stable topological sort of `links_to_add`.
@@ -850,7 +874,7 @@ fn diff_addresses(
     config: &NetworkConfig,
     current: &[AddressMessage],
     ifindex_to_name: &HashMap<u32, &str>,
-    ipv6_flushed: &HashSet<&str>,
+    flushed: &HashSet<&str>,
     purge: bool,
     diff: &mut ConfigDiff,
 ) {
@@ -873,15 +897,16 @@ fn diff_addresses(
 
     // Find addresses to add. An IPv6 address on a link whose change in
     // this apply makes the kernel drop it (set down, moved into or out of
-    // a VRF or a bond — see `diff_links`) is read here as present and is
-    // gone by the time the address step runs, so it is (re-)added too.
-    // Comparing only against the pre-apply dump left it missing until the
-    // next apply (#TBD). Should the address survive after all
-    // (`keep_addr_on_down`), the add finds it in place and is not counted.
+    // a VRF or a bond, a VLAN on one of those — see `compute_diff`) is read
+    // here as present and is gone by the time the address step runs, so it
+    // is (re-)added too. Comparing only against the pre-apply dump left it
+    // missing until the next apply (#409). Should the address survive after
+    // all (`keep_addr_on_down`), the add finds it in place and is not
+    // counted.
     for declared in &config.addresses {
         let key = (declared.dev.as_str(), declared.address, declared.prefix_len);
-        let flushed = declared.address.is_ipv6() && ipv6_flushed.contains(declared.dev.as_str());
-        if flushed || !current_set.contains(&key) {
+        let gone = declared.address.is_ipv6() && flushed.contains(declared.dev.as_str());
+        if gone || !current_set.contains(&key) {
             diff.addresses_to_add.push(declared.clone());
         }
     }
