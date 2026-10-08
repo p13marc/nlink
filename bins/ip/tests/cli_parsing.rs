@@ -170,24 +170,29 @@ mod link_command {
         );
     }
 
-    /// As root (it skips otherwise; run it with sudo): `--mtu` and `--txqlen`
-    /// reach a kind whose create message cannot carry them, and a link whose
-    /// post-create step fails is deleted again.
+    /// Where a network namespace can be created — as root, with sudo; it
+    /// skips otherwise: `--mtu` and `--txqlen` reach a kind whose create
+    /// message cannot carry them, and a link whose post-create step fails is
+    /// deleted again. (`euid == 0` is not the test: CI's unprivileged
+    /// containers run as root without `ip` or the right to make a netns.)
     #[test]
     fn test_link_add_sets_what_the_create_cannot_carry_as_root() {
-        let uid = std::process::Command::new("id").arg("-u").output().unwrap();
-        if String::from_utf8_lossy(&uid.stdout).trim() != "0" {
-            eprintln!("skipping: needs root");
-            return;
-        }
         struct Netns(&'static str);
         impl Drop for Netns {
             fn drop(&mut self) {
                 let _ = std::process::Command::new("ip").args(["netns", "del", self.0]).status();
             }
         }
+        let created = std::process::Command::new("ip")
+            .args(["netns", "add", "nlink-ip-t428"])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if !created {
+            eprintln!("skipping: cannot create a network namespace here (run as root)");
+            return;
+        }
         let ns = Netns("nlink-ip-t428");
-        assert!(std::process::Command::new("ip").args(["netns", "add", ns.0]).status().unwrap().success());
         let in_ns = |args: &[&str]| {
             let mut cmd = std::process::Command::new("ip");
             cmd.args(["netns", "exec", ns.0, env!("CARGO_BIN_EXE_nlink-ip")]).args(args);
