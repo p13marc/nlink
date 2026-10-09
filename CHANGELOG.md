@@ -36,6 +36,14 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`FlowerFilter::actions(ActionList)` (#450).** A flower filter could only
+  jump chains: it wrote `TCA_FLOWER_ACT` for `goto_chain` alone, so tc(8)'s
+  `flower … action drop` or `… action mirred …` had no equivalent. On an
+  ingress or clsact hook, where a classid means nothing, a flower filter
+  could not act at all. The action list shares the nest with `goto_chain`,
+  which runs after it, as matchall's does (#313). `parse_params` still does
+  not model `action` tokens, and now says so and names the builder method.
+
 - **Interval sets: ranges and prefixes (ipset `hash:net`).**
   `Set::interval()` / `DeclaredSetBuilder::interval()`, and
   `SetElement::{range, ipv4_prefix, ipv6_prefix, ipv4_range, ipv6_range,
@@ -416,7 +424,7 @@ All notable changes to this project will be documented in this file.
   - a subnet scanner and port checker (`NetworkScanner`,
     `ConnectivityChecker`) that nlink does not have;
   - `FlowerFilter::action(..)`, which never existed. `FlowerFilter`
-    carries no actions beyond `goto_chain` (#450);
+    carried no actions beyond `goto_chain` until `actions()` (#450);
   - `MirredAction::mirror_egress`, which is now `mirror_by_index`;
   - fields that are now accessors, on `FdbEntry`, `BridgeVlanEntry`,
     `Nexthop`, `MplsRoute` and `TcMessage`;

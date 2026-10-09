@@ -1030,20 +1030,22 @@ let filter = MatchallFilter::new()
     .build();
 conn.add_filter("eth0", TcHandle::INGRESS, filter).await?;
 
-// Mirror traffic to another interface. Actions name devices by ifindex,
+// Mirror HTTPS to another interface. Actions name devices by ifindex,
 // resolved through the connection, so they are right in any namespace.
 let eth1 = conn.get_link_by_name("eth1").await?.ok_or("no eth1")?.ifindex();
-let filter = MatchallFilter::new()
+let filter = FlowerFilter::new()
+    .ipv4()
+    .ip_proto_tcp()
+    .dst_port(443)
     .actions(ActionList::new().with(MirredAction::mirror_by_index(eth1)))
     .build();
-conn.add_filter("eth0", TcHandle::INGRESS, filter).await?;
+conn.add_filter_full("eth0", TcHandle::INGRESS, None, 0x0800, 20, filter).await?;
 # Ok(())
 # }
 ```
 
-Actions ride on `MatchallFilter` and `FlowFilter`. `FlowerFilter` carries
-none yet beyond `goto_chain` (#450): to act on a flower match, jump to a
-chain whose filter does, as below.
+`MatchallFilter`, `FlowerFilter` (since 0.30, #450) and `FlowFilter` carry
+an `ActionList`; a `goto_chain` on the same filter runs after it.
 
 ### TC Filter Chains
 

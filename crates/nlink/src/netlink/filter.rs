@@ -925,6 +925,8 @@ pub struct FlowerFilter {
     chain: Option<u32>,
     /// Goto chain action (jump to another chain on match).
     goto_chain: Option<u32>,
+    /// Actions run on a match (#450).
+    actions: Option<ActionList>,
 }
 
 impl FlowerFilter {
@@ -1198,9 +1200,40 @@ impl FlowerFilter {
     /// Jump to another chain on match.
     ///
     /// This adds a goto_chain action that transfers packet processing
-    /// to the specified chain when this filter matches.
+    /// to the specified chain when this filter matches. With
+    /// [`actions`](Self::actions) it runs after them.
     pub fn goto_chain(mut self, chain: u32) -> Self {
         self.goto_chain = Some(chain);
+        self
+    }
+
+    /// Run actions on a match: tc(8)'s `flower … action …`.
+    ///
+    /// They share `TCA_FLOWER_ACT` with [`goto_chain`](Self::goto_chain),
+    /// which, when set, runs after them. Until 0.30 the builder could only
+    /// jump chains, so a flower filter on an ingress or clsact hook, where a
+    /// classid means nothing, could not act at all (#450).
+    ///
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// use nlink::TcHandle;
+    /// use nlink::netlink::action::{ActionList, GactAction};
+    /// use nlink::netlink::filter::FlowerFilter;
+    ///
+    /// // tc filter add dev eth0 ingress protocol ip flower ip_proto tcp dst_port 23 action drop
+    /// let telnet = FlowerFilter::new()
+    ///     .ipv4()
+    ///     .ip_proto_tcp()
+    ///     .dst_port(23)
+    ///     .actions(ActionList::new().with(GactAction::drop()))
+    ///     .build();
+    /// conn.add_filter_full("eth0", TcHandle::INGRESS, None, 0x0800, 10, telnet).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn actions(mut self, actions: ActionList) -> Self {
+        self.actions = Some(actions);
         self
     }
 
@@ -1404,6 +1437,12 @@ impl FlowerFilter {
                 | "enc_dst_port" | "indev" => {
                     return Err(Error::InvalidMessage(format!(
                         "flower: `{key}` is not modelled by FlowerFilter yet — file an issue if you need this match"
+                    )));
+                }
+                "action" | "actions" => {
+                    return Err(Error::InvalidMessage(format!(
+                        "flower: `{key}` is not modelled by FlowerFilter::parse_params — build the \
+                         filter and attach them with FlowerFilter::actions(ActionList)"
                     )));
                 }
                 other => {
@@ -1928,23 +1967,34 @@ impl FilterConfig for FlowerFilter {
             builder.append_attr(flower::TCA_FLOWER_KEY_TCP_FLAGS_MASK, &mask.to_be_bytes());
         }
 
-        // Add goto_chain action if set
-        if let Some(chain) = self.goto_chain {
+        // Actions and goto_chain share `TCA_FLOWER_ACT`, so they share one
+        // nest, as matchall's do: writing the attribute twice would leave
+        // the kernel to keep one and silently drop the other.
+        if self.actions.is_some() || self.goto_chain.is_some() {
             use super::{
                 action::{ActionConfig, GactAction},
                 types::tc::{action, filter::flower::TCA_FLOWER_ACT},
             };
 
-            let goto = GactAction::goto_chain(chain);
             let act_token = builder.nest_start(TCA_FLOWER_ACT);
 
-            // Action index 1
-            let act1_token = builder.nest_start(1);
-            builder.append_attr_str(action::TCA_ACT_KIND, goto.kind());
-            let opt_token = builder.nest_start(action::TCA_ACT_OPTIONS);
-            goto.write_options(builder)?;
-            builder.nest_end(opt_token);
-            builder.nest_end(act1_token);
+            // `write_to` numbers its entries from 1; the goto continues that
+            // numbering rather than colliding with the first action.
+            let mut next_index = 1u16;
+            if let Some(actions) = &self.actions {
+                actions.write_to(builder)?;
+                next_index += actions.len() as u16;
+            }
+
+            if let Some(chain) = self.goto_chain {
+                let goto = GactAction::goto_chain(chain);
+                let goto_token = builder.nest_start(next_index);
+                builder.append_attr_str(action::TCA_ACT_KIND, goto.kind());
+                let opt_token = builder.nest_start(action::TCA_ACT_OPTIONS);
+                goto.write_options(builder)?;
+                builder.nest_end(opt_token);
+                builder.nest_end(goto_token);
+            }
 
             builder.nest_end(act_token);
         }
@@ -7007,5 +7057,75 @@ fn flower_set_protocol_supplies_the_ethertype() {
         c.set_protocol(0x86DD);
         assert_eq!(c.protocol(), Some(0x86DD), "{}", c.kind());
     }
+}
+
+// ========================================================================
+// #450 — flower carries actions
+// ========================================================================
+
+/// `FlowerFilter` had no way to attach actions: it wrote `TCA_FLOWER_ACT`
+/// only for `goto_chain`, so tc(8)'s `flower … action drop` had no
+/// equivalent, and on an ingress or clsact hook a flower filter could only
+/// jump chains (#450). Asserted at the byte level for the same reason as
+/// matchall's: the action list and `goto_chain` share one nest, and writing
+/// it twice would leave the kernel to keep one and drop the other.
+#[test]
+fn flower_actions_and_goto_chain_share_one_act_nest() {
+    use crate::netlink::{
+        action::{ActionList, GactAction},
+        test_support::{builder_attrs, parse_attrs},
+    };
+
+    let encode = |f: &FlowerFilter| {
+        let mut b = MessageBuilder::new(NlMsgType::RTM_NEWTFILTER, 0);
+        f.write_options(&mut b).unwrap();
+        builder_attrs(&b)
+    };
+    let udp53 = || FlowerFilter::new().ipv4().ip_proto_udp().dst_port(53);
+
+    // Actions alone: one nest, one action at index 1, beside the keys.
+    let attrs = encode(&udp53().actions(ActionList::new().with(GactAction::drop())));
+    assert!(attrs.contains_key(&flower::TCA_FLOWER_KEY_UDP_DST));
+    let act = attrs
+        .get(&flower::TCA_FLOWER_ACT)
+        .expect("TCA_FLOWER_ACT missing: the action list was dropped");
+    let inner = parse_attrs(act);
+    assert_eq!(inner.len(), 1, "expected one action, got {inner:?}");
+    assert!(inner.contains_key(&1), "actions are numbered from 1");
+
+    // goto_chain alone keeps working, still at index 1.
+    let attrs = encode(&udp53().goto_chain(3));
+    let inner = parse_attrs(attrs.get(&flower::TCA_FLOWER_ACT).unwrap());
+    assert_eq!(inner.len(), 1);
+    assert!(inner.contains_key(&1));
+
+    // Both: one nest; the goto follows the list, the order tc(8) emits and
+    // the kernel runs.
+    let attrs = encode(
+        &udp53()
+            .actions(ActionList::new().with(GactAction::pass()).with(GactAction::drop()))
+            .goto_chain(3),
+    );
+    let inner = parse_attrs(attrs.get(&flower::TCA_FLOWER_ACT).unwrap());
+    assert_eq!(
+        inner.len(),
+        3,
+        "the goto must extend the action list, not collide with it: {inner:?}"
+    );
+    assert!((1..=3).all(|i| inner.contains_key(&i)));
+}
+
+/// tc(8) spells actions after the keys (`flower dst_port 80 action drop`).
+/// `parse_params` does not model them; it says so and names the builder
+/// method instead of calling `action` an unknown token.
+#[test]
+fn flower_parse_params_points_action_at_the_builder() {
+    let err = FlowerFilter::parse_params(&["ip_proto", "tcp", "action", "drop"])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("flower: `action` is not modelled") && err.contains("FlowerFilter::actions"),
+        "{err}"
+    );
 }
 }
