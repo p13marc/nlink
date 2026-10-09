@@ -107,6 +107,20 @@ pub trait FilterConfig: Send + Sync {
         None
     }
 
+    /// Set the ethertype the filter is installed under (tc(8) `protocol`).
+    ///
+    /// The `*_full` entry points take the protocol as an argument and call
+    /// this with it before writing the options, so a config that derives
+    /// something from its protocol sees the one it is installed under:
+    /// flower takes its TCA_FLOWER_KEY_ETH_TYPE from it, as tc(8) does
+    /// (#433). Every config nlink ships that carries a protocol stores it.
+    ///
+    /// Default no-op so external `FilterConfig` impls stay source-compatible,
+    /// same as [`set_chain`](Self::set_chain).
+    fn set_protocol(&mut self, protocol: u16) {
+        let _ = protocol;
+    }
+
     /// The filter priority, a.k.a. `pref` (tc(8) `prio N`).
     ///
     /// `None` means "unset", and the kernel auto-assigns. As with
@@ -558,6 +572,10 @@ impl FilterConfig for U32Filter {
 
     fn protocol(&self) -> Option<u16> {
         Some(self.protocol)
+    }
+
+    fn set_protocol(&mut self, protocol: u16) {
+        self.protocol = protocol;
     }
 
     fn priority(&self) -> Option<u16> {
@@ -1123,11 +1141,10 @@ impl FlowerFilter {
 
     /// Match VLAN ID. `cls_flower` reads it only under a VLAN ethertype, so
     /// this implies [`vlan`](Self::vlan) (802.1Q) unless one is set —
-    /// [`qinq`](Self::qinq) for an 802.1AD tag. Under any other ethertype
-    /// the filter is refused (#431).
+    /// [`qinq`](Self::qinq), or a filter protocol of 802.1AD, for an 802.1AD
+    /// tag. Under any other ethertype the filter is refused (#431).
     pub fn vlan_id(mut self, id: u16) -> Self {
         self.vlan_id = Some(id);
-        self.eth_type.get_or_insert(0x8100);
         self
     }
 
@@ -1135,7 +1152,6 @@ impl FlowerFilter {
     /// unless an ethertype is set.
     pub fn vlan_prio(mut self, prio: u8) -> Self {
         self.vlan_prio = Some(prio);
-        self.eth_type.get_or_insert(0x8100);
         self
     }
 
@@ -1193,13 +1209,31 @@ impl FlowerFilter {
         self
     }
 
+    /// The TCA_FLOWER_KEY_ETH_TYPE this filter writes, resolved the way
+    /// tc(8) resolves it: an ethertype set on the filter (`.ipv4()`,
+    /// `.qinq()`, an address setter, `eth_type`), else the filter's protocol
+    /// unless that is `all` (#433), else 802.1Q when a VLAN key needs a tag.
+    ///
+    /// The VLAN default is resolved here and not in the setter so that
+    /// `protocol 802.1ad flower vlan_id 20` matches an 802.1AD tag. When the
+    /// setter wrote 0x8100, a filter that the protocol had already
+    /// restricted to 0x88a8 frames asked for a 0x8100 TPID and matched
+    /// nothing.
+    fn effective_eth_type(&self) -> Option<u16> {
+        const ETH_P_ALL: u16 = 0x0003;
+        self.eth_type
+            .or((!matches!(self.protocol, 0 | ETH_P_ALL)).then_some(self.protocol))
+            .or((self.vlan_id.is_some() || self.vlan_prio.is_some()).then_some(0x8100))
+    }
+
     /// Parse a tc-style flower params slice into a typed `FlowerFilter`.
     ///
     /// Recognised tokens:
     ///
     /// - `classid <handle>` (alias `flowid`) — target class id (`1:10`)
     /// - `ip_proto <name|num>` — `tcp` / `udp` / `sctp` / `icmp` /
-    ///   `icmpv6` or bare u8
+    ///   `icmpv6`, or a protocol number in hex as tc(8) reads it (`2f` or
+    ///   `0x2f` is GRE; `47` is 0x47)
     /// - `src_ip <addr[/prefix]>` / `dst_ip <addr[/prefix]>` — IPv4 or
     ///   IPv6 (auto-detected via `:` presence). Bare address means
     ///   `/32` (v4) or `/128` (v6). Sets `eth_type` if not already set.
@@ -1209,10 +1243,13 @@ impl FlowerFilter {
     ///   order; installing one without is an error
     /// - `src_mac <mac>` / `dst_mac <mac>` — `xx:xx:xx:xx:xx:xx`
     /// - `eth_type <name|hex>` — `ip` / `ipv4` / `ipv6` / `arp` / `vlan`
-    ///   / `802.1q` / `802.1ad`, or hex (`0x800`)
+    ///   / `802.1q` / `802.1ad`, or hex (`0x800`). nlink's own token: tc(8)
+    ///   takes the ethertype from the filter's `protocol`, and so does nlink
+    ///   when this is absent (#433)
     /// - `vlan_id <1-4094>` / `vlan_prio <0-7>`
-    /// - `ip_tos <val[/mask]>` / `ip_ttl <val[/mask]>` —
-    ///   bare value implies `/0xff` mask
+    /// - `ip_tos <val[/mask]>` / `ip_ttl <val[/mask]>` — the value in
+    ///   decimal (hex if it is not decimal: `1a`, `0x10`), the mask in hex,
+    ///   as tc(8) reads them; a bare value implies `/ff`
     /// - `tcp_flags <flags[/mask]>` — hex u16
     /// - `skip_hw` / `skip_sw` — flag tokens (no value)
     ///
@@ -1409,6 +1446,10 @@ fn parse_flower_port(key: &str, s: &str) -> crate::Result<FlowerPort> {
     Ok(FlowerPort::Range(min, max))
 }
 
+/// A flower `ip_proto`: a name, or a number read as hex the way tc(8) reads
+/// it (`flower_parse_ip_proto` → `get_u8(.., 16)`), so `2f` and `0x2f` are
+/// GRE and `47` is 0x47. nlink read the number as decimal, and the same
+/// command installed a different filter from tc(8)'s (#432).
 fn parse_flower_ip_proto(s: &str) -> crate::Result<u8> {
     use crate::Error;
     Ok(match s {
@@ -1417,9 +1458,10 @@ fn parse_flower_ip_proto(s: &str) -> crate::Result<u8> {
         "sctp" => flower::IPPROTO_SCTP,
         "icmp" => flower::IPPROTO_ICMP,
         "icmpv6" => flower::IPPROTO_ICMPV6,
-        other => other.parse::<u8>().map_err(|_| {
+        other => u8::from_str_radix(other.strip_prefix("0x").unwrap_or(other), 16).map_err(|_| {
             Error::InvalidMessage(format!(
-                "flower: invalid ip_proto `{other}` (expected tcp/udp/sctp/icmp/icmpv6 or 0-255)"
+                "flower: invalid ip_proto `{other}` (expected tcp/udp/sctp/icmp/icmpv6 or a \
+                 protocol number in hex, as tc(8) reads it: 2f or 0x2f for GRE)"
             ))
         })?,
     })
@@ -1504,19 +1546,18 @@ fn parse_mac(s: &str) -> crate::Result<[u8; 6]> {
     Ok(mac)
 }
 
+/// An `ip_tos` / `ip_ttl` `value[/mask]`, read as tc(8)'s
+/// `flower_parse_ip_tos_ttl` reads it: the value as decimal, falling back to
+/// hex, and the mask as hex. nlink tried hex first. Every all-digit value
+/// is valid hex, so `ip_ttl 64` came out as TTL 100 (#447).
 fn parse_value_mask_u8(s: &str, label: &str) -> crate::Result<(u8, u8)> {
     use crate::Error;
-    let parse_one = |t: &str| -> crate::Result<u8> {
-        let trimmed = t.strip_prefix("0x").unwrap_or(t);
-        u8::from_str_radix(trimmed, 16)
-            .or_else(|_| t.parse::<u8>())
-            .map_err(|_| Error::InvalidMessage(format!("flower: invalid {label} `{t}`")))
-    };
-    if let Some((v, m)) = s.split_once('/') {
-        Ok((parse_one(v)?, parse_one(m)?))
-    } else {
-        Ok((parse_one(s)?, 0xff))
-    }
+    let invalid = |t: &str| Error::InvalidMessage(format!("flower: invalid {label} `{t}`"));
+    let hex = |t: &str| u8::from_str_radix(t.strip_prefix("0x").unwrap_or(t), 16);
+    let (v, m) = s.split_once('/').map_or((s, None), |(v, m)| (v, Some(m)));
+    let value = v.parse::<u8>().or_else(|_| hex(v)).map_err(|_| invalid(v))?;
+    let mask = m.map_or(Ok(0xff), |m| hex(m).map_err(|_| invalid(m)))?;
+    Ok((value, mask))
 }
 
 fn parse_value_mask_u16_hex(s: &str, label: &str) -> crate::Result<(u16, u16)> {
@@ -1630,6 +1671,10 @@ impl FilterConfig for FlowerFilter {
         Some(self.protocol)
     }
 
+    fn set_protocol(&mut self, protocol: u16) {
+        self.protocol = protocol;
+    }
+
     fn priority(&self) -> Option<u16> {
         Some(self.priority)
     }
@@ -1649,7 +1694,8 @@ impl FilterConfig for FlowerFilter {
         // other ethertype, which drops them just as silently (ARP, or a
         // VLAN tag: nlink writes no TCA_FLOWER_KEY_VLAN_ETH_TYPE, so
         // `n_proto` is never set to the inner protocol) (#424).
-        if !matches!(self.eth_type, Some(0x0800 | 0x86DD)) {
+        let eth_type = self.effective_eth_type();
+        if !matches!(eth_type, Some(0x0800 | 0x86DD)) {
             let unusable = [
                 self.ip_proto.map(|_| "ip_proto"),
                 self.src_port.map(|_| "src_port"),
@@ -1664,7 +1710,7 @@ impl FilterConfig for FlowerFilter {
             .flatten()
             .collect::<Vec<_>>();
             if !unusable.is_empty() {
-                let other = match self.eth_type {
+                let other = match eth_type {
                     Some(t) => format!(" (this one is {t:#06x})"),
                     None => String::new(),
                 };
@@ -1672,7 +1718,8 @@ impl FilterConfig for FlowerFilter {
                     "flower: {} needs an ethertype of IPv4 or IPv6{other} — cls_flower \
                      discards L3/L4 keys unless TCA_FLOWER_KEY_ETH_TYPE says IPv4 or \
                      IPv6, and would install this as a match-all filter. Call .ipv4() \
-                     or .ipv6() (an address setter such as .dst_ipv4() implies one)",
+                     or .ipv6() (an address setter such as .dst_ipv4() implies one), or \
+                     install it under protocol ip or ipv6",
                     unusable.join(", ")
                 )));
             }
@@ -1694,14 +1741,14 @@ impl FilterConfig for FlowerFilter {
             )));
         }
         if (self.vlan_id.is_some() || self.vlan_prio.is_some())
-            && !matches!(self.eth_type, Some(0x8100 | 0x88A8))
+            && !matches!(eth_type, Some(0x8100 | 0x88A8))
         {
             let what = match (self.vlan_id, self.vlan_prio) {
                 (Some(_), Some(_)) => "vlan_id and vlan_prio",
                 (Some(_), None) => "vlan_id",
                 _ => "vlan_prio",
             };
-            let ethertype = match self.eth_type {
+            let ethertype = match eth_type {
                 Some(t) => format!("ethertype {t:#06x}"),
                 None => "no ethertype".to_string(),
             };
@@ -1769,7 +1816,7 @@ impl FilterConfig for FlowerFilter {
         }
 
         // Add ethernet type
-        if let Some(eth_type) = self.eth_type {
+        if let Some(eth_type) = eth_type {
             builder.append_attr(flower::TCA_FLOWER_KEY_ETH_TYPE, &eth_type.to_be_bytes());
         }
 
@@ -2125,6 +2172,10 @@ impl FilterConfig for MatchallFilter {
 
     fn protocol(&self) -> Option<u16> {
         Some(self.protocol)
+    }
+
+    fn set_protocol(&mut self, protocol: u16) {
+        self.protocol = protocol;
     }
 
     fn priority(&self) -> Option<u16> {
@@ -2839,6 +2890,10 @@ impl FilterConfig for BpfFilter {
         Some(self.protocol)
     }
 
+    fn set_protocol(&mut self, protocol: u16) {
+        self.protocol = protocol;
+    }
+
     fn priority(&self) -> Option<u16> {
         Some(self.priority)
     }
@@ -3186,6 +3241,10 @@ impl FilterConfig for BasicFilter {
 
     fn protocol(&self) -> Option<u16> {
         Some(self.protocol)
+    }
+
+    fn set_protocol(&mut self, protocol: u16) {
+        self.protocol = protocol;
     }
 
     fn priority(&self) -> Option<u16> {
@@ -4344,6 +4403,10 @@ impl FilterConfig for FlowFilter {
         Some(self.protocol)
     }
 
+    fn set_protocol(&mut self, protocol: u16) {
+        self.protocol = protocol;
+    }
+
     fn priority(&self) -> Option<u16> {
         Some(self.priority)
     }
@@ -4424,6 +4487,7 @@ impl Connection<Route> {
     ///
     /// let filter = FlowerFilter::new()
     ///     .classid(TcHandle::new(1, 0x10))
+    ///     .ipv4()
     ///     .ip_proto_tcp()
     ///     .dst_port(80)
     ///     .build();
@@ -4496,8 +4560,9 @@ impl Connection<Route> {
         handle: Option<TcHandle>,
         protocol: u16,
         priority: u16,
-        config: impl FilterConfig,
+        mut config: impl FilterConfig,
     ) -> Result<()> {
+        config.set_protocol(protocol);
         let parent_handle = parent.as_raw();
         let filter_handle = handle.map(|h| h.as_raw()).unwrap_or(0);
 
@@ -4622,8 +4687,9 @@ impl Connection<Route> {
         handle: Option<TcHandle>,
         protocol: u16,
         priority: u16,
-        config: impl FilterConfig,
+        mut config: impl FilterConfig,
     ) -> Result<()> {
+        config.set_protocol(protocol);
         let parent_handle = parent.as_raw();
         let filter_handle = handle.map(|h| h.as_raw()).unwrap_or(0);
 
@@ -4728,8 +4794,9 @@ impl Connection<Route> {
         handle: Option<TcHandle>,
         protocol: u16,
         priority: u16,
-        config: impl FilterConfig,
+        mut config: impl FilterConfig,
     ) -> Result<()> {
+        config.set_protocol(protocol);
         let parent_handle = parent.as_raw();
         let filter_handle = handle.map(|h| h.as_raw()).unwrap_or(0);
 
@@ -5393,7 +5460,8 @@ mod tests {
 
     #[test]
     fn flower_parse_params_ip_proto_numeric() {
-        let f = FlowerFilter::parse_params(&["ip_proto", "47"]).unwrap();
+        // Hex, as tc(8) reads it (#432).
+        let f = FlowerFilter::parse_params(&["ip_proto", "2f"]).unwrap();
         assert_eq!(f.ip_proto, Some(47)); // GRE
     }
 
@@ -6754,7 +6822,7 @@ fn flower_parse_params_sctp_ports() {
     for params in [
         &["eth_type", "ipv4", "ip_proto", "sctp", "dst_port", "80"][..],
         &["dst_port", "80", "ip_proto", "sctp", "eth_type", "ipv6"][..],
-        &["eth_type", "ipv4", "ip_proto", "132", "dst_port", "80"][..],
+        &["eth_type", "ipv4", "ip_proto", "84", "dst_port", "80"][..],
     ] {
         let f = FlowerFilter::parse_params(params).expect("tc(8) takes this");
         assert_eq!(f.ip_proto, Some(flower::IPPROTO_SCTP), "{params:?}");
@@ -6817,5 +6885,127 @@ fn flower_vlan_keys_imply_a_vlan_ethertype() {
     // tc(8)'s spelling still works.
     let parsed = FlowerFilter::parse_params(&["vlan_id", "10"]).unwrap();
     assert_eq!(ethertype(parsed), Some(0x8100));
+}
+
+// ========================================================================
+// #432, #447 — numbers read the way tc(8) reads them
+// ========================================================================
+
+/// tc(8) reads a numeric `ip_proto` as hex (`flower_parse_ip_proto` calls
+/// `get_u8(.., 16)`), so `ip_proto 47` is protocol 0x47 there, not GRE. nlink
+/// read it as decimal, and the same command installed a different filter
+/// (#432).
+#[test]
+fn flower_parse_params_reads_a_numeric_ip_proto_as_hex_like_tc() {
+    // What tc 6.15 installs for each spelling.
+    for (arg, want) in [("2f", 0x2f), ("0x2f", 0x2f), ("47", 0x47), ("010", 0x10), ("84", 132), ("ff", 0xff)] {
+        let f = FlowerFilter::parse_params(&["ip_proto", arg]).unwrap();
+        assert_eq!(f.ip_proto, Some(want), "ip_proto {arg}");
+    }
+    // …and what it refuses: 132 is 0x132, out of range.
+    for arg in ["132", "100", "0x", "zz", "-1"] {
+        let err = FlowerFilter::parse_params(&["ip_proto", arg]).unwrap_err().to_string();
+        assert!(err.contains("flower: invalid ip_proto"), "ip_proto {arg}: {err}");
+    }
+}
+
+/// tc(8) reads an `ip_tos` / `ip_ttl` value as decimal and falls back to hex;
+/// it reads the mask as hex (`flower_parse_ip_tos_ttl`). nlink tried hex
+/// first. Every all-digit value is valid hex, so `ip_ttl 64` installed TTL
+/// 100 (#447).
+#[test]
+fn flower_parse_params_reads_ip_tos_and_ttl_like_tc() {
+    // What tc 6.15 installs for each spelling (`tc -j filter show`).
+    for (arg, want) in [
+        ("64", (64, 0xff)),
+        ("1a", (26, 0xff)),
+        ("16/10", (16, 0x10)),
+        ("0x10/0xfc", (16, 0xfc)),
+        ("010", (10, 0xff)),
+        ("255/ff", (255, 0xff)),
+    ] {
+        let f = FlowerFilter::parse_params(&["ip_ttl", arg]).unwrap();
+        assert_eq!(f.ip_ttl, Some(want), "ip_ttl {arg}");
+        let f = FlowerFilter::parse_params(&["ip_tos", arg]).unwrap();
+        assert_eq!(f.ip_tos, Some(want), "ip_tos {arg}");
+    }
+    for arg in ["256", "1/100", "zz", "1/"] {
+        let err = FlowerFilter::parse_params(&["ip_ttl", arg]).unwrap_err().to_string();
+        assert!(err.contains("flower: invalid ip_ttl"), "ip_ttl {arg}: {err}");
+    }
+}
+
+// ========================================================================
+// #433 — the flower ethertype comes from the filter's protocol
+// ========================================================================
+
+/// The TCA_FLOWER_KEY_ETH_TYPE a filter writes, or the error that refuses it.
+fn flower_eth_type_key(f: &FlowerFilter) -> crate::Result<Option<u16>> {
+    Ok(flower_option_attrs(f)?
+        .into_iter()
+        .find(|(t, _)| *t == flower::TCA_FLOWER_KEY_ETH_TYPE)
+        .map(|(_, p)| u16::from_be_bytes(p.try_into().unwrap())))
+}
+
+/// tc(8) writes TCA_FLOWER_KEY_ETH_TYPE from the filter's `protocol` unless
+/// that is `all`, so `protocol ip flower ip_proto tcp dst_port 80` installs.
+/// nlink took the ethertype from the flower keys alone and refused that
+/// filter for want of one (#433).
+#[test]
+fn flower_takes_its_ethertype_from_the_filter_protocol() {
+    let f = FlowerFilter::new().protocol(0x0800).ip_proto_tcp().dst_port(80);
+    assert_eq!(flower_eth_type_key(&f).expect("tc(8) takes this"), Some(0x0800));
+    let f = FlowerFilter::new().protocol(0x86DD).ip_proto(0x3a);
+    assert_eq!(flower_eth_type_key(&f).expect("tc(8) takes this"), Some(0x86DD));
+    // A filter with no keys carries it too, as tc(8)'s does.
+    let f = FlowerFilter::new().protocol(0x0806);
+    assert_eq!(flower_eth_type_key(&f).unwrap(), Some(0x0806));
+
+    // `all` names no ethertype, so L3/L4 keys still need one; tc(8) refuses
+    // `protocol all flower ip_proto tcp` too. So does a zero protocol, which
+    // is what `FlowerFilter::default()` carries.
+    for f in [FlowerFilter::new(), FlowerFilter::default()] {
+        let err = flower_eth_type_key(&f.ip_proto_tcp()).unwrap_err().to_string();
+        assert!(err.contains("needs an ethertype"), "{err}");
+    }
+    assert_eq!(flower_eth_type_key(&FlowerFilter::new()).unwrap(), None);
+}
+
+/// The `*_full` entry points take the protocol as an argument and hand it to
+/// the config through `set_protocol` before writing the options, so a filter
+/// parsed from tc(8) arguments takes its ethertype from the protocol it is
+/// installed under. That covers 802.1AD as well: `.vlan_id()` used to write
+/// 802.1Q there and match nothing (#433).
+#[test]
+fn flower_set_protocol_supplies_the_ethertype() {
+    let mut f = FlowerFilter::parse_params(&["ip_proto", "tcp", "dst_port", "80"]).unwrap();
+    f.set_protocol(0x86DD);
+    assert_eq!(FilterConfig::protocol(&f), Some(0x86DD));
+    assert_eq!(flower_eth_type_key(&f).expect("tc(8) takes this"), Some(0x86DD));
+
+    let mut f = FlowerFilter::parse_params(&["vlan_id", "20"]).unwrap();
+    f.set_protocol(0x88A8);
+    assert_eq!(flower_eth_type_key(&f).expect("tc(8) takes this"), Some(0x88A8));
+    // Under `all` a VLAN key still implies 802.1Q…
+    f.set_protocol(0x0003);
+    assert_eq!(flower_eth_type_key(&f).unwrap(), Some(0x8100));
+    // …and an ethertype set on the filter wins over the protocol.
+    let mut f = FlowerFilter::new().qinq().vlan_id(20);
+    f.set_protocol(0x8100);
+    assert_eq!(flower_eth_type_key(&f).unwrap(), Some(0x88A8));
+
+    // Every shipped config that carries a protocol stores it.
+    let mut configs: Vec<Box<dyn FilterConfig>> = vec![
+        Box::new(U32Filter::new()),
+        Box::new(FlowerFilter::new()),
+        Box::new(MatchallFilter::new()),
+        Box::new(BpfFilter::new(0)),
+        Box::new(BasicFilter::new()),
+        Box::new(FlowFilter::new()),
+    ];
+    for c in &mut configs {
+        c.set_protocol(0x86DD);
+        assert_eq!(c.protocol(), Some(0x86DD), "{}", c.kind());
+    }
 }
 }

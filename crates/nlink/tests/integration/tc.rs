@@ -1402,3 +1402,182 @@ async fn flower_vlan_id_classifies_only_its_vlan() -> Result<()> {
     );
     Ok(())
 }
+
+// ============================================================================
+// #433 — the flower ethertype comes from the filter's protocol
+// ============================================================================
+
+/// A flower filter installed under `protocol ip` with no ethertype of its own
+/// takes the protocol as its TCA_FLOWER_KEY_ETH_TYPE, as tc(8) does. nlink
+/// refused it ("needs an ethertype"), so `protocol ip flower ip_proto udp
+/// dst_port 5001` — a standard tc(8) filter — could not be installed (#433).
+///
+/// All three explicit-protocol entry points are exercised: `add_filter_full`
+/// puts UDP 5001 into 1:10, `replace_filter_full` puts UDP 5002 into 1:20,
+/// and `change_filter_full` moves that filter to UDP 5003, which leaves 5002
+/// to the default class.
+#[tokio::test]
+async fn flower_takes_its_ethertype_from_the_filter_protocol() -> Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "sch_htb", "cls_flower");
+    use nlink::netlink::types::tc::filter::flower::TCA_FLOWER_KEY_ETH_TYPE;
+
+    let (ns, conn) = setup_tc_ns("flower-proto").await?;
+    ns.add_addr("dummy0", "10.42.0.1/24")?;
+
+    let htb = HtbQdiscConfig::new().default_class(0x30).build();
+    conn.add_qdisc_full("dummy0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb)
+        .await?;
+    for minor in [0x10, 0x20, 0x30] {
+        let class = HtbClassConfig::new(nlink::Rate::mbit(100)).build();
+        conn.add_class(
+            "dummy0",
+            TcHandle::major_only(1),
+            TcHandle::new(1, minor),
+            class,
+        )
+        .await?;
+    }
+    let udp_port = |minor: u16, port: &str| {
+        FlowerFilter::parse_params(&["classid", &format!("1:{minor:x}"), "ip_proto", "udp", "dst_port", port])
+            .expect("parses")
+    };
+    conn.add_filter_full("dummy0", TcHandle::major_only(1), None, 0x0800, 1, udp_port(0x10, "5001"))
+        .await?;
+    conn.replace_filter_full("dummy0", TcHandle::major_only(1), None, 0x0800, 2, udp_port(0x20, "5002"))
+        .await?;
+    let handle = conn
+        .get_filters_by_name("dummy0")
+        .await?
+        .iter()
+        .find(|f| f.kind() == Some("flower") && f.priority() == 2 && f.handle_raw() != 0)
+        .map(|f| f.handle())
+        .expect("the replaced filter is installed");
+    conn.change_filter_full("dummy0", TcHandle::major_only(1), Some(handle), 0x0800, 2, udp_port(0x20, "5003"))
+        .await?;
+
+    let mut failures = Vec::new();
+    for f in conn.get_filters_by_name("dummy0").await? {
+        if f.kind() != Some("flower") {
+            continue;
+        }
+        let eth_type = nlink::netlink::AttrIter::new(f.raw_options().unwrap_or_default())
+            .find(|(ty, _)| *ty == TCA_FLOWER_KEY_ETH_TYPE)
+            .map(|(_, payload)| payload.to_vec());
+        if eth_type != Some(0x0800u16.to_be_bytes().to_vec()) {
+            failures.push(format!(
+                "the flower filter at prio {} carries TCA_FLOWER_KEY_ETH_TYPE {eth_type:?}, want IPv4",
+                f.priority()
+            ));
+        }
+    }
+
+    const PER_PORT: usize = 5;
+    {
+        let name = ns.name().to_string();
+        std::thread::spawn(move || {
+            let _ns = nlink::netlink::namespace::enter(&name).expect("enter test netns");
+            let socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind");
+            for port in [5001, 5002, 5003] {
+                for _ in 0..PER_PORT {
+                    socket.send_to(b"nlink", ("10.42.0.2", port)).expect("send");
+                }
+            }
+        })
+        .join()
+        .expect("UDP thread panicked");
+    }
+
+    let classes = conn.get_classes_by_name("dummy0").await?;
+    let count = |minor: u16| {
+        classes
+            .iter()
+            .find(|c| c.handle() == TcHandle::new(1, minor))
+            .map(|c| c.packets())
+    };
+    let want = Some(PER_PORT as u64);
+    for (minor, what) in [(0x10, "UDP 5001"), (0x20, "UDP 5003"), (0x30, "the default (UDP 5002)")] {
+        if count(minor) != want {
+            failures.push(format!(
+                "class 1:{minor:x} for {what} counted {:?} packets, want {want:?}",
+                count(minor)
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
+/// A flower `vlan_id` filter under `protocol 802.1ad` classifies its 802.1AD
+/// VLAN. `.vlan_id()` implied an 802.1Q ethertype even when the filter's
+/// protocol named 802.1AD, so the filter asked for a TPID of 0x8100 on frames
+/// the protocol had already restricted to 0x88a8, and matched nothing. tc(8)
+/// takes the TPID from the protocol (#433). The kernel does not echo the
+/// TPID, so only traffic shows the difference.
+#[tokio::test]
+async fn flower_vlan_id_under_802_1ad_classifies_its_vlan() -> Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "8021q", "sch_htb", "cls_flower");
+    use nlink::netlink::link::VlanLink;
+
+    let (ns, conn) = setup_tc_ns("flower-qinq").await?;
+    ns.add_addr("dummy0", "10.42.0.1/24")?;
+    for (name, link, net) in [
+        ("dummy0.10", VlanLink::new("dummy0.10", "dummy0", 10), "10.10.0.1/24"),
+        ("dummy0.20", VlanLink::new("dummy0.20", "dummy0", 20).qinq(), "10.20.0.1/24"),
+    ] {
+        conn.add_link(link).await?;
+        conn.set_link_up(name).await?;
+        ns.add_addr(name, net)?;
+    }
+
+    let htb = HtbQdiscConfig::new().default_class(0x30).build();
+    conn.add_qdisc_full("dummy0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb)
+        .await?;
+    for minor in [0x10, 0x30] {
+        let class = HtbClassConfig::new(nlink::Rate::mbit(100)).build();
+        conn.add_class(
+            "dummy0",
+            TcHandle::major_only(1),
+            TcHandle::new(1, minor),
+            class,
+        )
+        .await?;
+    }
+    // tc(8): `protocol 802.1ad flower vlan_id 20 classid 1:10`.
+    let filter = FlowerFilter::parse_params(&["vlan_id", "20", "classid", "1:10"]).expect("parses");
+    conn.add_filter_full("dummy0", TcHandle::major_only(1), None, 0x88A8, 1, filter)
+        .await?;
+
+    const PER_TARGET: usize = 5;
+    {
+        let name = ns.name().to_string();
+        std::thread::spawn(move || {
+            let _ns = nlink::netlink::namespace::enter(&name).expect("enter test netns");
+            let socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind");
+            for peer in ["10.20.0.2:9", "10.10.0.2:9", "10.42.0.2:9"] {
+                for _ in 0..PER_TARGET {
+                    socket.send_to(b"nlink", peer).expect("send");
+                }
+            }
+        })
+        .join()
+        .expect("UDP thread panicked");
+    }
+
+    let classes = conn.get_classes_by_name("dummy0").await?;
+    let count = |minor: u16| {
+        classes
+            .iter()
+            .find(|c| c.handle() == TcHandle::new(1, minor))
+            .map(|c| c.packets())
+    };
+    let (vlan, default) = (count(0x10), count(0x30));
+    let (want_vlan, want_default) = (PER_TARGET as u64, 2 * PER_TARGET as u64);
+    assert!(
+        vlan == Some(want_vlan) && default == Some(want_default),
+        "802.1AD VLAN class 1:10 counted {vlan:?} packets (want {want_vlan}), default class 1:30 \
+         counted {default:?} (want {want_default})"
+    );
+    Ok(())
+}
