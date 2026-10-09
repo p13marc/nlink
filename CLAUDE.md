@@ -655,7 +655,13 @@ rustdoc builds every fenced Rust block as a doctest (#319). A block that is a
 fragment or a diagram is ```` ```text ````; anything marked `rust` has to
 compile. This replaced `audit-recipe-drift.sh`, a grep for known-stale
 shapes — every pattern it looked for is a compile error now. When you write
-a recipe, add its module to `recipe_doctests.rs`.
+a recipe, add its module to `recipe_doctests.rs`. The same file compiles the
+living documents outside `docs/recipes/`: `docs/library.md`,
+`docs/observability.md` and `README.md` (#449). When they were not compiled,
+39 of their 40 blocks stopped building, and some described APIs nlink never
+had. In the README, put scaffolding in visible code rather than on `# `
+lines: crates.io and the forge show hidden lines raw. The migration guides
+stay uncompiled on purpose, because their "before" code is the old API.
 
 When the user asks "how do I X" and X is one of these, link the
 recipe rather than re-synthesizing:

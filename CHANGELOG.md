@@ -409,6 +409,25 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`docs/library.md`, `docs/observability.md` and the README were never
+  compiled, and 39 of their 40 Rust blocks no longer built (#449).** The
+  recipes have been doctests since #319; these three documents were not.
+  What they described had drifted from the library:
+  - a subnet scanner and port checker (`NetworkScanner`,
+    `ConnectivityChecker`) that nlink does not have;
+  - `FlowerFilter::action(..)`, which never existed. `FlowerFilter`
+    carries no actions beyond `goto_chain` (#450);
+  - `MirredAction::mirror_egress`, which is now `mirror_by_index`;
+  - fields that are now accessors, on `FdbEntry`, `BridgeVlanEntry`,
+    `Nexthop`, `MplsRoute` and `TcMessage`;
+  - the old `MacsecSaBuilder` and `MptcpEndpointBuilder::dev`;
+  - a nftables ruleset diffed through a `Connection<Route>`;
+  - `into_events_with_resync` called synchronously.
+
+  All three files are now compiled the way the recipes are, each gated on
+  the features its blocks use, and every block matches the current API.
+  The flower examples now set an ethertype, which #288/#424 require.
+
 - **Flower numbers were read in a different base from tc(8) (#432,
   #447).** tc(8) reads a numeric `ip_proto` as hex
   (`flower_parse_ip_proto` → `get_u8(.., 16)`). It reads an `ip_tos` or
