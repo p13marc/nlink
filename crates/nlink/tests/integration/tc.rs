@@ -1581,3 +1581,73 @@ async fn flower_vlan_id_under_802_1ad_classifies_its_vlan() -> Result<()> {
     );
     Ok(())
 }
+
+// ============================================================================
+// #450 — flower carries actions
+// ============================================================================
+
+/// A flower filter's actions run on its match, and only there: a
+/// `dst_port 5001` filter with a drop drops UDP 5001, and UDP 5002 reaches
+/// the default class. `FlowerFilter` could not carry actions (only
+/// `goto_chain`), so tc(8)'s `flower … action drop` had no equivalent
+/// (#450).
+#[tokio::test]
+async fn flower_actions_run_on_its_match() -> Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "sch_htb", "cls_flower", "act_gact");
+    use nlink::netlink::action::{ActionList, GactAction};
+
+    let (ns, conn) = setup_tc_ns("flower-act").await?;
+    ns.add_addr("dummy0", "10.42.0.1/24")?;
+
+    let htb = HtbQdiscConfig::new().default_class(0x30).build();
+    conn.add_qdisc_full("dummy0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb)
+        .await?;
+    let class = HtbClassConfig::new(nlink::Rate::mbit(100)).build();
+    conn.add_class("dummy0", TcHandle::major_only(1), TcHandle::new(1, 0x30), class)
+        .await?;
+    let filter = FlowerFilter::new()
+        .ipv4()
+        .ip_proto_udp()
+        .dst_port(5001)
+        .actions(ActionList::new().with(GactAction::drop()))
+        .build();
+    conn.add_filter_full("dummy0", TcHandle::major_only(1), None, 0x0800, 1, filter)
+        .await?;
+
+    const PER_PORT: usize = 5;
+    {
+        let name = ns.name().to_string();
+        std::thread::spawn(move || {
+            let _ns = nlink::netlink::namespace::enter(&name).expect("enter test netns");
+            let socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind");
+            for port in [5001, 5002] {
+                for _ in 0..PER_PORT {
+                    // A drop at the qdisc is not an error for UDP without
+                    // IP_RECVERR, so every send succeeds.
+                    socket.send_to(b"nlink", ("10.42.0.2", port)).expect("send");
+                }
+            }
+        })
+        .join()
+        .expect("UDP thread panicked");
+    }
+
+    let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
+    let drops = qdiscs
+        .iter()
+        .find(|q| q.kind() == Some("htb"))
+        .map(|q| q.drops());
+    let classes = conn.get_classes_by_name("dummy0").await?;
+    let passed = classes
+        .iter()
+        .find(|c| c.handle() == TcHandle::new(1, 0x30))
+        .map(|c| c.packets());
+    let want = Some(PER_PORT as u64);
+    assert!(
+        drops.map(u64::from) == want && passed == want,
+        "the HTB root dropped {drops:?} packets (want {want:?}: UDP 5001, by the flower drop) and \
+         its default class passed {passed:?} (want {want:?}: UDP 5002)"
+    );
+    Ok(())
+}
