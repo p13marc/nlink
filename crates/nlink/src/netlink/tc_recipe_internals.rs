@@ -404,7 +404,11 @@ pub(crate) fn flower_matches(
     let live_attrs = split_attrs(live_raw);
 
     // Serialize the desired filter through the same writer that would
-    // install it, so this comparison cannot drift from what we send.
+    // install it, so this comparison cannot drift from what we send — under
+    // the protocol it is installed with, which is where a flower filter
+    // with no ethertype of its own takes one from (#433).
+    let mut desired = desired.clone();
+    desired.set_protocol(desired_protocol);
     let mut builder = crate::netlink::builder::MessageBuilder::new(0, 0);
     let start = builder.len();
     if desired.write_options(&mut builder).is_err() {
@@ -799,6 +803,26 @@ fn flower_matches_rejects_tcp_where_udp_was_asked_for() {
         .dst_port(53)
         .build();
     assert!(!flower_matches(&udp, ETH_P_IP, &live_flower(&tcp, ETH_P_IP)));
+}
+
+/// The install path hands the filter its protocol before writing it, and a
+/// flower filter with no ethertype of its own takes the protocol as one
+/// (#433). The comparison has to do the same, or a filter that relies on it
+/// never compares equal to what it installed and is replaced on every
+/// reconcile.
+#[test]
+fn flower_matches_takes_the_ethertype_from_the_protocol_like_the_install_path() {
+    let cid = TcHandle::new(1, 2);
+    let want = crate::netlink::filter::FlowerFilter::new()
+        .classid(cid)
+        .priority(1)
+        .ip_proto_udp()
+        .dst_port(53)
+        .build();
+    let mut installed = want.clone();
+    crate::netlink::filter::FilterConfig::set_protocol(&mut installed, ETH_P_IP);
+    let live = live_flower(&installed, ETH_P_IP);
+    assert!(flower_matches(&want, ETH_P_IP, &live));
 }
 
 #[test]

@@ -25,8 +25,8 @@ All notable changes to this project will be documented in this file.
 > - the `NftablesDiff` collections are typed.
 >
 > Every declarative layer was then checked by applying twice and asserting
-> the second apply does nothing. That found 30 bugs outside nftables
-> (#398–#418, #424–#428, #431, #436–#439) — TBF never converged at most rates, bond
+> the second apply does nothing. That found 33 bugs outside nftables
+> (#398–#418, #424–#428, #431–#433, #436–#439, #447) — TBF never converged at most rates, bond
 > ports could not be applied, WireGuard keys were rewritten on every run, a
 > changed VNI or VLAN id never reached the kernel, a link recreate could
 > destroy FDB and neighbour state, flower filters installed as match-alls,
@@ -409,6 +409,39 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Flower numbers were read in a different base from tc(8) (#432,
+  #447).** tc(8) reads a numeric `ip_proto` as hex
+  (`flower_parse_ip_proto` → `get_u8(.., 16)`). It reads an `ip_tos` or
+  `ip_ttl` value as decimal, falling back to hex, and the mask as hex.
+  `FlowerFilter::parse_params`, and so `nlink-tc`, did the opposite on
+  both counts. The same command therefore installed a different filter,
+  and the kernel accepted both:
+  - `ip_proto 47` matched GRE in nlink and protocol 0x47 in tc(8);
+  - `ip_ttl 64` matched TTL 100 in nlink and TTL 64 in tc(8).
+
+  Both now read numbers the way tc(8) does: `ip_proto 2f`/`0x2f` is GRE,
+  and `ip_proto 132` is an error, because 0x132 does not fit.
+
+- **A flower filter did not take its ethertype from the filter's protocol
+  (#433).** tc(8) writes `TCA_FLOWER_KEY_ETH_TYPE` from `protocol` unless
+  that is `all`, so `protocol ip flower ip_proto tcp dst_port 80` is a
+  normal filter. nlink took the ethertype from the flower keys alone and
+  refused that filter ("needs an ethertype"); `nlink-tc` refused 9 of 13
+  ordinary tc(8) flower command lines tested. Under `protocol 802.1ad`, a
+  `vlan_id` match wrote an 802.1Q TPID on frames the protocol had already
+  restricted to 802.1AD, and matched nothing (0 of 5 packets). The kernel
+  does not echo the TPID, so no dump showed it.
+
+  Now an ethertype set on the filter wins. Otherwise the filter's protocol
+  is used, unless it is `all`. Otherwise a VLAN key implies 802.1Q. The
+  `*_full` entry points (`add_filter_full`, `replace_filter_full`,
+  `change_filter_full` and their `_by_index` forms) take the protocol as an
+  argument and pass it on through the new `FilterConfig::set_protocol`. It
+  is defaulted like `set_chain`, and every shipped config that carries a
+  protocol stores it. The reconcile comparison of `PerPeerImpairer` and
+  `PerHostLimiter` resolves the ethertype the same way, so it cannot drift
+  from what is installed.
+
 - **A link recreate left VXLAN remotes `via` it pointing at nothing
   (#438).** A VXLAN FDB entry can name an output device
   (`bridge fdb append ... dev vx9 dst ... via d0`, `NDA_IFINDEX`). Deleting
@@ -445,7 +478,8 @@ All notable changes to this project will be documented in this file.
   set a VLAN ethertype, so `FlowerFilter::vlan_id(10)` always claimed every
   packet: on a dummy carrying VLANs 10 and 20, a `vlan_id 10` filter
   counted all 15 packets sent, 10 of them untagged or on VLAN 20. Now
-  `vlan_id`/`vlan_prio` imply 802.1Q unless an ethertype is set, `vlan()`
+  `vlan_id`/`vlan_prio` imply 802.1Q unless an ethertype is set (or, since
+  #433, the filter's protocol names one), `vlan()`
   and `qinq()` set one explicitly, and `write_options` refuses VLAN keys
   under any other ethertype and `tcp_flags` without `ip_proto tcp`, with a
   `flower: …` error — the same rule #424 applies to ports.
