@@ -4,7 +4,7 @@ This document covers library usage patterns for the nlink crate.
 
 ## Quick Start
 
-```rust
+```rust,no_run
 use nlink::netlink::{Connection, Route};
 
 #[tokio::main]
@@ -30,7 +30,8 @@ async fn main() -> nlink::Result<()> {
 
 ## Network Namespaces
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use nlink::netlink::{Connection, Route, Generic};
 use nlink::netlink::namespace;
 
@@ -69,13 +70,16 @@ namespace::delete("myns")?;
 // marker file, leaving the directory tree for the caller to own.
 namespace::create_path("/run/myapp/netns/tenant-a")?;
 namespace::delete_path("/run/myapp/netns/tenant-a")?;
+# Ok(())
+# }
 ```
 
 ## Event Monitoring
 
 ### Basic Event Stream
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use nlink::netlink::{Connection, Route, RtnetlinkGroup, NetworkEvent};
 use tokio_stream::StreamExt;
 
@@ -90,6 +94,8 @@ while let Some(result) = events.next().await {
         _ => {}
     }
 }
+# Ok(())
+# }
 ```
 
 `NetworkEvent` covers links, addresses, routes, neighbors, FDB, TC
@@ -103,29 +109,33 @@ always keep a `_ => {}` arm.
 
 ### Namespace-aware Monitoring
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use nlink::netlink::{Connection, Route, RtnetlinkGroup, namespace};
 use tokio_stream::StreamExt;
 
 // Monitor events in a named namespace
-let mut conn = namespace::connection_for("myns")?;
+let mut conn: Connection<Route> = namespace::connection_for("myns")?;
 conn.subscribe(&[RtnetlinkGroup::Link, RtnetlinkGroup::Tc])?;
 let mut events = conn.events().await;
 
 // Or by PID
-let mut conn = namespace::connection_for_pid(1234)?;
+let mut conn: Connection<Route> = namespace::connection_for_pid(1234)?;
 conn.subscribe(&[RtnetlinkGroup::Link])?;
 
 // Or by path
 let mut conn = Connection::<Route>::new_in_namespace_path("/proc/1234/ns/net")?;
 conn.subscribe_all()?;
+# Ok(())
+# }
 ```
 
 ## Watching Namespace Changes
 
 Two complementary approaches for monitoring network namespace lifecycle:
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use nlink::netlink::{NamespaceWatcher, NamespaceEvent};
 use nlink::netlink::{NamespaceEventSubscriber, NamespaceNetlinkEvent};
 
@@ -157,8 +167,11 @@ while let Some(event) = sub.recv().await? {
         NamespaceNetlinkEvent::DelNsId { nsid } => {
             println!("Deleted NSID {}", nsid);
         }
+        _ => {}
     }
 }
+# Ok(())
+# }
 ```
 
 ## Reflector / Watch-Cache
@@ -169,18 +182,27 @@ dependency). `Store<K, V>` is a cheap-to-clone, read-only handle over a
 shared map; `stream.reflect(store, classify)` is a pass-through adapter
 that updates the store from every item it forwards.
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# let conn = nlink::Connection::<nlink::Route>::new()?;
+# let ifindex = 1;
+use std::sync::Arc;
+
 use nlink::{Store, StoreOp};
 use nlink::netlink::reflector::ReflectExt;     // the stream combinator
 use nlink::netlink::events::NetworkEvent;
+use nlink::netlink::resync::ConnectionFactory;
 use tokio_stream::StreamExt;
 
+// The resync stream redumps through a fresh connection after an overflow.
+let factory: ConnectionFactory<nlink::Route> =
+    Arc::new(|| Box::pin(async { nlink::Connection::<nlink::Route>::new() }));
 let store: Store<u32, NetworkEvent> = Store::new();
 let reader = store.clone();                     // clones share the map
 
 // Drive the reflector in the background; classify each event into a
 // StoreOp. The typed event enum already encodes add-vs-delete.
-let watch = conn.into_events_with_resync(factory)?.reflect(store, |ev| {
+let watch = conn.into_events_with_resync(factory).await?.reflect(store, |ev| {
     match ev {
         NetworkEvent::NewLink(l) => StoreOp::Upsert(l.ifindex()),
         NetworkEvent::DelLink(l) => StoreOp::Remove(l.ifindex()),
@@ -195,6 +217,8 @@ tokio::spawn(async move {
 // Read the cache from anywhere.
 println!("{} links tracked", reader.len());
 let link = reader.get(&ifindex);
+# Ok(())
+# }
 ```
 
 After an `ENOBUFS` overflow the resync window replays the full state;
@@ -210,11 +234,15 @@ mutex, so a long-lived event subscriber blocks concurrent requests
 until it's dropped. Opt into **dispatcher mode** when one connection
 must serve a long-lived stream *and* concurrent requests:
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use nlink::netlink::{Connection, Route};
 let conn = std::sync::Arc::new(Connection::<Route>::new()?.with_dispatcher());
 conn.subscribe_all()?;
 let mut events = conn.events().await;     // long-lived subscriber…
 let links = conn.get_links().await?;      // …no longer blocks this request
+# Ok(())
+# }
 ```
 
 A single background driver owns `recv` and demultiplexes frames by
@@ -228,7 +256,8 @@ kernel serializes dumps per socket). See CLAUDE.md §Concurrency.
 
 ### Adding Qdiscs
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use nlink::netlink::{Connection, Route, namespace};
 use nlink::netlink::tc::NetemConfig;
 use std::time::Duration;
@@ -236,7 +265,7 @@ use std::time::Duration;
 let conn: Connection<Route> = namespace::connection_for("myns")?;
 
 // Get interface index via netlink (namespace-aware)
-let link = conn.get_link_by_name("eth0").await?;
+let link = conn.get_link_by_name("eth0").await?.ok_or("no eth0 in myns")?;
 
 let netem = NetemConfig::new()
     .delay(Duration::from_millis(100))
@@ -251,11 +280,14 @@ conn.add_qdisc_by_index(link.ifindex(), netem).await?;
 // - del_qdisc_by_index / del_qdisc_by_index_full  
 // - replace_qdisc_by_index / replace_qdisc_by_index_full
 // - change_qdisc_by_index / change_qdisc_by_index_full
+# Ok(())
+# }
 ```
 
 ### Reading Existing TC Configurations
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use nlink::netlink::{Connection, Route};
 use nlink::netlink::tc_options::QdiscOptions;
 
@@ -288,6 +320,7 @@ for qdisc in &qdiscs {
                     NetemLossModel::GilbertElliot { p, r, h, .. } => {
                         println!("2-state loss model: p={:.2}%, r={:.2}%, h={:.2}%", p, r, h);
                     }
+                    _ => {}
                 }
             }
         }
@@ -303,42 +336,50 @@ for qdisc in &qdiscs {
         _ => {}
     }
 }
+# Ok(())
+# }
 ```
 
 ### Monitoring TC Statistics
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use nlink::netlink::{Connection, Route};
+use std::collections::HashMap;
 use std::time::Duration;
 
 let conn = Connection::<Route>::new()?;
-let mut prev_stats = None;
+// The previous sample of each qdisc, by handle.
+let mut prev = HashMap::new();
 
 loop {
     let qdiscs = conn.get_qdiscs_by_name("eth0").await?;
-    
+
     for qdisc in &qdiscs {
         // Real-time rate from kernel's rate estimator
         println!("Rate: {} bps, {} pps", qdisc.bps(), qdisc.pps());
-        
-        // Calculate deltas from previous sample
-        if let (Some(curr), Some(prev)) = (&qdisc.stats_basic, &prev_stats) {
-            let delta = curr.delta(prev);
-            println!("Delta: {} bytes, {} packets", delta.bytes, delta.packets);
+
+        // Calculate deltas from the previous sample of the same qdisc
+        if let Some(curr) = qdisc.stats_basic() {
+            if let Some(before) = prev.insert(qdisc.handle_raw(), *curr) {
+                let delta = curr.delta(&before);
+                println!("Delta: {} bytes, {} packets", delta.bytes, delta.packets);
+            }
         }
-        
-        prev_stats = qdisc.stats_basic;
     }
-    
+
     tokio::time::sleep(Duration::from_secs(1)).await;
 }
+# Ok(())
+# }
 ```
 
 ## Tunnel Management
 
 ### Creating Tunnels
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use nlink::netlink::{Connection, Route};
 use nlink::netlink::link::{GreLink, VxlanLink, VtiLink};
 use std::net::Ipv4Addr;
@@ -368,6 +409,8 @@ conn.add_link(VtiLink::new("vti0")
     .ikey(100)
     .okey(100)
 ).await?;
+# Ok(())
+# }
 ```
 
 ### Tunnel Modification Limitations
@@ -391,7 +434,8 @@ conn.add_link(VtiLink::new("vti0")
 
 ### Safe Tunnel Replacement
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use nlink::netlink::{Connection, Route};
 use nlink::netlink::link::GreLink;
 use std::net::Ipv4Addr;
@@ -405,11 +449,18 @@ conn.add_link(GreLink::new("gre1")
     .remote(Ipv4Addr::new(10, 0, 0, 1))  // New remote
     .ttl(128)  // New TTL
 ).await?;
+# Ok(())
+# }
 ```
 
 For zero-downtime changes, create a new tunnel with a temporary name, migrate traffic, then rename:
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use nlink::netlink::link::GreLink;
+# use std::net::Ipv4Addr;
+# let conn = nlink::Connection::<nlink::Route>::new()?;
+# let (local, new_remote) = (Ipv4Addr::new(192, 168, 1, 1), Ipv4Addr::new(10, 0, 0, 1));
 // 1. Create new tunnel with temp name
 conn.add_link(GreLink::new("gre1_new")
     .remote(new_remote)
@@ -422,11 +473,14 @@ conn.add_link(GreLink::new("gre1_new")
 // 3. Delete old tunnel and rename new one
 conn.del_link("gre1").await?;
 conn.set_link_name("gre1_new", "gre1").await?;
+# Ok(())
+# }
 ```
 
 ## WireGuard via Generic Netlink
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use nlink::netlink::{Connection, Wireguard};
 use nlink::netlink::genl::wireguard::AllowedIp;
 use std::net::{Ipv4Addr, SocketAddrV4};
@@ -462,6 +516,8 @@ wg.set_peer("wg0", peer_pubkey, |peer| {
 
 // Remove a peer
 wg.del_peer("wg0", peer_pubkey).await?;
+# Ok(())
+# }
 ```
 
 Declarative counterpart: `WireguardConfig` (diff/apply, `wg-quick`
@@ -476,18 +532,24 @@ the tunnel is `ENETDOWN` until it is up — #329). The
 `facade::apply::wireguard*` helpers wire both together, so a bare
 `WireguardConfig` applies end-to-end:
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use nlink::netlink::genl::wireguard::WireguardConfig;
 
 let cfg = WireguardConfig::new().device("wg0", |d| d.listen_port(51820));
 nlink::facade::apply::wireguard(&cfg).await?;   // creates wg0 if absent
+# Ok(())
+# }
 ```
 
 ## Error Handling
 
-```rust
-use nlink::netlink::{Connection, Route, Error};
-use nlink::netlink::error::ValidationErrorInfo;
+```rust,no_run
+# async fn example() -> nlink::Result<()> {
+use nlink::TcHandle;
+use nlink::netlink::{Connection, Route, Error, ValidationErrorInfo};
+use nlink::netlink::tc::NetemConfig;
+use std::time::Duration;
 
 let conn = Connection::<Route>::new()?;
 
@@ -503,7 +565,8 @@ match conn.del_qdisc("eth0", TcHandle::ROOT).await {
 // Typed error variants for common not-found cases
 // del_link/set_link_up/down promote ENOENT to InterfaceNotFound
 // change_qdisc/del_qdisc promote ENOENT to QdiscNotFound
-match conn.change_qdisc("eth0", "root", netem).await {
+let netem = NetemConfig::new().delay(Duration::from_millis(50)).build();
+match conn.change_qdisc("eth0", TcHandle::ROOT, netem.clone()).await {
     Ok(()) => {}
     Err(Error::QdiscNotFound { .. }) => {
         // Qdisc doesn't exist yet — add instead of change
@@ -528,6 +591,8 @@ let err = Error::validation(vec![
     ValidationErrorInfo::new("name", "cannot be empty"),
     ValidationErrorInfo::new("vlan_id", "must be 1-4094"),
 ]);
+# Ok(())
+# }
 ```
 
 ## Declarative Network Configuration
@@ -537,7 +602,8 @@ describe the *desired* state; `diff` computes the delta against the
 live kernel and `apply` reconciles it idempotently (re-applying the
 same config is a no-op).
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use nlink::netlink::{Connection, Route};
 use nlink::netlink::config::{NetworkConfig, ApplyOptions};
 
@@ -561,6 +627,8 @@ desired
     .await?;
 let result = desired.apply(&conn).await?;
 println!("applied {} change(s)", result.changes_made);
+# Ok(())
+# }
 ```
 
 With the `serde` feature, the *same typed config* round-trips through
@@ -569,7 +637,9 @@ gateway, or MAC is a deserialize error rather than a silently-wrong
 config. Addresses and routes use CIDR strings (`default` for the
 default route); MACs use `aa:bb:cc:dd:ee:ff`:
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use nlink::netlink::config::NetworkConfig;
 let desired = NetworkConfig::from_json_str(r#"{
     "links": [
         { "name": "br0", "link-type": "bridge", "state": "up" },
@@ -583,6 +653,8 @@ let desired = NetworkConfig::from_json_str(r#"{
 // let desired: NetworkConfig = serde_yaml::from_str(yaml)?;
 
 let json = desired.to_json_string_pretty()?;
+# Ok(())
+# }
 ```
 
 ### Purge — full reconcile (opt-in)
@@ -592,7 +664,11 @@ stop declaring is left in place. Opt into a full reconcile — removing
 undeclared resources — with `DiffOptions::purge` (or
 `ApplyOptions::with_purge`):
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use nlink::netlink::config::{ApplyOptions, NetworkConfig};
+# let conn = nlink::Connection::<nlink::Route>::new()?;
+# let desired = NetworkConfig::new();
 use nlink::netlink::config::DiffOptions;
 
 // See exactly what would be removed before applying.
@@ -605,6 +681,8 @@ println!("{diff}");   // `-` lines list addresses/routes to be removed
 desired
     .apply_with_options(&conn, ApplyOptions::default().with_purge(true))
     .await?;
+# Ok(())
+# }
 ```
 
 Purge is conservatively fenced so a reconcile can't strip
@@ -632,13 +710,16 @@ CI can validate config files. The schema follows the human-facing JSON
 shape — CIDR strings for addresses/routes, `aa:bb:..` for MACs — not
 the in-memory types:
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 // Write the schema next to your config so VS Code's `json.schemas` /
 // `yaml.schemas` (or a CI validator) picks it up.
 std::fs::write(
     "network-config.schema.json",
     nlink::netlink::config::NetworkConfig::json_schema(),
 )?;
+# Ok(())
+# }
 ```
 
 `json_schema_value()` returns the `schemars::schema::RootSchema` if you
@@ -661,7 +742,13 @@ and route via a peer's tunnel address (#330). `apply_in_with` /
 layer — `ApplyOptions::default().with_purge(true)` is how a reconcile
 removes addresses and routes that left the declaration.
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use nlink::netlink::config::NetworkConfig;
+# use nlink::netlink::nftables::config::NftablesConfig;
+# use nlink::netlink::genl::wireguard::WireguardConfig;
+# let (net_cfg, fw_cfg, wg_cfg) = (NetworkConfig::new(), NftablesConfig::new(), WireguardConfig::new());
+# let container_pid = 1234;
 use nlink::facade::Stack;
 use nlink::netlink::NamespaceSpec;
 
@@ -679,6 +766,8 @@ use nlink::netlink::config::ApplyOptions;
 let report = stack                                 // reconcile: purge what left the config
     .apply_in_with(NamespaceSpec::Named("lab"), ApplyOptions::default().with_purge(true))
     .await?;
+# Ok(())
+# }
 ```
 
 Runnable demo: `cargo run -p nlink --example config_stack`
@@ -688,7 +777,8 @@ Runnable demo: `cargo run -p nlink --example config_stack`
 
 High-level rate limiting with minimal configuration:
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use nlink::{Bytes, Rate, netlink::{Connection, Route}};
 use nlink::netlink::ratelimit::{RateLimiter, PerHostLimiter};
 use std::time::Duration;
@@ -707,6 +797,8 @@ PerHostLimiter::new("eth0", Rate::mbit(10))      // default for unmatched
     .limit_ip("192.168.1.100".parse()?, Rate::mbit(100))
     .limit_subnet("10.0.0.0/8", Rate::mbit(50))?
     .apply(&conn).await?;
+# Ok(())
+# }
 ```
 
 Both limiters also expose `reconcile()` / `reconcile_dry_run()` /
@@ -717,50 +809,47 @@ unlike `apply()`, which destructively rebuilds the tree.
 
 ## Network Diagnostics
 
-High-level diagnostic tools for troubleshooting:
+`Diagnostics` combines links, TC, routes and addresses into actionable
+findings. It reads netlink only: it does not probe the network.
 
-```rust
-use nlink::netlink::diagnostics::{
-    NetworkScanner, ConnectivityChecker, BottleneckDetector,
-    ScanOptions, ConnectivityMethod
-};
-use std::net::IpAddr;
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+use nlink::netlink::{Connection, Route};
+use nlink::netlink::diagnostics::Diagnostics;
+use tokio_stream::StreamExt;
 
-// Scan a subnet for active hosts
-let scanner = NetworkScanner::new();
-let results = scanner.scan("192.168.1.0/24", ScanOptions {
-    timeout_ms: 1000,
-    concurrent: 50,
-    resolve_hostnames: true,
-    check_ports: vec![22, 80, 443],
-}).await?;
+let diag = Diagnostics::new(Connection::<Route>::new()?);
 
-for host in &results {
-    println!("{}: latency={:?}, hostname={:?}", 
-        host.ip, host.latency, host.hostname);
-    for port in &host.open_ports {
-        println!("  port {} open", port);
-    }
-}
-
-// Check connectivity to a destination
-let checker = ConnectivityChecker::new();
-let result = checker.check(
-    "8.8.8.8".parse()?,
-    ConnectivityMethod::Icmp,
-).await?;
-println!("Reachable: {}, latency: {:?}, hops: {:?}", 
-    result.reachable, result.latency, result.hops);
-
-// Detect bottlenecks on a path
-let detector = BottleneckDetector::new();
-let report = detector.detect("10.0.0.1".parse()?).await?;
+// Full scan: every interface, its qdiscs, the routes.
+let report = diag.scan().await?;
 for issue in &report.issues {
-    println!("[{:?}] {}: {}", issue.severity, issue.location, issue.description);
-    for rec in &issue.recommendations {
-        println!("  - {}", rec);
-    }
+    println!("[{:?}] {}: {}", issue.severity, issue.category, issue.message);
 }
+
+// One interface
+let eth0 = diag.scan_interface("eth0").await?;
+println!("eth0: {} bit/s, {} drops", eth0.rates.tx_bps(), eth0.stats.tx_dropped());
+
+// Is there a route to a destination, and is its path healthy?
+let report = diag.check_connectivity("8.8.8.8".parse()?).await?;
+for issue in &report.issues {
+    println!("  - {}", issue.message);
+}
+
+// The worst drop point on the host
+if let Some(bottleneck) = diag.find_bottleneck().await? {
+    println!("Bottleneck: {} ({:.2}% drops)", bottleneck.location, bottleneck.drop_rate * 100.0);
+    println!("  Recommendation: {}", bottleneck.recommendation);
+}
+
+// Or watch for issues as they appear
+let mut issues = diag.watch().await?;
+while let Some(issue) = issues.next().await {
+    let issue = issue?;
+    println!("[{:?}] {}", issue.severity, issue.message);
+}
+# Ok(())
+# }
 ```
 
 ## Socket Diagnostics (feature `sockdiag`)
@@ -768,7 +857,8 @@ for issue in &report.issues {
 Query kernel socket state via `NETLINK_SOCK_DIAG` — the foundation
 for `ss`-style tooling and unprivileged bandwidth observability.
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use nlink::netlink::{Connection, SockDiag};
 use nlink::sockdiag::{FilterExpr, SocketFilter};
 
@@ -794,6 +884,8 @@ let busy = conn
 let with_cc = conn
     .query(&SocketFilter::tcp().with_congestion().with_cc_info().build())
     .await?;
+# Ok(())
+# }
 ```
 
 ### Socket → process / cgroup attribution (0.24, #162)
@@ -803,7 +895,12 @@ amortized `/proc/<pid>/fd` → `socket:[inode]` scan (with a
 PID-reuse-safe `(pid, start_time)` identity); `CgroupPathMap`
 inverts the kernel's cgroup-v2 ID to its cgroupfs path:
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use nlink::netlink::{Connection, SockDiag};
+# use nlink::sockdiag::SocketFilter;
+# let conn = Connection::<SockDiag>::new()?;
+# let listeners = conn.query(&SocketFilter::tcp().listening().build()).await?;
 use nlink::sockdiag::{CgroupPathMap, SocketOwnerMap};
 
 let owners = SocketOwnerMap::scan();   // one /proc walk per poll cycle
@@ -816,6 +913,8 @@ for s in listeners.iter().filter_map(|s| s.as_inet()) {
         println!("  unit: {}", path.display());
     }
 }
+# Ok(())
+# }
 ```
 
 ### Per-socket TCP byte rates (0.24, #171)
@@ -825,7 +924,11 @@ goodput deltas. TCP only — UDP diag has no cumulative byte counters
 (architectural; see the `nlink::sockdiag` module docs for the full
 constraint list):
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use nlink::netlink::{Connection, SockDiag};
+# use nlink::sockdiag::SocketFilter;
+# let conn = Connection::<SockDiag>::new()?;
 use std::time::Instant;
 use nlink::sockdiag::SocketRateTracker;
 
@@ -838,6 +941,8 @@ for rate in tracker.ingest(inet.iter().copied(), Instant::now()) {
         rate.cookie, rate.tx_goodput_bps, rate.rx_goodput_bps,
         rate.retrans_ratio * 100.0);
 }
+# Ok(())
+# }
 ```
 
 End-to-end walkthrough:
@@ -849,8 +954,9 @@ runnable examples under `crates/nlink/examples/sockdiag/`
 
 ### HTB Class Configuration
 
-```rust
-use nlink::{Rate, netlink::{Connection, Route}};
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+use nlink::{Rate, TcHandle, netlink::{Connection, Route}};
 use nlink::netlink::tc::{HtbQdiscConfig, HtbClassConfig};
 
 let conn = Connection::<Route>::new()?;
@@ -880,14 +986,18 @@ conn.add_class("eth0", TcHandle::new(1, 1), TcHandle::new(1, 0x20),
         .prio(2)  // Lower priority
         .build()
 ).await?;
+# Ok(())
+# }
 ```
 
 ### TC Filters
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+use nlink::TcHandle;
 use nlink::netlink::{Connection, Route};
 use nlink::netlink::filter::{U32Filter, FlowerFilter, MatchallFilter};
-use nlink::netlink::action::{GactAction, MirredAction, PoliceAction};
+use nlink::netlink::action::{ActionList, MirredAction, PoliceAction};
 use std::net::Ipv4Addr;
 
 let conn = Connection::<Route>::new()?;
@@ -899,7 +1009,8 @@ let filter = U32Filter::new()
     .build();
 conn.add_filter("eth0", TcHandle::major_only(1), filter).await?;
 
-// Flower filter for TCP traffic to subnet
+// Flower filter for TCP traffic to subnet (the IPv4 address implies the
+// IPv4 ethertype flower needs before it reads ip_proto)
 let filter = FlowerFilter::new()
     .classid(TcHandle::new(1, 0x20))
     .ip_proto_tcp()
@@ -909,32 +1020,39 @@ conn.add_filter("eth0", TcHandle::major_only(1), filter).await?;
 
 // Filter with police action (rate limit)
 let police = PoliceAction::new()
-    .rate(1_000_000)
+    .rate(1_000_000)    // bytes per second
     .burst(10000)
     .exceed_drop()
     .build();
 
 let filter = MatchallFilter::new()
-    .action(police)
+    .actions(ActionList::new().with(police))
     .build();
 conn.add_filter("eth0", TcHandle::INGRESS, filter).await?;
 
-// Mirror traffic to another interface
-let mirror = MirredAction::mirror_egress("eth1");
-let filter = FlowerFilter::new()
-    .ip_proto_tcp()
-    .dst_port(443)
-    .action(mirror)
+// Mirror traffic to another interface. Actions name devices by ifindex,
+// resolved through the connection, so they are right in any namespace.
+let eth1 = conn.get_link_by_name("eth1").await?.ok_or("no eth1")?.ifindex();
+let filter = MatchallFilter::new()
+    .actions(ActionList::new().with(MirredAction::mirror_by_index(eth1)))
     .build();
 conn.add_filter("eth0", TcHandle::INGRESS, filter).await?;
+# Ok(())
+# }
 ```
+
+Actions ride on `MatchallFilter` and `FlowFilter`. `FlowerFilter` carries
+none yet beyond `goto_chain` (#450): to act on a flower match, jump to a
+chain whose filter does, as below.
 
 ### TC Filter Chains
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+use nlink::TcHandle;
 use nlink::netlink::{Connection, Route};
-use nlink::netlink::filter::FlowerFilter;
-use nlink::netlink::action::GactAction;
+use nlink::netlink::filter::{FlowerFilter, MatchallFilter};
+use nlink::netlink::action::{ActionList, GactAction};
 use nlink::netlink::tc::IngressConfig;
 
 let conn = Connection::<Route>::new()?;
@@ -946,34 +1064,37 @@ conn.add_qdisc("eth0", IngressConfig::new()).await?;
 conn.add_tc_chain("eth0", TcHandle::INGRESS, 0).await?;
 conn.add_tc_chain("eth0", TcHandle::INGRESS, 100).await?;
 
-// Add filter in chain 0 that jumps to chain 100 for TCP
+// Add filter in chain 0 that jumps to chain 100 for TCP to port 80
 let filter = FlowerFilter::new()
     .chain(0)
+    .ipv4()
     .ip_proto_tcp()
+    .dst_port(80)
     .goto_chain(100)
     .build();
 conn.add_filter("eth0", TcHandle::INGRESS, filter).await?;
 
-// Add filter in chain 100 to drop port 80
-let filter = FlowerFilter::new()
+// Add filter in chain 100 to drop what arrives there
+let filter = MatchallFilter::new()
     .chain(100)
-    .ip_proto_tcp()
-    .dst_port(80)
-    .action(GactAction::drop())
+    .actions(ActionList::new().with(GactAction::drop()))
     .build();
 conn.add_filter("eth0", TcHandle::INGRESS, filter).await?;
 
 // List chains
-for chain in conn.get_tc_chains("eth0", "ingress").await? {
+for chain in conn.get_tc_chains("eth0", TcHandle::INGRESS).await? {
     println!("Chain: {}", chain);
 }
+# Ok(())
+# }
 ```
 
 ## Bridge FDB and VLAN
 
 ### FDB Management
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use nlink::netlink::{Connection, Route};
 use nlink::netlink::fdb::FdbEntryBuilder;
 use std::net::Ipv4Addr;
@@ -984,7 +1105,7 @@ let conn = Connection::<Route>::new()?;
 let entries = conn.get_fdb("br0").await?;
 for entry in &entries {
     println!("{} vlan={:?} state={:?}", 
-        entry.mac_str(), entry.vlan, entry.state);
+        entry.mac_str(), entry.vlan(), entry.state());
 }
 
 // Add static FDB entry
@@ -1006,11 +1127,14 @@ conn.add_fdb(
 
 // Flush dynamic entries
 conn.flush_fdb("br0").await?;
+# Ok(())
+# }
 ```
 
 ### VLAN Filtering
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use nlink::netlink::{Connection, Route};
 use nlink::netlink::bridge_vlan::BridgeVlanBuilder;
 
@@ -1020,7 +1144,7 @@ let conn = Connection::<Route>::new()?;
 let vlans = conn.get_bridge_vlans("eth0").await?;
 for vlan in &vlans {
     println!("VLAN {}: pvid={} untagged={}", 
-        vlan.vid, vlan.flags.pvid, vlan.flags.untagged);
+        vlan.vid(), vlan.flags().pvid, vlan.flags().untagged);
 }
 
 // Set native VLAN (PVID + untagged)
@@ -1035,11 +1159,14 @@ conn.add_bridge_vlan_range("eth0", 300, 310).await?;
 // Delete VLANs
 conn.del_bridge_vlan("eth0", 200).await?;
 conn.del_bridge_vlan_range("eth0", 300, 310).await?;
+# Ok(())
+# }
 ```
 
 ## Nexthop Objects and ECMP
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use nlink::netlink::{Connection, Route};
 use nlink::netlink::nexthop::{NexthopBuilder, NexthopGroupBuilder};
 use nlink::netlink::route::Ipv4Route;
@@ -1093,16 +1220,19 @@ conn.add_route(
 // Query nexthops
 for nh in conn.get_nexthops().await? {
     if nh.is_group() {
-        println!("Group {}: {:?}", nh.id, nh.group);
+        println!("Group {}: {:?}", nh.id(), nh.group());
     } else {
-        println!("NH {}: gateway={:?}", nh.id, nh.gateway);
+        println!("NH {}: gateway={:?}", nh.id(), nh.gateway());
     }
 }
+# Ok(())
+# }
 ```
 
 ## MPLS Routes
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use nlink::netlink::{Connection, Route};
 use nlink::netlink::mpls::{MplsEncap, MplsRouteBuilder};
 use nlink::netlink::route::Ipv4Route;
@@ -1140,13 +1270,16 @@ conn.add_mpls_route(
 
 // Query MPLS routes
 for route in conn.get_mpls_routes().await? {
-    println!("Label {}: {:?}", route.label.0, route.action);
+    println!("Label {}: {:?}", route.label().0, route.action());
 }
+# Ok(())
+# }
 ```
 
 ## SRv6 Segment Routing
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use nlink::netlink::{Connection, Route};
 use nlink::netlink::srv6::{Srv6Encap, Srv6LocalBuilder};
 use nlink::netlink::route::{Ipv4Route, Ipv6Route};
@@ -1188,11 +1321,14 @@ conn.add_srv6_local(
     Srv6LocalBuilder::end_dt4("fc00:1::100".parse()?, 100)
         .dev("eth0")
 ).await?;
+# Ok(())
+# }
 ```
 
 ## MACsec Configuration
 
-```rust
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use nlink::netlink::{Connection, Macsec};
 use nlink::netlink::genl::macsec::MacsecSaBuilder;
 
@@ -1200,14 +1336,13 @@ let conn = Connection::<Macsec>::new_async().await?;
 
 // Get device information (name resolved via netlink)
 let device = conn.get_device("macsec0").await?;
-println!("SCI: {:016x}, cipher: {:?}", device.sci, device.cipher_suite);
+println!("SCI: {:016x}, cipher: {:?}", device.sci, device.cipher);
 
 // Add TX SA
 let key = [0u8; 16]; // 128-bit key
 conn.add_tx_sa("macsec0",
-    MacsecSaBuilder::new(0)
-        .key(&key)
-        .pn(1)
+    MacsecSaBuilder::new(0, &key)
+        .packet_number(1)
         .active(true)
 ).await?;
 
@@ -1215,20 +1350,26 @@ conn.add_tx_sa("macsec0",
 let peer_sci = 0x001122334455_0001u64;
 conn.add_rx_sc("macsec0", peer_sci).await?;
 conn.add_rx_sa("macsec0", peer_sci,
-    MacsecSaBuilder::new(0)
-        .key(&key)
-        .pn(1)
+    MacsecSaBuilder::new(0, &key)
+        .packet_number(1)
         .active(true)
 ).await?;
+# Ok(())
+# }
 ```
 
 ## MPTCP Path Manager
 
-```rust
-use nlink::netlink::{Connection, Mptcp};
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+use nlink::netlink::{Connection, Mptcp, Route};
 use nlink::netlink::genl::mptcp::{MptcpEndpointBuilder, MptcpLimits};
 
 let conn = Connection::<Mptcp>::new_async().await?;
+// Endpoints name their device by ifindex, resolved in the same namespace.
+let route = Connection::<Route>::new()?;
+let eth1 = route.get_link_by_name("eth1").await?.ok_or("no eth1")?.ifindex();
+let wlan0 = route.get_link_by_name("wlan0").await?.ok_or("no wlan0")?.ifindex();
 
 // List endpoints
 for ep in conn.get_endpoints().await? {
@@ -1239,7 +1380,7 @@ for ep in conn.get_endpoints().await? {
 conn.add_endpoint(
     MptcpEndpointBuilder::new("192.168.2.1".parse()?)
         .id(1)
-        .dev("eth1")
+        .ifindex(eth1)
         .subflow()
         .signal()
 ).await?;
@@ -1248,7 +1389,7 @@ conn.add_endpoint(
 conn.add_endpoint(
     MptcpEndpointBuilder::new("10.0.0.1".parse()?)
         .id(2)
-        .dev("wlan0")
+        .ifindex(wlan0)
         .backup()
         .signal()
 ).await?;
@@ -1259,6 +1400,8 @@ conn.set_limits(
         .subflows(4)
         .add_addr_accepted(4)
 ).await?;
+# Ok(())
+# }
 ```
 
 ## Module Reference
@@ -1269,7 +1412,7 @@ conn.set_limits(
 | `nlink::netlink::config` | Declarative network configuration (diff/apply/reconcile + opt-in purge) |
 | `nlink::netlink::reflector` | `Store<K,V>` watch-cache + `ReflectExt::reflect` over resync event streams |
 | `nlink::netlink::ratelimit` | Rate limiting DSL |
-| `nlink::netlink::diagnostics` | Network diagnostics (scanner, connectivity, bottleneck) |
+| `nlink::netlink::diagnostics` | Network diagnostics (interface/TC/route scan, connectivity, bottleneck, issue stream) |
 | `nlink::netlink::tc` | TC builders (netem, htb, fq_codel, etc.) |
 | `nlink::netlink::filter` | TC filter builders (u32, flower, matchall, etc.) |
 | `nlink::netlink::action` | TC action builders (gact, mirred, police, etc.) |
@@ -1284,5 +1427,4 @@ conn.set_limits(
 | `nlink::util` | Parsing utilities, address helpers, name resolution |
 | `nlink::sockdiag` | Socket diagnostics (feature: `sockdiag`): typed queries, kernel-side `FilterExpr` bytecode filtering, `SocketOwnerMap`/`CgroupPathMap` attribution, `SocketRateTracker` TCP goodput, `CcInfo` (BBR/DCTCP/vegas) |
 | `nlink::tuntap` | TUN/TAP devices (feature: `tuntap`) |
-| `nlink::tc` | TC utilities (feature: `tc`) |
 | `nlink::output` | Output formatting (feature: `output`) |

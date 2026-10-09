@@ -26,7 +26,7 @@ MSRV: Rust 1.98, edition 2024.
 
 ## Quick start
 
-```rust
+```rust,no_run
 use nlink::netlink::{Connection, Route, RtnetlinkGroup, NetworkEvent};
 use tokio_stream::StreamExt;
 
@@ -103,57 +103,66 @@ name), `NETLINK_GET_STRICT_CHK` opt-in.
 The lower-level imperative API is the foundation; these declarative layers
 collapse common configuration patterns.
 
-```rust
-// Declarative network state — diff against kernel, apply changes idempotently.
-// With the `serde` feature it also round-trips through JSON/YAML: the typed
-// config validates as it parses (CIDR addresses, MAC strings), so a bad value
-// is a deserialize error, not a silently-wrong config.
-use nlink::netlink::config::NetworkConfig;
-NetworkConfig::new()
-    .link("br0", |l| l.bridge().up())
-    .link("dummy0", |l| l.dummy().mtu(9000).up().master("br0"))
-    .address("br0", "192.168.100.1/24")?
-    .apply(&conn).await?;
-let cfg = NetworkConfig::from_json_str(r#"{ "links": [{ "name": "br0", "link-type": "bridge" }] }"#)?;
+```rust,no_run
+use std::{sync::Arc, time::Duration};
+use nlink::netlink::{Connection, Nftables, Route, diagnostics::Diagnostics};
 
-// Declarative nftables ruleset — atomic batch commit.
-use nlink::netlink::nftables::config::NftablesConfig;
-use nlink::netlink::nftables::types::{Family, Hook, Policy, Priority};
-let cfg = NftablesConfig::new().table("filter", Family::Inet, |t| {
-    t.chain("input", |c| c.hook(Hook::Input).priority(Priority::Filter).policy(Policy::Drop))
-        .rule("input", |r| r.match_iif("lo").accept())
-        .rule("input", |r| r.match_tcp_dport(22).accept())
-});
-cfg.diff(&conn).await?.apply(&conn).await?;
+async fn tour(conn: Connection<Route>) -> Result<(), Box<dyn std::error::Error>> {
+    // Declarative network state — diff against kernel, apply changes idempotently.
+    // With the `serde` feature it also round-trips through JSON/YAML: the typed
+    // config validates as it parses (CIDR addresses, MAC strings), so a bad value
+    // is a deserialize error, not a silently-wrong config.
+    use nlink::netlink::config::NetworkConfig;
+    NetworkConfig::new()
+        .link("br0", |l| l.bridge().up())
+        .link("dummy0", |l| l.dummy().mtu(9000).up().master("br0"))
+        .address("br0", "192.168.100.1/24")?
+        .apply(&conn).await?;
+    let cfg = NetworkConfig::from_json_str(r#"{ "links": [{ "name": "br0", "link-type": "bridge" }] }"#)?;
 
-// Rate limiting — typed Rate, no bits-vs-bytes confusion.
-use nlink::{Rate, netlink::ratelimit::RateLimiter};
-RateLimiter::new("eth0").egress(Rate::mbit(100)).ingress(Rate::mbit(50))
-    .apply(&conn).await?;
+    // Declarative nftables ruleset — atomic batch commit.
+    use nlink::netlink::nftables::config::NftablesConfig;
+    use nlink::netlink::nftables::types::{Family, Hook, Policy, Priority};
+    let cfg = NftablesConfig::new().table("filter", Family::Inet, |t| {
+        t.chain("input", |c| c.hook(Hook::Input).priority(Priority::Filter).policy(Policy::Drop))
+            .rule("input", |r| r.match_iif("lo").accept())
+            .rule("input", |r| r.match_tcp_dport(22).accept())
+    });
+    let fw = Connection::<Nftables>::new()?;
+    cfg.diff(&fw).await?.apply(&fw).await?;
 
-// Per-peer impairment — netem per destination on shared L2.
-use nlink::netlink::impair::PerPeerImpairer;
-PerPeerImpairer::new("vethA-br")
-    .impair_dst_ip("172.100.3.18".parse()?, /* netem config */)
-    .apply(&conn).await?;
+    // Rate limiting — typed Rate, no bits-vs-bytes confusion.
+    use nlink::{Rate, netlink::ratelimit::RateLimiter};
+    RateLimiter::new("eth0").egress(Rate::mbit(100)).ingress(Rate::mbit(50))
+        .apply(&conn).await?;
 
-// Network diagnostics — find issues, score bottlenecks.
-let report = nlink::netlink::diagnostics::Diagnostics::new(conn).scan().await?;
+    // Per-peer impairment — netem per destination on shared L2.
+    use nlink::netlink::{impair::PerPeerImpairer, tc::NetemConfig};
+    let wan = NetemConfig::new().delay(Duration::from_millis(40)).build();
+    PerPeerImpairer::new("vethA-br")
+        .impair_dst_ip("172.100.3.18".parse()?, wan)
+        .apply(&conn).await?;
 
-// Reflector / watch-cache — keep an in-memory Store up to date from a
-// resync-aware event stream (kube-rs style), then read it from anywhere.
-use nlink::{Store, StoreOp};
-use nlink::netlink::reflector::ReflectExt;
-let store: Store<u32, NetworkEvent> = Store::new();
-let watch = conn.into_events_with_resync(factory)?.reflect(store.clone(), |ev| match ev {
-    NetworkEvent::NewLink(l) => StoreOp::Upsert(l.ifindex()),
-    NetworkEvent::DelLink(l) => StoreOp::Remove(l.ifindex()),
-    _ => StoreOp::Ignore,
-});
-// drive `watch` in a task; `store.len()` / `store.get(&idx)` read the cache.
+    // Network diagnostics — find issues, score bottlenecks.
+    let report = Diagnostics::new(Connection::<Route>::new()?).scan().await?;
 
-// JSON Schema for config files (feature `schemars`) — editor/CI validation.
-let schema = NetworkConfig::json_schema();
+    // Reflector / watch-cache — keep an in-memory Store up to date from a
+    // resync-aware event stream (kube-rs style), then read it from anywhere.
+    use nlink::{NetworkEvent, Store, StoreOp};
+    use nlink::netlink::{reflector::ReflectExt, resync::ConnectionFactory};
+    let factory: ConnectionFactory<Route> = Arc::new(|| Box::pin(async { Connection::<Route>::new() }));
+    let store: Store<u32, NetworkEvent> = Store::new();
+    let watch = conn.into_events_with_resync(factory).await?.reflect(store.clone(), |ev| match ev {
+        NetworkEvent::NewLink(l) => StoreOp::Upsert(l.ifindex()),
+        NetworkEvent::DelLink(l) => StoreOp::Remove(l.ifindex()),
+        _ => StoreOp::Ignore,
+    });
+    // drive `watch` in a task; `store.len()` / `store.get(&idx)` read the cache.
+
+    // JSON Schema for config files (feature `schemars`) — editor/CI validation.
+    let schema = NetworkConfig::json_schema();
+    Ok(())
+}
 ```
 
 ## Building blocks for downstream code

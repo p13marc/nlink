@@ -100,3 +100,22 @@ mod wireguard_mesh {}
 #[doc = include_str!("../../../docs/recipes/xfrm-ipsec-tunnel.md")]
 mod xfrm_ipsec_tunnel {}
 
+
+// The living documents outside `docs/recipes/` (#449). Until these lines
+// existed, 39 of their 40 Rust blocks no longer compiled. Some called
+// methods that never existed, such as `FlowerFilter::action` (#450) and a
+// subnet scanner nlink does not have. Each is gated on every feature its
+// blocks use.
+
+#[cfg(all(feature = "sockdiag", feature = "namespace_watcher", feature = "schemars"))]
+#[doc = include_str!("../../../docs/library.md")]
+mod library_md {}
+
+// `tracing_subscriber` is a dependency only through `lab`.
+#[cfg(feature = "lab")]
+#[doc = include_str!("../../../docs/observability.md")]
+mod observability_md {}
+
+#[cfg(feature = "schemars")]
+#[doc = include_str!("../../../README.md")]
+mod readme_md {}
