@@ -338,6 +338,26 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **`PerHostLimiter` installs in the recipe band (#434).** `FilterPriority`
+  documents bands: operator `1..=49`, recipe `100..=199`. `PerPeerImpairer`
+  used the recipe band. `PerHostLimiter` put rule `i`'s filter at `i + 1`,
+  in the band reserved for operators, and a port rule's other three at
+  `i + 101/201/301`. Rule `i` now takes the four priorities from
+  `100 + 4 * i`.
+  - Every protocol meets the rules in the order they were declared.
+    Before, an address rule always came before every port rule's UDP and
+    IPv6 filters.
+  - No two rules can share a priority, so a port rule can have any number
+    of rules after it. The old layout refused one 100, 200 or 300 places
+    later. The limit is 16359 rules.
+
+  The first `reconcile()` after upgrading moves every filter. It adds the
+  new ones first, then removes the old ones. To make that work,
+  `reconcile()` now removes any filter under the limiter's root that sends
+  traffic into one of its rule classes from a priority it does not use.
+  Before, it looked only inside its own bands. `apply()` rebuilds the tree
+  as before.
+
 - **`scripts/cut-release.sh` runs on this forge again (#358).** It was
   written against `gh` and a per-cycle branch, and its first pre-flight check
   failed on a missing binary, so the last cuts were done by hand around it.
@@ -825,9 +845,9 @@ All notable changes to this project will be documented in this file.
 - **`PerHostLimiter` port rules did not shape IPv6 (#425).** `limit_port`
   and `limit_port_range` installed flower filters for IPv4 only, so TCP and
   UDP over IPv6 to a limited port went to the default class. A port rule
-  now has four filters: IPv4 TCP at its priority (`index + 1`), IPv4 UDP
-  100 above it, IPv6 TCP and UDP 200 and 300 above it — one ethertype per
-  priority, since the kernel refuses a second there. `apply()` and
+  now has four filters, IPv4 and IPv6, TCP and UDP, each at its own
+  priority, since the kernel refuses a second ethertype at one (the
+  priorities moved again in #434). `apply()` and
   `reconcile()` still build them from one list. Two things came with it:
   a port rule that becomes an address rule no longer leaves its other
   filters behind — `reconcile()` kept them, classifying the port's traffic

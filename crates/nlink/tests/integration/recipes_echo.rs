@@ -550,11 +550,112 @@ async fn per_host_rule_changing_shape_leaves_no_old_filter() -> nlink::Result<()
             .iter()
             .map(|f| f.priority())
             .collect();
-        if left != [1] {
+        if left != [100] {
             failures.push(format!(
-                "[{name}] filters left at priorities {left:?}; the address rule has one, at 1"
+                "[{name}] filters left at priorities {left:?}; the address rule has one, at 100"
             ));
         }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
+/// Upgrading moves `PerHostLimiter` out of the operator band (#434). Its
+/// filters used to sit at `index + 1` and, for a port rule, `index +
+/// 101/201/301`; they now take `100 + 4 * index` onwards. The first
+/// `reconcile()` on a device a 0.29 limiter set up installs the new ones and
+/// removes the old ones: every filter that sends traffic into one of the
+/// limiter's rule classes from a priority the limiter no longer uses. An
+/// operator's own filter in the operator band, aimed elsewhere, stays.
+#[tokio::test]
+async fn per_host_reconcile_moves_filters_out_of_the_operator_band() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "sch_htb", "sch_fq_codel", "cls_flower");
+    use nlink::TcHandle;
+    use nlink::netlink::filter::FlowerFilter;
+
+    let ns = TestNamespace::new("rce-ph-band")?;
+    let conn = ns.connection()?;
+    conn.add_link(nlink::netlink::link::DummyLink::new("d0")).await?;
+    conn.set_link_up("d0").await?;
+    let ifindex = conn.get_link_by_name("d0").await?.expect("d0 exists").ifindex();
+    let root = TcHandle::major_only(1);
+
+    let limiter = PerHostLimiter::new("d0", Rate::mbit(10))
+        .limit_ip(v4(10, 0, 0, 1), Rate::mbit(5))
+        .limit_port(80, Rate::mbit(5));
+    let _ = limiter.reconcile(&conn).await?;
+
+    // The (priority, protocol) of every filter under the limiter's root.
+    async fn filters(conn: &Connection<Route>, ifindex: u32) -> nlink::Result<Vec<(u16, u16)>> {
+        let mut prios: Vec<(u16, u16)> = conn
+            .get_filters_by_parent_index(ifindex, nlink::TcHandle::major_only(1))
+            .await?
+            .iter()
+            .map(|f| (f.priority(), f.protocol()))
+            .collect();
+        prios.sort();
+        prios.dedup();
+        Ok(prios)
+    }
+
+    // What 0.29 left on the device: the same classes, with the filters at
+    // its priorities, and an operator filter of its own in the operator band.
+    for (prio, proto) in filters(&conn, ifindex).await? {
+        conn.del_filter_by_index(ifindex, root, proto, prio).await?;
+    }
+    let (rule0, rule1) = (TcHandle::new(1, 2), TcHandle::new(1, 3));
+    let port80 = |f: FlowerFilter| f.classid(rule1).dst_port(80);
+    let old = [
+        (0x0800, 1, FlowerFilter::new().classid(rule0).dst_ipv4(Ipv4Addr::new(10, 0, 0, 1), 32)),
+        (0x0800, 2, port80(FlowerFilter::new().ipv4().ip_proto_tcp())),
+        (0x0800, 102, port80(FlowerFilter::new().ipv4().ip_proto_udp())),
+        (0x86DD, 202, port80(FlowerFilter::new().ipv6().ip_proto_tcp())),
+        (0x86DD, 302, port80(FlowerFilter::new().ipv6().ip_proto_udp())),
+        // The operator's: into the default class, which no rule owns.
+        (
+            0x0800,
+            10,
+            FlowerFilter::new()
+                .classid(TcHandle::new(1, 0xffff))
+                .dst_ipv4(Ipv4Addr::new(10, 9, 9, 9), 32),
+        ),
+    ];
+    for (proto, prio, filter) in old {
+        conn.add_filter_by_index_full(ifindex, root, None, proto, prio, filter)
+            .await?;
+    }
+
+    let mut failures = Vec::new();
+    let upgrade = limiter.reconcile(&conn).await?;
+    if !upgrade
+        .unmanaged
+        .iter()
+        .any(|u| u.priority.map(|p| p.as_u16()) == Some(10))
+    {
+        failures.push(format!(
+            "the operator's filter at 10 is not reported unmanaged: {:?}",
+            upgrade.unmanaged
+        ));
+    }
+    let want = vec![
+        (10, 0x0800),
+        (100, 0x0800),
+        (104, 0x0800),
+        (105, 0x0800),
+        (106, 0x86DD),
+        (107, 0x86DD),
+    ];
+    let left = filters(&conn, ifindex).await?;
+    if left != want {
+        failures.push(format!(
+            "after the upgrade reconcile the filters are at {left:?} (priority, protocol), \
+             want {want:?}"
+        ));
+    }
+    let again = limiter.reconcile(&conn).await?;
+    if !again.is_noop() {
+        failures.push(format!("the next reconcile was not a no-op: {again:?}"));
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     Ok(())
