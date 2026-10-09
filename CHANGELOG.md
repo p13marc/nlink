@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-10-09
+
 > **The ipset release, and every declarative layer converges.**
 >
 > nftables gains what ipset users need: lookups by any packet field and

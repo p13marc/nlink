@@ -803,8 +803,8 @@ sets are checked: `cargo test -p nlink --doc` in the `test` job and
 
 ## Active work
 
-**0.30.0 is ready to cut** (workspace at 0.30.0; `scripts/cut-release.sh
-0.30.0 --dry-run` clean). Narrative in `CHANGELOG.md ## [Unreleased]` +
+**0.30.0 shipped 2026-10-09** (`0.30.0` tagged — bare, no `v`; both crates
+on crates.io). Narrative in `CHANGELOG.md ## [0.30.0]` +
 `docs/migration_guide/0.29.0-to-0.30.0.md`. It started from external PR #246
 (`meta mark set`, TCP MSS clamping, set size) and grew into the ipset
 release. nftables gained:
@@ -837,6 +837,11 @@ Lessons to carry:
   packets through a namespace; a set that lists correctly can still match the
   wrong thing (an interval start with no end matches to the top of the key
   space).
+- **Install it both ways and diff the kernel.** Putting 13 ordinary tc(8)
+  flower lines through `tc` and `nlink-tc` and comparing `tc filter show`
+  found three silent disagreements: number bases (#432, #447) and the
+  ethertype taken from `protocol` (#433). A fourth, an 802.1AD TPID, does not
+  appear in any dump; only traffic showed it.
 
 **0.29.0 shipped 2026-10-01** (`0.29.0` tagged — bare, no `v`; both crates
 on crates.io). Headline narrative in `CHANGELOG.md ## [0.29.0]` +
