@@ -986,11 +986,9 @@ impl PerHostLimiter {
     /// Add a rate limit for TCP and UDP traffic to a destination port,
     /// over IPv4 and IPv6.
     ///
-    /// Classified by four flower filters, one per protocol and family. They
-    /// take the rule's own filter priority and the ones 100, 200 and 300
-    /// above it, so a limiter cannot have another rule 100, 200 or 300
-    /// places after a port rule: `apply()` and `reconcile()` refuse that
-    /// before changing anything.
+    /// Classified by four flower filters, one per protocol and family, at
+    /// the rule's four filter priorities: `100 + 4 * index` onwards, in the
+    /// recipe band (#434).
     pub fn limit_port(mut self, port: u16, rate: crate::util::Rate) -> Self {
         self.rules.push(HostRule {
             match_: HostMatch::Port(port),
@@ -1376,8 +1374,8 @@ impl PerHostLimiter {
                 }
             }
 
-            // 3c. Filter(s) at root parent. Address matches use one
-            // priority (i+1); port matches four (i+1, +101, +201, +301).
+            // 3c. Filter(s) at root parent: rule i's at 100 + 4i onwards
+            // (`rule_filters`), one for an address match, four for a port.
             self.reconcile_filter_for_rule(
                 conn,
                 ifindex,
@@ -1583,10 +1581,6 @@ impl PerHostLimiter {
         //
         // so removing a rule used to fail with EBUSY partway through
         // (#291) — the class went first and its filter was still bound.
-        // Stale filters at root parent. PerHostLimiter installs at
-        // priority i+1 (i in 0..n), and a port rule also 100, 200 and 300
-        // above that (`PORT_RULE_PRIORITY_OFFSETS`). Only those four bands
-        // are managed; anything else is unmanaged.
         // Stale classes in major 1: — computed first, because a filter
         // bound to one has to go before it, whatever band it sits in.
         let mut stale_classes: Vec<TcHandle> = Vec::new();
@@ -1620,48 +1614,41 @@ impl PerHostLimiter {
         let mut stale_filters: Vec<(u16, u16, TcHandle)> = Vec::new();
         for f in &tree.root_filters {
             let prio = f.priority();
+            // Step 3c reconciled every priority a rule wants, from this same
+            // snapshot; whatever stood there has been compared, and replaced
+            // if it differed. Deleting it again here would delete the
+            // replacement.
+            if desired.contains(&prio) {
+                continue;
+            }
             let target = flower_classid(f);
-            let mut stale = || {
-                let seen = stale_filters
+            // Anywhere else, a filter that sends traffic into one of this
+            // limiter's classes is one of its own that no rule installs any
+            // more:
+            // - a removed rule's, bound to the class this reconcile removes
+            //   (deleting the class first failed with EBUSY, "HTB class in
+            //   use": #413, and #291 for PerPeerImpairer);
+            // - a rule's that changed shape, such as a port rule turned into
+            //   an address rule, still classifying the port's traffic into
+            //   the class the address rule now owns (#425);
+            // - one at a priority the layout before 0.30 used, `index + 1`
+            //   and `index + 101/201/301`, which the first reconcile after
+            //   upgrading moves into the recipe band (#434).
+            if target.is_some_and(|c| stale_classes.contains(&c) || is_rule_class(c)) {
+                if !stale_filters
                     .iter()
-                    .any(|(p, proto, _)| *p == prio && *proto == f.protocol());
-                if !seen {
+                    .any(|(p, proto, _)| *p == prio && *proto == f.protocol())
+                {
                     stale_filters.push((prio, f.protocol(), f.parent()));
                 }
-            };
-            // A filter that sends traffic to a class this reconcile
-            // removes is the removed rule's own filter. The bands below
-            // are sized by the *current* rule count, so a removed rule's
-            // priority falls outside them and read as "unmanaged": it was
-            // left bound, and deleting its class failed with EBUSY, "HTB
-            // class in use" (#413 — the PerPeerImpairer half was #291).
-            if target.is_some_and(|c| stale_classes.contains(&c)) {
-                stale();
                 continue;
             }
-            let in_band = PORT_RULE_PRIORITY_OFFSETS.iter().any(|&offset| {
-                (prio as usize)
-                    .checked_sub(offset as usize + 1)
-                    .is_some_and(|i| i < n)
+            // Not ours: left alone, and reported.
+            report.unmanaged.push(UnmanagedObject {
+                kind: "filter",
+                handle: f.parent(),
+                priority: Some(FilterPriority::new(prio)),
             });
-            // In a band, at a priority no rule wants, sending traffic into
-            // one of this limiter's rule classes: a filter a rule no longer
-            // has. A port rule that became an address rule kept its UDP and
-            // (since #425) IPv6 filters this way, still classifying the
-            // port's traffic — into the class the address rule now owns.
-            if in_band && !desired.contains(&prio) && target.is_some_and(is_rule_class) {
-                stale();
-                continue;
-            }
-            // Out-of-band entries, and in-band ones that are not ours, are
-            // unmanaged (left alone).
-            if !in_band || !desired.contains(&prio) {
-                report.unmanaged.push(UnmanagedObject {
-                    kind: "filter",
-                    handle: f.parent(),
-                    priority: Some(FilterPriority::new(prio)),
-                });
-            }
         }
         for (prio, proto, parent) in stale_filters {
             if !opts.dry_run {
@@ -1707,15 +1694,16 @@ impl PerHostLimiter {
         Ok(())
     }
 
-    /// Fail on a rule no filter can express (an empty port range), or on
-    /// two filters that need the same priority, before anything is changed.
+    /// Fail on a rule no filter can express (an empty port range, a rule
+    /// past the last priority), or on two filters that need the same
+    /// priority, before anything is changed.
     ///
-    /// A port rule's filters sit 100, 200 and 300 above its own priority
-    /// ([`rule_filters`]), so past 100 rules they can land on another
-    /// rule's. The kernel would refuse the second if its ethertype differs
-    /// and put it beside the first if not — where `reconcile()`, which
-    /// reads one filter per priority, would replace one with the other on
-    /// every pass.
+    /// [`rule_filters`] gives every rule its own four priorities, so the
+    /// last check is a guard: the kernel would refuse a second filter at a
+    /// priority if its ethertype differed and put it beside the first if
+    /// not — where `reconcile()`, which reads one filter per priority, would
+    /// replace one with the other on every pass. The layout before 0.30
+    /// could do that past 100 rules.
     fn check_rules(&self) -> Result<()> {
         let mut taken: HashMap<u16, usize> = HashMap::new();
         for (i, rule) in self.rules.iter().enumerate() {
@@ -1723,9 +1711,7 @@ impl PerHostLimiter {
                 if let Some(other) = taken.insert(prio, i) {
                     return Err(Error::InvalidMessage(format!(
                         "PerHostLimiter: rules {other} and {i} both need filter priority \
-                         {prio} — a port rule also takes the priorities 100, 200 and 300 \
-                         above its own, so it cannot have another rule 100, 200 or 300 \
-                         places after it"
+                         {prio}"
                     )));
                 }
             }
@@ -1750,12 +1736,18 @@ impl PerHostLimiter {
     }
 }
 
-/// How far above `index + 1` each of a `PerHostLimiter` port rule's
-/// filters sits — IPv4 TCP, IPv4 UDP, IPv6 TCP, IPv6 UDP. An address rule
-/// has only the first. With `n` rules the priorities `PerHostLimiter`
-/// manages are therefore `1..=n`, `101..=100+n`, `201..=200+n` and
-/// `301..=300+n`.
-const PORT_RULE_PRIORITY_OFFSETS: [u16; 4] = [0, 100, 200, 300];
+/// Where a `PerHostLimiter`'s filters start: the recipe band, as
+/// [`FilterPriority`] documents. Before 0.30 they started at 1, in the band
+/// it reserves for operators (#434).
+const FIRST_RULE_PRIORITY: u16 = FilterPriority::RECIPE_BAND_START;
+
+/// The priorities each rule takes, from `FIRST_RULE_PRIORITY + 4 * index`:
+/// IPv4 TCP (or an address rule's one filter), IPv4 UDP, IPv6 TCP, IPv6 UDP.
+const PRIORITIES_PER_RULE: u16 = 4;
+
+/// How many rules fit: the last one's fourth priority is `u16::MAX`.
+const MAX_RULES: usize =
+    ((u16::MAX - FIRST_RULE_PRIORITY + 1) / PRIORITIES_PER_RULE) as usize;
 
 /// The flower filters that classify a `PerHostLimiter` rule's traffic
 /// into its class, as `(tcm_info protocol, priority, filter)`.
@@ -1765,14 +1757,19 @@ const PORT_RULE_PRIORITY_OFFSETS: [u16; 4] = [0, 100, 200, 300];
 /// and `apply()` none for a range wider than 10 ports — and for a narrower
 /// one a TCP filter per port, errors ignored, no UDP (#416).
 ///
-/// Address rules take one priority, `index + 1`. Port rules take four,
-/// one per protocol and IP family — IPv4 TCP at `index + 1`, IPv4 UDP at
-/// `index + 101`, IPv6 TCP at `index + 201`, IPv6 UDP at `index + 301`.
-/// They cannot share one: a priority holds a single `tcf_proto` with one
-/// ethertype, and the kernel refuses another there ("Filter with specified
-/// priority/protocol not found"); and `reconcile()` reads one filter per
-/// priority. The IPv6 pair was missing until #425, so IPv6 traffic to a
-/// limited port went to the default class.
+/// Rule `index` owns the four priorities from `100 + 4 * index`, in the
+/// recipe band (#434). An address rule uses the first. A port rule uses all
+/// four, one per protocol and IP family: IPv4 TCP, IPv4 UDP, IPv6 TCP,
+/// IPv6 UDP. They cannot share one: a priority holds a single `tcf_proto`
+/// with one ethertype, and the kernel refuses another there ("Filter with
+/// specified priority/protocol not found"); and `reconcile()` reads one
+/// filter per priority. The IPv6 pair was missing until #425, so IPv6
+/// traffic to a limited port went to the default class.
+///
+/// Consecutive priorities per rule mean every protocol meets the rules in
+/// the order they were declared. Before 0.30 an address rule sat at
+/// `index + 1` and a port rule's other filters at `index + 101/201/301`,
+/// so for UDP and IPv6 traffic every address rule came first.
 fn rule_filters(
     index: usize,
     rule: &HostRule,
@@ -1794,17 +1791,22 @@ fn rule_filters(
     // on the interface (#288). The address setters imply it; the
     // L4 ones do not.
 
-    let priority = (index + 1) as u16;
+    if index >= MAX_RULES {
+        return Err(Error::InvalidMessage(format!(
+            "PerHostLimiter: rule {index} is past the last filter priority — a limiter holds \
+             at most {MAX_RULES} rules (four priorities each, from {FIRST_RULE_PRIORITY})"
+        )));
+    }
+    let priority = FIRST_RULE_PRIORITY + PRIORITIES_PER_RULE * index as u16;
     let base = || FlowerFilter::new().classid(classid);
     let prefix_of = |ip: &IpAddr, subnet: Option<u8>| {
         subnet.unwrap_or(if ip.is_ipv4() { 32 } else { 128 })
     };
-    // TCP and UDP, IPv4 and IPv6, each with `port` set on it, at the four
-    // priorities above. (A priority past u16 saturates, and `check_rules`
-    // refuses the collision that makes.)
+    // TCP and UDP, IPv4 and IPv6, each with `port` set on it, at the rule's
+    // four priorities.
     let tcp_and_udp = |set_port: &dyn Fn(FlowerFilter) -> FlowerFilter| {
         let filter = |eth_p: u16, offset: u16, proto: fn(FlowerFilter) -> FlowerFilter| {
-            let prio = priority.saturating_add(offset);
+            let prio = priority + offset;
             let family = if eth_p == ETH_P_IP {
                 base().ipv4()
             } else {
@@ -1812,7 +1814,7 @@ fn rule_filters(
             };
             (eth_p, prio, set_port(proto(family.priority(prio))).build())
         };
-        let [tcp4, udp4, tcp6, udp6] = PORT_RULE_PRIORITY_OFFSETS;
+        let [tcp4, udp4, tcp6, udp6] = [0, 1, 2, 3];
         vec![
             filter(ETH_P_IP, tcp4, FlowerFilter::ip_proto_tcp),
             filter(ETH_P_IP, udp4, FlowerFilter::ip_proto_udp),
@@ -2124,7 +2126,7 @@ mod tests {
             .collect();
         assert_eq!(
             prios,
-            vec![(0x0800, 1), (0x0800, 101), (0x86DD, 201), (0x86DD, 301)]
+            vec![(0x0800, 100), (0x0800, 101), (0x86DD, 102), (0x86DD, 103)]
         );
         for (_, _, f) in &range {
             let keys = filter_keys(f);
@@ -2185,28 +2187,60 @@ mod tests {
                 );
                 shape.push((*proto, *prio, value(TCA_FLOWER_KEY_IP_PROTO).unwrap()[0]));
             }
-            let first = i as u16 + 1;
+            let first = 100 + 4 * i as u16;
             assert_eq!(
                 shape,
                 [
                     (0x0800, first, 6),
-                    (0x0800, first + 100, 17),
-                    (0x86DD, first + 200, 6),
-                    (0x86DD, first + 300, 17),
+                    (0x0800, first + 1, 17),
+                    (0x86DD, first + 2, 6),
+                    (0x86DD, first + 3, 17),
                 ],
                 "rule {i}"
             );
         }
     }
 
-    /// Two rules whose filters would share a priority are refused before
-    /// anything changes. A port rule's other filters sit 100, 200 and 300
-    /// above its index, so past 100 rules they can meet another rule's:
-    /// the kernel refuses a second ethertype at one priority, and puts a
-    /// second filter of the same one beside the first, where `reconcile()`
-    /// sees only one of them.
+    /// `PerHostLimiter` installs in the recipe band, as `FilterPriority`
+    /// documents and `PerPeerImpairer` does, never in the operator band
+    /// `1..=49` (#434). Each rule takes the four priorities from
+    /// `100 + 4 * index`, so every protocol meets the rules in the order they
+    /// were declared. Before, an address rule's filter at `index + 1` always
+    /// came before every port rule's UDP and IPv6 filters at
+    /// `index + 101/201/301`, whatever the order.
     #[test]
-    fn rules_whose_filters_share_a_priority_are_refused() {
+    fn filters_sit_in_the_recipe_band_in_rule_order() {
+        use crate::util::Rate;
+
+        let limiter = PerHostLimiter::new("d0", Rate::mbit(10))
+            .limit_port(53, Rate::mbit(5))
+            .limit_ip("10.0.0.1".parse().unwrap(), Rate::mbit(5))
+            .limit_port_range(8000, 8100, Rate::mbit(5))
+            .limit_ip("fd00::1".parse().unwrap(), Rate::mbit(5));
+        let mut last = 0;
+        for (i, rule) in limiter.rules.iter().enumerate() {
+            let prios: Vec<u16> = rule_filters(i, rule, TcHandle::new(1, (i + 2) as u16))
+                .unwrap()
+                .into_iter()
+                .map(|(_, p, _)| p)
+                .collect();
+            let base = 100 + 4 * i as u16;
+            assert!(
+                prios.iter().all(|p| (base..base + 4).contains(p)),
+                "rule {i} at {prios:?}, want within {base}..{}",
+                base + 4
+            );
+            assert!(prios[0] > last, "rule {i} at {prios:?} comes before rule {}", i.wrapping_sub(1));
+            last = *prios.iter().max().unwrap();
+        }
+    }
+
+    /// No two rules share a priority any more, so a port rule can have any
+    /// number of rules after it: the old layout refused one with another rule
+    /// 100, 200 or 300 places later. The limit is the last priority: rule
+    /// `i` needs `100 + 4 * i + 3` to fit in a `u16`.
+    #[test]
+    fn a_limiter_holds_rules_up_to_the_last_priority() {
         use crate::util::Rate;
 
         let hosts = |mut limiter: PerHostLimiter, n: u32| {
@@ -2216,29 +2250,15 @@ mod tests {
             }
             limiter
         };
-        // Rule 0 is a port rule; rule 100 (the 101st) takes priority 101,
-        // its IPv4 UDP filter's.
-        let limiter = hosts(
-            PerHostLimiter::new("d0", Rate::mbit(10)).limit_port(80, Rate::mbit(5)),
-            100,
-        );
-        let err = limiter
-            .check_rules()
-            .expect_err("rules 0 and 100 meet at 101");
-        assert!(err.to_string().contains("priority 101"), "{err}");
+        let port_first = || PerHostLimiter::new("d0", Rate::mbit(10)).limit_port(80, Rate::mbit(5));
+        assert!(hosts(port_first(), 400).check_rules().is_ok());
 
-        // Address rules take one priority each: any number of them is fine,
-        // and so is a port rule with fewer than 100 rules after it.
-        assert!(
-            hosts(PerHostLimiter::new("d0", Rate::mbit(10)), 400)
-                .check_rules()
-                .is_ok()
-        );
-        let limiter = hosts(
-            PerHostLimiter::new("d0", Rate::mbit(10)).limit_port(80, Rate::mbit(5)),
-            99,
-        );
-        assert!(limiter.check_rules().is_ok());
+        // 16359 rules: the last one's filters end at 65535.
+        assert!(hosts(port_first(), 16358).check_rules().is_ok());
+        let err = hosts(port_first(), 16359)
+            .check_rules()
+            .expect_err("rule 16359 would need priority 65536");
+        assert!(err.to_string().contains("at most 16359 rules"), "{err}");
     }
 
     #[test]
