@@ -451,11 +451,10 @@ pub mod __rt {
     // `resolve_genl_family(socket, "...")` to look up the
     // kernel-assigned family ID at connection construction.
     //
-    // Body matches the per-family `resolve_wireguard_family` /
-    // `resolve_macsec_family` / etc. helpers in each in-tree
-    // family's connection.rs — just parametrized on name. A
-    // future cleanup pass can rewire those copies to call this
-    // resolver and eliminate the duplication.
+    // The in-tree families (wireguard, macsec, mptcp, nl80211, devlink,
+    // ethtool) resolve through these too. Both read to the request's ACK
+    // under the default operation timeout (#496): the connection that
+    // would carry a configured timeout does not exist yet.
 
     use crate::netlink::{
         genl::{CtrlAttr, CtrlAttrMcastGrp, CtrlCmd, GenlMsgHdr, GENL_HDRLEN, GENL_ID_CTRL},
@@ -480,62 +479,7 @@ pub mod __rt {
         socket: &NetlinkSocket,
         name: &str,
     ) -> Result<u16> {
-        let mut builder = MessageBuilder::new(GENL_ID_CTRL, NLM_F_REQUEST | NLM_F_ACK);
-        let genl_hdr = GenlMsgHdr::new(CtrlCmd::GetFamily as u8, 1);
-        builder.append(&genl_hdr);
-        builder.append_attr_str(CtrlAttr::FamilyName as u16, name);
-
-        let seq = socket.next_seq();
-        builder.set_seq(seq);
-        builder.set_pid(socket.pid());
-
-        let msg = builder.finish();
-        socket.send(&msg).await?;
-
-        let response: Vec<u8> = socket.recv_unicast().await?;
-
-        for result in MessageIter::new(&response) {
-            let (header, payload) = result?;
-
-            if header.nlmsg_seq != seq {
-                continue;
-            }
-
-            if header.is_error() {
-                let err = NlMsgError::from_bytes(payload)?;
-                err.warn_if_ack_warns(header.nlmsg_flags, payload);
-                if !err.is_ack() {
-                    if err.error == -libc::ENOENT {
-                        return Err(Error::FamilyNotFound {
-                            name: name.to_string(),
-                        });
-                    }
-                    return Err(err.to_error(header.nlmsg_flags, payload));
-                }
-                continue;
-            }
-
-            if header.is_done() {
-                continue;
-            }
-
-            if payload.len() < GENL_HDRLEN {
-                return Err(Error::InvalidMessage(
-                    "GENL header too short in CTRL_CMD_GETFAMILY response".into(),
-                ));
-            }
-
-            let attrs_data = &payload[GENL_HDRLEN..];
-            for (attr_type, attr_payload) in AttrIter::new(attrs_data) {
-                if attr_type == CtrlAttr::FamilyId as u16 {
-                    return parse_u16_attr(attr_payload);
-                }
-            }
-        }
-
-        Err(Error::FamilyNotFound {
-            name: name.to_string(),
-        })
+        Ok(resolve_genl_family_with_groups(socket, name).await?.0)
     }
 
     /// Resolve the kernel-assigned family ID **and** the family's
@@ -569,12 +513,44 @@ pub mod __rt {
         let msg = builder.finish();
         socket.send(&msg).await?;
 
-        let response: Vec<u8> = socket.recv_unicast().await?;
-
         let mut family_id: Option<u16> = None;
         let mut mcast_groups: HashMap<String, u32> = HashMap::new();
 
-        for result in MessageIter::new(&response) {
+        // Read to this request's ACK, under the operation timeout (#496).
+        // The reply and its ACK arrive as two datagrams; reading only the
+        // first left the ACK queued for whatever used the socket next,
+        // and a reply that never came hung the constructor for good.
+        let read = async {
+            loop {
+                let response: Vec<u8> = socket.recv_unicast().await?;
+                if read_family_reply(&response, seq, name, &mut family_id, &mut mcast_groups)? {
+                    return Ok::<(), Error>(());
+                }
+            }
+        };
+        tokio::time::timeout(crate::netlink::connection::DEFAULT_OPERATION_TIMEOUT, read)
+            .await
+            .map_err(|_| Error::Timeout)??;
+
+        match family_id {
+            Some(id) => Ok((id, mcast_groups)),
+            None => Err(Error::FamilyNotFound {
+                name: name.to_string(),
+            }),
+        }
+    }
+
+    /// Fold one datagram of a `CTRL_CMD_GETFAMILY` reply into `family_id`
+    /// and `mcast_groups`. Returns `true` once this request's ACK has
+    /// arrived.
+    fn read_family_reply(
+        response: &[u8],
+        seq: u32,
+        name: &str,
+        family_id: &mut Option<u16>,
+        mcast_groups: &mut HashMap<String, u32>,
+    ) -> Result<bool> {
+        for result in MessageIter::new(response) {
             let (header, payload) = result?;
 
             if header.nlmsg_seq != seq {
@@ -592,11 +568,11 @@ pub mod __rt {
                     }
                     return Err(err.to_error(header.nlmsg_flags, payload));
                 }
-                continue;
+                return Ok(true);
             }
 
             if header.is_done() {
-                continue;
+                return Ok(true);
             }
 
             if payload.len() < GENL_HDRLEN {
@@ -608,7 +584,7 @@ pub mod __rt {
             let attrs_data = &payload[GENL_HDRLEN..];
             for (attr_type, attr_payload) in AttrIter::new(attrs_data) {
                 if attr_type == CtrlAttr::FamilyId as u16 {
-                    family_id = Some(parse_u16_attr(attr_payload)?);
+                    *family_id = Some(parse_u16_attr(attr_payload)?);
                 } else if attr_type == CtrlAttr::McastGroups as u16 {
                     // CTRL_ATTR_MCAST_GROUPS is a nested list of
                     // anonymous index attrs; each inner element
@@ -642,12 +618,7 @@ pub mod __rt {
             }
         }
 
-        match family_id {
-            Some(id) => Ok((id, mcast_groups)),
-            None => Err(Error::FamilyNotFound {
-                name: name.to_string(),
-            }),
-        }
+        Ok(false)
     }
 }
 
@@ -1415,5 +1386,28 @@ mod tests {
         assert_eq!(SecondFamily::NAME, "second_family");
         assert_eq!(SecondFamily::VERSION, 2);
         assert_async_constructible::<SecondFamily>();
+    }
+
+    /// #496: the reply and the ACK are two datagrams. Resolution read the
+    /// first and left the ACK queued for whatever used the socket next.
+    #[tokio::test]
+    async fn family_resolution_reads_through_its_ack() {
+        use crate::netlink::{NetlinkSocket, Protocol, genl::GENL_ID_CTRL};
+        let socket = NetlinkSocket::new(Protocol::Generic).expect("socket");
+        let (id, groups) = __rt::resolve_genl_family_with_groups(&socket, "nlctrl")
+            .await
+            .expect("nlctrl is always there");
+        assert_eq!(id, GENL_ID_CTRL);
+        assert!(groups.contains_key("notify"), "{groups:?}");
+        assert_eq!(
+            socket.try_recv_msg().expect("recv"),
+            None,
+            "the ACK must not be left queued"
+        );
+        let err = __rt::resolve_genl_family(&socket, "no-such-family")
+            .await
+            .expect_err("unknown family");
+        assert!(matches!(err, Error::FamilyNotFound { .. }), "{err}");
+        assert_eq!(socket.try_recv_msg().expect("recv"), None);
     }
 }

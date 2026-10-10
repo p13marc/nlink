@@ -26,6 +26,30 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **GENL: `command()` and family lookups read one datagram, so the next
+  call read a stale ACK; family resolution had no timeout (#496).** A
+  `doit` reply and its ACK are two datagrams: `genlmsg_reply` unicasts
+  the reply, then `netlink_rcv_skb` sends the ACK.
+  - `Connection<Generic>::command()` returned the first datagram that
+    arrived. From the second call on, that was the previous call's ACK,
+    returned as the result while the real reply waited for the call
+    after.
+  - `get_family` (`query_family`) read the socket directly. It took no
+    request lock in mutex mode and raced the driver in dispatcher mode.
+    It left the same ACK behind, so a second lookup reported
+    `FamilyNotFound` for a family that exists.
+  - `resolve_genl_family{,_with_groups}`, which every `new_async()` GENL
+    connection and `#[genl_family]` type resolves through, left the ACK
+    queued too, and could wait forever for a reply.
+
+  All of them now read through the request's own ACK. `command()` and
+  `get_family` go through the request session, so they lock in mutex
+  mode and register with the driver in dispatcher mode. The resolvers
+  run under the 30 s operation timeout. Unit tests send each request
+  three times: on master, call 1 of `command()` returned no reply, lookup
+  1 said `FamilyNotFound`, a dispatcher-mode lookup lost its reply to the
+  driver, and a resolved socket still held the ACK.
+
 - **Event streams: a large frame was lost and ended the stream, parse
   failures left no trace, and a request beside a mutex-mode stream hung
   (#505).**
