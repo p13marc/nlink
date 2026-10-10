@@ -493,7 +493,7 @@ impl Connection<Devlink> {
 
         let seq = self.socket().next_seq();
 
-        let mut session = self.recv_session_dump(seq).await;
+        let mut session = self.recv_session_dump(seq).await?;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
@@ -520,7 +520,7 @@ impl Connection<Devlink> {
 
         let seq = self.socket().next_seq();
 
-        let mut session = self.recv_session_dump(seq).await;
+        let mut session = self.recv_session_dump(seq).await?;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
@@ -542,7 +542,7 @@ impl Connection<Devlink> {
 
         let seq = self.socket().next_seq();
 
-        let mut session = self.recv_session(seq).await;
+        let mut session = self.recv_session(seq).await?;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
@@ -612,7 +612,7 @@ impl Connection<Devlink> {
     /// Send a command and wait for ACK.
     async fn devlink_send_ack(&self, mut builder: MessageBuilder) -> Result<()> {
         let seq = self.socket().next_seq();
-        let mut session = self.recv_session(seq).await;
+        let mut session = self.recv_session(seq).await?;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 

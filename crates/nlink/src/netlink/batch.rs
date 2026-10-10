@@ -400,7 +400,7 @@ impl<'a> Batch<'a> {
         // instead of the loop racing its recv_msg. Built BEFORE the send
         // (and the with_timeout wrapper) so it spans the timeout window.
         let seqs: Vec<u32> = ops.iter().map(|o| o.seq).collect();
-        let mut session = self.conn.recv_session_multi(&seqs).await;
+        let mut session = self.conn.recv_session_multi(&seqs).await?;
         // Concatenate messages into a single buffer
         let total_size: usize = ops.iter().map(|o| o.msg.len()).sum();
         let mut buf = Vec::with_capacity(total_size);

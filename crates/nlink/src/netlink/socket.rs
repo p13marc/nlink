@@ -749,12 +749,10 @@ impl NetlinkSocket {
 
     /// Receive a message, allocating a buffer.
     ///
-    /// Plan 224 — passes `MSG_TRUNC` to recv so the kernel reports
-    /// the actual frame size. On truncation, auto-grows the recv
-    /// buffer (rounded up to the next 4 KiB) and re-attempts, up
-    /// to a 1 MiB cap. If the kernel emits a frame past the cap,
-    /// returns [`Error::FrameTruncated`]
-    /// instead of silently losing the tail.
+    /// Reads each datagram whole, however large, up to a 1 MiB cap: it
+    /// peeks the size first (#505; see `recv_whole`). A datagram past
+    /// the cap is dropped and reported as [`Error::FrameTruncated`]
+    /// rather than lost without a word.
     pub async fn recv_msg(&self) -> Result<Vec<u8>> {
         Ok(self.recv_msg_from().await?.0)
     }
@@ -769,50 +767,27 @@ impl NetlinkSocket {
     /// and another process's (`ip`, `nft`) with a seq that is not 0. Only
     /// changes the kernel originates carry seq 0 (#465).
     pub async fn recv_msg_from(&self) -> Result<(Vec<u8>, bool)> {
-        let mut capacity = RECV_INITIAL_CAPACITY;
         loop {
-            let mut buf = BytesMut::with_capacity(capacity);
-            let (received, multicast) = loop {
-                let mut guard = self.fd.ready(Interest::READABLE).await?;
-                match guard.try_io(|inner| inner.get_ref().recv_from(&mut buf, libc::MSG_TRUNC)) {
-                    Ok(Ok((n, addr))) => break (n, addr.multicast_groups() != 0),
-                    Ok(Err(e)) => {
-                        // Plan 234 §4 — route ENOBUFS to multicast
-                        // subscribers via the dispatcher BEFORE
-                        // propagating the error to the caller. Slow
-                        // subscribers see `ResyncMarker::ResyncStart`
-                        // even though the request path also surfaces
-                        // the error. Pre-dispatcher, ENOBUFS
-                        // surfaced into whichever caller happened to
-                        // be in `recv_msg` — typically a request,
-                        // not the subscriber that should care.
-                        if e.raw_os_error() == Some(libc::ENOBUFS) {
-                            self.fan_out_enobufs();
-                        }
-                        return Err(e.into());
+            let mut guard = self.fd.ready(Interest::READABLE).await?;
+            match guard.try_io(|inner| recv_whole(inner.get_ref(), 0)) {
+                Ok(Ok(got)) => return got.into_result(),
+                Ok(Err(e)) => {
+                    // Plan 234 §4 — route ENOBUFS to multicast
+                    // subscribers via the dispatcher BEFORE
+                    // propagating the error to the caller. Slow
+                    // subscribers see `ResyncMarker::ResyncStart`
+                    // even though the request path also surfaces
+                    // the error. Pre-dispatcher, ENOBUFS
+                    // surfaced into whichever caller happened to
+                    // be in `recv_msg` — typically a request,
+                    // not the subscriber that should care.
+                    if e.raw_os_error() == Some(libc::ENOBUFS) {
+                        self.fan_out_enobufs();
                     }
-                    Err(_would_block) => continue,
+                    return Err(e.into());
                 }
-            };
-
-            if received <= capacity {
-                // Fast path. The bytes already in buf are the
-                // complete frame.
-                return Ok((buf.to_vec(), multicast));
+                Err(_would_block) => continue,
             }
-
-            // Truncated. The kernel reports the actual size in
-            // `received`. Re-attempt with that size (rounded up
-            // to the next 4 KiB), capped at RECV_MAX_CAPACITY.
-            let next = received.next_multiple_of(4096);
-            if next > RECV_MAX_CAPACITY {
-                return Err(Error::FrameTruncated {
-                    received,
-                    buffer_size: capacity,
-                });
-            }
-            capacity = next;
-            // Loop and re-attempt the recv with the larger buffer.
         }
     }
 
@@ -865,39 +840,18 @@ impl NetlinkSocket {
     /// [`try_recv_msg`](Self::try_recv_msg) with the multicast tag, as in
     /// [`recv_msg_from`](Self::recv_msg_from).
     fn try_recv_inner(&self) -> Result<Option<(Vec<u8>, bool)>> {
-        let mut capacity = RECV_INITIAL_CAPACITY;
-        loop {
-            let mut buf = BytesMut::with_capacity(capacity);
-            let (received, multicast) = match self
-                .fd
-                .get_ref()
-                .recv_from(&mut buf, libc::MSG_TRUNC | libc::MSG_DONTWAIT)
-            {
-                Ok((n, addr)) => (n, addr.multicast_groups() != 0),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
-                Err(e) => {
-                    // Same routing as recv_msg: multicast subscribers
-                    // need the resync marker even when the overflow
-                    // surfaces on a non-blocking drain.
-                    if e.raw_os_error() == Some(libc::ENOBUFS) {
-                        self.fan_out_enobufs();
-                    }
-                    return Err(e.into());
+        match recv_whole(self.fd.get_ref(), libc::MSG_DONTWAIT) {
+            Ok(got) => got.into_result().map(Some),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+            Err(e) => {
+                // Same routing as recv_msg: multicast subscribers
+                // need the resync marker even when the overflow
+                // surfaces on a non-blocking drain.
+                if e.raw_os_error() == Some(libc::ENOBUFS) {
+                    self.fan_out_enobufs();
                 }
-            };
-
-            if received <= capacity {
-                return Ok(Some((buf.to_vec(), multicast)));
+                Err(e.into())
             }
-
-            let next = received.next_multiple_of(4096);
-            if next > RECV_MAX_CAPACITY {
-                return Err(Error::FrameTruncated {
-                    received,
-                    buffer_size: capacity,
-                });
-            }
-            capacity = next;
         }
     }
 
@@ -906,16 +860,13 @@ impl NetlinkSocket {
     /// This is the poll-based version of `recv_msg()` for use with `Stream` implementations.
     /// Returns `Poll::Ready(Ok(data))` when data is available.
     ///
-    /// Plan 224 — passes `MSG_TRUNC` so kernel-side truncation is
-    /// detected. `poll_recv` cannot auto-grow inside a single poll
-    /// (it would have to return `Pending` after re-arming with a
-    /// larger buffer), so on first truncation it surfaces
-    /// [`Error::FrameTruncated`]. Stream-shape callers
-    /// (`events()`, `dump_stream`) propagate the error cleanly.
+    /// Reads each datagram whole, as [`recv_msg`](Self::recv_msg) does
+    /// (#505): it used to receive into a fixed 32 KiB buffer, so a larger
+    /// frame was consumed, lost, and ended an event stream for good. Only
+    /// a datagram past the 1 MiB cap surfaces as
+    /// [`Error::FrameTruncated`], which an event stream reports as an
+    /// overrun and survives.
     pub fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Result<Vec<u8>>> {
-        let capacity = RECV_INITIAL_CAPACITY;
-        let mut buf = BytesMut::with_capacity(capacity);
-
         loop {
             let mut guard = match self.fd.poll_read_ready(cx) {
                 Poll::Ready(Ok(guard)) => guard,
@@ -923,17 +874,9 @@ impl NetlinkSocket {
                 Poll::Pending => return Poll::Pending,
             };
 
-            match guard.try_io(|inner| inner.get_ref().recv(&mut buf, libc::MSG_TRUNC)) {
+            match guard.try_io(|inner| recv_whole(inner.get_ref(), 0)) {
                 Ok(result) => match result {
-                    Ok(received) => {
-                        if received > capacity {
-                            return Poll::Ready(Err(Error::FrameTruncated {
-                                received,
-                                buffer_size: capacity,
-                            }));
-                        }
-                        return Poll::Ready(Ok(buf.to_vec()));
-                    }
+                    Ok(got) => return Poll::Ready(got.into_result().map(|(data, _)| data)),
                     Err(e) => {
                         // Plan 234 §4 — see recv_msg for the
                         // ENOBUFS routing rationale. poll_recv is
@@ -964,10 +907,72 @@ impl NetlinkSocket {
 /// upper bound; this lets callers react faster.
 pub(crate) const SEND_WOULDBLOCK_LIMIT: u32 = 32;
 
-/// Initial recv buffer capacity for [`NetlinkSocket::recv_msg`]
-/// (Plan 224). 32 KiB matches the historic single-frame cap; the
-/// auto-grow loop handles anything larger.
+/// The buffer every receive peeks into (Plan 224). 32 KiB is what the
+/// kernel packs a dump skb up to, so nearly every datagram fits it; a
+/// larger one gets a buffer of its exact size (`recv_whole`).
 pub(crate) const RECV_INITIAL_CAPACITY: usize = 32 * 1024;
+
+/// Receive one whole datagram: peek it (`MSG_PEEK | MSG_TRUNC`, which
+/// reports its full length), then consume it — the way iproute2's
+/// `rtnl_recvmsg` does.
+///
+/// Receiving with `MSG_TRUNC` alone consumed a datagram larger than the
+/// buffer before its size was known: the "grow and retry" that followed
+/// read the *next* datagram, and the large one — a link with many VFs, a
+/// big notification — was gone without a word (#505). A datagram past
+/// [`RECV_MAX_CAPACITY`] is consumed and reported as
+/// [`Error::FrameTruncated`]. Returns the bytes and whether the datagram
+/// was a multicast copy.
+fn recv_whole(socket: &Socket, flags: libc::c_int) -> std::io::Result<RecvWhole> {
+    recv_whole_capped(socket, flags, RECV_MAX_CAPACITY)
+}
+
+/// [`recv_whole`] with the cap as a parameter, so a test can reach it
+/// without a megabyte of socket buffer.
+fn recv_whole_capped(
+    socket: &Socket,
+    flags: libc::c_int,
+    max: usize,
+) -> std::io::Result<RecvWhole> {
+    let mut buf = BytesMut::with_capacity(RECV_INITIAL_CAPACITY);
+    let (len, addr) = socket.recv_from(&mut buf, flags | libc::MSG_PEEK | libc::MSG_TRUNC)?;
+    let multicast = addr.multicast_groups() != 0;
+    if len > max {
+        // Drop it, and say so.
+        let mut none = BytesMut::new();
+        socket.recv_from(&mut none, flags)?;
+        return Ok(RecvWhole::TooLarge(len));
+    }
+    if len <= RECV_INITIAL_CAPACITY {
+        // The peek has it all; consume it without copying it again.
+        let mut none = BytesMut::new();
+        socket.recv_from(&mut none, flags)?;
+        return Ok(RecvWhole::Frame(buf.to_vec(), multicast));
+    }
+    let mut big = BytesMut::with_capacity(len);
+    socket.recv_from(&mut big, flags)?;
+    Ok(RecvWhole::Frame(big.to_vec(), multicast))
+}
+
+/// What [`recv_whole`] got.
+enum RecvWhole {
+    /// The datagram, and whether it was a multicast copy.
+    Frame(Vec<u8>, bool),
+    /// A datagram of this many bytes, past [`RECV_MAX_CAPACITY`], dropped.
+    TooLarge(usize),
+}
+
+impl RecvWhole {
+    fn into_result(self) -> Result<(Vec<u8>, bool)> {
+        match self {
+            RecvWhole::Frame(data, multicast) => Ok((data, multicast)),
+            RecvWhole::TooLarge(received) => Err(Error::FrameTruncated {
+                received,
+                buffer_size: RECV_MAX_CAPACITY,
+            }),
+        }
+    }
+}
 
 /// Max recv buffer capacity for [`NetlinkSocket::recv_msg`]
 /// (Plan 224). 1 MiB is the cap before nlink surfaces
@@ -1484,10 +1489,9 @@ mod batch_tests {
     }
 }
 
-/// Plan 224 — recv_msg MSG_TRUNC handling tests. The constants
-/// and the auto-grow size math are testable without a live
-/// socket; the truncation behaviour itself is covered by the
-/// integration test in `crates/nlink/tests/integration/`.
+/// Plan 224 / #505 — receiving datagrams of any size. `usersock_pair`
+/// queues them between two userspace netlink sockets, so no kernel
+/// subsystem has to produce a large frame.
 #[cfg(test)]
 mod recv_msg_truncate_tests {
     use super::*;
@@ -1498,40 +1502,6 @@ mod recv_msg_truncate_tests {
         const _: () = assert!(RECV_INITIAL_CAPACITY <= RECV_MAX_CAPACITY);
         assert_eq!(RECV_INITIAL_CAPACITY, 32 * 1024);
         assert_eq!(RECV_MAX_CAPACITY, 1024 * 1024);
-    }
-
-    #[test]
-    fn next_multiple_of_4096_overshoots_at_cap_boundary() {
-        // `1 MiB + 1` rounds up past the cap so the auto-grow
-        // surfaces FrameTruncated instead of growing again.
-        let received = 1_048_577_usize; // 1 MiB + 1
-        let next = received.next_multiple_of(4096);
-        assert!(
-            next > RECV_MAX_CAPACITY,
-            "1 MiB + 1 should overshoot the cap"
-        );
-    }
-
-    #[test]
-    fn next_multiple_of_4096_doesnt_grow_in_fast_path() {
-        // A frame that fits the initial buffer must not trigger
-        // auto-grow — the `received <= capacity` fast path
-        // returns directly.
-        let capacity = RECV_INITIAL_CAPACITY;
-        let received = 8_000_usize;
-        assert!(received <= capacity);
-    }
-
-    #[test]
-    fn auto_grow_step_matches_actual_frame() {
-        // For a frame of size N where `INITIAL < N < MAX`, the
-        // next capacity is `N` rounded up to 4 KiB — enough to
-        // cover the same frame on retry.
-        let received = 60_000_usize; // ~60 KiB
-        let next = received.next_multiple_of(4096);
-        assert!(next >= received);
-        assert!(next <= RECV_MAX_CAPACITY);
-        assert_eq!(next % 4096, 0);
     }
 
     #[test]
@@ -1548,6 +1518,75 @@ mod recv_msg_truncate_tests {
         assert!(err.is_backpressure());
         // Other errors must NOT match.
         assert!(!Error::Timeout.is_backpressure());
+    }
+
+    /// A receiving socket and a sender, both `NETLINK_USERSOCK`: unicast
+    /// between userspace ports needs no privilege, so a test can queue a
+    /// datagram of any size without the kernel producing one.
+    fn usersock_pair() -> (NetlinkSocket, Socket, SocketAddr) {
+        let bound = || {
+            let mut socket = Socket::new(protocols::NETLINK_USERSOCK).expect("usersock");
+            let mut addr = SocketAddr::new(0, 0);
+            socket.bind(&addr).expect("bind");
+            socket.get_address(&mut addr).expect("address");
+            (socket, addr)
+        };
+        let (rx, rx_addr) = bound();
+        rx.set_non_blocking(true).expect("non-blocking");
+        let pid = rx_addr.port_number();
+        let rx = NetlinkSocket::from_raw_socket(rx, pid, Protocol::Route).expect("wrap");
+        (rx, bound().0, SocketAddr::new(pid, 0))
+    }
+
+    /// #505: a datagram larger than the initial receive buffer was consumed
+    /// by the `MSG_TRUNC` probe that measured it, and the retry read the
+    /// *next* datagram. Every receive path must return it whole, in order.
+    #[tokio::test]
+    async fn a_datagram_past_the_initial_buffer_arrives_whole() {
+        let (rx, tx, to) = usersock_pair();
+        let big: Vec<u8> = (0..RECV_INITIAL_CAPACITY + 8192)
+            .map(|i| i as u8)
+            .collect();
+        let small = vec![0xcd; 64];
+        for _ in 0..3 {
+            tx.send_to(&big, &to, 0).expect("send big");
+            tx.send_to(&small, &to, 0).expect("send small");
+        }
+
+        let (got, multicast) = rx.recv_msg_from().await.expect("recv_msg_from");
+        assert!(!multicast);
+        assert!(got == big, "recv_msg_from: got {} bytes", got.len());
+        assert_eq!(rx.recv_msg_from().await.expect("small").0, small);
+
+        let got = rx.try_recv_msg().expect("try_recv_msg").expect("queued");
+        assert!(got == big, "try_recv_msg: got {} bytes", got.len());
+        assert_eq!(rx.try_recv_msg().expect("small"), Some(small.clone()));
+
+        let got = std::future::poll_fn(|cx| rx.poll_recv(cx))
+            .await
+            .expect("poll_recv");
+        assert!(got == big, "poll_recv: got {} bytes", got.len());
+        let got = std::future::poll_fn(|cx| rx.poll_recv(cx)).await;
+        assert_eq!(got.expect("small"), small);
+    }
+
+    /// A datagram past the cap is dropped and reported; the one behind it
+    /// is still there (#505).
+    #[tokio::test]
+    async fn a_datagram_past_the_cap_is_reported_and_the_next_survives() {
+        let (rx, tx, to) = usersock_pair();
+        let cap = RECV_INITIAL_CAPACITY + 4096;
+        tx.send_to(&vec![1u8; cap + 1], &to, 0).expect("send big");
+        tx.send_to(&[2u8; 16], &to, 0).expect("send small");
+        let socket = rx.fd.get_ref();
+        match recv_whole_capped(socket, 0, cap).expect("recv") {
+            RecvWhole::TooLarge(len) => assert_eq!(len, cap + 1),
+            RecvWhole::Frame(data, _) => panic!("got a {}-byte frame past the cap", data.len()),
+        }
+        match recv_whole_capped(socket, 0, cap).expect("recv") {
+            RecvWhole::Frame(data, _) => assert_eq!(data, [2u8; 16]),
+            RecvWhole::TooLarge(len) => panic!("next datagram reported as {len} bytes"),
+        }
     }
 
     #[test]

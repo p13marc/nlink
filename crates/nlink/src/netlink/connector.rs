@@ -434,7 +434,7 @@ impl Connection<Connector> {
         let seq = self.socket().next_seq();
         // Held for the send: serializes it in mutex mode, registers the
         // seq in dispatcher mode (#466). Nothing answers a control message.
-        let _session = self.recv_session(seq).await;
+        let _session = self.recv_session(seq).await?;
         let pid = self.socket().pid();
 
         // Build the message

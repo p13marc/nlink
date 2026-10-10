@@ -1015,7 +1015,7 @@ impl Connection<Nftables> {
             .chain(inner_seqs.iter().copied())
             .chain(std::iter::once(end_seq))
             .collect();
-        let mut session = self.recv_session_multi(&all_seqs).await;
+        let mut session = self.recv_session_multi(&all_seqs).await?;
         self.socket().send(&batch).await?;
         let mut failures: Vec<super::NftBatchFailure> = Vec::new();
 
@@ -1144,7 +1144,7 @@ impl Connection<Nftables> {
         // the driver in dispatcher mode; reading the socket directly raced
         // the driver's own recv there (#466).
         let seq = self.socket().next_seq();
-        let mut session = self.recv_session(seq).await;
+        let mut session = self.recv_session(seq).await?;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
         self.socket().send(&builder.finish()).await?;
@@ -1252,7 +1252,7 @@ impl Connection<Nftables> {
         // side; in dispatcher mode, register with the driver instead of
         // racing its recv (#466). See connection.rs `Concurrency` docstring.
         let seq = self.socket().next_seq();
-        let mut session = self.recv_session_dump(seq).await;
+        let mut session = self.recv_session_dump(seq).await?;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 

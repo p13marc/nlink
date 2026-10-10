@@ -130,8 +130,10 @@ pub enum Error {
     /// `MSG_TRUNC`). Distinct from [`Self::Truncated`] which is
     /// the parser short-buffer case. `received` is the actual
     /// frame size the kernel reported via `MSG_TRUNC`;
-    /// `buffer_size` is what was allocated. nlink auto-grows the
-    /// recv buffer up to 1 MiB before surfacing this error.
+    /// `buffer_size` is the cap. nlink reads a datagram of any size
+    /// up to 1 MiB whole; this error means one past that was dropped.
+    /// An event stream reports it as an overrun (an `ENOBUFS` error, so
+    /// a resync wrapper re-dumps) and keeps going (#505).
     ///
     /// Added in 0.20.1 (Plan 224 — closes B4).
     #[error(
@@ -162,6 +164,22 @@ pub enum Error {
         /// WouldBlock returns from the kernel.
         send_buffer_full: bool,
     },
+
+    /// A request on a mutex-mode connection while one of its event
+    /// streams ([`Connection::events`](crate::Connection::events), or a
+    /// resync wrapper) owns it. In mutex mode the stream holds the
+    /// connection's request lock until it is dropped, so the request could
+    /// only wait — and did, until the operation timeout reported it as a
+    /// kernel hang. Send requests on a second connection, or build this one
+    /// with [`Connection::with_dispatcher`](crate::Connection::with_dispatcher),
+    /// where events and requests share the socket.
+    ///
+    /// Added in 0.31.0 (#505).
+    #[error(
+        "connection busy: an event stream owns it (mutex mode); \
+         send requests on a second connection or use `with_dispatcher()`"
+    )]
+    EventStreamActive,
 
     /// Invalid message format.
     #[error("invalid message: {0}")]
@@ -816,7 +834,7 @@ impl Error {
 
     /// Check if this is an [`Error::FrameTruncated`] error — the
     /// kernel emitted a netlink frame larger than nlink's
-    /// auto-grow recv buffer cap (1 MiB).
+    /// receive cap (1 MiB).
     ///
     /// Added in 0.20.1 (Plan 224 — closes B4).
     pub fn is_truncated(&self) -> bool {
@@ -830,6 +848,14 @@ impl Error {
     /// Added in 0.20.1 (Plan 232 — closes B19).
     pub fn is_backpressure(&self) -> bool {
         matches!(self, Self::Backpressure { .. })
+    }
+
+    /// Check if this is an [`Error::EventStreamActive`] — a request on a
+    /// mutex-mode connection whose event stream owns it.
+    ///
+    /// Added in 0.31.0 (#505).
+    pub fn is_event_stream_active(&self) -> bool {
+        matches!(self, Self::EventStreamActive)
     }
 
     /// Check if this is an [`Error::DumpInterrupted`].

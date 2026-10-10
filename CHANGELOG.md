@@ -26,6 +26,40 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Event streams: a large frame was lost and ended the stream, parse
+  failures left no trace, and a request beside a mutex-mode stream hung
+  (#505).**
+  - Every receive read into a 32 KiB buffer with `MSG_TRUNC`. That
+    consumed a larger datagram while measuring it. `recv_msg` then read
+    the *next* datagram into the grown buffer, so the large one was lost
+    without a word. `poll_recv`, under every event stream and
+    `dump_stream`, returned `FrameTruncated` and the stream fused. Each
+    receive now peeks the datagram's size first, as iproute2 does, and
+    reads it whole. A datagram past the 1 MiB cap is still dropped. An
+    event stream now reports that as an overrun (an `ENOBUFS` error, so a
+    resync wrapper re-dumps) and keeps going. The dispatcher driver
+    treats it the same way.
+  - The rtnetlink event parser skipped malformed frames and unparseable
+    messages silently. It still skips them, so one bad frame cannot end a
+    subscription, but it now logs each at `debug`. An nftables event in an
+    address family nlink does not know was reported as `inet`; it is
+    dropped with a `debug` record instead.
+  - In mutex mode an event stream holds the connection's request lock
+    until it is dropped. A request on that connection meanwhile waited
+    out the 30 s operation timeout. A dump with its own receive loop
+    (nftables, conntrack) took the lock outside the timeout, so it waited
+    forever. Both fail at once now with the new
+    `Error::EventStreamActive`, including a request already queued when
+    the stream claims the lock. The docs that said a borrowed stream
+    leaves the connection "usable for queries" now say what is true:
+    that holds in dispatcher mode only.
+
+  Unit tests queue datagrams between two `NETLINK_USERSOCK` sockets, so
+  no kernel subsystem has to produce a large frame. Before the fix,
+  `recv_msg_from` returned the 64-byte datagram queued behind a 40 KiB
+  one. Two more check that a request beside a live stream, and one queued
+  behind its claim, fail within 2 s rather than time out.
+
 - **Resync snapshots covered only part of what the stream subscribes to,
   and there was no initial snapshot (#503).**
   - `rtnetlink_snapshot` dumped links, addresses, routes and neighbours,
@@ -450,6 +484,9 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`Error::EventStreamActive` and `Error::is_event_stream_active()`**
+  (#505).
 
 - **`ResyncMarker::InitialSyncStart`, `ResyncStream::initial_snapshot`,
   `ResyncedEvent::is_initial_sync_start`, `Connection<Nftables>::generation`**

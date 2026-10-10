@@ -139,7 +139,7 @@ impl<'a, P: ProtocolState, T: FromNetlink + Unpin> DumpStream<'a, P, T> {
         // lifetime. In mutex mode (0.19 Finding B) it stops two concurrent
         // DumpStreams from racing `poll_recv`; in dispatcher mode it
         // serializes dumps (kernel `EBUSY`). Same lock, both roles.
-        let guard = conn.lock_request_owned().await;
+        let guard = conn.lock_request().await?;
 
         let mut builder = MessageBuilder::new(msg_type, NLM_F_REQUEST | NLM_F_DUMP);
         if !body.is_empty() {
@@ -560,7 +560,7 @@ mod tests {
     async fn make_stream<'a>(
         conn: &'a Connection<crate::netlink::Route>,
     ) -> DumpStream<'a, crate::netlink::Route, Dummy> {
-        let guard = conn.lock_request_owned().await;
+        let guard = conn.lock_request().await.unwrap();
         DumpStream {
             conn,
             expected_seq: 1,
@@ -646,7 +646,7 @@ mod tests {
     async fn make_stream_strict<'a>(
         conn: &'a Connection<crate::netlink::Route>,
     ) -> DumpStream<'a, crate::netlink::Route, Strict> {
-        let guard = conn.lock_request_owned().await;
+        let guard = conn.lock_request().await.unwrap();
         DumpStream {
             conn,
             expected_seq: 1,

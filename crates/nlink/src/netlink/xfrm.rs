@@ -1667,7 +1667,7 @@ impl Connection<Xfrm> {
         // timeout window.
         let seq = self.socket().next_seq();
         let pid = self.socket().pid();
-        let mut session = self.recv_session_dump(seq).await;
+        let mut session = self.recv_session_dump(seq).await?;
         // Plan 208 Phase 1+2 — wrap in with_timeout, add seq filter,
         // detect NLM_F_DUMP_INTR.
         self.with_timeout(async move {
@@ -1783,7 +1783,7 @@ impl Connection<Xfrm> {
         // #134 — dual-mode recv (dump); see `get_security_associations`.
         let seq = self.socket().next_seq();
         let pid = self.socket().pid();
-        let mut session = self.recv_session_dump(seq).await;
+        let mut session = self.recv_session_dump(seq).await?;
         // Plan 208 Phase 1+2 — wrap in with_timeout, seq filter,
         // NLM_F_DUMP_INTR detection.
         self.with_timeout(async move {

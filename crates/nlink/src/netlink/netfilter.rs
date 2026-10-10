@@ -910,7 +910,7 @@ impl Connection<Netfilter> {
         // with_timeout so it spans the timeout window.
         let seq = self.socket().next_seq();
         let pid = self.socket().pid();
-        let mut session = self.recv_session_dump(seq).await;
+        let mut session = self.recv_session_dump(seq).await?;
         // Plan 208 Phase 1+2 — wrap in with_timeout, seq filter,
         // NLM_F_DUMP_INTR detection.
         self.with_timeout(async move {

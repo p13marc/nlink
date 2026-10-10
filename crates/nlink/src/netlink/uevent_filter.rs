@@ -1110,10 +1110,11 @@ mod tests {
     ///
     /// The kernel never emits such a frame: `add_uevent_var` NUL-
     /// terminates every variable, and `SEQNUM` always follows
-    /// `SUBSYSTEM`. And nlink would not deliver one anyway —
-    /// `recv_msg` passes `MSG_TRUNC` and surfaces a short read as
-    /// `Error::FrameTruncated` rather than parsing it. Pinned here so
-    /// the divergence is a known one rather than a surprise.
+    /// `SUBSYSTEM`. And nlink would not deliver one anyway — `recv_msg`
+    /// reads every datagram whole (#505), and drops one past its 1 MiB
+    /// cap as `Error::FrameTruncated` rather than parsing a prefix.
+    /// Pinned here so the divergence is a known one rather than a
+    /// surprise.
     #[test]
     fn unterminated_subsystem_value_is_dropped() {
         let filter = UeventFilter::new().subsystem("net").build();
