@@ -1701,11 +1701,19 @@ pub mod filter {
                 }
             }
 
-            /// Create a key for matching at nexthdr+ offset.
+            /// Create a key for matching at nexthdr+ offset: `val` and
+            /// `mask` in host order, packed big-endian like
+            /// [`pack_key32`]. The offset counts from the next header,
+            /// which only a linking filter's `offset` sets
+            /// (`U32Filter::offset_at`); without one it is 0, the start
+            /// of the IP header.
+            ///
+            /// Stored `val`/`mask` in host order before 0.31 (#492), so on
+            /// little-endian it compared byte-swapped.
             pub fn with_nexthdr(val: u32, mask: u32, off: i32) -> Self {
                 Self {
-                    mask,
-                    val: val & mask,
+                    mask: mask.to_be(),
+                    val: (val & mask).to_be(),
                     off,
                     offmask: -1,
                 }
@@ -1820,6 +1828,15 @@ pub mod filter {
                 (val as u32, mask as u32)
             };
             TcU32Key::new(val32.to_be(), mask32.to_be(), off & !3)
+        }
+
+        /// [`pack_key16`] relative to the next header, as `tc … match
+        /// tcp|udp src|dst` packs it (offmask -1).
+        pub fn pack_key16_nexthdr(val: u16, mask: u16, off: i32) -> TcU32Key {
+            TcU32Key {
+                offmask: -1,
+                ..pack_key16(val, mask, off)
+            }
         }
 
         /// Helper to pack an 8-bit key at an offset.

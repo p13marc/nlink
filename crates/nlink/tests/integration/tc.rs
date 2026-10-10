@@ -1880,3 +1880,194 @@ async fn flower_actions_run_on_its_match() -> Result<()> {
     );
     Ok(())
 }
+
+/// HTB on `a`'s end of `pair`: default class 1:30, and 1:10 for what the
+/// u32 filters pick.
+async fn u32_htb(conn: &Connection<Route>, dev: &str) -> Result<()> {
+    let htb = HtbQdiscConfig::new().default_class(0x30).build();
+    conn.add_qdisc_full(dev, TcHandle::ROOT, Some(TcHandle::major_only(1)), htb)
+        .await?;
+    for minor in [0x10, 0x30] {
+        let class = HtbClassConfig::new(nlink::Rate::mbit(100)).build();
+        conn.add_class(dev, TcHandle::major_only(1), TcHandle::new(1, minor), class)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Packets classified into `1:minor` on `a`'s end so far.
+async fn u32_class_packets(pair: &crate::common::topo::NsPair, minor: u16) -> Result<u64> {
+    let conn = pair.a.connection()?;
+    let stats =
+        crate::common::counters::class_stats(&conn, pair.a_ifindex, TcHandle::new(1, minor))
+            .await?;
+    Ok(stats.map_or(0, |(packets, _)| packets))
+}
+
+/// #492: `match_dst_port` was a next-header key in host byte order. On
+/// little-endian it compared the wrong bytes, and with no linking
+/// `offset` the next header is the IP header itself, so it never matched
+/// a port. It is now tc's `match ip dport`: bytes 22–23 of an
+/// option-less IPv4 packet.
+#[tokio::test]
+async fn u32_port_matches_classify_traffic() -> Result<()> {
+    use std::net::SocketAddr;
+
+    use crate::common::{topo::NsPair, traffic::deliver_udp};
+    require_root!();
+    nlink::require_modules!("sch_htb", "cls_u32", "veth");
+
+    let pair = NsPair::new("u32ports", 63).await?;
+    let conn = pair.a.connection()?;
+    u32_htb(&conn, pair.a_if).await?;
+    let filter = U32Filter::new()
+        .match_ip_proto(17)
+        .match_dst_port(5001)
+        .classid(TcHandle::new(1, 0x10))
+        .build();
+    conn.add_filter_full(pair.a_if, TcHandle::major_only(1), None, 0x0800, 1, filter)
+        .await?;
+
+    let to = |port| SocketAddr::new(pair.b_addr.into(), port);
+    assert_eq!(deliver_udp(&pair.a, &pair.b, to(5001), 10), 10);
+    assert!(
+        u32_class_packets(&pair, 0x10).await? >= 10,
+        "port 5001 should land in 1:10"
+    );
+    let before = u32_class_packets(&pair, 0x10).await?;
+    assert_eq!(deliver_udp(&pair.a, &pair.b, to(5002), 10), 10);
+    assert_eq!(
+        u32_class_packets(&pair, 0x10).await?,
+        before,
+        "port 5002 is not 5001"
+    );
+    assert!(
+        u32_class_packets(&pair, 0x30).await? >= 10,
+        "the rest takes the default"
+    );
+    Ok(())
+}
+
+/// #492: the next-header form, as tc(8) builds it. A filter in the root
+/// table finds the header length (`offset at 0 mask 0f00 shift 6`) and
+/// links to table 2:, whose key matches the port relative to it. The
+/// table handle is a u32 handle, `2:` = 0x00200000, not a qdisc handle.
+#[tokio::test]
+async fn u32_next_header_port_matches_behind_a_link() -> Result<()> {
+    use std::net::SocketAddr;
+
+    use crate::common::{topo::NsPair, traffic::deliver_udp};
+    require_root!();
+    nlink::require_modules!("sch_htb", "cls_u32", "veth");
+
+    let pair = NsPair::new("u32nexthdr", 64).await?;
+    let conn = pair.a.connection()?;
+    u32_htb(&conn, pair.a_if).await?;
+    let table = U32Filter::handle(2, 0, 0);
+    let parent = TcHandle::major_only(1);
+    conn.add_filter_full(
+        pair.a_if,
+        parent,
+        Some(TcHandle::from_raw(table)),
+        0x0800,
+        1,
+        U32Filter::new().divisor(1).build(),
+    )
+    .await?;
+    // tc(8)'s own line for it.
+    let linker = U32Filter::parse_params(&[
+        "match", "ip", "protocol", "17", "0xff", "offset", "at", "0", "mask", "0f00", "shift", "6",
+        "link", "2:",
+    ])?;
+    conn.add_filter_full(pair.a_if, parent, None, 0x0800, 1, linker)
+        .await?;
+    let port = U32Filter::parse_params(&["ht", "2:", "match", "udp", "dst", "5003", "0xffff"])?
+        .classid(TcHandle::new(1, 0x10));
+    conn.add_filter_full(pair.a_if, parent, None, 0x0800, 1, port)
+        .await?;
+
+    let to = |port| SocketAddr::new(pair.b_addr.into(), port);
+    assert_eq!(deliver_udp(&pair.a, &pair.b, to(5003), 10), 10);
+    assert!(
+        u32_class_packets(&pair, 0x10).await? >= 10,
+        "port 5003 should land in 1:10 through table 2:"
+    );
+    let before = u32_class_packets(&pair, 0x10).await?;
+    assert_eq!(deliver_udp(&pair.a, &pair.b, to(5004), 10), 10);
+    assert_eq!(u32_class_packets(&pair, 0x10).await?, before);
+    Ok(())
+}
+
+/// #492, the way 0.30 found its flower bugs: install the same u32 lines
+/// through `tc` and through nlink's parser at two priorities, and compare
+/// what `tc filter show` says about each.
+#[tokio::test]
+async fn u32_port_filters_match_what_tc_installs() -> Result<()> {
+    require_root!();
+    nlink::require_modules!("sch_htb", "cls_u32");
+
+    let (ns, conn) = setup_tc_ns("u32-parity").await?;
+    u32_htb(&conn, "dummy0").await?;
+    let lines: [&[&str]; 5] = [
+        &["match", "ip", "dport", "443", "0xffff", "flowid", "1:10"],
+        &["match", "ip", "sport", "53", "0xffff", "flowid", "1:10"],
+        &[
+            "match",
+            "ip",
+            "src",
+            "10.1.2.0/24",
+            "match",
+            "ip",
+            "dport",
+            "80",
+            "0xfff0",
+            "flowid",
+            "1:10",
+        ],
+        &["match", "tcp", "dst", "22", "0xffff", "flowid", "1:10"],
+        &[
+            "match", "ip", "protocol", "6", "0xff", "match", "ip", "dport", "22", "0xffff",
+            "flowid", "1:10",
+        ],
+    ];
+    let shown = |prio: &str| -> Result<String> {
+        let out = ns.exec(
+            "tc",
+            &[
+                "filter", "show", "dev", "dummy0", "parent", "1:", "prio", prio,
+            ],
+        )?;
+        // Drop the per-filter handle lines' numbering; keep the matches.
+        Ok(out
+            .lines()
+            .filter(|l| l.trim_start().starts_with("match"))
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join("\n"))
+    };
+    for (n, tokens) in lines.iter().enumerate() {
+        let (tc_prio, nlink_prio) = (10 + 2 * n as u16, 11 + 2 * n as u16);
+        let mut args = vec!["filter", "add", "dev", "dummy0", "parent", "1:"];
+        let tc_prio_s = tc_prio.to_string();
+        args.extend(["prio", &tc_prio_s, "protocol", "ip", "u32"]);
+        args.extend(tokens.iter());
+        ns.exec("tc", &args)?;
+        let filter = U32Filter::parse_params(tokens)?;
+        conn.add_filter_full(
+            "dummy0",
+            TcHandle::major_only(1),
+            None,
+            0x0800,
+            nlink_prio,
+            filter,
+        )
+        .await?;
+        let (theirs, ours) = (shown(&tc_prio_s)?, shown(&nlink_prio.to_string())?);
+        assert!(
+            !theirs.is_empty(),
+            "tc showed no match lines for {tokens:?}"
+        );
+        assert_eq!(ours, theirs, "{tokens:?}");
+    }
+    Ok(())
+}

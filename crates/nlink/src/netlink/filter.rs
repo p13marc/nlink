@@ -199,9 +199,38 @@ pub struct U32Filter {
     chain: Option<u32>,
     /// Filter flags (`TCA_CLS_FLAGS_SKIP_HW`/`SKIP_SW`).
     flags: u32,
+    /// `offset …`: where the next header starts, for the keys of the
+    /// table this filter links to (#492).
+    offset: U32Offset,
+}
+
+/// The selector's `offset` fields (`tc … u32 offset [plus N] [at N]
+/// [mask N] [shift N] [eat]`).
+#[derive(Debug, Clone, Copy, Default)]
+struct U32Offset {
+    /// `TC_U32_OFFSET` / `TC_U32_VAROFFSET` / `TC_U32_EAT`.
+    flags: u8,
+    plus: u16,
+    at: i16,
+    mask: u16,
+    shift: u8,
 }
 
 impl U32Filter {
+    /// A u32 handle: hash table `htid`, bucket and node, which `tc(8)`
+    /// writes `htid:bucket:node` in hex — `htid << 20 | bucket << 12 |
+    /// node`. `U32Filter::handle(2, 0, 0)` is `2:`, the form [`ht`],
+    /// [`link`] and a table-creating filter's handle take.
+    ///
+    /// Not a qdisc handle: `2:` is `0x00200000` here and `0x00020000` as
+    /// a [`TcHandle`] (#492).
+    ///
+    /// [`ht`]: Self::ht
+    /// [`link`]: Self::link
+    pub const fn handle(htid: u16, bucket: u8, node: u16) -> u32 {
+        ((htid as u32 & 0xFFF) << 20) | ((bucket as u32) << 12) | (node as u32 & 0xFFF)
+    }
+
     /// Create a new u32 filter builder.
     pub fn new() -> Self {
         Self {
@@ -268,19 +297,90 @@ impl U32Filter {
         self
     }
 
-    /// Match source port (requires nexthdr offset).
+    /// Match the L4 source port of an IPv4 packet with no IP options:
+    /// bytes 20–21, as `tc … u32 match ip sport` does.
+    ///
+    /// It used to be a next-header-relative key with its value and mask
+    /// in host order. On little-endian that compared the wrong bytes, and
+    /// with no linking `offset` "next header" is the IP header itself, so
+    /// it never matched a port (#492). For IP options, see
+    /// [`match_nexthdr_src_port`](Self::match_nexthdr_src_port).
     pub fn match_src_port(mut self, port: u16) -> Self {
-        // Source port is at nexthdr+0
-        let key = u32_mod::TcU32Key::with_nexthdr((port as u32) << 16, 0xFFFF0000, 0);
-        self.keys.push(key);
+        self.keys.push(u32_mod::pack_key16(port, 0xFFFF, 20));
         self
     }
 
-    /// Match destination port (requires nexthdr offset).
+    /// Match the L4 destination port of an IPv4 packet with no IP
+    /// options: bytes 22–23, as `tc … u32 match ip dport` does. See
+    /// [`match_src_port`](Self::match_src_port).
     pub fn match_dst_port(mut self, port: u16) -> Self {
-        // Destination port is at nexthdr+2
-        let key = u32_mod::TcU32Key::with_nexthdr(port as u32, 0x0000FFFF, 0);
-        self.keys.push(key);
+        self.keys.push(u32_mod::pack_key16(port, 0xFFFF, 22));
+        self
+    }
+
+    /// Match the TCP/UDP source port at the start of the next header, as
+    /// `tc … u32 match tcp src` does.
+    ///
+    /// "Next header" is wherever the filter that linked to this one's
+    /// table put it, with [`offset_at`](Self::offset_at). Without that,
+    /// it is the start of the IP header. The usual pair:
+    ///
+    /// ```no_run
+    /// # async fn example() -> nlink::Result<()> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// use nlink::{TcHandle, netlink::filter::U32Filter};
+    ///
+    /// let table = U32Filter::handle(2, 0, 0);
+    /// // Table 2:, one bucket.
+    /// conn.add_filter_full("eth0", TcHandle::major_only(1), Some(TcHandle::from_raw(table)),
+    ///     0x0800, 1, U32Filter::new().divisor(1)).await?;
+    /// // In the root table: UDP goes on to 2:, with the next header IHL*4 bytes in.
+    /// conn.add_filter_full("eth0", TcHandle::major_only(1), None, 0x0800, 1,
+    ///     U32Filter::new().match_ip_proto(17).offset_at(0, 0x0f00, 6).link(table)).await?;
+    /// // In 2: — the port, wherever the IP header ends.
+    /// conn.add_filter_full("eth0", TcHandle::major_only(1), None, 0x0800, 1,
+    ///     U32Filter::new().ht(table).match_nexthdr_dst_port(53)
+    ///         .classid(TcHandle::new(1, 0x10))).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn match_nexthdr_src_port(mut self, port: u16) -> Self {
+        self.keys.push(u32_mod::pack_key16_nexthdr(port, 0xFFFF, 0));
+        self
+    }
+
+    /// Match the TCP/UDP destination port two bytes into the next header,
+    /// as `tc … u32 match tcp dst` does. See
+    /// [`match_nexthdr_src_port`](Self::match_nexthdr_src_port).
+    pub fn match_nexthdr_dst_port(mut self, port: u16) -> Self {
+        self.keys.push(u32_mod::pack_key16_nexthdr(port, 0xFFFF, 2));
+        self
+    }
+
+    /// `offset at AT mask MASK shift SHIFT`: where the next header starts,
+    /// for the keys of the table this filter [`link`](Self::link)s to —
+    /// `(be16 at AT & MASK) >> SHIFT` bytes in. For IPv4,
+    /// `offset_at(0, 0x0f00, 6)` is the header length (IHL × 4).
+    pub fn offset_at(mut self, at: i16, mask: u16, shift: u8) -> Self {
+        self.offset.flags |= u32_mod::TC_U32_VAROFFSET;
+        self.offset.at = at;
+        self.offset.mask = mask;
+        self.offset.shift = shift;
+        self
+    }
+
+    /// `offset plus N`: a fixed next-header offset, added to any
+    /// [`offset_at`](Self::offset_at).
+    pub fn offset_plus(mut self, plus: u16) -> Self {
+        self.offset.flags |= u32_mod::TC_U32_OFFSET;
+        self.offset.plus = plus;
+        self
+    }
+
+    /// `offset … eat`: move the base past the next-header offset, so the
+    /// linked table's plain (not next-header) keys count from there.
+    pub fn eat(mut self) -> Self {
+        self.offset.flags |= u32_mod::TC_U32_EAT;
         self
     }
 
@@ -297,15 +397,16 @@ impl U32Filter {
         self
     }
 
-    /// Link to a hash table.
+    /// Link to a hash table: a u32 handle, from [`U32Filter::handle`].
     pub fn link(mut self, link: u32) -> Self {
         self.link = Some(link);
         self
     }
 
-    /// Set the hash table this filter belongs to (`TCA_U32_HASH`).
-    /// Pass the raw u32 form of a tc(8) handle (e.g.
-    /// `TcHandle::new(0x100, 0).as_raw()` for `100:`).
+    /// Set the hash table this filter belongs to (`TCA_U32_HASH`): a
+    /// u32 handle, from [`U32Filter::handle`] — `U32Filter::handle(0x100,
+    /// 0, 0)` for `100:`. Not a [`TcHandle`]'s raw form, which puts the
+    /// table id 4 bits too low (#492).
     pub fn ht(mut self, handle: u32) -> Self {
         self.ht = Some(handle);
         self
@@ -372,11 +473,10 @@ impl U32Filter {
     ///
     /// # Phase 2 surface (named-match shortcuts, IPv4 only)
     ///
-    /// All four-token shortcuts are sugar over the existing typed
-    /// setters (`match_src_ipv4` / `match_dst_ipv4` /
-    /// `match_ip_proto` / `match_src_port` / `match_dst_port`).
-    /// Wire output matches what those setters emit; tcp/udp port
-    /// matches use `nexthdr`-relative offsets (IP-options-tolerant).
+    /// Sugar over the typed setters (`match_src_ipv4` /
+    /// `match_dst_ipv4` / `match_ip_proto` / `match_src_port` /
+    /// `match_dst_port` / `match_nexthdr_src_port` /
+    /// `match_nexthdr_dst_port`), with tc(8)'s wire encoding.
     ///
     /// - `match ip src <addr>[/<prefix>]` — IPv4 source address.
     ///   Bare address defaults to `/32`.
@@ -384,11 +484,16 @@ impl U32Filter {
     /// - `match ip protocol <name|number>` — IP protocol.
     ///   Names: `tcp`, `udp`, `icmp`, `icmpv6`, `sctp`, `ah`, `esp`,
     ///   `gre`. Numeric: 0–255.
-    /// - `match ip sport <port>` — L4 source port (nexthdr-relative).
-    /// - `match ip dport <port>` — L4 destination port.
-    /// - `match tcp sport|dport <port>` / `match udp sport|dport <port>`
-    ///   — alias for `match ip sport|dport`. The wire is identical;
-    ///   the prefix is `tc(8)` syntax sugar.
+    /// - `match ip sport|dport <port> [<hex-mask>]` — L4 port at bytes
+    ///   20/22, past an option-less IPv4 header, as tc(8) has it.
+    ///   `match tcp|udp sport|dport` are nlink's aliases.
+    /// - `match tcp|udp src|dst <port> [<hex-mask>]` — L4 port relative
+    ///   to the next header, which only a linking filter's `offset`
+    ///   sets (tc(8)'s meaning; #492).
+    /// - `offset [plus <n>] [at <n>] [mask <hex>] [shift <n>] [eat]` —
+    ///   where the next header starts, for the table this filter
+    ///   `link`s to: `offset at 0 mask 0f00 shift 6` is the IPv4 header
+    ///   length.
     ///
     /// Stricter than the legacy `add_u32_options` parser (which
     /// silently dropped unknown tokens via a default `_ => i += 1`
@@ -401,9 +506,11 @@ impl U32Filter {
     ///   filter creates a hash table. Combine with no keys for the
     ///   table-create case.
     /// - `ht <handle>` — hash table this filter belongs to,
-    ///   encoded as `TCA_U32_HASH`. Handle uses tc(8) notation
-    ///   (e.g. `100:` → 0x01000000 via `TcHandle`).
-    /// - `link <handle>` — next-hop hash table to chase on match.
+    ///   encoded as `TCA_U32_HASH`. A u32 handle, `htid[:bucket[:node]]`
+    ///   in hex: `100:` is `0x10000000` (see [`U32Filter::handle`]). It
+    ///   was parsed as a qdisc handle, `0x01000000` (#492).
+    /// - `link <handle>` — next-hop hash table to chase on match; a u32
+    ///   handle, as for `ht`.
     /// - `hashkey mask <hex> at <offset>` — bytes of the packet
     ///   used to compute the hash bucket index. `mask` is hex,
     ///   `offset` is decimal or hex (i16 range).
@@ -434,8 +541,9 @@ impl U32Filter {
                             i = triple.consumed;
                         }
                         "ip" | "tcp" | "udp" => {
-                            f = apply_named_match(f, params, i, width)?;
-                            i += 4;
+                            let consumed;
+                            (f, consumed) = apply_named_match(f, params, i, width)?;
+                            i += consumed;
                         }
                         other => {
                             return Err(Error::InvalidMessage(format!(
@@ -473,19 +581,76 @@ impl U32Filter {
                 }
                 "ht" => {
                     let s = need_value(params, i, "u32", key)?;
-                    let h = s.parse::<TcHandle>().map_err(|e| {
-                        Error::InvalidMessage(format!("u32: invalid ht handle `{s}`: {e}"))
-                    })?;
-                    f = f.ht(h.as_raw());
+                    f = f.ht(parse_u32_handle("ht", s)?);
                     i += 2;
                 }
                 "link" => {
                     let s = need_value(params, i, "u32", key)?;
-                    let h = s.parse::<TcHandle>().map_err(|e| {
-                        Error::InvalidMessage(format!("u32: invalid link handle `{s}`: {e}"))
-                    })?;
-                    f = f.link(h.as_raw());
+                    f = f.link(parse_u32_handle("link", s)?);
                     i += 2;
+                }
+                "offset" => {
+                    // offset [plus N] [at N] [mask HEX] [shift N] [eat]
+                    let mut j = i + 1;
+                    let (mut at, mut mask, mut shift, mut var) = (0i16, 0u16, 0u8, false);
+                    while let Some(&sub) = params.get(j) {
+                        match sub {
+                            "plus" => {
+                                let s = need_value(params, j, "u32", "offset plus")?;
+                                let plus = parse_offset("u32", s)?;
+                                let plus = u16::try_from(plus).map_err(|_| {
+                                    Error::InvalidMessage(format!(
+                                        "u32: offset plus `{s}` out of range (0–65535)"
+                                    ))
+                                })?;
+                                f = f.offset_plus(plus);
+                                j += 2;
+                            }
+                            "at" => {
+                                let s = need_value(params, j, "u32", "offset at")?;
+                                at = i16::try_from(parse_offset("u32", s)?).map_err(|_| {
+                                    Error::InvalidMessage(format!(
+                                        "u32: offset at `{s}` out of range for i16"
+                                    ))
+                                })?;
+                                (var, j) = (true, j + 2);
+                            }
+                            "mask" => {
+                                let s = need_value(params, j, "u32", "offset mask")?;
+                                mask = u16::try_from(parse_hex_u32("u32", "offset mask", s)?)
+                                    .map_err(|_| {
+                                        Error::InvalidMessage(format!(
+                                            "u32: offset mask `{s}` is wider than 16 bits"
+                                        ))
+                                    })?;
+                                (var, j) = (true, j + 2);
+                            }
+                            "shift" => {
+                                let s = need_value(params, j, "u32", "offset shift")?;
+                                shift = s.parse().map_err(|_| {
+                                    Error::InvalidMessage(format!(
+                                        "u32: invalid offset shift `{s}` (expected 0–255)"
+                                    ))
+                                })?;
+                                (var, j) = (true, j + 2);
+                            }
+                            "eat" => {
+                                f = f.eat();
+                                j += 1;
+                            }
+                            _ => break,
+                        }
+                    }
+                    if j == i + 1 {
+                        return Err(Error::InvalidMessage(
+                            "u32: `offset` requires `plus`, `at`, `mask`, `shift` or `eat`"
+                                .to_string(),
+                        ));
+                    }
+                    if var {
+                        f = f.offset_at(at, mask, shift);
+                    }
+                    i = j;
                 }
                 "hashkey" => {
                     // Form: hashkey mask <hex> at <offset> → 5 tokens total.
@@ -612,7 +777,7 @@ impl FilterConfig for U32Filter {
         // Build and add selector if we have keys or a hashkey
         // configured. Divisor-only filters (which create the hash
         // table itself) emit just TCA_U32_DIVISOR — no selector.
-        if !self.keys.is_empty() || self.hashkey.is_some() {
+        if !self.keys.is_empty() || self.hashkey.is_some() || self.offset.flags != 0 {
             let mut sel = u32_mod::TcU32Sel::new();
             sel.set_terminal();
             for key in &self.keys {
@@ -623,6 +788,12 @@ impl FilterConfig for U32Filter {
                 sel.hdr.hmask = mask.to_be();
                 sel.hdr.hoff = offset;
             }
+            // offmask is big-endian; off and offoff are host order.
+            sel.hdr.flags |= self.offset.flags;
+            sel.hdr.off = self.offset.plus;
+            sel.hdr.offoff = self.offset.at;
+            sel.hdr.offmask = self.offset.mask.to_be();
+            sel.hdr.offshift = self.offset.shift;
             builder.append_attr(u32_mod::TCA_U32_SEL, &sel.to_bytes());
         }
 
@@ -750,12 +921,14 @@ fn parse_u32_raw_match(params: &[&str], i: usize, width: &str) -> Result<U32Matc
 /// `match tcp dport PORT`, etc.) by routing through the existing
 /// typed setters. Returns the mutated filter; caller advances `i` by
 /// 4 (the shortcut is always exactly `match LAYER FIELD VALUE`).
+/// Apply `match ip|tcp|udp FIELD VALUE [MASK]`; returns the filter and
+/// the number of tokens consumed.
 fn apply_named_match(
     filter: U32Filter,
     params: &[&str],
     i: usize,
     layer: &str,
-) -> Result<U32Filter> {
+) -> Result<(U32Filter, usize)> {
     let field = params
         .get(i + 2)
         .copied()
@@ -764,33 +937,102 @@ fn apply_named_match(
         Error::InvalidMessage(format!("u32: `match {layer} {field}` requires VALUE"))
     })?;
 
+    // tc(8) writes a port match with a hex mask: `match ip dport 80 0xffff`.
+    // Taken when the next token is one; the mask was not accepted at all
+    // before (#492).
+    let port_match = |off: i32, nexthdr: bool| -> Result<(U32Filter, usize)> {
+        let port = parse_port(field, layer, value)?;
+        let (mask, consumed) = match params
+            .get(i + 4)
+            .and_then(|s| parse_hex_u32("u32", "port mask", s).ok())
+        {
+            Some(mask) => {
+                let mask = u16::try_from(mask).map_err(|_| {
+                    Error::InvalidMessage(format!(
+                        "u32: `match {layer} {field}` mask `{}` is wider than 16 bits",
+                        params[i + 4]
+                    ))
+                })?;
+                (mask, 5)
+            }
+            None => (0xFFFF, 4),
+        };
+        let key = if nexthdr {
+            u32_mod::pack_key16_nexthdr(port & mask, mask, off)
+        } else {
+            u32_mod::pack_key16(port & mask, mask, off)
+        };
+        let mut filter = filter.clone();
+        filter.keys.push(key);
+        Ok((filter, consumed))
+    };
+
     match (layer, field) {
         ("ip", "src") => {
             let (addr, prefix) = parse_u32_ipv4_with_prefix(value)?;
-            Ok(filter.match_src_ipv4(addr, prefix))
+            Ok((filter.match_src_ipv4(addr, prefix), 4))
         }
         ("ip", "dst") => {
             let (addr, prefix) = parse_u32_ipv4_with_prefix(value)?;
-            Ok(filter.match_dst_ipv4(addr, prefix))
+            Ok((filter.match_dst_ipv4(addr, prefix), 4))
         }
         ("ip", "protocol") => {
+            // tc(8) writes it with a mask too: `match ip protocol 6 0xff`.
             let proto = parse_ip_proto_name_or_num(value)?;
-            Ok(filter.match_ip_proto(proto))
+            match params
+                .get(i + 4)
+                .and_then(|s| parse_hex_u32("u32", "protocol mask", s).ok())
+            {
+                Some(mask) => {
+                    let mask = u8::try_from(mask).map_err(|_| {
+                        Error::InvalidMessage(format!(
+                            "u32: `match ip protocol` mask `{}` is wider than 8 bits",
+                            params[i + 4]
+                        ))
+                    })?;
+                    let mut filter = filter;
+                    filter.keys.push(u32_mod::pack_key8(proto & mask, mask, 9));
+                    Ok((filter, 5))
+                }
+                None => Ok((filter.match_ip_proto(proto), 4)),
+            }
         }
-        ("ip", "sport") | ("tcp", "sport") | ("udp", "sport") => {
-            let port = parse_port("sport", layer, value)?;
-            Ok(filter.match_src_port(port))
-        }
-        ("ip", "dport") | ("tcp", "dport") | ("udp", "dport") => {
-            let port = parse_port("dport", layer, value)?;
-            Ok(filter.match_dst_port(port))
-        }
+        // Fixed offsets past a 20-byte IPv4 header, as tc's `ip sport|dport`.
+        // `tcp|udp sport|dport` are nlink's aliases for them.
+        ("ip" | "tcp" | "udp", "sport") => port_match(20, false),
+        ("ip" | "tcp" | "udp", "dport") => port_match(22, false),
+        // tc's `tcp|udp src|dst`: relative to the next header, which a
+        // linking filter's `offset` sets.
+        ("tcp" | "udp", "src") => port_match(0, true),
+        ("tcp" | "udp", "dst") => port_match(2, true),
         _ => Err(Error::InvalidMessage(format!(
             "u32: unsupported `match {layer} {field}` \
-             (Phase 2 supports: ip src/dst/protocol/sport/dport, \
-             tcp/udp sport/dport)"
+             (supported: ip src/dst/protocol/sport/dport, \
+             tcp/udp src/dst/sport/dport)"
         ))),
     }
+}
+
+/// Parse a u32 handle in tc(8) notation — `htid[:[bucket[:node]]]`, hex,
+/// or a `0x` raw value — as iproute2's `get_u32_handle` does (#492). Not a
+/// qdisc handle: `2:` is `0x00200000`.
+fn parse_u32_handle(key: &str, s: &str) -> Result<u32> {
+    let bad = || Error::InvalidMessage(format!("u32: invalid {key} handle `{s}`"));
+    let Some((htid, rest)) = s.split_once(':') else {
+        return s
+            .strip_prefix("0x")
+            .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+            .ok_or_else(bad);
+    };
+    let hex = |part: &str, max: u32| -> Result<u32> {
+        if part.is_empty() {
+            return Ok(0);
+        }
+        let v = u32::from_str_radix(part, 16).map_err(|_| bad())?;
+        if v > max { Err(bad()) } else { Ok(v) }
+    };
+    let (bucket, node) = rest.split_once(':').unwrap_or((rest, ""));
+    Ok((hex(htid, 0xFFF)? << 20) | (hex(bucket, 0xFF)? << 12) | hex(node, 0xFFF)?)
 }
 
 /// Parse `ADDR[/PREFIX]` into (Ipv4Addr, u8) with `u32:` error
@@ -6246,9 +6488,97 @@ mod tests {
         let sport_direct = U32Filter::new().match_src_port(12345);
         assert_eq!(dport.keys[0].val, dport_direct.keys[0].val);
         assert_eq!(dport.keys[0].mask, dport_direct.keys[0].mask);
-        assert_eq!(dport.keys[0].offmask, dport_direct.keys[0].offmask); // -1 = nexthdr-relative
+        assert_eq!(dport.keys[0].offmask, dport_direct.keys[0].offmask); // 0: fixed offset
         assert_eq!(sport.keys[0].val, sport_direct.keys[0].val);
         assert_eq!(sport.keys[0].mask, sport_direct.keys[0].mask);
+    }
+
+    /// #492: the keys' bytes, as iproute2 packs them (`pack_key16`:
+    /// `htonl` of the value and mask, the half chosen by `off & 3`).
+    /// Port matches were next-header keys in host order: on little-endian
+    /// `match_dst_port(443)` compared the first 16 bits of the IP header
+    /// with 0xBB01. The old test compared the parser with the setter,
+    /// which were wrong the same way.
+    #[test]
+    fn u32_port_keys_have_tcs_wire_bytes() {
+        use zerocopy::IntoBytes;
+        /// tokens, off, offmask, mask bytes, value bytes
+        type Case<'a> = (&'a [&'a str], i32, i32, [u8; 4], [u8; 4]);
+        let cases: [Case; 5] = [
+            (
+                &["match", "ip", "dport", "443", "0xffff"],
+                20,
+                0,
+                [0, 0, 0xff, 0xff],
+                [0, 0, 0x01, 0xbb],
+            ),
+            (
+                &["match", "ip", "sport", "12345"],
+                20,
+                0,
+                [0xff, 0xff, 0, 0],
+                [0x30, 0x39, 0, 0],
+            ),
+            (
+                &["match", "udp", "dst", "53", "ffff"],
+                0,
+                -1,
+                [0, 0, 0xff, 0xff],
+                [0, 0, 0, 53],
+            ),
+            (
+                &["match", "tcp", "src", "80", "0xff00"],
+                0,
+                -1,
+                [0xff, 0, 0, 0],
+                [0, 0, 0, 0],
+            ),
+            (
+                &["match", "tcp", "dport", "8080"],
+                20,
+                0,
+                [0, 0, 0xff, 0xff],
+                [0, 0, 0x1f, 0x90],
+            ),
+        ];
+        for (tokens, off, offmask, mask, val) in cases {
+            let f = U32Filter::parse_params(tokens).unwrap();
+            let key = f.keys[0];
+            assert_eq!((key.off, key.offmask), (off, offmask), "{tokens:?}");
+            assert_eq!(key.mask.as_bytes(), mask, "{tokens:?} mask");
+            assert_eq!(key.val.as_bytes(), val, "{tokens:?} value");
+        }
+        let direct = U32Filter::new()
+            .match_dst_port(443)
+            .match_nexthdr_dst_port(443);
+        assert_eq!(direct.keys[0].val.as_bytes(), [0, 0, 0x01, 0xbb]);
+        assert_eq!((direct.keys[1].off, direct.keys[1].offmask), (0, -1));
+        assert_eq!(direct.keys[1].val.as_bytes(), [0, 0, 0x01, 0xbb]);
+    }
+
+    /// `offset at 0 mask 0f00 shift 6` lands in the selector header:
+    /// `TC_U32_VAROFFSET`, `offoff` 0, `offmask` big-endian, `offshift` 6.
+    #[test]
+    fn u32_offset_lands_in_the_selector() {
+        let f = U32Filter::parse_params(&[
+            "match", "ip", "protocol", "17", "offset", "at", "0", "mask", "0f00", "shift", "6",
+            "link", "2:",
+        ])
+        .unwrap();
+        let mut b = MessageBuilder::new(0, 0);
+        f.write_options(&mut b).unwrap();
+        let bytes = b.as_bytes()[16..].to_vec();
+        let sel = crate::netlink::attr::AttrIter::new(&bytes)
+            .find(|(ty, _)| *ty == u32_mod::TCA_U32_SEL)
+            .map(|(_, p)| p.to_vec())
+            .expect("a selector");
+        // flags, offshift, nkeys, pad, offmask (be16), off, offoff
+        assert_eq!(sel[0], u32_mod::TC_U32_TERMINAL | u32_mod::TC_U32_VAROFFSET);
+        assert_eq!(sel[1], 6);
+        assert_eq!(&sel[4..6], &[0x0f, 0x00]);
+        assert_eq!(&sel[8..10], &0i16.to_ne_bytes());
+        assert_eq!(f.link, Some(0x0020_0000));
+        assert!(U32Filter::parse_params(&["offset"]).is_err());
     }
 
     #[test]
@@ -6341,12 +6671,22 @@ mod tests {
         assert!(f.hashkey.is_none());
     }
 
+    /// A u32 handle is `htid << 20 | bucket << 12 | node` (iproute2's
+    /// `get_u32_handle`), not a qdisc handle: `100:` is 0x10000000. It was
+    /// parsed as a `TcHandle`, 0x01000000 (#492).
     #[test]
-    fn u32_parse_params_ht_handle_encodes_via_tchandle() {
+    fn u32_parse_params_ht_handle_is_a_u32_handle() {
         let f = U32Filter::parse_params(&["ht", "100:"]).unwrap();
-        // tc(8) `100:` = TcHandle(major=0x100, minor=0) → as_raw() = 0x01000000.
-        let want = TcHandle::new(0x100, 0).as_raw();
-        assert_eq!(f.ht, Some(want));
+        assert_eq!(f.ht, Some(0x1000_0000));
+        assert_eq!(U32Filter::handle(0x100, 0, 0), 0x1000_0000);
+        let f = U32Filter::parse_params(&["ht", "2:3:4"]).unwrap();
+        assert_eq!(f.ht, Some(0x0020_3004));
+        assert!(
+            U32Filter::parse_params(&["ht", "1000:"]).is_err(),
+            "htid is 12 bits"
+        );
+        let f = U32Filter::parse_params(&["link", "0x00200000"]).unwrap();
+        assert_eq!(f.link, Some(0x0020_0000));
     }
 
     #[test]
@@ -6357,8 +6697,8 @@ mod tests {
             "ht", "100:", "match", "ip", "dst", "10.0.0.1", "link", "200:", "classid", "1:1",
         ])
         .unwrap();
-        assert_eq!(f.ht, Some(TcHandle::new(0x100, 0).as_raw()));
-        assert_eq!(f.link, Some(TcHandle::new(0x200, 0).as_raw()));
+        assert_eq!(f.ht, Some(U32Filter::handle(0x100, 0, 0)));
+        assert_eq!(f.link, Some(U32Filter::handle(0x200, 0, 0)));
         assert_eq!(f.classid, Some(TcHandle::new(1, 1).as_raw()));
         assert_eq!(f.keys.len(), 1, "the dst match should append a key");
     }
@@ -6366,7 +6706,7 @@ mod tests {
     #[test]
     fn u32_parse_params_link_via_handle_notation() {
         let f = U32Filter::parse_params(&["link", "1:a"]).unwrap();
-        assert_eq!(f.link, Some(TcHandle::new(1, 0xa).as_raw()));
+        assert_eq!(f.link, Some(U32Filter::handle(1, 0xa, 0)));
     }
 
     #[test]

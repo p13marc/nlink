@@ -32,6 +32,35 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **u32: port matches never matched a port, and `ht`/`link` named the
+  wrong hash table (#492, #562).**
+  - `match_src_port`/`match_dst_port` were next-header keys
+    (`with_nexthdr`) with their value and mask in host order. On
+    little-endian, `match_dst_port(443)` compared the first 16 bits with
+    `0xBB01`. And with no linking `offset`, "next header" is the IP header
+    itself. They are now tc's `match ip sport|dport`: bytes 20–21 and 22–23
+    of an option-less IPv4 header.
+  - `TcU32Key::with_nexthdr` packs big-endian like `pack_key*`.
+  - New `match_nexthdr_src_port`/`match_nexthdr_dst_port` (tc's
+    `match tcp|udp src|dst`) and `offset_at`/`offset_plus`/`eat` (tc's
+    `offset at … mask … shift … [eat]`) build the two-level next-header
+    form.
+  - The parser takes tc's port and protocol masks
+    (`match ip dport 80 0xffff`, `match ip protocol 6 0xff`), and
+    `match tcp|udp src|dst` and `offset …` too.
+  - `ht`/`link` were parsed as qdisc handles, so `2:` was `0x00020000`;
+    u32 handles are `htid << 20 | bucket << 12 | node` (`0x00200000`).
+    They now parse as u32 handles, and `U32Filter::handle(htid, bucket,
+    node)` builds one.
+  - The old test compared the parser's keys with the setter's, which
+    were wrong the same way. The new tests:
+    - unit tests pin the key bytes iproute2 writes;
+    - a root test sends UDP through a `match_dst_port` filter on HTB and
+      counts the class (on master, port 5001 never reached 1:10);
+    - another builds the linked next-header form from tc's own lines;
+    - a third installs five u32 lines through `tc` and through nlink's
+      parser and compares `tc filter show`.
+
 - **tc readback: a netem rate of 4 GB/s or more read as 4294967295, a
   netem replace kept a slot and ECN set by `tc`, `qopt` latency was in the
   wrong unit, and `is_ingress()`/`is_clsact()` were both true (#493).**
@@ -587,6 +616,9 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`U32Filter::{handle, match_nexthdr_src_port, match_nexthdr_dst_port,
+  offset_at, offset_plus, eat}`** and `u32::pack_key16_nexthdr` (#492).
 
 - **`Error::NamespaceDeleted` and `Error::is_namespace_deleted()`** (#504).
 
