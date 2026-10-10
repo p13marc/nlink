@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ### Breaking Changes
 
+- **`DeclaredQdiscType::Prio` gains `priomap` and `#[non_exhaustive]`
+  (#487).** Construct it with `QdiscBuilder::prio()`; match it with `..`.
+
 - **`FqCodelConfig::ecn` is `Option<bool>` (#488).** `None` sends nothing,
   and the kernel's default is ECN **on**. `.ecn(false)` now really turns
   it off. See the migration guide.
@@ -15,6 +18,18 @@ All notable changes to this project will be documented in this file.
   [`docs/migration_guide/0.30.0-to-0.31.0.md`](docs/migration_guide/0.30.0-to-0.31.0.md).
 
 ### Fixed
+
+- **A prio qdisc with fewer than three bands always failed with `EINVAL`
+  (#487).** `PrioConfig::bands(n)` kept the three-band default priomap,
+  which names band 2, and `prio_tune` refuses a priomap entry past the
+  last band. So `bands(2)`, imperative or declarative, could never be
+  installed. The default map is now fitted to fewer bands: each entry is
+  capped at the last band, through `PrioConfig::effective_priomap()`,
+  which the diff compares too. A custom map that names a missing band, or
+  `bands` outside 2..=16, is refused with a message that says so. The
+  declarative form gains `QdiscBuilder::priomap()`. The echo cases
+  `prio-bands-2` and a custom priomap converge. Before the fix the first
+  one failed with `add_qdisc: Invalid argument`.
 
 - **fq_codel ECN could not be turned off, and pie/fq_pie flags could not
   be turned off by a replace (#488).** `FqCodelConfig` wrote

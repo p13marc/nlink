@@ -2161,11 +2161,27 @@ impl Default for PrioConfig {
 }
 
 impl PrioConfig {
+    /// The kernel's (and `tc`'s) priomap for three bands.
+    pub const DEFAULT_PRIOMAP: [u8; 16] = [1, 2, 2, 2, 1, 2, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1];
+
     /// Create a new prio configuration builder with defaults.
     pub fn new() -> Self {
         Self {
             bands: 3,
-            priomap: [1, 2, 2, 2, 1, 2, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1],
+            priomap: Self::DEFAULT_PRIOMAP,
+        }
+    }
+
+    /// The priomap that is sent: the one set, except that the default
+    /// map is fitted to fewer than three bands (every entry capped at the
+    /// last band), so `bands(2)` works without a priomap. The kernel
+    /// refuses an entry that names a band past the last (#487).
+    pub fn effective_priomap(&self) -> [u8; 16] {
+        let last = u8::try_from(self.bands.clamp(1, 16) - 1).unwrap_or(0);
+        if self.priomap == Self::DEFAULT_PRIOMAP && self.bands < 3 {
+            Self::DEFAULT_PRIOMAP.map(|band| band.min(last))
+        } else {
+            self.priomap
         }
     }
 
@@ -2250,9 +2266,29 @@ impl QdiscConfig for PrioConfig {
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        // prio_tune: TCQ_MIN_PRIO_BANDS (2) ..= TCQ_PRIO_BANDS (16), and
+        // every priomap entry below `bands`. Say so here rather than relay
+        // a bare EINVAL.
+        if !(2..=16).contains(&self.bands) {
+            return Err(Error::InvalidMessage(format!(
+                "prio: bands {} out of range (2..=16)",
+                self.bands
+            )));
+        }
+        let priomap = self.effective_priomap();
+        if let Some((tos, band)) = priomap
+            .iter()
+            .enumerate()
+            .find(|(_, band)| i32::from(**band) >= self.bands)
+        {
+            return Err(Error::InvalidMessage(format!(
+                "prio: priomap[{tos}] names band {band}, but there are only {} bands",
+                self.bands
+            )));
+        }
         let qopt = prio::TcPrioQopt {
             bands: self.bands,
-            priomap: self.priomap,
+            priomap,
         };
         builder.append(&qopt);
         Ok(())
@@ -10101,6 +10137,36 @@ mod tests {
         assert_eq!(ecn_attr(FqCodelConfig::new().ecn(false)), Some(0));
         assert_eq!(ecn_attr(FqCodelConfig::new().ecn(true)), Some(1));
         assert_eq!(ecn_attr(FqCodelConfig::new()), None);
+    }
+
+    /// Fewer than three bands fit the default priomap to them; a custom
+    /// map that names a band past the last is refused before the kernel
+    /// sees it (#487).
+    #[test]
+    fn prio_fits_the_default_priomap_and_refuses_a_bad_one() {
+        let two = PrioConfig::new().bands(2);
+        assert!(two.effective_priomap().iter().all(|band| *band <= 1));
+        let mut b = MessageBuilder::new(0, 0);
+        two.write_options(&mut b)
+            .expect("bands(2) with the default map");
+
+        let parsed = PrioConfig::parse_params(&["bands", "2"]).unwrap();
+        assert_eq!(parsed.effective_priomap(), two.effective_priomap());
+
+        let bad = PrioConfig::new().bands(2).priomap([2; 16]);
+        let err = bad
+            .write_options(&mut MessageBuilder::new(0, 0))
+            .unwrap_err();
+        assert!(err.to_string().contains("priomap[0] names band 2"), "{err}");
+        let err = PrioConfig::new()
+            .bands(1)
+            .write_options(&mut MessageBuilder::new(0, 0))
+            .unwrap_err();
+        assert!(err.to_string().contains("bands 1 out of range"), "{err}");
+        assert_eq!(
+            PrioConfig::new().effective_priomap(),
+            PrioConfig::DEFAULT_PRIOMAP
+        );
     }
 
     #[test]

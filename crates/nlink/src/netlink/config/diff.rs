@@ -1472,7 +1472,7 @@ fn qdisc_params_match(declared: &DeclaredQdiscType, existing: &TcMessage) -> boo
         }
         (DeclaredQdiscType::Prio { .. }, Some(QdiscOptions::Prio(live))) => {
             let cfg = declared.prio_config().expect("matched the Prio arm");
-            live.bands == cfg.bands && live.priomap == cfg.priomap
+            live.bands == cfg.bands && live.priomap == cfg.effective_priomap()
         }
         // Same kind (the caller checked) and no options either way.
         (DeclaredQdiscType::Ingress | DeclaredQdiscType::Clsact, _) => true,
@@ -2026,10 +2026,16 @@ mod tests {
         assert!(!qdisc_params_match(&mk_sfq(None, Some(64), None), &tuned_echo));
         assert!(!qdisc_params_match(&mk_sfq(None, None, Some(300)), &tuned_echo));
 
-        let prio = DeclaredQdiscType::Prio { bands: Some(3) };
+        let prio = DeclaredQdiscType::Prio {
+            bands: Some(3),
+            priomap: None,
+        };
         let echo = live("prio", Some(declared_options_bytes(&prio)));
         assert!(qdisc_params_match(&prio, &echo));
-        let other = DeclaredQdiscType::Prio { bands: Some(4) };
+        let other = DeclaredQdiscType::Prio {
+            bands: Some(4),
+            priomap: None,
+        };
         assert!(!qdisc_params_match(&other, &echo));
     }
 
