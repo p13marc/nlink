@@ -26,6 +26,34 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Resync snapshots covered only part of what the stream subscribes to,
+  and there was no initial snapshot (#503).**
+  - `rtnetlink_snapshot` dumped links, addresses, routes and neighbours,
+    while `subscribe_all` also joins qdiscs, rules, nexthops and MDB.
+  - `nftables_snapshot` left out named objects and set elements, though
+    the live stream reports both.
+
+  At `ResyncEnd` the reflector replaces its store with the snapshot, so
+  one overflow emptied a mirror of any of these, for good. And without an
+  initial snapshot a fresh mirror held nothing until the first overflow.
+
+  - The rtnetlink snapshot now dumps everything it can: links,
+    addresses, nexthops (before the routes that use them), routes,
+    rules, neighbours, qdiscs, classes, filters and bridge MDB.
+    Network-namespace ids have no dump.
+  - The nftables snapshot adds objects and set elements. It is taken
+    between two reads of the ruleset generation (new
+    `Connection<Nftables>::generation()`) and taken again if a commit
+    landed in between.
+  - `ResyncStream::initial_snapshot(bool)` begins the stream with the
+    current state, marked by the new `ResyncMarker::InitialSyncStart` …
+    `ResyncEnd`, which the reflector stages like a resync. The
+    rtnetlink and nftables `*_with_resync` constructors turn it on.
+
+  Root tests check that the initial rtnetlink snapshot includes a netem
+  qdisc, a rule and a nexthop, and the nftables one a named counter and
+  a set's two elements.
+
 - **After an overflow, the resync stream replayed pre-overflow events on
   top of its snapshot (#464).** On ENOBUFS, `ResyncStream` took the
   snapshot at once. The kernel reports the overflow before it dequeues
@@ -422,6 +450,10 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`ResyncMarker::InitialSyncStart`, `ResyncStream::initial_snapshot`,
+  `ResyncedEvent::is_initial_sync_start`, `Connection<Nftables>::generation`**
+  (#503).
 
 - **`NetlinkSocket::{recv_msg_from, recv_unicast, try_recv_unicast}`**
   (#465).

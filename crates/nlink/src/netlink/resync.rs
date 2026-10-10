@@ -90,6 +90,12 @@ pub enum ResyncMarker {
     /// Resync is starting. The next items will be
     /// [`ResyncedEvent::Resynced`] until [`Self::ResyncEnd`].
     ResyncStart,
+    /// The initial snapshot is starting: the stream begins with the state
+    /// as it is, as [`ResyncedEvent::Resynced`] items, until
+    /// [`Self::ResyncEnd`] — so a mirror built from the stream is complete
+    /// from the start, not only after the first overflow (#503). See
+    /// [`ResyncStream::initial_snapshot`].
+    InitialSyncStart,
     /// Resync is complete. Subsequent items resume as
     /// [`ResyncedEvent::Event`].
     ResyncEnd,
@@ -113,6 +119,11 @@ pub enum ResyncedEvent<T> {
 }
 
 impl<T> ResyncedEvent<T> {
+    /// Convenience: is this a `Marker(InitialSyncStart)`?
+    pub fn is_initial_sync_start(&self) -> bool {
+        matches!(self, Self::Marker(ResyncMarker::InitialSyncStart))
+    }
+
     /// Convenience: is this a `Marker(ResyncStart)`?
     pub fn is_resync_start(&self) -> bool {
         matches!(self, Self::Marker(ResyncMarker::ResyncStart))
@@ -235,6 +246,9 @@ enum ResyncState<'a, T> {
     /// yielded as `Event(T)` or — on ENOBUFS — kicks the state
     /// machine into `RunningSnapshot`.
     Forwarding,
+    /// Not polled yet, with an initial snapshot to take first
+    /// ([`ResyncStream::initial_snapshot`]).
+    Initial,
     /// After an ENOBUFS: discarding what the inner stream had already
     /// queued, until it returns `Pending`, before the snapshot is taken.
     ///
@@ -252,6 +266,8 @@ enum ResyncState<'a, T> {
     /// `Marker(ResyncEnd)` via the `Replaying` state.
     RunningSnapshot {
         fut: Pin<Box<dyn Future<Output = crate::Result<Vec<T>>> + Send + 'a>>,
+        /// The marker the replay opens with.
+        start: ResyncMarker,
         /// Redump attempts already spent on this recovery.
         ///
         /// A redump races the very mutations that caused the
@@ -269,10 +285,12 @@ enum ResyncState<'a, T> {
     Replaying {
         items: VecDeque<T>,
         did_emit_start: bool,
+        start: ResyncMarker,
     },
     /// Waiting out [`REDUMP_RETRY_DELAY`] before the next redump.
     RetryBackoff {
         sleep: Pin<Box<tokio::time::Sleep>>,
+        start: ResyncMarker,
         /// Attempts already spent; the next one is `attempts + 1`.
         attempts: u8,
     },
@@ -365,6 +383,17 @@ where
                     }
                 }
 
+                ResyncState::Initial => {
+                    // Subscribed before this snapshot is taken, so what
+                    // changes during it is queued and follows `ResyncEnd`.
+                    let fut = (this.resync)();
+                    this.state = ResyncState::RunningSnapshot {
+                        fut,
+                        start: ResyncMarker::InitialSyncStart,
+                        attempts: 1,
+                    };
+                }
+
                 ResyncState::Draining => match Pin::new(&mut this.inner).poll_next(cx) {
                     // Older than the overflow: superseded by the snapshot.
                     Poll::Ready(Some(Ok(_))) => this.state = ResyncState::Draining,
@@ -382,17 +411,26 @@ where
                     // Nothing queued any more: snapshot now.
                     Poll::Pending => {
                         let fut = (this.resync)();
-                        this.state = ResyncState::RunningSnapshot { fut, attempts: 1 };
+                        this.state = ResyncState::RunningSnapshot {
+                            fut,
+                            start: ResyncMarker::ResyncStart,
+                            attempts: 1,
+                        };
                     }
                 },
 
-                ResyncState::RunningSnapshot { mut fut, attempts } => {
+                ResyncState::RunningSnapshot {
+                    mut fut,
+                    start,
+                    attempts,
+                } => {
                     match fut.as_mut().poll(cx) {
                         Poll::Ready(Ok(items)) => {
                             // Flush start marker, then drain.
                             this.state = ResyncState::Replaying {
                                 items: items.into(),
                                 did_emit_start: false,
+                                start,
                             };
                             // Loop to emit the start marker.
                         }
@@ -410,6 +448,7 @@ where
                             );
                             this.state = ResyncState::RetryBackoff {
                                 sleep: Box::pin(tokio::time::sleep(REDUMP_RETRY_DELAY)),
+                                start,
                                 attempts,
                             };
                         }
@@ -419,7 +458,11 @@ where
                             return Poll::Ready(Some(Err(e)));
                         }
                         Poll::Pending => {
-                            this.state = ResyncState::RunningSnapshot { fut, attempts };
+                            this.state = ResyncState::RunningSnapshot {
+                                fut,
+                                start,
+                                attempts,
+                            };
                             return Poll::Pending;
                         }
                     }
@@ -427,17 +470,23 @@ where
 
                 ResyncState::RetryBackoff {
                     mut sleep,
+                    start,
                     attempts,
                 } => match sleep.as_mut().poll(cx) {
                     Poll::Ready(()) => {
                         let fut = (this.resync)();
                         this.state = ResyncState::RunningSnapshot {
                             fut,
+                            start,
                             attempts: attempts + 1,
                         };
                     }
                     Poll::Pending => {
-                        this.state = ResyncState::RetryBackoff { sleep, attempts };
+                        this.state = ResyncState::RetryBackoff {
+                            sleep,
+                            start,
+                            attempts,
+                        };
                         return Poll::Pending;
                     }
                 },
@@ -445,20 +494,21 @@ where
                 ResyncState::Replaying {
                     mut items,
                     did_emit_start,
+                    start,
                 } => {
                     if !did_emit_start {
                         this.state = ResyncState::Replaying {
                             items,
                             did_emit_start: true,
+                            start,
                         };
-                        return Poll::Ready(Some(Ok(ResyncedEvent::Marker(
-                            ResyncMarker::ResyncStart,
-                        ))));
+                        return Poll::Ready(Some(Ok(ResyncedEvent::Marker(start))));
                     }
                     if let Some(item) = items.pop_front() {
                         this.state = ResyncState::Replaying {
                             items,
                             did_emit_start: true,
+                            start,
                         };
                         return Poll::Ready(Some(Ok(ResyncedEvent::Resynced(item))));
                     }
@@ -470,6 +520,28 @@ where
                 }
             }
         }
+    }
+}
+
+impl<'a, S, T, F> ResyncStream<'a, S, T, F>
+where
+    S: Stream<Item = crate::Result<T>>,
+    F: FnMut() -> Pin<Box<dyn Future<Output = crate::Result<Vec<T>>> + Send + 'a>>,
+{
+    /// Begin with a snapshot of the current state: `InitialSyncStart`, the
+    /// state as [`ResyncedEvent::Resynced`] items, `ResyncEnd`, then live
+    /// events — so a mirror built from the stream is complete from the
+    /// start (#503). Takes effect only before the stream is first polled.
+    ///
+    /// The rtnetlink and nftables resync constructors turn this on; pass
+    /// `false` to start from live events only.
+    pub fn initial_snapshot(mut self, on: bool) -> Self {
+        match (&self.state, on) {
+            (ResyncState::Forwarding, true) => self.state = ResyncState::Initial,
+            (ResyncState::Initial, false) => self.state = ResyncState::Forwarding,
+            _ => {}
+        }
+        self
     }
 }
 
@@ -788,6 +860,27 @@ mod tests {
         // Snapshot failed → fuse with the snapshot's error.
         assert_eq!(results.len(), 1);
         assert!(results[0].as_ref().unwrap_err().errno() == Some(libc::ENODEV));
+    }
+
+    /// With an initial snapshot the stream begins with the state as it is,
+    /// marked `InitialSyncStart` … `ResyncEnd`, then live events (#503).
+    #[tokio::test]
+    async fn an_initial_snapshot_comes_first() {
+        let s = ScriptedStream::new(vec![Ok(5u32)]);
+        let mut stream = events_with_resync(s, || {
+            Box::pin(async move { Ok::<Vec<u32>, crate::Error>(vec![1, 2]) })
+        })
+        .initial_snapshot(true);
+        let mut got = Vec::new();
+        while let Some(item) = stream.next().await {
+            got.push(item.unwrap());
+        }
+        assert!(got[0].is_initial_sync_start());
+        assert!(matches!(got[1], ResyncedEvent::Resynced(1)));
+        assert!(matches!(got[2], ResyncedEvent::Resynced(2)));
+        assert!(got[3].is_resync_end());
+        assert!(matches!(got[4], ResyncedEvent::Event(5)));
+        assert_eq!(got.len(), 5);
     }
 
     /// What the stream had queued when the overflow was reported is

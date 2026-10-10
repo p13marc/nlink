@@ -580,6 +580,9 @@ async fn into_events_with_resync_recovers_from_enobufs() -> nlink::Result<()> {
         let mut saw_start = false;
         let mut snapshot_count = 0usize;
         let mut saw_end = false;
+        // The stream opens with its initial snapshot (#503); the resync
+        // this test chases is the one after the overflow.
+        let mut in_initial = false;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
 
         while tokio::time::Instant::now() < deadline {
@@ -587,6 +590,13 @@ async fn into_events_with_resync_recovers_from_enobufs() -> nlink::Result<()> {
                 item = stream.next() => {
                     let Some(item) = item else { break };
                     match item? {
+                        ResyncedEvent::Marker(ResyncMarker::InitialSyncStart) => {
+                            in_initial = true;
+                        }
+                        ResyncedEvent::Resynced(_) if in_initial => {}
+                        ResyncedEvent::Marker(ResyncMarker::ResyncEnd) if in_initial => {
+                            in_initial = false;
+                        }
                         ResyncedEvent::Marker(ResyncMarker::ResyncStart) => {
                             saw_start = true;
                         }
@@ -605,7 +615,9 @@ async fn into_events_with_resync_recovers_from_enobufs() -> nlink::Result<()> {
                                 NftablesEvent::NewChain(_)
                                 | NftablesEvent::NewRule(_)
                                 | NftablesEvent::NewFlowtable(_)
-                                | NftablesEvent::NewSet(_) => {}
+                                | NftablesEvent::NewSet(_)
+                                | NftablesEvent::NewSetElements(_)
+                                | NftablesEvent::NewObject(_) => {}
                                 other => panic!(
                                     "snapshot must emit only New* variants; got {other:?}"
                                 ),
@@ -1452,4 +1464,63 @@ async fn a_refused_batch_names_each_refused_operation() -> nlink::Result<()> {
         Ok(())
     })
     .await
+}
+
+// ============================================================================
+// #503 — the nftables snapshot holds named objects and set elements
+// ============================================================================
+
+/// The nftables resync stream starts with a snapshot, and it carries named
+/// objects and set elements, which the live stream reports too. Without
+/// them a mirror lost every named counter and set element on its first
+/// overflow; without the initial snapshot it never had them (#503).
+#[tokio::test]
+async fn the_nftables_snapshot_holds_objects_and_elements() -> nlink::Result<()> {
+    use nlink::netlink::nftables::NftablesEvent;
+    use nlink::netlink::nftables::ObjectConfig;
+    use nlink::netlink::resync::{ConnectionFactory, ResyncedEvent};
+    use std::sync::Arc;
+    use tokio_stream::StreamExt;
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let ns = TestNamespace::new("nft-snap")?;
+    let conn = ns.connection_for::<Nftables>()?;
+    let cfg = NftablesConfig::new().table("t", Family::Inet, |t| {
+        t.object("hits", ObjectConfig::Counter).set("allow", |s| {
+            s.key_type(SetKeyType::Ipv4Addr)
+                .ipv4(std::net::Ipv4Addr::new(192, 0, 2, 1))
+                .ipv4(std::net::Ipv4Addr::new(192, 0, 2, 2))
+        })
+    });
+    cfg.diff(&conn).await?.apply(&conn).await?;
+
+    let name = ns.name().to_string();
+    let factory: ConnectionFactory<Nftables> = Arc::new(move || {
+        let name = name.clone();
+        Box::pin(async move { namespace::connection_for::<Nftables>(&name) })
+    });
+    let mut stream = ns
+        .connection_for::<Nftables>()?
+        .into_events_with_resync(factory)
+        .await?;
+    let first = with_timeout(async { stream.next().await.expect("an item") }).await?;
+    assert!(first.is_initial_sync_start(), "{first:?}");
+    let (mut object, mut elements) = (false, 0);
+    loop {
+        let item = with_timeout(async { stream.next().await.expect("more") }).await?;
+        match item {
+            ResyncedEvent::Resynced(NftablesEvent::NewObject(o)) if o.name == "hits" => {
+                object = true;
+            }
+            ResyncedEvent::Resynced(NftablesEvent::NewSetElements(e)) if e.set == "allow" => {
+                elements = e.elements.len();
+            }
+            item if item.is_resync_end() => break,
+            _ => {}
+        }
+    }
+    assert!(object, "the named counter is in the snapshot");
+    assert_eq!(elements, 2, "the set's elements are in the snapshot");
+    Ok(())
 }
