@@ -269,7 +269,7 @@ impl RecvSession {
 ///
 /// The number aligns with the integration suite's existing 30s
 /// explicit cap on root-gated tests — same budget, same intuition.
-const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ============================================================================
 // Shared methods for protocol types that implement Default
@@ -3551,79 +3551,84 @@ impl Connection<Generic> {
         // Append family name attribute
         builder.append_attr_str(CtrlAttr::FamilyName as u16, name);
 
-        // Plan 208 Phase 1 — wrap in with_timeout. High blast radius:
-        // every hand-rolled GENL family resolution touches this
-        // method. Pre-0.19 had no timeout; a dropped CTRL_CMD_GETFAMILY
-        // response would hang `new_async()` indefinitely.
-        //
-        // Note: parse_family_response already filters by seq, but the
-        // single-recv pattern means a stale frame on the socket would
-        // be swallowed once and then the kernel's real reply would
-        // arrive on the next recv — outside the bounds of this call.
-        // The minimum-risk fix is to keep the single-recv but add the
-        // timeout wrap. A full loop+seq-filter refactor (Plan 208
-        // Phase 4) is queued separately because parse_family_response
-        // conflates "stale frame" and "real ENOENT" into the same
-        // FamilyNotFound error and disambiguating that requires
-        // refactoring the parse side.
-        self.with_timeout(async move {
-            let seq = self.socket.next_seq();
-            builder.set_seq(seq);
-            builder.set_pid(self.socket.pid());
-
-            let msg = builder.finish();
-            self.socket.send(&msg).await?;
-
-            let response = self.socket.recv_unicast().await?;
-            self.parse_family_response(&response, seq, name)
-        })
-        .await
-    }
-
-    /// Parse a CTRL_CMD_GETFAMILY response.
-    fn parse_family_response(&self, data: &[u8], seq: u32, name: &str) -> Result<FamilyInfo> {
-        for result in MessageIter::new(data) {
-            let (header, payload) = result?;
-
-            // Check sequence number
-            if header.nlmsg_seq != seq {
-                continue;
-            }
-
-            // Check for error
-            if header.is_error() {
-                let err = NlMsgError::from_bytes(payload)?;
-                err.warn_if_ack_warns(header.nlmsg_flags, payload);
-                if !err.is_ack() {
-                    // ENOENT means family not found
-                    if err.error == -libc::ENOENT {
-                        return Err(Error::FamilyNotFound {
-                            name: name.to_string(),
-                        });
-                    }
-                    return Err(err.to_error(header.nlmsg_flags, payload));
+        // Through the request session, to this request's ACK (#496). It
+        // read one datagram straight off the socket: with no request lock
+        // in mutex mode and racing the driver in dispatcher mode, and
+        // leaving the ACK, which comes as a second datagram, for the next
+        // call — which then took it for its reply and said
+        // `FamilyNotFound`.
+        let (seq, datagrams) = self.genl_request(builder).await.map_err(|e| {
+            if e.errno() == Some(libc::ENOENT) {
+                Error::FamilyNotFound {
+                    name: name.to_string(),
                 }
-                continue;
+            } else {
+                e
             }
-
-            // Skip DONE message
-            if header.is_done() {
-                continue;
+        })?;
+        for data in &datagrams {
+            for msg in MessageIter::new(data) {
+                let (header, payload) = msg?;
+                if header.nlmsg_seq != seq || header.is_error() || header.is_done() {
+                    continue;
+                }
+                if payload.len() < GENL_HDRLEN {
+                    return Err(Error::InvalidMessage("GENL header too short".into()));
+                }
+                return self.parse_family_attrs(&payload[GENL_HDRLEN..]);
             }
-
-            // Parse GENL header
-            if payload.len() < GENL_HDRLEN {
-                return Err(Error::InvalidMessage("GENL header too short".into()));
-            }
-
-            // Parse attributes after GENL header
-            let attrs_data = &payload[GENL_HDRLEN..];
-            return self.parse_family_attrs(attrs_data);
         }
-
         Err(Error::FamilyNotFound {
             name: name.to_string(),
         })
+    }
+
+    /// Send a GENL request with `NLM_F_ACK` and read every datagram that
+    /// answers it, through its ACK (#496). Returns the request's seq and
+    /// those datagrams, in order.
+    ///
+    /// A `doit` reply and its ACK are two datagrams: `genlmsg_reply`
+    /// unicasts the reply, then `netlink_rcv_skb` sends the ACK. A caller
+    /// that read one left the ACK queued, and the next request on the
+    /// socket took it for its own response.
+    async fn genl_request(&self, mut builder: MessageBuilder) -> Result<(u32, Vec<Vec<u8>>)> {
+        // Session before the timeout, so the lock (mutex mode) or the seq
+        // registration (dispatcher mode) spans the whole window.
+        let seq = self.socket.next_seq();
+        builder.set_seq(seq);
+        builder.set_pid(self.socket.pid());
+        let mut session = self.recv_session(seq).await?;
+
+        self.with_timeout(async move {
+            self.socket.send(&builder.finish()).await?;
+
+            let mut datagrams = Vec::new();
+            loop {
+                let data = session.recv_with_timeout(self).await?;
+                let mut ours = false;
+                let mut acked = false;
+                for msg in MessageIter::new(&data) {
+                    let (header, payload) = msg?;
+                    match classify(header, payload, seq) {
+                        Classification::SkipSeq => continue,
+                        Classification::Error(e) => return Err(e),
+                        Classification::Done(result) => {
+                            result?;
+                            (ours, acked) = (true, true);
+                        }
+                        Classification::Ack => (ours, acked) = (true, true),
+                        Classification::Data { .. } => ours = true,
+                    }
+                }
+                if ours {
+                    datagrams.push(data);
+                }
+                if acked {
+                    return Ok((seq, datagrams));
+                }
+            }
+        })
+        .await
     }
 
     /// Parse family attributes from a CTRL_CMD_GETFAMILY response.
@@ -3704,6 +3709,12 @@ impl Connection<Generic> {
     ///
     /// This is a low-level method for sending arbitrary GENL commands.
     /// Family-specific wrappers (like `Connection<Wireguard>`) should use this.
+    ///
+    /// Returns every datagram the kernel sent for this request through its
+    /// ACK, back to back: the reply, if the command has one, then the ACK.
+    /// Walk it with [`MessageIter`].
+    /// It used to return the first datagram that arrived, which could be
+    /// an earlier call's ACK (#496).
     #[tracing::instrument(level = "debug", skip_all, fields(method = "command"))]
     pub async fn command(
         &self,
@@ -3717,32 +3728,15 @@ impl Connection<Generic> {
         builder.append(&genl_hdr);
         build_attrs(&mut builder);
 
-        // #134 — dual-mode recv. In mutex mode the session holds the
-        // request lock for the whole send+recv (the F1 fix — these public
-        // escape hatches were missed in the 0.19 lock sweep); in
-        // dispatcher mode it registers the seq so the driver routes the
-        // response here instead of the call racing the driver's recv_msg.
-        // Built BEFORE with_timeout so the lock/registration spans the
-        // 30s op-timeout window.
-        let seq = self.socket.next_seq();
-        builder.set_seq(seq);
-        builder.set_pid(self.socket.pid());
-        let mut session = self.recv_session(seq).await?;
-
-        // Plan 208 Phase 1 — wrap in with_timeout. Pre-0.19 a kernel
-        // that dropped the ACK for any custom GENL command hung
-        // indefinitely. `process_genl_response` already does
-        // seq-filter; the timeout closes the indefinite-hang class.
-        self.with_timeout(async move {
-            let msg = builder.finish();
-            self.socket.send(&msg).await?;
-
-            let response = session.recv_with_timeout(self).await?;
-            self.process_genl_response(&response, seq)?;
-
-            Ok(response)
-        })
-        .await
+        let (_, datagrams) = self.genl_request(builder).await?;
+        let mut response = Vec::new();
+        for data in datagrams {
+            // Datagrams end aligned; pad anyway so the next one starts
+            // where `MessageIter` looks for it.
+            response.resize(response.len().next_multiple_of(4), 0);
+            response.extend_from_slice(&data);
+        }
+        Ok(response)
     }
 
     /// Send a GENL dump command and collect all responses.
@@ -3806,26 +3800,6 @@ impl Connection<Generic> {
             Ok(responses)
         })
         .await
-    }
-
-    /// Process a GENL response, checking for errors.
-    fn process_genl_response(&self, data: &[u8], seq: u32) -> Result<()> {
-        for result in MessageIter::new(data) {
-            let (header, payload) = result?;
-
-            if header.nlmsg_seq != seq {
-                continue;
-            }
-
-            if header.is_error() {
-                let err = NlMsgError::from_bytes(payload)?;
-                err.warn_if_ack_warns(header.nlmsg_flags, payload);
-                if !err.is_ack() {
-                    return Err(err.to_error(header.nlmsg_flags, payload));
-                }
-            }
-        }
-        Ok(())
     }
 }
 
@@ -4062,5 +4036,73 @@ mod send_sync_tests {
 
         drop(claim.expect("join"));
         conn.get_links().await.expect("usable once the claim drops");
+    }
+
+    /// GETFAMILY for `nlctrl` as a raw [`Connection::command`].
+    fn get_nlctrl(b: &mut MessageBuilder) {
+        b.append_attr_str(CtrlAttr::FamilyName as u16, "nlctrl");
+    }
+
+    /// The data frames (not ACKs) in a `command()` response.
+    fn replies(response: &[u8]) -> usize {
+        MessageIter::new(response)
+            .flatten()
+            .filter(|(h, _)| !h.is_error() && !h.is_done())
+            .count()
+    }
+
+    /// #496: `command()` read one datagram. The reply and its ACK are two,
+    /// so the next call read the stale ACK and returned it as its result.
+    #[tokio::test]
+    async fn command_returns_its_own_reply_not_the_last_calls_ack() {
+        let conn = Connection::<Generic>::new().expect("socket open");
+        for call in 0..3 {
+            let cmd = conn.command(GENL_ID_CTRL, CtrlCmd::GetFamily as u8, 1, get_nlctrl);
+            let response = tokio::time::timeout(Duration::from_secs(5), cmd)
+                .await
+                .expect("in time")
+                .expect("command");
+            assert_eq!(replies(&response), 1, "call {call}: its own reply");
+        }
+    }
+
+    /// #496: `query_family` read one datagram too, so a second lookup
+    /// read the first one's ACK and reported `FamilyNotFound`.
+    #[tokio::test]
+    async fn a_family_is_found_every_time_it_is_looked_up() {
+        let conn = Connection::<Generic>::new().expect("socket open");
+        for lookup in 0..3 {
+            conn.clear_cache();
+            let info = tokio::time::timeout(Duration::from_secs(5), conn.get_family("nlctrl"))
+                .await
+                .expect("in time")
+                .unwrap_or_else(|e| panic!("lookup {lookup}: {e}"));
+            assert_eq!(info.id, GENL_ID_CTRL);
+        }
+        conn.clear_cache();
+        let err = conn.get_family("no-such-family").await.expect_err("unknown");
+        assert!(matches!(err, Error::FamilyNotFound { .. }), "{err}");
+    }
+
+    /// #496: `query_family` read the socket directly, so in dispatcher
+    /// mode it raced the driver for its own reply. Two worker threads, so
+    /// the driver really runs beside the lookup.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_family_lookup_goes_through_the_dispatcher() {
+        let conn = Connection::<Generic>::new()
+            .expect("socket open")
+            .with_dispatcher();
+        for lookup in 0..3 {
+            // A command first, so the driver is running.
+            conn.command(GENL_ID_CTRL, CtrlCmd::GetFamily as u8, 1, get_nlctrl)
+                .await
+                .expect("command");
+            conn.clear_cache();
+            let info = tokio::time::timeout(Duration::from_secs(5), conn.get_family("nlctrl"))
+                .await
+                .unwrap_or_else(|_| panic!("lookup {lookup} lost its reply to the driver"))
+                .expect("found");
+            assert_eq!(info.id, GENL_ID_CTRL);
+        }
     }
 }
