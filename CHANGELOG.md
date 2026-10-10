@@ -26,6 +26,29 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Namespace names were not validated, so `delete("")` detached
+  `/var/run/netns` and every named namespace with it (#463).** Every
+  by-name function joined the name onto `NETNS_RUN_DIR` unchecked, and
+  `delete_path` lazily unmounts what it is given, as root:
+  - `delete("")` detached `/var/run/netns` itself (a self-bind mount
+    wherever `ip netns add` has run), and every namespace mounted under
+    it;
+  - `delete("..")` detached `/run`;
+  - an absolute name replaced the base directory, so `delete("/some/file")`
+    unlinked that file and `exists("/etc/passwd")` was `true`;
+  - `create("a/b")` made nested directories.
+
+  The new `namespace::validate_name` checks a name the way `ip netns`
+  does: non-empty, no `/`, not `.` or `..`, at most 255 bytes, no NUL.
+  `create`, `delete`, `open`, `enter`, `connection_for*`, the sysctl
+  helpers, `spawn*` and `/etc/netns` binds all go through it, and
+  `exists`/`is_namespace` answer `false` for an invalid name.
+  `delete_path` refuses anything that is not a regular file before it
+  unmounts. Unit tests cover every entry point with `""`, `.`, `..`,
+  `a/b`, an absolute path, NUL and an overlong name, and a directory
+  passed to `delete_path`. The destructive cases were not run against
+  the old code on purpose; `exists("/etc/passwd")` showed the escape.
+
 - **A dump torn by a concurrent change failed the caller, and left its
   remaining frames in the socket (#494).** The kernel marks a multi-part
   dump `NLM_F_DUMP_INTR` when the table changes under it. nlink returned
@@ -330,6 +353,8 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`namespace::validate_name`** (#463).
 
 - **`Error::Sysctl`, `sysctl::{ipv4_conf_key, ipv6_conf_key}`** (#477).
 
