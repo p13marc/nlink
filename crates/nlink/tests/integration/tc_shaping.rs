@@ -36,6 +36,7 @@ use nlink::{
 
 use crate::common::counters::class_stats;
 use crate::common::topo::NsPair;
+use crate::common::traffic::deliver_udp;
 use crate::common::TestNamespace;
 
 // ============================================================================
@@ -656,5 +657,118 @@ async fn port_rules_install_with_their_match_keys() -> nlink::Result<()> {
             "prio {prio}: kernel discarded the port key — this filter matches everything (#288)"
         );
     }
+    Ok(())
+}
+
+// ============================================================================
+// #458 — RateLimiter ingress must deliver
+// ============================================================================
+
+/// `RateLimiter`'s ingress half sends what arrives through the IFB's HTB,
+/// and delivers it. The redirect was a mirred *ingress* redirect: the
+/// packet went to the IFB's receive path, never met the HTB, and the IFB
+/// (`IFF_NOARP`) dropped ARP, so nothing arrived at all (#458).
+/// `reconcile()` read that filter as converged; it now replaces it.
+#[tokio::test]
+async fn ratelimiter_ingress_delivers_through_the_ifb() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!(
+        "sch_htb",
+        "sch_ingress",
+        "cls_matchall",
+        "cls_u32",
+        "act_mirred",
+        "ifb",
+        "veth"
+    );
+
+    let pair = NsPair::new("tcs_rlin", 29).await?;
+    let b = pair.b.connection()?;
+    let dst = std::net::SocketAddr::new(pair.b_addr.into(), 9000);
+    let limiter = RateLimiter::new(pair.b_if).ingress(Rate::mbit(50));
+    limiter.apply(&b).await?;
+
+    assert_eq!(
+        deliver_udp(&pair.a, &pair.b, dst, 20),
+        20,
+        "ingress shaping delivers"
+    );
+    let ifb = b
+        .get_link_by_name("ifb_veth-b")
+        .await?
+        .expect("the IFB exists")
+        .ifindex();
+    let (_, bytes) = class_stats(&b, ifb, TcHandle::new(1, 10))
+        .await?
+        .expect("the IFB's default class exists");
+    assert!(bytes > 0, "the traffic passed the IFB's HTB");
+
+    // What every release before 0.31 installed: u32 at priority 1 with a
+    // mirred *ingress* redirect.
+    for f in b
+        .get_filters_by_parent_index(pair.b_ifindex, TcHandle::INGRESS)
+        .await?
+    {
+        b.del_filter_by_index(
+            pair.b_ifindex,
+            TcHandle::INGRESS,
+            f.protocol(),
+            f.priority(),
+        )
+        .await
+        .or_else(|e| if e.is_not_found() { Ok(()) } else { Err(e) })?;
+    }
+    pair.b.exec(
+        "tc",
+        &[
+            "filter",
+            "add",
+            "dev",
+            pair.b_if,
+            "parent",
+            "ffff:",
+            "prio",
+            "1",
+            "protocol",
+            "all",
+            "u32",
+            "match",
+            "u32",
+            "0",
+            "0",
+            "action",
+            "mirred",
+            "ingress",
+            "redirect",
+            "dev",
+            "ifb_veth-b",
+        ],
+    )?;
+    assert_eq!(
+        deliver_udp(&pair.a, &pair.b, dst, 20),
+        0,
+        "the old redirect drops it all"
+    );
+
+    let report = limiter.reconcile(&b).await?;
+    assert!(report.changes_made > 0, "{report:?}");
+    assert_eq!(
+        deliver_udp(&pair.a, &pair.b, dst, 20),
+        20,
+        "reconcile fixed the redirect"
+    );
+    let filters = b
+        .get_filters_by_parent_index(pair.b_ifindex, TcHandle::INGRESS)
+        .await?;
+    assert!(
+        filters.iter().all(|f| f.kind() == Some("matchall")),
+        "the u32 redirect is gone: {:?}",
+        filters
+            .iter()
+            .map(|f| (f.kind(), f.priority()))
+            .collect::<Vec<_>>()
+    );
+    let again = limiter.reconcile(&b).await?;
+    assert_eq!(again.changes_made, 0, "{again:?}");
     Ok(())
 }

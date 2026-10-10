@@ -312,7 +312,10 @@ impl ActionConfig for GactAction {
 /// // Mirror to eth2 by index
 /// let mirror = MirredAction::mirror_by_index(eth2_ifindex);
 ///
-/// // Redirect on ingress to eth0 by index
+/// // Redirect on ingress to eth0 by index: the packet is *received* by
+/// // eth0. To shape inbound traffic through an IFB, use the egress form,
+/// // `redirect_by_index(ifb)`: the IFB has to transmit the packet for its
+/// // root qdisc to see it (#458).
 /// let ingress_redirect = MirredAction::ingress_redirect_by_index(eth0_ifindex);
 /// ```
 #[derive(Debug, Clone)]
@@ -359,10 +362,13 @@ impl MirredAction {
         Self::new_with_ifindex(mirred::TCA_EGRESS_MIRROR, ifindex)
     }
 
-    /// Create an ingress redirect action by interface index.
+    /// Create an ingress redirect action by interface index: the packet
+    /// enters `ifindex`'s **receive** path.
     ///
-    /// This is the preferred method for namespace operations as it avoids
-    /// sysfs reads that don't work across namespaces.
+    /// Not for IFB shaping: a packet redirected this way never passes the
+    /// IFB's root qdisc, and the IFB (`IFF_NOARP`) drops ARP, so nothing
+    /// gets through. Redirect to an IFB with
+    /// [`redirect_by_index`](Self::redirect_by_index) (#458).
     pub fn ingress_redirect_by_index(ifindex: u32) -> Self {
         Self::new_with_ifindex(mirred::TCA_INGRESS_REDIR, ifindex)
     }
