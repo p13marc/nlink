@@ -562,7 +562,7 @@ impl Connection<Devlink> {
             let mut result_payload: Option<Vec<u8>> = None;
 
             loop {
-                let data: Vec<u8> = self.socket().recv_msg().await?;
+                let data: Vec<u8> = self.socket().recv_unicast().await?;
                 let mut done = false;
 
                 for msg_result in MessageIter::new(&data) {
@@ -632,7 +632,7 @@ impl Connection<Devlink> {
         // operation timeout (Plan 171 default: 30s).
         self.with_timeout(async {
             loop {
-                let data: Vec<u8> = self.socket().recv_msg().await?;
+                let data: Vec<u8> = self.socket().recv_unicast().await?;
 
                 for msg_result in MessageIter::new(&data) {
                     let (header, payload) = msg_result?;
@@ -667,7 +667,7 @@ impl Connection<Devlink> {
             let mut results = Vec::new();
 
             loop {
-                let data: Vec<u8> = self.socket().recv_msg().await?;
+                let data: Vec<u8> = self.socket().recv_unicast().await?;
                 let mut done = false;
 
                 for msg_result in MessageIter::new(&data) {

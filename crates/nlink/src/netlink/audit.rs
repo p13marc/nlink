@@ -446,7 +446,7 @@ impl Connection<Audit> {
             // Receive responses, filtering by seq (skip any stale
             // frames from prior queries on the same socket).
             loop {
-                let data = self.socket().recv_msg().await?;
+                let data = self.socket().recv_unicast().await?;
 
                 if data.len() < NLMSG_HDRLEN {
                     return Err(Error::InvalidMessage("response too short".into()));
@@ -605,7 +605,7 @@ impl Connection<Audit> {
 
             // Receive response - skip ACK; filter by seq.
             loop {
-                let data = self.socket().recv_msg().await?;
+                let data = self.socket().recv_unicast().await?;
 
                 if data.len() < NLMSG_HDRLEN {
                     return Err(Error::InvalidMessage("response too short".into()));
@@ -701,7 +701,7 @@ impl Connection<Audit> {
 
             // Receive response - skip ACK; filter by seq.
             loop {
-                let data = self.socket().recv_msg().await?;
+                let data = self.socket().recv_unicast().await?;
 
                 if data.len() < NLMSG_HDRLEN {
                     return Err(Error::InvalidMessage("response too short".into()));

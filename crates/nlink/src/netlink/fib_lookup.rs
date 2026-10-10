@@ -410,7 +410,7 @@ impl Connection<FibLookup> {
             self.socket().send(&buf).await?;
 
             loop {
-                let data = self.socket().recv_msg().await?;
+                let data = self.socket().recv_unicast().await?;
                 if data.len() < NLMSG_HDRLEN {
                     return Err(Error::InvalidMessage("response too short".into()));
                 }

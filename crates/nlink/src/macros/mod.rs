@@ -492,7 +492,7 @@ pub mod __rt {
         let msg = builder.finish();
         socket.send(&msg).await?;
 
-        let response: Vec<u8> = socket.recv_msg().await?;
+        let response: Vec<u8> = socket.recv_unicast().await?;
 
         for result in MessageIter::new(&response) {
             let (header, payload) = result?;
@@ -569,7 +569,7 @@ pub mod __rt {
         let msg = builder.finish();
         socket.send(&msg).await?;
 
-        let response: Vec<u8> = socket.recv_msg().await?;
+        let response: Vec<u8> = socket.recv_unicast().await?;
 
         let mut family_id: Option<u16> = None;
         let mut mcast_groups: HashMap<String, u32> = HashMap::new();

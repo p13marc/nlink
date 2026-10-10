@@ -316,20 +316,25 @@ impl Dispatcher {
 
     /// Classify and route one recv'd datagram. Called by the driver.
     ///
-    /// Rules (mirror the seq invariant the request loops rely on):
-    /// - first parseable message has `seq != 0` and a registered
-    ///   pending entry → forward the whole buffer to that channel;
-    /// - `seq == 0` → multicast notification → fan out to every
-    ///   subscriber (group-agnostic v1, preserving today's
-    ///   "see-everything-then-filter" `events()` semantics);
+    /// `multicast` is what the socket address said (`nl_groups != 0`), the
+    /// only reliable mark: a notification caused by a request carries that
+    /// request's seq and portid, so another process's (`ip`, `nft`) has a
+    /// seq that is not 0, and this socket's own looks like its reply. They
+    /// used to be routed by `seq == 0` — dropped as "unregistered", or
+    /// delivered to a request whose seq they happened to share (#465).
+    ///
+    /// - multicast → fan out to every subscriber (group-agnostic v1,
+    ///   preserving the "see-everything-then-filter" `events()` semantics);
+    /// - unicast with a registered seq → forward the whole buffer to that
+    ///   request's channel;
     /// - otherwise (unknown / late / post-cancel seq) → drop.
-    pub(crate) fn route_buffer(&self, buf: Arc<Vec<u8>>) {
+    pub(crate) fn route_buffer(&self, buf: Arc<Vec<u8>>, multicast: bool) {
         let Some((header, _)) = MessageIter::new(&buf).flatten().next() else {
             // Unparseable frame — drop (Plan 193 rule 3 spirit).
             return;
         };
         let seq = header.nlmsg_seq;
-        if seq == 0 {
+        if multicast {
             // Multicast notification. Feed both surfaces: the typed
             // `DispatcherEvent` broadcast (resync/ENOBUFS consumers) and
             // the raw-frame `event_listeners` (the `events()` streams).
@@ -612,8 +617,8 @@ async fn run_driver(socket: Arc<NetlinkSocket>, dispatcher: Dispatcher) {
                 tracing::trace!("dispatcher driver: shutdown");
                 break;
             }
-            res = socket.recv_msg() => match res {
-                Ok(buf) => dispatcher.route_buffer(Arc::new(buf)),
+            res = socket.recv_msg_from() => match res {
+                Ok((buf, multicast)) => dispatcher.route_buffer(Arc::new(buf), multicast),
                 Err(e) if e.is_no_buffer_space() => {
                     // ENOBUFS: `recv_msg` already fanned out
                     // ResyncMarker::ResyncStart to subscribers via the
@@ -808,10 +813,26 @@ mod tests {
         let d = Dispatcher::new();
         let mut guard = d.register(7);
         assert_eq!(d.pending_count(), 1);
-        d.route_buffer(synth_frame(7));
+        d.route_buffer(synth_frame(7), false);
         let buf = guard.rx.recv().await.expect("frame routed to seq 7");
         // The routed buffer is the whole datagram.
         assert!(!buf.is_empty());
+    }
+
+    /// A multicast copy that carries a pending request's seq — the
+    /// notification of that very request, or another process's with a
+    /// colliding seq — goes to event listeners, not to the request (#465).
+    #[tokio::test]
+    async fn a_multicast_frame_with_a_pending_seq_is_an_event() {
+        let d = Dispatcher::new();
+        let mut request = d.register(7);
+        let mut listener = d.subscribe_events();
+        d.route_buffer(synth_frame(7), true);
+        assert!(matches!(
+            request.rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(listener.rx.try_recv().is_ok(), "the event listener got it");
     }
 
     #[tokio::test]
@@ -819,7 +840,7 @@ mod tests {
         let d = Dispatcher::new();
         let mut guard = d.register(1);
         // Frame for an unregistered seq must not reach seq 1's channel.
-        d.route_buffer(synth_frame(999));
+        d.route_buffer(synth_frame(999), false);
         assert!(matches!(
             guard.rx.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
@@ -834,7 +855,7 @@ mod tests {
         drop(guard);
         assert_eq!(d.pending_count(), 0);
         // A late frame for the dropped seq is silently discarded.
-        d.route_buffer(synth_frame(3));
+        d.route_buffer(synth_frame(3), false);
         assert_eq!(d.pending_count(), 0);
     }
 
@@ -844,7 +865,7 @@ mod tests {
         let mut sub = d.subscribe_multicast(1);
         let mut unicast = d.register(5);
         // seq == 0 → multicast fan-out, NOT the unicast channel.
-        d.route_buffer(synth_frame(0));
+        d.route_buffer(synth_frame(0), true);
         match sub.recv().await {
             Ok(DispatcherEvent::Frame(_)) => {}
             other => panic!("expected multicast Frame, got {:?}", other),
@@ -955,7 +976,7 @@ mod tests {
         let mut guard = d.subscribe_events();
         assert_eq!(d.event_listener_count(), 1);
         // Multicast frame (seq == 0) is fanned to event listeners.
-        d.route_buffer(synth_frame(0));
+        d.route_buffer(synth_frame(0), true);
         let buf = guard.rx.recv().await.expect("event listener got the frame");
         assert!(!buf.is_empty());
     }
@@ -967,7 +988,7 @@ mod tests {
         let mut req = d.register(5);
         // A unicast (seq != 0) frame goes to the per-seq channel, not the
         // event listener.
-        d.route_buffer(synth_frame(5));
+        d.route_buffer(synth_frame(5), false);
         assert!(req.rx.recv().await.is_some(), "unicast routed to seq 5");
         assert!(matches!(
             ev.rx.try_recv(),
@@ -983,7 +1004,7 @@ mod tests {
         drop(g);
         assert_eq!(d.event_listener_count(), 0);
         // A later multicast frame is simply dropped (no panic).
-        d.route_buffer(synth_frame(0));
+        d.route_buffer(synth_frame(0), true);
     }
 
     #[tokio::test]
@@ -992,7 +1013,7 @@ mod tests {
         let mut a = d.subscribe_events();
         let mut b = d.subscribe_events();
         assert_eq!(d.event_listener_count(), 2);
-        d.route_buffer(synth_frame(0));
+        d.route_buffer(synth_frame(0), true);
         assert!(a.rx.recv().await.is_some());
         assert!(b.rx.recv().await.is_some());
     }
@@ -1003,9 +1024,9 @@ mod tests {
         let mut guard = d.register_many(&[10, 20, 30]);
         assert_eq!(d.pending_count(), 3);
         // Frames for any of the registered seqs land on the one channel.
-        d.route_buffer(synth_frame(20));
-        d.route_buffer(synth_frame(10));
-        d.route_buffer(synth_frame(30));
+        d.route_buffer(synth_frame(20), false);
+        d.route_buffer(synth_frame(10), false);
+        d.route_buffer(synth_frame(30), false);
         for _ in 0..3 {
             assert!(guard.rx.recv().await.is_some());
         }
@@ -1020,8 +1041,8 @@ mod tests {
         let mut g1 = d.register(10);
         let mut g2 = d.register(20);
         assert_eq!(d.pending_count(), 2);
-        d.route_buffer(synth_frame(20));
-        d.route_buffer(synth_frame(10));
+        d.route_buffer(synth_frame(20), false);
+        d.route_buffer(synth_frame(10), false);
         assert!(g1.rx.recv().await.is_some(), "seq 10 delivered");
         assert!(g2.rx.recv().await.is_some(), "seq 20 delivered");
     }

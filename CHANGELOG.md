@@ -26,6 +26,31 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Multicast was recognised by `nlmsg_seq == 0`, so notifications caused
+  by other processes were dropped, and a subscribed connection read its
+  own as a reply (#465).** The kernel stamps a notification caused by a
+  request with that request's seq and portid (`rtmsg_ifa(…, nlh,
+  portid)`, `rtmsg_fib`). Only changes the kernel originates carry seq 0.
+  Link changes do, via the netdev notifier, which is why tests that only
+  added links never noticed. The effects:
+  - A dispatcher-mode `events()` stream silently dropped every address
+    or route change made by `ip`, `nft` or another process, as an
+    "unregistered seq".
+  - A connection subscribed to a group read the notification of its own
+    request first. In mutex mode that made `add_address` fail with
+    "kernel returned data on an ack-only request". In dispatcher mode the
+    notification went to the request and was lost to `events()`.
+
+  `NetlinkSocket` gains `recv_msg_from()`, which also says whether the
+  datagram was a multicast copy (`nl_groups` in `msg_name`, the only place
+  the kernel records it), plus `recv_unicast()`/`try_recv_unicast()`. The
+  dispatcher routes on that tag. Every request/reply loop (rtnetlink,
+  GENL, nftables, sockdiag, devlink, nl80211, audit, FIB lookup) skips
+  multicast copies, as do batched dump receives (which now record
+  `msg_name`). Root tests cover both cases. Before the fix, a
+  dispatcher stream never saw an address `ip` added, and a subscribed
+  mutex-mode `add_address` failed with "data on an ack-only request".
+
 - **Namespace names were not validated, so `delete("")` detached
   `/var/run/netns` and every named namespace with it (#463).** Every
   by-name function joined the name onto `NETNS_RUN_DIR` unchecked, and
@@ -353,6 +378,9 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`NetlinkSocket::{recv_msg_from, recv_unicast, try_recv_unicast}`**
+  (#465).
 
 - **`namespace::validate_name`** (#463).
 
