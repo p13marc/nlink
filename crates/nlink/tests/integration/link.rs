@@ -754,3 +754,36 @@ async fn test_create_netkit_pair() -> Result<()> {
 
     Ok(())
 }
+
+/// A bridge created with an MTU keeps it when a port with a smaller MTU
+/// joins. The kernel treats a bridge MTU as the user's only after an
+/// RTM_SETLINK that changes it, so the IFLA_MTU it was created with gave
+/// way to the port's (#474).
+#[tokio::test]
+async fn a_bridge_created_with_an_mtu_keeps_it() -> Result<()> {
+    require_root!();
+    nlink::require_modules!("bridge", "dummy");
+
+    let ns = TestNamespace::new("brmtu")?;
+    let conn = ns.connection()?;
+    conn.add_link(BridgeLink::new("br0").mtu(9000)).await?;
+    conn.add_link(DummyLink::new("d0").mtu(1500)).await?;
+    conn.set_link_master("d0", "br0").await?;
+    assert_eq!(link_mtu(&conn, "br0").await?, Some(9000));
+    conn.set_link_mtu("d0", 1400).await?;
+    assert_eq!(link_mtu(&conn, "br0").await?, Some(9000));
+
+    // An existing, unpinned bridge: pin it.
+    conn.add_link(BridgeLink::new("br1")).await?;
+    conn.add_link(DummyLink::new("d1").mtu(1500)).await?;
+    conn.set_link_master("d1", "br1").await?;
+    conn.pin_bridge_mtu("br1", 1500).await?;
+    conn.set_link_mtu("d1", 1400).await?;
+    let br1 = link_mtu(&conn, "br1").await?;
+    assert_eq!(br1, Some(1500), "a pinned bridge does not follow its port");
+    Ok(())
+}
+
+async fn link_mtu(conn: &nlink::Connection<nlink::Route>, name: &str) -> Result<Option<u32>> {
+    Ok(conn.get_link_by_name(name).await?.and_then(|l| l.mtu()))
+}

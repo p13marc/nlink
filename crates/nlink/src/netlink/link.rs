@@ -369,6 +369,16 @@ pub trait LinkConfig: Send + Sync {
     /// The `parent_index` parameter contains the resolved interface index
     /// for link types that have a parent reference.
     fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>);
+
+    /// An MTU [`Connection::add_link`] must pin after creating the link.
+    ///
+    /// A bridge's MTU follows its smallest port unless the kernel marks it
+    /// user-set, which only an `RTM_SETLINK` that changes it does — not the
+    /// `IFLA_MTU` it was created with (#474). `BridgeLink` returns its MTU
+    /// here; the default is `None`.
+    fn pinned_mtu(&self) -> Option<u32> {
+        None
+    }
 }
 
 // ============================================================================
@@ -775,6 +785,10 @@ impl LinkConfig for BridgeLink {
 
     fn kind(&self) -> &str {
         "bridge"
+    }
+
+    fn pinned_mtu(&self) -> Option<u32> {
+        self.mtu
     }
 
     fn write_to(&self, builder: &mut MessageBuilder, _parent_index: Option<u32>) {
@@ -5270,7 +5284,39 @@ impl Connection<Route> {
 
         self.send_ack(builder)
             .await
-            .map_err(|e| e.with_context(format!("add_link({link_name}, kind={link_kind})")))
+            .map_err(|e| e.with_context(format!("add_link({link_name}, kind={link_kind})")))?;
+
+        // A bridge created with an MTU keeps it only once the MTU is pinned
+        // (#474).
+        if let Some(mtu) = config.pinned_mtu() {
+            self.pin_bridge_mtu(link_name.as_str(), mtu).await?;
+        }
+        Ok(())
+    }
+
+    /// Set a bridge's MTU so that it **stays**: marked user-set, so ports
+    /// joining or changing their MTU no longer move it.
+    ///
+    /// The kernel sets `BROPT_MTU_SET_BY_USER` only in `br_change_mtu`, an
+    /// `RTM_SETLINK` that changes the MTU. The `IFLA_MTU` a bridge is created
+    /// with does not count, and neither does a set to the MTU it already
+    /// has, so `br_add_if()` and a port's MTU change moved the bridge back
+    /// to its smallest port's MTU (#474). When the bridge already has `mtu`,
+    /// this goes through a neighbouring value first.
+    pub async fn pin_bridge_mtu(&self, bridge: impl Into<InterfaceRef>, mtu: u32) -> Result<()> {
+        let ifindex = self.resolve_interface(&bridge.into()).await?;
+        self.pin_bridge_mtu_by_index(ifindex, mtu).await
+    }
+
+    /// [`pin_bridge_mtu`](Self::pin_bridge_mtu) by interface index.
+    pub async fn pin_bridge_mtu_by_index(&self, ifindex: u32, mtu: u32) -> Result<()> {
+        let current = self.get_link_by_index(ifindex).await?.and_then(|l| l.mtu());
+        if current == Some(mtu) {
+            // 68 is the IPv4 minimum, below which the kernel refuses.
+            let step = if mtu > 68 { mtu - 1 } else { mtu + 1 };
+            self.set_link_mtu_by_index(ifindex, step).await?;
+        }
+        self.set_link_mtu_by_index(ifindex, mtu).await
     }
 
     /// Set the master (controller) device for an interface.

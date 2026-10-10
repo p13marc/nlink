@@ -261,6 +261,20 @@ async fn link_modifiers_converge() -> nlink::Result<()> {
                     .link("d0", |l| l.dummy().mtu(1500).master("br0").up()),
             ],
         ),
+        // Created with its MTU, then a port's MTU drops: an unpinned
+        // bridge follows the port (`NETDEV_CHANGEMTU`), so the IFLA_MTU it
+        // was created with has to have been pinned (#474).
+        case(
+            "bridge-mtu-survives-a-port-mtu-change",
+            vec![
+                NetworkConfig::new()
+                    .link("br0", |l| l.bridge().mtu(9000).up())
+                    .link("d0", |l| l.dummy().mtu(9000).master("br0").up()),
+                NetworkConfig::new()
+                    .link("br0", |l| l.bridge().mtu(9000).up())
+                    .link("d0", |l| l.dummy().mtu(1500).master("br0").up()),
+            ],
+        ),
         case(
             "bridge-mtu-below-port",
             vec![

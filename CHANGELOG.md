@@ -26,6 +26,25 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **A bridge created with an MTU gave it up to its ports (#474).** The
+  kernel treats a bridge MTU as the user's (`BROPT_MTU_SET_BY_USER`) only
+  after `br_change_mtu`, an `RTM_SETLINK` that changes it. The `IFLA_MTU`
+  a bridge is created with does not count. So a port joining
+  (`br_add_if`) or a port's MTU change (`NETDEV_CHANGEMTU`) moved the
+  bridge to its smallest port's MTU. #407 re-asserted a declared bridge's
+  MTU only when its port set changed in the same apply. That missed
+  imperative bridges, port MTU changes, and creation itself.
+  `Connection::add_link` now pins the MTU of a `BridgeLink` created with
+  one, through the new provided `LinkConfig::pinned_mtu`. For bridges
+  that already exist, `Connection::pin_bridge_mtu{,_by_index}` sets the
+  MTU through a neighbouring value when it is already right, since a
+  no-op set does not count. The declarative apply also re-asserts a
+  bridge's MTU when a port's MTU changes. Root tests: an imperative
+  bridge created at 9000 with a 1500 port; an unpinned bridge pinned
+  with `pin_bridge_mtu`; and an echo case where a port drops from 9000
+  to 1500. Before the fix the first ended at 1500 and the echo case left
+  `~ link br0 (mtu=9000)` after the apply.
+
 - **A partial or duplicate link declaration released the link from its
   master, and two declarations flipped it on every apply (#462).** A
   declaration's `master: None` meant "no master", unlike MTU and MAC,
@@ -267,6 +286,9 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`Connection::pin_bridge_mtu{,_by_index}` and the provided
+  `LinkConfig::pinned_mtu`** (#474).
 
 - **`NetworkConfig::validate()`, `LinkBuilder::nomaster()`, `MasterSpec`,
   `DeclaredLink::master_spec()`** (#462).

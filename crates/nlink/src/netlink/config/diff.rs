@@ -643,6 +643,12 @@ fn diff_links<'a>(
                 port_set_changes.extend(declared.master.name());
                 port_set_changes.extend(existing_master);
             }
+            // A port's MTU change moves an unpinned bridge too
+            // (`NETDEV_CHANGEMTU` → `br_mtu_auto_adjust`), so the bridge's
+            // declared MTU is re-asserted after it (#474).
+            if changes.set_mtu.is_some() {
+                port_set_changes.extend(existing_master);
+            }
             // The link changes that make the kernel drop the link's routes
             // and IPv6 addresses (`addrconf_ifdown()`, unless
             // `keep_addr_on_down`): going down; joining or leaving an L3
@@ -687,7 +693,9 @@ fn diff_links<'a>(
     // bridge is created with. So a bridge declared with an MTU and given a
     // port in the same apply ended up at the port's MTU, and the next diff
     // reported its own MTU as changed. Every declared bridge MTU whose port
-    // set changes here is re-asserted once the links are done.
+    // set — or a port's MTU — changes here is re-asserted once the links
+    // are done. (A bridge nlink creates with an MTU is pinned as it is
+    // created, by `add_link`, #474; this covers bridges that predate that.)
     for declared in &config.links {
         let Some(mtu) = declared.mtu else { continue };
         let is_bridge = declared.link_type == DeclaredLinkType::Bridge
