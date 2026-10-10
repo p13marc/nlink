@@ -1382,3 +1382,74 @@ async fn what_a_hand_added_rule_uses_is_kept() -> nlink::Result<()> {
     })
     .await
 }
+
+// ============================================================================
+// #481 — a refused batch names every operation it refused
+// ============================================================================
+
+/// A batch with two bad operations — a rule for a chain that does not
+/// exist, and a delete of a set a rule still uses — is refused with both
+/// named, not one errno and a bare offset. And nothing in it is committed:
+/// the table it also added is not there.
+#[tokio::test]
+async fn a_refused_batch_names_each_refused_operation() -> nlink::Result<()> {
+    use nlink::netlink::nftables::types::{Chain, Rule, Set};
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let ns = TestNamespace::new("nft-batch-err")?;
+    let conn = ns.connection_for::<Nftables>()?;
+    with_timeout(async {
+        conn.add_table("t", Family::Ip).await?;
+        conn.add_chain(Chain::new("t", "c")?.family(Family::Ip))
+            .await?;
+        let set = Set::new("t", "s")
+            .family(Family::Ip)
+            .key_type(SetKeyType::Ipv4Addr);
+        conn.add_set(set).await?;
+        conn.add_rule(
+            Rule::new("t", "c")
+                .family(Family::Ip)
+                .match_saddr_in_set("s")
+                .drop(),
+        )
+        .await?;
+
+        let err = conn
+            .transaction()
+            .add_table("other", Family::Ip)
+            .add_rule(Rule::new("t", "nochain").family(Family::Ip).accept())
+            .del_set("t", "s", Family::Ip)
+            .commit(&conn)
+            .await
+            .expect_err("the batch has two bad operations");
+        let shown = err.to_string();
+        assert!(shown.contains("nothing committed"), "{shown}");
+        assert!(
+            shown.contains("op #1 add rule ip t/nochain: No such file or directory (errno 2)"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("op #2 delete set ip t/s: Device or resource busy (errno 16)"),
+            "{shown}"
+        );
+        assert!(
+            !shown.contains("os error"),
+            "the errno is said once: {shown}"
+        );
+        // The predicates answer for the first failure.
+        assert!(err.is_not_found(), "{shown}");
+        let nlink::Error::NftBatch { failures, .. } = &err else {
+            panic!("expected Error::NftBatch, got {err:?}");
+        };
+        assert_eq!(failures.len(), 2, "{shown}");
+
+        let tables = conn.list_tables().await?;
+        assert!(
+            !tables.iter().any(|t| t.name == "other"),
+            "a refused batch commits nothing: {tables:?}"
+        );
+        Ok(())
+    })
+    .await
+}

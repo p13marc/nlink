@@ -34,6 +34,7 @@
 //! # }
 //! ```
 
+pub mod batch_error;
 pub mod config;
 pub mod connection;
 pub mod events;
@@ -44,6 +45,7 @@ pub mod resync;
 pub mod types;
 pub(crate) mod userdata;
 
+pub use batch_error::NftBatchFailure;
 pub use connection::{RawMessage, Transaction};
 pub use events::{GenInfo, NftablesEvent, NftablesGroup, SetElementsEvent, NFNLGRP_NFTABLES};
 pub use resync::{nftables_snapshot, BorrowedResyncStream, OwnedResyncStream};
