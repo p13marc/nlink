@@ -762,8 +762,11 @@ pub struct FqCodelConfig {
     pub flows: Option<u32>,
     /// Quantum (bytes per round).
     pub quantum: Option<u32>,
-    /// Enable ECN marking.
-    pub ecn: bool,
+    /// ECN marking: `Some(true)` marks, `Some(false)` drops, `None` sends
+    /// nothing. The kernel turns ECN **on** when it creates an fq_codel and
+    /// keeps whatever it has when a change does not carry the attribute, so
+    /// turning it off has to be said (#488).
+    pub ecn: Option<bool>,
     /// CE threshold.
     pub ce_threshold: Option<Duration>,
     /// Memory limit in bytes.
@@ -785,7 +788,7 @@ impl FqCodelConfig {
             limit: None,
             flows: None,
             quantum: None,
-            ecn: false,
+            ecn: None,
             ce_threshold: None,
             memory_limit: None,
         }
@@ -821,9 +824,9 @@ impl FqCodelConfig {
         self
     }
 
-    /// Enable or disable ECN marking.
+    /// Enable or disable ECN marking. The kernel's default is on.
     pub fn ecn(mut self, enable: bool) -> Self {
-        self.ecn = enable;
+        self.ecn = Some(enable);
         self
     }
 
@@ -935,11 +938,11 @@ impl FqCodelConfig {
                     i += 2;
                 }
                 "ecn" => {
-                    cfg.ecn = true;
+                    cfg.ecn = Some(true);
                     i += 1;
                 }
                 "noecn" => {
-                    cfg.ecn = false;
+                    cfg.ecn = Some(false);
                     i += 1;
                 }
                 other => {
@@ -974,8 +977,8 @@ impl QdiscConfig for FqCodelConfig {
         if let Some(quantum) = self.quantum {
             builder.append_attr_u32(fq_codel::TCA_FQ_CODEL_QUANTUM, quantum);
         }
-        if self.ecn {
-            builder.append_attr_u32(fq_codel::TCA_FQ_CODEL_ECN, 1);
+        if let Some(ecn) = self.ecn {
+            builder.append_attr_u32(fq_codel::TCA_FQ_CODEL_ECN, u32::from(ecn));
         }
         if let Some(ce) = self.ce_threshold {
             builder.append_attr_u32(fq_codel::TCA_FQ_CODEL_CE_THRESHOLD, ce.as_micros() as u32);
@@ -3490,12 +3493,11 @@ impl QdiscConfig for PieConfig {
         if let Some(beta) = self.beta {
             builder.append_attr_u32(pie::TCA_PIE_BETA, beta);
         }
-        if self.ecn {
-            builder.append_attr_u32(pie::TCA_PIE_ECN, 1);
-        }
-        if self.bytemode {
-            builder.append_attr_u32(pie::TCA_PIE_BYTEMODE, 1);
-        }
+        // Written whether on or off: both default off, and `pie_change`
+        // keeps what it has when the attribute is absent, so a replace that
+        // only ever sent "on" could never turn either off (#488).
+        builder.append_attr_u32(pie::TCA_PIE_ECN, u32::from(self.ecn));
+        builder.append_attr_u32(pie::TCA_PIE_BYTEMODE, u32::from(self.bytemode));
 
         Ok(())
     }
@@ -3849,15 +3851,15 @@ impl QdiscConfig for FqPieConfig {
             let permille = (prob.as_percent() * 10.0) as u32;
             builder.append_attr_u32(fq_pie::TCA_FQ_PIE_ECN_PROB, permille);
         }
-        if self.ecn {
-            builder.append_attr_u32(fq_pie::TCA_FQ_PIE_ECN, 1);
-        }
-        if self.bytemode {
-            builder.append_attr_u32(fq_pie::TCA_FQ_PIE_BYTEMODE, 1);
-        }
-        if self.dq_rate_estimator {
-            builder.append_attr_u32(fq_pie::TCA_FQ_PIE_DQ_RATE_ESTIMATOR, 1);
-        }
+        // Written whether on or off: all three default off, and
+        // `fq_pie_change` keeps what it has when an attribute is absent, so
+        // a replace could never turn one off (#488).
+        builder.append_attr_u32(fq_pie::TCA_FQ_PIE_ECN, u32::from(self.ecn));
+        builder.append_attr_u32(fq_pie::TCA_FQ_PIE_BYTEMODE, u32::from(self.bytemode));
+        builder.append_attr_u32(
+            fq_pie::TCA_FQ_PIE_DQ_RATE_ESTIMATOR,
+            u32::from(self.dq_rate_estimator),
+        );
 
         Ok(())
     }
@@ -9121,7 +9123,7 @@ mod tests {
         assert_eq!(config.target, Some(Duration::from_millis(5)));
         assert_eq!(config.interval, Some(Duration::from_millis(100)));
         assert_eq!(config.limit, Some(10000));
-        assert!(config.ecn);
+        assert_eq!(config.ecn, Some(true));
         assert_eq!(config.kind(), "fq_codel");
     }
 
@@ -10047,7 +10049,7 @@ mod tests {
         assert!(cfg.target.is_none());
         assert!(cfg.interval.is_none());
         assert!(cfg.limit.is_none());
-        assert!(!cfg.ecn);
+        assert_eq!(cfg.ecn, None);
     }
 
     #[test]
@@ -10075,15 +10077,30 @@ mod tests {
         assert_eq!(cfg.quantum, Some(1500));
         // 32m via tc-style size = 32 * 1024 * 1024
         assert_eq!(cfg.memory_limit, Some(32 * 1024 * 1024));
-        assert!(cfg.ecn);
+        assert_eq!(cfg.ecn, Some(true));
     }
 
     #[test]
     fn fq_codel_parse_params_ecn_noecn_toggle() {
         let cfg = FqCodelConfig::parse_params(&["ecn"]).unwrap();
-        assert!(cfg.ecn);
+        assert_eq!(cfg.ecn, Some(true));
         let cfg = FqCodelConfig::parse_params(&["ecn", "noecn"]).unwrap();
-        assert!(!cfg.ecn);
+        assert_eq!(cfg.ecn, Some(false));
+    }
+
+    /// `ecn(false)` writes ECN=0 — the kernel's default is on — and an
+    /// unset ECN writes nothing (#488).
+    #[test]
+    fn fq_codel_writes_ecn_off_and_omits_it_unset() {
+        let ecn_attr = |cfg: FqCodelConfig| {
+            let attrs = crate::netlink::test_support::qdisc_attrs(&cfg);
+            attrs
+                .get(&fq_codel::TCA_FQ_CODEL_ECN)
+                .map(|v| u32::from_ne_bytes(v[..4].try_into().unwrap()))
+        };
+        assert_eq!(ecn_attr(FqCodelConfig::new().ecn(false)), Some(0));
+        assert_eq!(ecn_attr(FqCodelConfig::new().ecn(true)), Some(1));
+        assert_eq!(ecn_attr(FqCodelConfig::new()), None);
     }
 
     #[test]

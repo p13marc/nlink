@@ -1787,7 +1787,8 @@ pub enum DeclaredQdiscType {
         /// Bytes dequeued per round. Added in 0.28 (#361).
         quantum: Option<u32>,
         /// Mark rather than drop, where the peer negotiated ECN.
-        /// `None` leaves the kernel default (off). Added in 0.28 (#361).
+        /// `None` leaves the kernel default, which is **on**, and is not
+        /// compared; `Some(false)` turns it off (#488). Added in 0.28 (#361).
         ecn: Option<bool>,
     },
     /// Token Bucket Filter.

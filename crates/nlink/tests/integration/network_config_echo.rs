@@ -1893,6 +1893,21 @@ async fn other_qdisc_kinds_converge() -> nlink::Result<()> {
         // fq_codel_change: `q->quantum = max(256U, quantum)`.
         case("fq_codel-quantum-128", vec![base().qdisc("d0", |q| q.fq_codel().quantum(128))]),
         case("fq_codel-quantum-256", vec![base().qdisc("d0", |q| q.fq_codel().quantum(256))]),
+        // fq_codel_init turns ECN on; off has to be written, and a replace
+        // that does not send it keeps it on (#488).
+        case(
+            "fq_codel-ecn-off",
+            vec![base().qdisc("d0", |q| q.fq_codel().ecn(false))],
+        )
+        .check(|ns| fq_codel_ecn_is(ns, false)),
+        case(
+            "fq_codel-ecn-on-then-off",
+            vec![
+                base().qdisc("d0", |q| q.fq_codel().ecn(true)),
+                base().qdisc("d0", |q| q.fq_codel().ecn(false)),
+            ],
+        )
+        .check(|ns| fq_codel_ecn_is(ns, false)),
         case("sfq", vec![base().qdisc("d0", |q| q.sfq())]),
         // sfq_change caps limit at maxdepth * maxflows (127 * 128).
         case("sfq-limit-20000", vec![base().qdisc("d0", |q| q.sfq().limit(20000))]),
@@ -1931,6 +1946,22 @@ async fn other_qdisc_kinds_converge() -> nlink::Result<()> {
         ),
     ];
     assert_converges("nce-qdiscs", cases).await
+}
+
+/// Whether `tc` says d0's root fq_codel marks ECN. `tc` prints the flag
+/// only when it is on.
+fn fq_codel_ecn_is(ns: &TestNamespace, want: bool) -> Result<(), String> {
+    let out = ns
+        .exec("tc", &["-j", "qdisc", "show", "dev", "d0", "root"])
+        .map_err(|e| format!("tc qdisc show: {e}"))?;
+    let qdiscs: serde_json::Value =
+        serde_json::from_str(&out).map_err(|e| format!("tc qdisc show: {e}: {out}"))?;
+    let ecn = qdiscs[0]["options"]["ecn"].as_bool().unwrap_or(false);
+    if ecn == want {
+        Ok(())
+    } else {
+        Err(format!("fq_codel ecn is {ecn}, want {want}: {out}"))
+    }
 }
 
 // ============================================================================

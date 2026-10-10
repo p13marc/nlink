@@ -515,6 +515,52 @@ async fn test_replace_qdisc() -> Result<()> {
     Ok(())
 }
 
+/// A replace that turns a flag off turns it off. ECN, bytemode and the
+/// dequeue-rate estimator were written only when on, and the kernel keeps
+/// what a change does not carry, so once on they stayed on (#488).
+#[tokio::test]
+async fn a_replace_turns_pie_flags_off() -> Result<()> {
+    use nlink::netlink::tc::{FqPieConfig, PieConfig};
+    require_root!();
+    nlink::require_modules!("sch_pie", "sch_fq_pie");
+
+    let (ns, conn) = setup_tc_ns("pieflags").await?;
+    let flags = |ns: &TestNamespace| -> Result<serde_json::Value> {
+        let out = ns.exec("tc", &["-j", "qdisc", "show", "dev", "dummy0", "root"])?;
+        let qdiscs: serde_json::Value = serde_json::from_str(&out).unwrap();
+        Ok(qdiscs[0]["options"].clone())
+    };
+
+    conn.add_qdisc("dummy0", PieConfig::new().ecn(true).bytemode(true))
+        .await?;
+    conn.replace_qdisc("dummy0", PieConfig::new()).await?;
+    let pie = flags(&ns)?;
+    assert_ne!(pie["ecn"], true, "pie ECN stayed on: {pie}");
+    assert_ne!(pie["bytemode"], true, "pie bytemode stayed on: {pie}");
+
+    conn.del_qdisc("dummy0", TcHandle::ROOT).await?;
+    conn.add_qdisc(
+        "dummy0",
+        FqPieConfig::new()
+            .ecn(true)
+            .bytemode(true)
+            .dq_rate_estimator(true),
+    )
+    .await?;
+    conn.replace_qdisc("dummy0", FqPieConfig::new()).await?;
+    let fq_pie = flags(&ns)?;
+    assert_ne!(fq_pie["ecn"], true, "fq_pie ECN stayed on: {fq_pie}");
+    assert_ne!(
+        fq_pie["bytemode"], true,
+        "fq_pie bytemode stayed on: {fq_pie}"
+    );
+    assert_ne!(
+        fq_pie["dq_rate_estimator"], true,
+        "fq_pie estimator stayed on: {fq_pie}"
+    );
+    Ok(())
+}
+
 // ============================================================================
 // Class Tests
 // ============================================================================

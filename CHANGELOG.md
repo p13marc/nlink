@@ -6,11 +6,29 @@ All notable changes to this project will be documented in this file.
 
 ### Breaking Changes
 
+- **`FqCodelConfig::ecn` is `Option<bool>` (#488).** `None` sends nothing,
+  and the kernel's default is ECN **on**. `.ecn(false)` now really turns
+  it off. See the migration guide.
+
 - **`ParsedExtAck` gains fields and `#[non_exhaustive]` (#507).** The
   workspace moves to 0.31.0 with it. See
   [`docs/migration_guide/0.30.0-to-0.31.0.md`](docs/migration_guide/0.30.0-to-0.31.0.md).
 
 ### Fixed
+
+- **fq_codel ECN could not be turned off, and pie/fq_pie flags could not
+  be turned off by a replace (#488).** `FqCodelConfig` wrote
+  `TCA_FQ_CODEL_ECN` only when true. The kernel turns ECN on when it creates
+  an fq_codel, and keeps it when a change does not carry the attribute, so
+  ECN was always on. The declarative docs said the default was off, and a
+  declared `ecn(false)` sat in the replace list on every apply. pie's and
+  fq_pie's `ecn`, `bytemode` and `dq_rate_estimator` had the same shape:
+  once on, a replace could never turn them off. fq_codel's ECN is now
+  `Option<bool>`, and `Some(false)` writes 0. The pie/fq_pie flags are
+  written every time. Two echo cases, `ecn(false)` and on → off, are
+  checked through `tc -j`. A root test replaces a pie and an fq_pie with
+  every flag on by ones with every flag off. Each failed before the fix:
+  pie's dump still said `"ecn":true,"bytemode":true`.
 
 - **A refused nftables batch said one errno and a bare byte offset (#481).**
   `send_batch` returned on the first error as `kernel error: Device or
