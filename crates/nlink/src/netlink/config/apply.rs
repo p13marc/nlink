@@ -372,7 +372,11 @@ pub async fn apply_diff(
         }
     }
 
-    // 3. Add addresses
+    // 3. Add addresses. An IPv6 address the diff also removes at another
+    //    prefix is the same address re-prefixed: the kernel knows it by the
+    //    address alone, so the old prefix is deleted right before the add,
+    //    not in step 6 after it (#461).
+    let mut removed_early: Vec<&DeclaredAddress> = Vec::new();
     for addr in &diff.addresses_to_add {
         let op = format!(
             "add address {}/{} on {}",
@@ -382,6 +386,19 @@ pub async fn apply_diff(
             result.summary.push(format!("Would {}", op));
             result.changes_made += 1;
         } else {
+            for old in diff.addresses_to_remove.iter().filter(|old| {
+                addr.address.is_ipv6()
+                    && old.dev == addr.dev
+                    && old.address == addr.address
+                    && old.prefix_len != addr.prefix_len
+            }) {
+                match del_address(conn, old).await {
+                    Ok(()) => {}
+                    Err(e) if e.is_not_found() || e.errno() == Some(libc::EADDRNOTAVAIL) => {}
+                    Err(e) => return Err(e),
+                }
+                removed_early.push(old);
+            }
             match add_address(conn, addr).await {
                 Ok(()) => {
                     result.summary.push(format!(
@@ -392,8 +409,11 @@ pub async fn apply_diff(
                 }
                 // A re-add the diff scheduled because the link change was
                 // expected to flush it, where the kernel kept it after all
-                // (`keep_addr_on_down`): the state we wanted, not a change.
-                Err(e) if e.is_already_exists() => {
+                // (`keep_addr_on_down`): the state we wanted, not a change —
+                // if what is there is the declared prefix. An IPv6 address
+                // at another prefix is EEXIST too, and swallowing that left
+                // the wrong prefix in place forever (#461).
+                Err(e) if e.is_already_exists() && address_present(conn, addr).await? => {
                     result.summary.push(format!(
                         "Address {}/{} on {} already present",
                         addr.address, addr.prefix_len, addr.dev
@@ -558,8 +578,17 @@ pub async fn apply_diff(
         }
     }
 
-    // 6b. Remove undeclared addresses.
+    // 6b. Remove undeclared addresses (but not the re-prefixed ones step 3
+    //     already removed).
     for addr in &diff.addresses_to_remove {
+        if removed_early.iter().any(|done| std::ptr::eq(*done, addr)) {
+            result.changes_made += 1;
+            result.summary.push(format!(
+                "Removed address {}/{} on {}",
+                addr.address, addr.prefix_len, addr.dev
+            ));
+            continue;
+        }
         let op = format!(
             "remove address {}/{} on {}",
             addr.address, addr.prefix_len, addr.dev
@@ -1038,6 +1067,18 @@ async fn del_address(conn: &Connection<Route>, addr: &DeclaredAddress) -> Result
 
 /// `Ok(true)` when the route was deleted, `Ok(false)` when the kernel
 /// no longer had it.
+/// Does `addr`'s device hold `addr` at the declared prefix?
+async fn address_present(conn: &Connection<Route>, addr: &DeclaredAddress) -> Result<bool> {
+    let Some(link) = conn.get_link_by_name(&addr.dev).await? else {
+        return Ok(false);
+    };
+    Ok(conn
+        .get_addresses_by_index(link.ifindex())
+        .await?
+        .iter()
+        .any(|a| a.address == Some(addr.address) && a.prefix_len() == addr.prefix_len))
+}
+
 async fn del_route(conn: &Connection<Route>, route: &DeclaredRoute) -> Result<bool> {
     // Delete the way `ip route del` does: type 0, scope
     // `RT_SCOPE_NOWHERE`, protocol 0, and only the attributes that pick
