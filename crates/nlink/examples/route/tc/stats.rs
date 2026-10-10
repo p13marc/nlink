@@ -73,7 +73,7 @@ async fn main() -> nlink::netlink::Result<()> {
                 )
             } else {
                 // Use kernel's rate estimator for first sample
-                (qdisc.bps() as u64, qdisc.pps() as u64)
+                (qdisc.bps(), qdisc.pps())
             };
 
             println!(

@@ -27,6 +27,7 @@ mod stats2_ids {
     pub const TCA_STATS_RATE_EST: u16 = 2;
     pub const TCA_STATS_QUEUE: u16 = 3;
     pub const TCA_STATS_APP: u16 = 4;
+    pub const TCA_STATS_RATE_EST64: u16 = 5;
     pub const TCA_STATS_BASIC_HW: u16 = 7;
     pub const TCA_STATS_PKT64: u16 = 8;
 }
@@ -166,13 +167,18 @@ impl TcStatsQueue {
     }
 }
 
-/// Rate estimator statistics (from TCA_STATS2/TCA_STATS_RATE_EST).
+/// Rate estimator statistics (from TCA_STATS2/TCA_STATS_RATE_EST, or
+/// `TCA_STATS_RATE_EST64` when the rate does not fit 32 bits).
+///
+/// 64-bit since 0.31.0 (#489): `TCA_STATS_RATE_EST` caps the byte rate at
+/// `u32::MAX` (about 34 Gbit/s), and the kernel sends the real value in
+/// `TCA_STATS_RATE_EST64` only then.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TcStatsRateEst {
     /// Bytes per second.
-    pub bps: u32,
+    pub bps: u64,
     /// Packets per second.
-    pub pps: u32,
+    pub pps: u64,
 }
 
 impl TcMessage {
@@ -374,14 +380,14 @@ impl TcMessage {
     /// Get bytes per second from rate estimator.
     ///
     /// Returns 0 if rate estimator statistics are not available.
-    pub fn bps(&self) -> u32 {
+    pub fn bps(&self) -> u64 {
         self.stats_rate_est.map(|s| s.bps).unwrap_or(0)
     }
 
     /// Get packets per second from rate estimator.
     ///
     /// Returns 0 if rate estimator statistics are not available.
-    pub fn pps(&self) -> u32 {
+    pub fn pps(&self) -> u64 {
         self.stats_rate_est.map(|s| s.pps).unwrap_or(0)
     }
 
@@ -751,6 +757,9 @@ impl FromNetlink for TcMessage {
             ..Default::default()
         };
 
+        let mut saw_stats2 = false;
+        let mut legacy_stats = None;
+
         // Parse attributes
         while !input.is_empty() && input.len() >= 4 {
             // 0.19 N9 — nla_len/nla_type are host-order, not LE.
@@ -802,14 +811,24 @@ impl FromNetlink for TcMessage {
                     msg.egress_block = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
                 }
                 attr_ids::TCA_STATS2 => {
+                    saw_stats2 = true;
                     parse_stats2(&mut msg, attr_data);
                 }
                 attr_ids::TCA_STATS => {
                     // Legacy stats format (struct tc_stats)
-                    parse_legacy_stats(&mut msg, attr_data);
+                    legacy_stats = Some(attr_data);
                 }
                 _ => {} // Ignore unknown attributes
             }
+        }
+
+        // The kernel appends the legacy `tc_stats` after TCA_STATS2 as a
+        // compat copy (`gnet_stats_finish_copy`): 32-bit packets, no
+        // requeues. Parsed unconditionally, it overwrote the real counters,
+        // so `requeues()` read 0 and packets wrapped at 2^32 (#489). It is
+        // the answer only from a kernel that sends nothing else.
+        if !saw_stats2 && let Some(data) = legacy_stats {
+            parse_legacy_stats(&mut msg, data);
         }
 
         Ok(msg)
@@ -881,8 +900,17 @@ fn parse_stats2(msg: &mut TcMessage, data: &[u8]) {
                 // struct gnet_stats_rate_est: u32 bps, pps
                 if payload.len() >= 8 => {
                     msg.stats_rate_est = Some(TcStatsRateEst {
-                        bps: u32::from_ne_bytes(payload[0..4].try_into().unwrap()),
-                        pps: u32::from_ne_bytes(payload[4..8].try_into().unwrap()),
+                        bps: u32::from_ne_bytes(payload[0..4].try_into().unwrap()).into(),
+                        pps: u32::from_ne_bytes(payload[4..8].try_into().unwrap()).into(),
+                    });
+                }
+            stats2_ids::TCA_STATS_RATE_EST64
+                // struct gnet_stats_rate_est64: u64 bps, pps. Sent after
+                // RATE_EST, and only when its u32 byte rate was capped.
+                if payload.len() >= 16 => {
+                    msg.stats_rate_est = Some(TcStatsRateEst {
+                        bps: u64::from_ne_bytes(payload[0..8].try_into().unwrap()),
+                        pps: u64::from_ne_bytes(payload[8..16].try_into().unwrap()),
                     });
                 }
             stats2_ids::TCA_STATS_APP
@@ -934,7 +962,10 @@ fn parse_legacy_stats(msg: &mut TcMessage, data: &[u8]) {
             requeues: 0,
             overlimits,
         });
-        msg.stats_rate_est = Some(TcStatsRateEst { bps, pps });
+        msg.stats_rate_est = Some(TcStatsRateEst {
+            bps: bps.into(),
+            pps: pps.into(),
+        });
     }
 }
 
@@ -1062,6 +1093,72 @@ mod classification_tests {
         assert_eq!(msg.packets(), 100);
         assert_eq!(msg.stats_basic_hw().unwrap().bytes, 400);
         assert_eq!(msg.stats_basic_hw().unwrap().packets, 4);
+    }
+
+    /// One netlink attribute, padded.
+    fn nla(ty: u16, payload: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&(4 + payload.len() as u16).to_ne_bytes());
+        v.extend_from_slice(&ty.to_ne_bytes());
+        v.extend_from_slice(payload);
+        v.resize(v.len().next_multiple_of(4), 0);
+        v
+    }
+
+    /// A qdisc dump as the kernel builds it: `TCA_STATS2`, then the legacy
+    /// `TCA_STATS` compat copy (`gnet_stats_finish_copy`), which has 32-bit
+    /// packets and no requeues. The copy overwrote the real counters, so
+    /// `requeues()` was 0 and packets wrapped at 2^32 (#489).
+    #[test]
+    fn the_legacy_stats_copy_does_not_overwrite_stats2() {
+        let packets: u64 = 5_000_000_000;
+        let mut basic = 123_456_789_000u64.to_ne_bytes().to_vec();
+        basic.extend_from_slice(&(packets as u32).to_ne_bytes());
+        basic.extend_from_slice(&[0; 4]);
+        let mut queue = Vec::new();
+        for v in [3u32, 4500, 11, 7, 13] {
+            queue.extend_from_slice(&v.to_ne_bytes()); // qlen backlog drops requeues overlimits
+        }
+        let mut rate = 5_000_000_000u64.to_ne_bytes().to_vec(); // past u32
+        rate.extend_from_slice(&400_000u64.to_ne_bytes());
+        let mut rate32 = u32::MAX.to_ne_bytes().to_vec();
+        rate32.extend_from_slice(&400_000u32.to_ne_bytes());
+        let stats2 = [
+            nla(stats2_ids::TCA_STATS_BASIC, &basic),
+            nla(stats2_ids::TCA_STATS_RATE_EST, &rate32),
+            nla(stats2_ids::TCA_STATS_RATE_EST64, &rate),
+            nla(stats2_ids::TCA_STATS_QUEUE, &queue),
+            nla(stats2_ids::TCA_STATS_PKT64, &packets.to_ne_bytes()),
+        ]
+        .concat();
+        // struct tc_stats: bytes, packets, drops, overlimits, bps, pps, qlen, backlog.
+        let mut legacy = 123_456_789_000u64.to_ne_bytes().to_vec();
+        for v in [packets as u32, 11, 13, u32::MAX, 400_000, 3, 4500] {
+            legacy.extend_from_slice(&v.to_ne_bytes());
+        }
+        let mut wire = vec![0u8; std::mem::size_of::<TcMsg>()];
+        wire.extend(nla(attr_ids::TCA_KIND, b"fq_codel\0"));
+        wire.extend(nla(attr_ids::TCA_STATS2 | 0x8000, &stats2));
+        wire.extend(nla(attr_ids::TCA_STATS, &legacy));
+
+        let msg = TcMessage::from_bytes(&wire).expect("parses");
+        assert_eq!(msg.requeues(), 7, "requeues come from TCA_STATS_QUEUE");
+        assert_eq!(msg.packets(), packets, "packets come from TCA_STATS_PKT64");
+        assert_eq!(msg.bytes(), 123_456_789_000);
+        assert_eq!(msg.bps(), 5_000_000_000, "RATE_EST64 past the u32 cap");
+        assert_eq!(msg.drops(), 11);
+
+        // A kernel that sends only the legacy block is still read.
+        let mut old = vec![0u8; std::mem::size_of::<TcMsg>()];
+        old.extend(nla(attr_ids::TCA_STATS, &legacy));
+        let msg = TcMessage::from_bytes(&old).expect("parses");
+        assert_eq!(msg.packets(), u64::from(packets as u32));
+        assert_eq!(msg.drops(), 11);
+        assert_eq!(
+            msg.bps(),
+            u64::from(u32::MAX),
+            "the legacy block caps the rate"
+        );
     }
 
     /// The nastiest shape: nothing has been offloaded yet, so the hw counter

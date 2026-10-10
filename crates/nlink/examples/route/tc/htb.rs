@@ -363,7 +363,7 @@ async fn show_htb(conn: &Connection<Route>, dev: &str) -> nlink::Result<()> {
             println!("    overlimits: {}", qdisc.overlimits());
             println!(
                 "    rate: {} ({} pps)",
-                Rate::bytes_per_sec(qdisc.bps() as u64),
+                Rate::bytes_per_sec(qdisc.bps()),
                 qdisc.pps()
             );
         } else {
@@ -407,7 +407,7 @@ async fn show_classes(conn: &Connection<Route>, dev: &str) -> nlink::Result<()> 
         };
 
         let rate = if class.bps() > 0 {
-            Rate::bytes_per_sec(class.bps() as u64).to_string()
+            Rate::bytes_per_sec(class.bps()).to_string()
         } else {
             "-".to_string()
         };

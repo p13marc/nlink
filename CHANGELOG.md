@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ### Breaking Changes
 
+- **`TcStatsRateEst` is 64-bit, and `TcMessage::{bps, pps}` return `u64`
+  (#489).** `TCA_STATS_RATE_EST` caps the byte rate at `u32::MAX` (about
+  34 Gbit/s), and the kernel sends the real value in
+  `TCA_STATS_RATE_EST64` only then. nlink now reads it. Drop any `as u64`
+  at the call site.
+
 - **A link declaration that does not mention a master leaves it alone
   (#462).** Use `LinkBuilder::nomaster()` to release a link from its
   master; a declaration without `master()` or `nomaster()` no longer does.
@@ -25,6 +31,16 @@ All notable changes to this project will be documented in this file.
   [`docs/migration_guide/0.30.0-to-0.31.0.md`](docs/migration_guide/0.30.0-to-0.31.0.md).
 
 ### Fixed
+
+- **tc stats: `requeues()` was always 0, and packet counts wrapped at 2^32
+  (#489).** `tc_fill_qdisc`/`tc_fill_tclass` dump `TCA_STATS2` and then,
+  through `gnet_stats_finish_copy`, the legacy `TCA_STATS` block as a
+  compat copy. The copy has 32-bit packets and no requeues field. nlink
+  parsed both, and the copy, arriving second, overwrote the real
+  counters. The legacy block is now used only when there is no
+  `TCA_STATS2`, and `TCA_STATS_RATE_EST64` is parsed. A unit test parses a
+  dump in the kernel's order. On master it read `requeues() == 0` where
+  the queue stats said 7.
 
 - **An event stream kept a deleted namespace alive and idled forever
   (#504).** A socket holds a reference on its network namespace.
