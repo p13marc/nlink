@@ -197,6 +197,24 @@ impl RecvSession {
         }
     }
 
+    /// The next datagram for this cycle if one is already here, without
+    /// waiting — for draining what the kernel queued after a failure.
+    pub(crate) fn try_recv<P: ProtocolState>(
+        &mut self,
+        conn: &Connection<P>,
+    ) -> Result<Option<Vec<u8>>> {
+        match self {
+            RecvSession::Direct(_) => conn.socket().try_recv_unicast(),
+            RecvSession::Dispatched { guard, .. } => match guard.rx.try_recv() {
+                Ok(buf) => Ok(Some((*buf).clone())),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => Ok(None),
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    Err(conn.dispatcher().take_fatal_error())
+                }
+            },
+        }
+    }
+
     /// Receive the next datagram for this cycle with no deadline.
     /// Prefer [`recv_with_timeout`](Self::recv_with_timeout); this is
     /// for callers that impose their own bound.
@@ -611,20 +629,6 @@ impl<P: ProtocolState> Connection<P> {
     #[instrument(level = "debug", skip(self), fields(method = "set_ext_ack"))]
     pub fn set_ext_ack(&self, on: bool) -> Result<()> {
         self.socket.set_ext_ack(on)
-    }
-
-    /// Acquire the per-connection request lock for the duration of
-    /// a `send + recv-loop` cycle.
-    ///
-    /// Every higher-level method that does `socket.send(...)` followed
-    /// by a `recv_msg`/`recv_batch` loop MUST hold this guard for the
-    /// whole flow. Otherwise concurrent callers on a shared
-    /// `Arc<Connection<P>>` race on the recv side and lose frames.
-    ///
-    /// This closes the F1 architectural concurrency issue (rtnetlink
-    /// #131 shape). See the struct-level `Concurrency` docstring.
-    pub(crate) async fn lock_request(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.request_lock.lock().await
     }
 
     /// Acquire the request lock as an *owned* guard. 0.19 Finding B —

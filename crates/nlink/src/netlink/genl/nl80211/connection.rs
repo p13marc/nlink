@@ -162,10 +162,6 @@ impl Connection<Nl80211> {
     /// Trigger a scan by interface index (namespace-safe).
     #[tracing::instrument(level = "debug", skip_all, fields(method = "trigger_scan_by_index"))]
     pub async fn trigger_scan_by_index(&self, ifindex: u32, request: &ScanRequest) -> Result<()> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring.
-        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
@@ -190,6 +186,8 @@ impl Connection<Nl80211> {
         }
 
         let seq = self.socket().next_seq();
+
+        let mut session = self.recv_session(seq).await;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
@@ -197,7 +195,7 @@ impl Connection<Nl80211> {
         self.socket().send(&msg).await?;
 
         // Wait for ACK
-        self.wait_ack(seq).await
+        self.wait_ack(&mut session, seq).await
     }
 
     /// Get cached scan results for an interface.
@@ -217,10 +215,6 @@ impl Connection<Nl80211> {
         fields(method = "get_scan_results_by_index")
     )]
     pub async fn get_scan_results_by_index(&self, ifindex: u32) -> Result<Vec<ScanResult>> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring.
-        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
@@ -229,13 +223,15 @@ impl Connection<Nl80211> {
         builder.append_attr_u32(NL80211_ATTR_IFINDEX, ifindex);
 
         let seq = self.socket().next_seq();
+
+        let mut session = self.recv_session_dump(seq).await;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
         let msg = builder.finish();
         self.socket().send(&msg).await?;
 
-        let responses = self.collect_dump_responses(seq).await?;
+        let responses = self.collect_dump_responses(&mut session, seq).await?;
         let mut results = Vec::new();
 
         for payload in &responses {
@@ -281,10 +277,6 @@ impl Connection<Nl80211> {
     /// List all stations by interface index.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_stations_by_index"))]
     pub async fn get_stations_by_index(&self, ifindex: u32) -> Result<Vec<StationInfo>> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring.
-        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
@@ -293,13 +285,15 @@ impl Connection<Nl80211> {
         builder.append_attr_u32(NL80211_ATTR_IFINDEX, ifindex);
 
         let seq = self.socket().next_seq();
+
+        let mut session = self.recv_session_dump(seq).await;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
         let msg = builder.finish();
         self.socket().send(&msg).await?;
 
-        let responses = self.collect_dump_responses(seq).await?;
+        let responses = self.collect_dump_responses(&mut session, seq).await?;
         let mut stations = Vec::new();
 
         for payload in &responses {
@@ -324,7 +318,6 @@ impl Connection<Nl80211> {
     /// Channel survey results by interface index.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_survey_by_index"))]
     pub async fn get_survey_by_index(&self, ifindex: u32) -> Result<Vec<SurveyInfo>> {
-        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
@@ -333,13 +326,15 @@ impl Connection<Nl80211> {
         builder.append_attr_u32(NL80211_ATTR_IFINDEX, ifindex);
 
         let seq = self.socket().next_seq();
+
+        let mut session = self.recv_session_dump(seq).await;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
         let msg = builder.finish();
         self.socket().send(&msg).await?;
 
-        let responses = self.collect_dump_responses(seq).await?;
+        let responses = self.collect_dump_responses(&mut session, seq).await?;
         let mut surveys = Vec::new();
         for payload in &responses {
             if payload.len() < GENL_HDRLEN {
@@ -400,10 +395,6 @@ impl Connection<Nl80211> {
     /// Get the current regulatory domain.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_regulatory"))]
     pub async fn get_regulatory(&self) -> Result<RegulatoryDomain> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring.
-        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST);
@@ -411,13 +402,15 @@ impl Connection<Nl80211> {
         builder.append(&genl_hdr);
 
         let seq = self.socket().next_seq();
+
+        let mut session = self.recv_session(seq).await;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
         let msg = builder.finish();
         self.socket().send(&msg).await?;
 
-        let responses = self.collect_dump_responses(seq).await?;
+        let responses = self.collect_dump_responses(&mut session, seq).await?;
 
         let mut domain = RegulatoryDomain {
             country: String::new(),
@@ -445,7 +438,6 @@ impl Connection<Nl80211> {
     pub async fn set_regulatory(&self, alpha2: &str) -> Result<()> {
         let code = normalize_alpha2(alpha2)?;
 
-        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
@@ -455,13 +447,15 @@ impl Connection<Nl80211> {
         builder.append_attr_str(NL80211_ATTR_REG_ALPHA2, &code);
 
         let seq = self.socket().next_seq();
+
+        let mut session = self.recv_session(seq).await;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
         let msg = builder.finish();
         self.socket().send(&msg).await?;
 
-        self.wait_ack(seq).await
+        self.wait_ack(&mut session, seq).await
     }
 
     // =========================================================================
@@ -482,10 +476,6 @@ impl Connection<Nl80211> {
     /// Connect by interface index (namespace-safe).
     #[tracing::instrument(level = "debug", skip_all, fields(method = "connect_by_index"))]
     pub async fn connect_by_index(&self, ifindex: u32, request: ConnectRequest) -> Result<()> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring.
-        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
@@ -503,13 +493,15 @@ impl Connection<Nl80211> {
         }
 
         let seq = self.socket().next_seq();
+
+        let mut session = self.recv_session(seq).await;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
         let msg = builder.finish();
         self.socket().send(&msg).await?;
 
-        self.wait_ack(seq).await
+        self.wait_ack(&mut session, seq).await
     }
 
     /// Disconnect from the current network.
@@ -522,10 +514,6 @@ impl Connection<Nl80211> {
     /// Disconnect by interface index (namespace-safe).
     #[tracing::instrument(level = "debug", skip_all, fields(method = "disconnect_by_index"))]
     pub async fn disconnect_by_index(&self, ifindex: u32) -> Result<()> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring.
-        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
@@ -535,13 +523,15 @@ impl Connection<Nl80211> {
         builder.append_attr_u16(NL80211_ATTR_REASON_CODE, 3); // REASON_DEAUTH_LEAVING
 
         let seq = self.socket().next_seq();
+
+        let mut session = self.recv_session(seq).await;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
         let msg = builder.finish();
         self.socket().send(&msg).await?;
 
-        self.wait_ack(seq).await
+        self.wait_ack(&mut session, seq).await
     }
 
     /// Remove (kick) a station from an AP-mode interface by MAC.
@@ -557,10 +547,6 @@ impl Connection<Nl80211> {
     /// Remove a station by interface index (namespace-safe).
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_station_by_index"))]
     pub async fn del_station_by_index(&self, ifindex: u32, mac: [u8; 6]) -> Result<()> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring.
-        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
@@ -570,25 +556,21 @@ impl Connection<Nl80211> {
         builder.append_attr(NL80211_ATTR_MAC, &mac);
 
         let seq = self.socket().next_seq();
+
+        let mut session = self.recv_session(seq).await;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
         let msg = builder.finish();
         self.socket().send(&msg).await?;
 
-        self.wait_ack(seq).await
+        self.wait_ack(&mut session, seq).await
     }
 
     /// Set power save mode.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_power_save"))]
     pub async fn set_power_save(&self, iface: &str, enabled: bool) -> Result<()> {
         let ifindex = self.resolve_ifindex(iface).await?;
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring. Note: the
-        // `resolve_ifindex` above runs its own send+recv flow under
-        // the lock; we re-acquire here for the actual SET request.
-        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
@@ -605,25 +587,21 @@ impl Connection<Nl80211> {
         );
 
         let seq = self.socket().next_seq();
+
+        let mut session = self.recv_session(seq).await;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
         let msg = builder.finish();
         self.socket().send(&msg).await?;
 
-        self.wait_ack(seq).await
+        self.wait_ack(&mut session, seq).await
     }
 
     /// Get power save mode.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_power_save"))]
     pub async fn get_power_save(&self, iface: &str) -> Result<PowerSaveState> {
         let ifindex = self.resolve_ifindex(iface).await?;
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring. Note: the
-        // `resolve_ifindex` above runs its own send+recv flow under
-        // the lock; we re-acquire here for the actual GET request.
-        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST);
@@ -632,13 +610,15 @@ impl Connection<Nl80211> {
         builder.append_attr_u32(NL80211_ATTR_IFINDEX, ifindex);
 
         let seq = self.socket().next_seq();
+
+        let mut session = self.recv_session(seq).await;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
         let msg = builder.finish();
         self.socket().send(&msg).await?;
 
-        let responses = self.collect_dump_responses(seq).await?;
+        let responses = self.collect_dump_responses(&mut session, seq).await?;
 
         for payload in &responses {
             if payload.len() < GENL_HDRLEN {
@@ -686,10 +666,6 @@ impl Connection<Nl80211> {
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_wiphy_netns"))]
     pub async fn set_wiphy_netns(&self, wiphy: u32, netns_fd: i32) -> Result<()> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring.
-        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
@@ -699,13 +675,15 @@ impl Connection<Nl80211> {
         builder.append_attr_u32(NL80211_ATTR_NETNS_FD, netns_fd as u32);
 
         let seq = self.socket().next_seq();
+
+        let mut session = self.recv_session(seq).await;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
         let msg = builder.finish();
         self.socket().send(&msg).await?;
 
-        self.wait_ack(seq)
+        self.wait_ack(&mut session, seq)
             .await
             .map_err(|e| e.with_context("set_wiphy_netns"))
     }
@@ -716,10 +694,6 @@ impl Connection<Nl80211> {
     /// a namespace file descriptor.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "set_wiphy_netns_pid"))]
     pub async fn set_wiphy_netns_pid(&self, wiphy: u32, pid: u32) -> Result<()> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring.
-        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
@@ -729,13 +703,15 @@ impl Connection<Nl80211> {
         builder.append_attr_u32(NL80211_ATTR_PID, pid);
 
         let seq = self.socket().next_seq();
+
+        let mut session = self.recv_session(seq).await;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
         let msg = builder.finish();
         self.socket().send(&msg).await?;
 
-        self.wait_ack(seq)
+        self.wait_ack(&mut session, seq)
             .await
             .map_err(|e| e.with_context("set_wiphy_netns_pid"))
     }
@@ -746,10 +722,6 @@ impl Connection<Nl80211> {
 
     /// Send a GENL dump request (no filter).
     async fn nl80211_dump(&self, cmd: u8) -> Result<Vec<Vec<u8>>> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring.
-        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
@@ -757,13 +729,15 @@ impl Connection<Nl80211> {
         builder.append(&genl_hdr);
 
         let seq = self.socket().next_seq();
+
+        let mut session = self.recv_session_dump(seq).await;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
         let msg = builder.finish();
         self.socket().send(&msg).await?;
 
-        self.collect_dump_responses(seq).await
+        self.collect_dump_responses(&mut session, seq).await
     }
 
     /// Send a `GET_WIPHY` dump with `NL80211_ATTR_SPLIT_WIPHY_DUMP`.
@@ -773,9 +747,6 @@ impl Connection<Nl80211> {
     /// fit. With it, a wiphy's attributes span multiple messages (same
     /// `NL80211_ATTR_WIPHY` index) which `get_phys` reassembles.
     async fn dump_wiphy_split(&self) -> Result<Vec<Vec<u8>>> {
-        // F1 fix — serialize the send + recv-loop pair (see the
-        // `nl80211_dump` / `Concurrency` docstring).
-        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
@@ -784,24 +755,30 @@ impl Connection<Nl80211> {
         builder.append_attr_empty(NL80211_ATTR_SPLIT_WIPHY_DUMP);
 
         let seq = self.socket().next_seq();
+
+        let mut session = self.recv_session_dump(seq).await;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
         let msg = builder.finish();
         self.socket().send(&msg).await?;
 
-        self.collect_dump_responses(seq).await
+        self.collect_dump_responses(&mut session, seq).await
     }
 
     /// Collect all responses from a dump request.
-    async fn collect_dump_responses(&self, seq: u32) -> Result<Vec<Vec<u8>>> {
+    async fn collect_dump_responses(
+        &self,
+        session: &mut crate::netlink::connection::RecvSession,
+        seq: u32,
+    ) -> Result<Vec<Vec<u8>>> {
         // Plan 172 — wrap the recv loop in the Connection-level
         // operation timeout (Plan 171 default: 30s).
         self.with_timeout(async {
             let mut results = Vec::new();
 
             loop {
-                let data: Vec<u8> = self.socket().recv_unicast().await?;
+                let data: Vec<u8> = session.recv_with_timeout(self).await?;
                 let mut done = false;
 
                 for msg_result in MessageIter::new(&data) {
@@ -832,12 +809,16 @@ impl Connection<Nl80211> {
     }
 
     /// Wait for an ACK response.
-    async fn wait_ack(&self, seq: u32) -> Result<()> {
+    async fn wait_ack(
+        &self,
+        session: &mut crate::netlink::connection::RecvSession,
+        seq: u32,
+    ) -> Result<()> {
         // Plan 172 — wrap the recv loop in the Connection-level
         // operation timeout (Plan 171 default: 30s).
         self.with_timeout(async {
             loop {
-                let data: Vec<u8> = self.socket().recv_unicast().await?;
+                let data: Vec<u8> = session.recv_with_timeout(self).await?;
 
                 for msg_result in MessageIter::new(&data) {
                     let (header, payload) = msg_result?;

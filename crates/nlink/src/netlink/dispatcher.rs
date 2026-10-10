@@ -124,7 +124,7 @@ struct DispatcherInner {
     /// impls poll an `mpsc::UnboundedReceiver` directly — `broadcast`
     /// has no public poll method. Keyed by a monotonic id so a dropped
     /// stream deregisters precisely.
-    event_listeners: Mutex<HashMap<u64, mpsc::UnboundedSender<Arc<Vec<u8>>>>>,
+    event_listeners: Mutex<HashMap<u64, EventListener>>,
 
     /// Monotonic id source for `event_listeners` registrations.
     next_listener_id: std::sync::atomic::AtomicU64,
@@ -203,6 +203,16 @@ impl Dispatcher {
     /// Idempotent — if no subscribers are active the call is a
     /// no-op.
     pub fn emit_enobufs(&self) {
+        // The `events()` streams, which until #466 never heard of it.
+        for listener in self
+            .inner
+            .event_listeners
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .values()
+        {
+            listener.overrun();
+        }
         let subs = self
             .inner
             .subscribers
@@ -383,16 +393,24 @@ impl Dispatcher {
             .inner
             .next_listener_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(EVENT_LISTENER_CAPACITY);
+        let lagged = Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.inner
             .event_listeners
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .insert(id, tx);
+            .insert(
+                id,
+                EventListener {
+                    tx,
+                    lagged: lagged.clone(),
+                },
+            );
         EventGuard {
             dispatcher: self.clone(),
             id,
             rx,
+            lagged,
         }
     }
 
@@ -413,7 +431,17 @@ impl Dispatcher {
             .event_listeners
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        listeners.retain(|_, tx| tx.send(frame.clone()).is_ok());
+        listeners.retain(|_, listener| {
+            match listener.tx.try_send(EventFrame::Data(frame.clone())) {
+                Ok(()) => true,
+                // A listener that cannot keep up loses frames, and is told.
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    listener.overrun();
+                    true
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => false,
+            }
+        });
     }
 
     /// Test/lab accessor: number of registered event listeners.
@@ -595,9 +623,58 @@ impl Drop for PendingGuard {
 pub(crate) struct EventGuard {
     dispatcher: Dispatcher,
     id: u64,
-    /// Each item is a full multicast netlink datagram.
-    pub rx: mpsc::UnboundedReceiver<Arc<Vec<u8>>>,
+    /// Each item is a full multicast netlink datagram, or the news that
+    /// some were lost.
+    pub rx: mpsc::Receiver<EventFrame>,
+    /// Set when frames for this listener were lost — its channel was full,
+    /// or the kernel reported ENOBUFS — and the stream has not said so yet.
+    lagged: Arc<std::sync::atomic::AtomicBool>,
 }
+
+impl EventGuard {
+    /// Take the overrun, if there was one: clear the flag and drop every
+    /// queued frame, which predates the loss. The stream then reports
+    /// ENOBUFS, as the socket would in mutex mode, and a resync wrapper
+    /// re-dumps (#466).
+    pub(crate) fn take_overrun(&mut self) -> bool {
+        if !self.lagged.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            return false;
+        }
+        while self.rx.try_recv().is_ok() {}
+        true
+    }
+}
+
+/// One item of an event listener's channel.
+#[derive(Debug)]
+pub(crate) enum EventFrame {
+    /// A multicast datagram.
+    Data(Arc<Vec<u8>>),
+    /// Frames were lost; wakes a listener that was idle when it happened.
+    Overrun,
+}
+
+/// The sending half of an event listener: a bounded channel, and the flag
+/// that records what did not fit.
+struct EventListener {
+    tx: mpsc::Sender<EventFrame>,
+    lagged: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl EventListener {
+    /// Record a loss and wake the listener if there is room to.
+    fn overrun(&self) {
+        self.lagged
+            .store(true, std::sync::atomic::Ordering::Release);
+        let _ = self.tx.try_send(EventFrame::Overrun);
+    }
+}
+
+/// Frames an event listener may have queued before the dispatcher counts it
+/// as overrun. The kernel's receive buffer used to be the bound — a slow
+/// `events()` consumer overflowed it and got ENOBUFS; an unbounded channel
+/// turned that into unbounded memory instead (#466).
+pub(crate) const EVENT_LISTENER_CAPACITY: usize = 1024;
 
 impl Drop for EventGuard {
     fn drop(&mut self) {
@@ -977,8 +1054,38 @@ mod tests {
         assert_eq!(d.event_listener_count(), 1);
         // Multicast frame (seq == 0) is fanned to event listeners.
         d.route_buffer(synth_frame(0), true);
-        let buf = guard.rx.recv().await.expect("event listener got the frame");
-        assert!(!buf.is_empty());
+        let frame = guard.rx.recv().await.expect("event listener got the frame");
+        assert!(matches!(frame, EventFrame::Data(buf) if !buf.is_empty()));
+    }
+
+    /// A listener that falls a channel behind is told, and what it had
+    /// queued — older than the loss — is dropped (#466).
+    #[tokio::test]
+    async fn a_full_listener_is_overrun_and_drained() {
+        let d = Dispatcher::new();
+        let mut guard = d.subscribe_events();
+        for _ in 0..EVENT_LISTENER_CAPACITY + 5 {
+            d.route_buffer(synth_frame(0), true);
+        }
+        assert!(guard.take_overrun(), "the overflow was recorded");
+        assert!(
+            guard.rx.try_recv().is_err(),
+            "the stale frames were dropped"
+        );
+        assert!(!guard.take_overrun(), "reported once");
+        d.route_buffer(synth_frame(0), true);
+        assert!(matches!(guard.rx.try_recv(), Ok(EventFrame::Data(_))));
+    }
+
+    /// A kernel ENOBUFS reaches `events()` listeners, waking an idle one
+    /// (#466). It used to reach only the typed subscribers nothing reads.
+    #[tokio::test]
+    async fn enobufs_reaches_event_listeners() {
+        let d = Dispatcher::new();
+        let mut guard = d.subscribe_events();
+        d.emit_enobufs();
+        assert!(matches!(guard.rx.recv().await, Some(EventFrame::Overrun)));
+        assert!(guard.take_overrun());
     }
 
     #[tokio::test]

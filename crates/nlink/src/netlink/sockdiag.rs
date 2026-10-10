@@ -292,11 +292,8 @@ impl Connection<SockDiag> {
     /// # }
     /// ```
     pub async fn destroy_tcp_socket(&self, socket: &InetSocket) -> Result<()> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring.
-        let _guard = self.lock_request().await;
         let seq = self.socket().next_seq();
+        let mut session = self.recv_session(seq).await;
         let pid = self.socket().pid();
 
         let mut buf = Vec::with_capacity(128);
@@ -357,7 +354,7 @@ impl Connection<SockDiag> {
             self.socket().send(&buf).await?;
 
             loop {
-                let data: Vec<u8> = self.socket().recv_unicast().await?;
+                let data: Vec<u8> = session.recv_with_timeout(self).await?;
                 if data.len() < 16 {
                     return Err(crate::netlink::Error::InvalidMessage(
                         "response too short".into(),
@@ -525,16 +522,11 @@ impl Connection<SockDiag> {
             effective_expr.clone()
         };
 
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring. Acquired
-        // BEFORE the with_timeout wrapper so the lock spans the
-        // entire timeout window.
-        let _guard = self.lock_request().await;
         // Plan 208 Phase 1+2 — wrap in with_timeout, seq filter,
         // NLM_F_DUMP_INTR detection.
         self.with_timeout(async move {
             let seq = self.socket().next_seq();
+            let mut session = self.recv_session_dump(seq).await;
             let pid = self.socket().pid();
 
             let mut buf = Vec::with_capacity(256);
@@ -599,7 +591,7 @@ impl Connection<SockDiag> {
             let mut sockets = Vec::new();
 
             loop {
-                let data: Vec<u8> = self.socket().recv_unicast().await?;
+                let data: Vec<u8> = session.recv_with_timeout(self).await?;
 
                 let mut offset = 0;
                 while offset + 16 <= data.len() {
@@ -686,16 +678,11 @@ impl Connection<SockDiag> {
     }
 
     async fn query_unix_typed(&self, filter: &UnixFilter) -> Result<Vec<UnixSocket>> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring. Acquired
-        // BEFORE the with_timeout wrapper so the lock spans the
-        // entire timeout window.
-        let _guard = self.lock_request().await;
         // Plan 208 Phase 1+2 — wrap in with_timeout, seq filter,
         // NLM_F_DUMP_INTR detection.
         self.with_timeout(async move {
             let seq = self.socket().next_seq();
+            let mut session = self.recv_session_dump(seq).await;
             let pid = self.socket().pid();
 
             let mut buf = Vec::with_capacity(64);
@@ -721,7 +708,7 @@ impl Connection<SockDiag> {
             let mut sockets = Vec::new();
 
             loop {
-                let data: Vec<u8> = self.socket().recv_unicast().await?;
+                let data: Vec<u8> = session.recv_with_timeout(self).await?;
 
                 let mut offset = 0;
                 while offset + 16 <= data.len() {
@@ -809,16 +796,11 @@ impl Connection<SockDiag> {
         &self,
         filter: &NetlinkFilter,
     ) -> Result<Vec<crate::sockdiag::socket::NetlinkSocket>> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring. Acquired
-        // BEFORE the with_timeout wrapper so the lock spans the
-        // entire timeout window.
-        let _guard = self.lock_request().await;
         // Plan 208 Phase 1+2 — wrap in with_timeout, seq filter,
         // NLM_F_DUMP_INTR detection.
         self.with_timeout(async move {
             let seq = self.socket().next_seq();
+            let mut session = self.recv_session_dump(seq).await;
             let pid = self.socket().pid();
 
             let mut buf = Vec::with_capacity(64);
@@ -851,7 +833,7 @@ impl Connection<SockDiag> {
             let mut sockets = Vec::new();
 
             loop {
-                let data: Vec<u8> = self.socket().recv_unicast().await?;
+                let data: Vec<u8> = session.recv_with_timeout(self).await?;
 
                 let mut offset = 0;
                 while offset + 16 <= data.len() {
@@ -925,12 +907,9 @@ impl Connection<SockDiag> {
     }
 
     async fn query_packet(&self, filter: &PacketFilter) -> Result<Vec<SocketInfo>> {
-        // AF_PACKET socket diagnostics via PACKET_DIAG (the same
-        // SOCK_DIAG_BY_FAMILY dump the inet/unix/netlink paths use, with
-        // `sdiag_family = AF_PACKET`).
-        let _guard = self.lock_request().await;
         self.with_timeout(async move {
             let seq = self.socket().next_seq();
+            let mut session = self.recv_session_dump(seq).await;
             let pid = self.socket().pid();
 
             // struct packet_diag_req {
@@ -975,7 +954,7 @@ impl Connection<SockDiag> {
 
             let mut sockets = Vec::new();
             loop {
-                let data: Vec<u8> = self.socket().recv_unicast().await?;
+                let data: Vec<u8> = session.recv_with_timeout(self).await?;
 
                 let mut offset = 0;
                 while offset + 16 <= data.len() {

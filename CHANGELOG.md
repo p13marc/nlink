@@ -26,6 +26,35 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Dispatcher mode lost overflows, buffered without bound, and raced its
+  own driver (#466).**
+  - An ENOBUFS reached only the typed subscriber surface nothing reads,
+    so a `with_dispatcher()` `events()` stream, and the resync wrappers
+    built on it, never heard of an overflow.
+  - The listener channels were unbounded. A slow consumer turned the
+    kernel's bounded buffer, which would have raised ENOBUFS, into
+    unbounded memory.
+  - About 30 request paths took the request lock and read the socket
+    themselves, racing the driver's `recv`: nftables, sockdiag,
+    devlink, nl80211, audit, FIB lookup, connector. Beside a running
+    driver their replies were stolen and they timed out.
+
+  The fixes:
+  - Event listeners now get a bounded channel (1024 datagrams). A
+    listener that falls behind, or a kernel ENOBUFS, marks it overrun.
+    The stream then drops what it had queued, which predates the loss,
+    and yields ENOBUFS as a mutex-mode socket would, so
+    `into_events_with_resync` re-dumps in dispatcher mode too.
+  - Every one of those request paths goes through `RecvSession`. It
+    serializes in mutex mode and registers the seq with the driver in
+    dispatcher mode. The nftables batch registers all of its seqs and
+    maps a failure back to its operation by seq.
+
+  Root tests: a dispatcher consumer that does not read during 1400 link
+  notifications must get ENOBUFS first; it got the first event instead.
+  And 40 nftables add/list rounds on a dispatcher connection with a live
+  driver on a multi-threaded runtime must complete; they timed out.
+
 - **Multicast was recognised by `nlmsg_seq == 0`, so notifications caused
   by other processes were dropped, and a subscribed connection read its
   own as a reply (#465).** The kernel stamps a notification caused by a

@@ -381,12 +381,6 @@ impl Connection<FibLookup> {
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "lookup_with_options"))]
     pub async fn lookup_with_options(&self, request: FibResultNl) -> Result<FibLookupResult> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring. Acquired
-        // BEFORE the with_timeout wrapper so the lock spans the
-        // entire timeout window.
-        let _guard = self.lock_request().await;
         // Plan 208 Phase 1 — wrap in with_timeout + seq filter loop.
         // Pre-0.19 this raw-recv'd a single frame with no seq check
         // and no timeout. A kernel that dropped the response hung
@@ -394,6 +388,7 @@ impl Connection<FibLookup> {
         // mistaken for the response.
         self.with_timeout(async move {
             let seq = self.socket().next_seq();
+            let mut session = self.recv_session(seq).await;
             let pid = self.socket().pid();
 
             let mut buf = Vec::with_capacity(64);
@@ -410,7 +405,7 @@ impl Connection<FibLookup> {
             self.socket().send(&buf).await?;
 
             loop {
-                let data = self.socket().recv_unicast().await?;
+                let data = session.recv_with_timeout(self).await?;
                 if data.len() < NLMSG_HDRLEN {
                     return Err(Error::InvalidMessage("response too short".into()));
                 }

@@ -928,10 +928,6 @@ impl Connection<Nftables> {
             return Ok(());
         }
 
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring.
-        let _guard = self.lock_request().await;
         let mut batch = Vec::new();
 
         // NFNL_MSG_BATCH_BEGIN — control message; no ACK requested.
@@ -966,9 +962,11 @@ impl Connection<Nftables> {
         // future caller cannot reintroduce a second counter.
         //
         let pid = self.socket().pid();
+        let mut inner_seqs = Vec::with_capacity(messages.len());
         for msg_data in &mut messages {
             let seq = self.socket().next_seq();
             stamp_seq_pid(msg_data, seq, pid)?;
+            inner_seqs.push(seq);
             batch.extend_from_slice(msg_data);
         }
 
@@ -989,11 +987,16 @@ impl Connection<Nftables> {
         end.set_pid(self.socket().pid());
         batch.extend_from_slice(&end.finish());
 
+        // Every seq the kernel can answer with: BATCH_BEGIN, the inner ops,
+        // BATCH_END. The session serializes in mutex mode (the F1 fix) and,
+        // in dispatcher mode, registers all of them with the driver rather
+        // than racing its recv (#466). Registered before the send.
+        let all_seqs: Vec<u32> = std::iter::once(begin_seq)
+            .chain(inner_seqs.iter().copied())
+            .chain(std::iter::once(end_seq))
+            .collect();
+        let mut session = self.recv_session_multi(&all_seqs).await;
         self.socket().send(&batch).await?;
-
-        // Every seq the kernel can legitimately answer with now lies in one
-        // contiguous window: BATCH_BEGIN, the inner ops, BATCH_END.
-        let window = begin_seq..=end_seq;
         let mut failures: Vec<super::NftBatchFailure> = Vec::new();
 
         // (4) Wrap in the Connection-level operation timeout
@@ -1007,9 +1010,9 @@ impl Connection<Nftables> {
                 // the socket: drain it without waiting for an END ACK a
                 // refused batch may not get.
                 let data: Vec<u8> = if failures.is_empty() {
-                    self.socket().recv_unicast().await?
+                    session.recv_with_timeout(self).await?
                 } else {
-                    match self.socket().try_recv_unicast()? {
+                    match session.try_recv(self)? {
                         Some(data) => data,
                         None => return Err(Error::NftBatch { failures }),
                     }
@@ -1037,7 +1040,7 @@ impl Connection<Nftables> {
                     //     recv-loop rule 1. The old one-sided `> end_seq`
                     //     bound silently swallowed mid-batch kernel errors
                     //     (#199).
-                    if !window.contains(&header.nlmsg_seq) {
+                    if !all_seqs.contains(&header.nlmsg_seq) {
                         continue;
                     }
 
@@ -1067,7 +1070,7 @@ impl Connection<Nftables> {
                         } else if seq == end_seq {
                             super::NftBatchFailure::of_batch("commit", err.error, ext)
                         } else {
-                            let index = seq.wrapping_sub(begin_seq).wrapping_sub(1) as usize;
+                            let index = inner_seqs.iter().position(|s| *s == seq).unwrap_or(0);
                             let message = messages.get(index).map_or(&[][..], Vec::as_slice);
                             super::NftBatchFailure::of_message(index, message, err.error, ext)
                         };
@@ -1117,15 +1120,18 @@ impl Connection<Nftables> {
     /// Send a single (non-dump) GET and return its one reply:
     /// `(nfgen_family, payload after the nfgenmsg)`.
     async fn nft_get_one(&self, mut builder: MessageBuilder) -> Result<(u8, Vec<u8>)> {
-        let _guard = self.lock_request().await;
+        // The session serializes in mutex mode and registers the seq with
+        // the driver in dispatcher mode; reading the socket directly raced
+        // the driver's own recv there (#466).
         let seq = self.socket().next_seq();
+        let mut session = self.recv_session(seq).await;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
         self.socket().send(&builder.finish()).await?;
 
         self.with_timeout(async {
             loop {
-                let data: Vec<u8> = self.socket().recv_unicast().await?;
+                let data: Vec<u8> = session.recv_with_timeout(self).await?;
                 for msg_result in MessageIter::new(&data) {
                     let (header, payload) = msg_result?;
                     match classify(header, payload, seq) {
@@ -1223,9 +1229,10 @@ impl Connection<Nftables> {
     async fn nft_dump_once(&self, mut builder: MessageBuilder) -> Result<Vec<(u8, Vec<u8>)>> {
         // F1 fix — serialize the send + recv-loop pair so concurrent
         // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring.
-        let _guard = self.lock_request().await;
+        // side; in dispatcher mode, register with the driver instead of
+        // racing its recv (#466). See connection.rs `Concurrency` docstring.
         let seq = self.socket().next_seq();
+        let mut session = self.recv_session_dump(seq).await;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
@@ -1241,7 +1248,7 @@ impl Connection<Nftables> {
             let mut interrupted = false;
 
             loop {
-                let data: Vec<u8> = self.socket().recv_unicast().await?;
+                let data: Vec<u8> = session.recv_with_timeout(self).await?;
                 let mut done = false;
 
                 for msg_result in MessageIter::new(&data) {

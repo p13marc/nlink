@@ -419,3 +419,68 @@ async fn a_subscribed_connection_gets_its_reply_and_its_own_event() -> nlink::Re
     .await?;
     Ok(())
 }
+
+// ============================================================================
+// #466 — overruns reach events(), and every request goes through the driver
+// ============================================================================
+
+/// A dispatcher-mode `events()` consumer that falls behind is told, as a
+/// mutex-mode socket would tell it: ENOBUFS, so a resync wrapper re-dumps.
+/// The listener channel was unbounded — a slow consumer meant unbounded
+/// memory and no overrun, ever (#466).
+#[tokio::test]
+async fn a_slow_dispatcher_consumer_gets_enobufs() -> nlink::Result<()> {
+    use nlink::netlink::RtnetlinkGroup;
+    use nlink::netlink::link::DummyLink;
+    use tokio_stream::StreamExt;
+    require_root!();
+    nlink::require_module!("dummy");
+
+    let ns = crate::common::TestNamespace::new("disp-overrun")?;
+    let conn = ns.connection()?.with_dispatcher();
+    conn.subscribe(&[RtnetlinkGroup::Link])?;
+    let mut events = conn.events().await;
+    // Far more notifications than a listener may queue, while nothing
+    // reads them.
+    let other = ns.connection()?;
+    for i in 0..700 {
+        let name = format!("o{i}");
+        other.add_link(DummyLink::new(name.as_str())).await?;
+        other.del_link(name.as_str()).await?;
+    }
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), events.next())
+        .await
+        .expect("an item")
+        .expect("the stream is live");
+    match first {
+        Err(e) => assert!(e.is_no_buffer_space(), "{e:?}"),
+        Ok(event) => panic!("expected ENOBUFS for the overrun, got an event: {event:?}"),
+    }
+    Ok(())
+}
+
+/// nftables requests on a dispatcher-mode connection whose driver is
+/// running. They read the socket themselves, racing the driver's recv —
+/// timing out, or losing frames to it (#466).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nftables_requests_work_beside_the_dispatcher_driver() -> nlink::Result<()> {
+    use nlink::netlink::Nftables;
+    use nlink::netlink::nftables::types::Family;
+    require_root!();
+    nlink::require_module!("nf_tables");
+
+    let ns = crate::common::TestNamespace::new("disp-nft")?;
+    let conn = ns
+        .connection_for::<Nftables>()?
+        .timeout(std::time::Duration::from_secs(3))
+        .with_dispatcher();
+    conn.subscribe_all()?;
+    let _events = conn.events().await;
+    for i in 0..40 {
+        conn.add_table(format!("t{i}").as_str(), Family::Inet)
+            .await?;
+        let tables = conn.list_tables().await?;
+        assert_eq!(tables.len(), i + 1);
+    }
+    Ok(())
+}

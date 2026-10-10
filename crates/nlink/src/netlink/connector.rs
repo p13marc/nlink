@@ -431,16 +431,10 @@ impl Connection<Connector> {
 
     /// Send a process connector control message.
     async fn send_proc_control(&self, op: u32) -> Result<()> {
-        // 0.19 Finding D — acquire the F1 request lock for the
-        // send. No ACK is solicited (the cn_proc layer doesn't
-        // emit one and nlmsg_flags omits NLM_F_ACK), so there's
-        // no recv loop here — but the lock matches the doc
-        // invariant ("every send is locked") and prevents a
-        // future caller from interleaving sendmsg bytes with
-        // another in-flight request on the same socket.
-        let _guard = self.lock_request().await;
-
         let seq = self.socket().next_seq();
+        // Held for the send: serializes it in mutex mode, registers the
+        // seq in dispatcher mode (#466). Nothing answers a control message.
+        let _session = self.recv_session(seq).await;
         let pid = self.socket().pid();
 
         // Build the message

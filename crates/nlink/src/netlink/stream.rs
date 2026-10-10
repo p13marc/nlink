@@ -203,15 +203,29 @@ fn poll_event_backend<P: EventSource>(
                 }
                 Poll::Pending => return Poll::Pending,
             },
-            EventBackend::Dispatched(guard) => match guard.rx.poll_recv(cx) {
-                Poll::Ready(Some(frame)) => (*frame).clone(),
-                Poll::Ready(None) => {
-                    // Driver stopped — surface the fatal error once, end after.
-                    *terminated = true;
-                    return Poll::Ready(Some(Err(conn.dispatcher().take_fatal_error())));
+            EventBackend::Dispatched(guard) => {
+                // Frames were lost — the listener fell behind, or the
+                // kernel overflowed the socket. Say so as the socket would
+                // in mutex mode, so a resync wrapper re-dumps (#466).
+                if guard.take_overrun() {
+                    return Poll::Ready(Some(Err(crate::Error::Io(
+                        std::io::Error::from_raw_os_error(libc::ENOBUFS),
+                    ))));
                 }
-                Poll::Pending => return Poll::Pending,
-            },
+                match guard.rx.poll_recv(cx) {
+                    Poll::Ready(Some(super::dispatcher::EventFrame::Data(frame))) => {
+                        (*frame).clone()
+                    }
+                    // The wake-up for an overrun: the flag says the rest.
+                    Poll::Ready(Some(super::dispatcher::EventFrame::Overrun)) => continue,
+                    Poll::Ready(None) => {
+                        // Driver stopped — surface the fatal error once, end after.
+                        *terminated = true;
+                        return Poll::Ready(Some(Err(conn.dispatcher().take_fatal_error())));
+                    }
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
         };
 
         *buffer = data;
