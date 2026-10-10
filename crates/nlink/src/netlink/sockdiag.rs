@@ -357,7 +357,7 @@ impl Connection<SockDiag> {
             self.socket().send(&buf).await?;
 
             loop {
-                let data: Vec<u8> = self.socket().recv_msg().await?;
+                let data: Vec<u8> = self.socket().recv_unicast().await?;
                 if data.len() < 16 {
                     return Err(crate::netlink::Error::InvalidMessage(
                         "response too short".into(),
@@ -599,7 +599,7 @@ impl Connection<SockDiag> {
             let mut sockets = Vec::new();
 
             loop {
-                let data: Vec<u8> = self.socket().recv_msg().await?;
+                let data: Vec<u8> = self.socket().recv_unicast().await?;
 
                 let mut offset = 0;
                 while offset + 16 <= data.len() {
@@ -721,7 +721,7 @@ impl Connection<SockDiag> {
             let mut sockets = Vec::new();
 
             loop {
-                let data: Vec<u8> = self.socket().recv_msg().await?;
+                let data: Vec<u8> = self.socket().recv_unicast().await?;
 
                 let mut offset = 0;
                 while offset + 16 <= data.len() {
@@ -851,7 +851,7 @@ impl Connection<SockDiag> {
             let mut sockets = Vec::new();
 
             loop {
-                let data: Vec<u8> = self.socket().recv_msg().await?;
+                let data: Vec<u8> = self.socket().recv_unicast().await?;
 
                 let mut offset = 0;
                 while offset + 16 <= data.len() {
@@ -975,7 +975,7 @@ impl Connection<SockDiag> {
 
             let mut sockets = Vec::new();
             loop {
-                let data: Vec<u8> = self.socket().recv_msg().await?;
+                let data: Vec<u8> = self.socket().recv_unicast().await?;
 
                 let mut offset = 0;
                 while offset + 16 <= data.len() {

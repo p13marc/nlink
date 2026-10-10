@@ -345,3 +345,77 @@ async fn dropping_a_dispatcher_connection_closes_its_fd() -> Result<()> {
         open_fds(),
     );
 }
+
+// ============================================================================
+// #465 — multicast is what the socket address says, not seq 0
+// ============================================================================
+
+fn is_new_address(ip: std::net::Ipv4Addr) -> impl FnMut(&nlink::netlink::NetworkEvent) -> bool {
+    let ip = std::net::IpAddr::V4(ip);
+    move |e| matches!(e, nlink::netlink::NetworkEvent::NewAddress(a) if a.address() == Some(&ip))
+}
+
+/// A change made by another process reaches a dispatcher-mode `events()`
+/// stream. An address notification carries the seq of the request that
+/// caused it — `ip`'s, not 0 — and the dispatcher dropped every such frame
+/// as "unregistered" (#465). (Link notifications come from the netdev
+/// notifier with seq 0, which is why a link test never showed it.)
+#[tokio::test]
+async fn dispatcher_events_see_changes_made_by_another_process() -> nlink::Result<()> {
+    use crate::common::events::expect_event;
+    use nlink::netlink::RtnetlinkGroup;
+    require_root!();
+    nlink::require_module!("dummy");
+
+    let ns = crate::common::TestNamespace::new("disp-foreign")?;
+    ns.exec("ip", &["link", "add", "d0", "type", "dummy"])?;
+    let conn = ns.connection()?.with_dispatcher();
+    conn.subscribe(&[RtnetlinkGroup::Ipv4Addr])?;
+    let mut events = conn.events().await;
+    ns.exec("ip", &["addr", "add", "10.65.0.1/24", "dev", "d0"])?;
+    expect_event(
+        &mut events,
+        std::time::Duration::from_secs(5),
+        "NewAddress 10.65.0.1 made by ip",
+        is_new_address(std::net::Ipv4Addr::new(10, 65, 0, 1)),
+    )
+    .await?;
+    Ok(())
+}
+
+/// A connection subscribed to a group gets the notification of its own
+/// request, carrying that request's seq. In mutex mode it was read as the
+/// reply — "data on an ack-only request" — and in dispatcher mode it was
+/// routed to the request and lost to `events()` (#465).
+#[tokio::test]
+async fn a_subscribed_connection_gets_its_reply_and_its_own_event() -> nlink::Result<()> {
+    use crate::common::events::expect_event;
+    use nlink::netlink::RtnetlinkGroup;
+    use nlink::netlink::addr::Ipv4Address;
+    use std::net::Ipv4Addr;
+    require_root!();
+    nlink::require_module!("dummy");
+
+    let ns = crate::common::TestNamespace::new("disp-own")?;
+    ns.exec("ip", &["link", "add", "d0", "type", "dummy"])?;
+
+    let mutex = ns.connection()?;
+    mutex.subscribe(&[RtnetlinkGroup::Ipv4Addr])?;
+    mutex
+        .add_address(Ipv4Address::new("d0", Ipv4Addr::new(10, 66, 0, 1), 24))
+        .await?;
+
+    let disp = ns.connection()?.with_dispatcher();
+    disp.subscribe(&[RtnetlinkGroup::Ipv4Addr])?;
+    let mut events = disp.events().await;
+    let ip = Ipv4Addr::new(10, 66, 0, 2);
+    disp.add_address(Ipv4Address::new("d0", ip, 24)).await?;
+    expect_event(
+        &mut events,
+        std::time::Duration::from_secs(5),
+        "NewAddress 10.66.0.2 from this connection's own request",
+        is_new_address(ip),
+    )
+    .await?;
+    Ok(())
+}

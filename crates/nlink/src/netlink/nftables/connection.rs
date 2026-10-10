@@ -1007,9 +1007,9 @@ impl Connection<Nftables> {
                 // the socket: drain it without waiting for an END ACK a
                 // refused batch may not get.
                 let data: Vec<u8> = if failures.is_empty() {
-                    self.socket().recv_msg().await?
+                    self.socket().recv_unicast().await?
                 } else {
-                    match self.socket().try_recv_msg()? {
+                    match self.socket().try_recv_unicast()? {
                         Some(data) => data,
                         None => return Err(Error::NftBatch { failures }),
                     }
@@ -1125,7 +1125,7 @@ impl Connection<Nftables> {
 
         self.with_timeout(async {
             loop {
-                let data: Vec<u8> = self.socket().recv_msg().await?;
+                let data: Vec<u8> = self.socket().recv_unicast().await?;
                 for msg_result in MessageIter::new(&data) {
                     let (header, payload) = msg_result?;
                     match classify(header, payload, seq) {
@@ -1241,7 +1241,7 @@ impl Connection<Nftables> {
             let mut interrupted = false;
 
             loop {
-                let data: Vec<u8> = self.socket().recv_msg().await?;
+                let data: Vec<u8> = self.socket().recv_unicast().await?;
                 let mut done = false;
 
                 for msg_result in MessageIter::new(&data) {

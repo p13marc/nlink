@@ -202,7 +202,7 @@ impl RecvSession {
     /// for callers that impose their own bound.
     pub(crate) async fn recv<P: ProtocolState>(&mut self, conn: &Connection<P>) -> Result<Vec<u8>> {
         match self {
-            RecvSession::Direct(_) => conn.socket().recv_msg().await,
+            RecvSession::Direct(_) => conn.socket().recv_unicast().await,
             RecvSession::Dispatched { guard, .. } => match guard.rx.recv().await {
                 Some(buf) => Ok((*buf).clone()),
                 None => Err(conn.dispatcher().take_fatal_error()),
@@ -868,7 +868,7 @@ impl<P: ProtocolState> Connection<P> {
         // bounds the loop so a never-ack'd request still surfaces
         // as `Error::Timeout` instead of hanging.
         loop {
-            let response = self.socket.recv_msg().await?;
+            let response = self.socket.recv_unicast().await?;
             let mut found_seq = false;
             for result in MessageIter::new(&response) {
                 // 0.19 N2 — Plan 193 §2.3 rule 3 extension. When a
@@ -929,7 +929,7 @@ impl<P: ProtocolState> Connection<P> {
         // with the expected seq lands, skipping unrelated multicast
         // frames.
         loop {
-            let response = self.socket.recv_msg().await?;
+            let response = self.socket.recv_unicast().await?;
             for result in MessageIter::new(&response) {
                 // 0.19 N2 — see send_request_inner.
                 let Ok((header, payload)) = result else {
@@ -1010,7 +1010,7 @@ impl<P: ProtocolState> Connection<P> {
             }
             #[cfg(not(feature = "syscall_batch"))]
             let batch = {
-                let data = self.with_timeout(self.socket.recv_msg()).await?;
+                let data = self.with_timeout(self.socket.recv_unicast()).await?;
                 vec![data]
             };
 
@@ -3507,7 +3507,7 @@ impl Connection<Generic> {
             let msg = builder.finish();
             self.socket.send(&msg).await?;
 
-            let response = self.socket.recv_msg().await?;
+            let response = self.socket.recv_unicast().await?;
             self.parse_family_response(&response, seq, name)
         })
         .await

@@ -756,13 +756,26 @@ impl NetlinkSocket {
     /// returns [`Error::FrameTruncated`]
     /// instead of silently losing the tail.
     pub async fn recv_msg(&self) -> Result<Vec<u8>> {
+        Ok(self.recv_msg_from().await?.0)
+    }
+
+    /// [`recv_msg`](Self::recv_msg), and whether the datagram was a
+    /// **multicast** copy: `sockaddr_nl.nl_groups != 0` in `msg_name`.
+    ///
+    /// That is the only place the kernel says so. A notification caused by
+    /// a request carries the request's seq and portid in its header —
+    /// `rtmsg_fib(…, info->nlh, info->portid)` — so a socket subscribed to
+    /// the group gets its own notification looking exactly like a reply,
+    /// and another process's (`ip`, `nft`) with a seq that is not 0. Only
+    /// changes the kernel originates carry seq 0 (#465).
+    pub async fn recv_msg_from(&self) -> Result<(Vec<u8>, bool)> {
         let mut capacity = RECV_INITIAL_CAPACITY;
         loop {
             let mut buf = BytesMut::with_capacity(capacity);
-            let received = loop {
+            let (received, multicast) = loop {
                 let mut guard = self.fd.ready(Interest::READABLE).await?;
-                match guard.try_io(|inner| inner.get_ref().recv(&mut buf, libc::MSG_TRUNC)) {
-                    Ok(Ok(n)) => break n,
+                match guard.try_io(|inner| inner.get_ref().recv_from(&mut buf, libc::MSG_TRUNC)) {
+                    Ok(Ok((n, addr))) => break (n, addr.multicast_groups() != 0),
                     Ok(Err(e)) => {
                         // Plan 234 §4 — route ENOBUFS to multicast
                         // subscribers via the dispatcher BEFORE
@@ -785,7 +798,7 @@ impl NetlinkSocket {
             if received <= capacity {
                 // Fast path. The bytes already in buf are the
                 // complete frame.
-                return Ok(buf.to_vec());
+                return Ok((buf.to_vec(), multicast));
             }
 
             // Truncated. The kernel reports the actual size in
@@ -800,6 +813,33 @@ impl NetlinkSocket {
             }
             capacity = next;
             // Loop and re-attempt the recv with the larger buffer.
+        }
+    }
+
+    /// Receive the next datagram addressed to this socket alone, skipping
+    /// multicast copies — for request/reply loops. A connection that has
+    /// joined a group would otherwise read its own notification, which
+    /// carries its request's seq, as the reply (#465).
+    pub async fn recv_unicast(&self) -> Result<Vec<u8>> {
+        loop {
+            let (data, multicast) = self.recv_msg_from().await?;
+            if !multicast {
+                return Ok(data);
+            }
+            tracing::trace!("skipping a multicast datagram while waiting for a reply");
+        }
+    }
+
+    /// [`try_recv_msg`](Self::try_recv_msg) for request/reply loops:
+    /// multicast copies are skipped, as in
+    /// [`recv_unicast`](Self::recv_unicast).
+    pub fn try_recv_unicast(&self) -> Result<Option<Vec<u8>>> {
+        loop {
+            match self.try_recv_inner()? {
+                Some((_, true)) => continue,
+                Some((data, false)) => return Ok(Some(data)),
+                None => return Ok(None),
+            }
         }
     }
 
@@ -819,15 +859,21 @@ impl NetlinkSocket {
     /// the same 1 MiB cap, and a frame past the cap surfaces as
     /// [`Error::FrameTruncated`].
     pub fn try_recv_msg(&self) -> Result<Option<Vec<u8>>> {
+        Ok(self.try_recv_inner()?.map(|(data, _)| data))
+    }
+
+    /// [`try_recv_msg`](Self::try_recv_msg) with the multicast tag, as in
+    /// [`recv_msg_from`](Self::recv_msg_from).
+    fn try_recv_inner(&self) -> Result<Option<(Vec<u8>, bool)>> {
         let mut capacity = RECV_INITIAL_CAPACITY;
         loop {
             let mut buf = BytesMut::with_capacity(capacity);
-            let received = match self
+            let (received, multicast) = match self
                 .fd
                 .get_ref()
-                .recv(&mut buf, libc::MSG_TRUNC | libc::MSG_DONTWAIT)
+                .recv_from(&mut buf, libc::MSG_TRUNC | libc::MSG_DONTWAIT)
             {
-                Ok(n) => n,
+                Ok((n, addr)) => (n, addr.multicast_groups() != 0),
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
                 Err(e) => {
                     // Same routing as recv_msg: multicast subscribers
@@ -841,7 +887,7 @@ impl NetlinkSocket {
             };
 
             if received <= capacity {
-                return Ok(Some(buf.to_vec()));
+                return Ok(Some((buf.to_vec(), multicast)));
             }
 
             let next = received.next_multiple_of(4096);
@@ -974,6 +1020,10 @@ struct BatchBufs {
     /// lifetime extends across `recvmmsg` calls.
     #[allow(dead_code)]
     iovecs: Vec<libc::iovec>,
+    /// Per-slot sender address; `msg_hdr.msg_name` points into it, and
+    /// `nl_groups` marks a multicast copy (#465). Held for the same
+    /// lifetime reason as `iovecs`.
+    names: Vec<libc::sockaddr_nl>,
     /// mmsghdr array; msg_hdr.msg_iov points into `iovecs`.
     msgs: Vec<libc::mmsghdr>,
 }
@@ -993,11 +1043,15 @@ impl BatchBufs {
         let mut msgs: Vec<libc::mmsghdr> = (0..NL_BATCH_SIZE)
             .map(|_| unsafe { std::mem::zeroed() })
             .collect();
+        // SAFETY: sockaddr_nl is plain old data; all-zero is a valid value.
+        let mut names: Vec<libc::sockaddr_nl> = (0..NL_BATCH_SIZE)
+            .map(|_| unsafe { std::mem::zeroed() })
+            .collect();
         for (i, msg) in msgs.iter_mut().enumerate() {
             msg.msg_hdr.msg_iov = &mut iovecs[i] as *mut _;
             msg.msg_hdr.msg_iovlen = 1;
-            msg.msg_hdr.msg_name = std::ptr::null_mut();
-            msg.msg_hdr.msg_namelen = 0;
+            msg.msg_hdr.msg_name = &mut names[i] as *mut libc::sockaddr_nl as *mut libc::c_void;
+            msg.msg_hdr.msg_namelen = std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t;
             msg.msg_hdr.msg_control = std::ptr::null_mut();
             msg.msg_hdr.msg_controllen = 0;
             msg.msg_hdr.msg_flags = 0;
@@ -1006,6 +1060,7 @@ impl BatchBufs {
         BatchBufs {
             storage,
             iovecs,
+            names,
             msgs,
         }
     }
@@ -1016,6 +1071,10 @@ impl BatchBufs {
         for i in 0..n {
             self.msgs[i].msg_len = 0;
             self.msgs[i].msg_hdr.msg_flags = 0;
+            // The kernel writes the address length back; reset it.
+            self.msgs[i].msg_hdr.msg_namelen =
+                std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t;
+            self.names[i].nl_groups = 0;
         }
     }
 }
@@ -1159,6 +1218,12 @@ impl NetlinkSocket {
                             i, len, NL_BUF_SIZE
                         ),
                     ));
+                }
+                // Batched receives serve dumps, which are request/reply: a
+                // multicast copy here is a notification, not part of the
+                // dump, and is dropped (#465).
+                if bufs.names[i].nl_groups != 0 {
+                    continue;
                 }
                 frames.push(bufs.storage[i][..len].to_vec());
             }
