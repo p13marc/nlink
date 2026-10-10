@@ -1432,6 +1432,24 @@ impl NftablesConfig {
                     ));
                 }
             }
+
+            // The rules of a chain this diff deletes go explicitly, in the
+            // apply's first phase. DELCHAIN would take them too, but only at
+            // its own place, after the deletes of the sets and objects those
+            // rules use — which are then EBUSY (#460).
+            for (table, family, chain) in &diff.chains_to_delete {
+                if table != declared.name() || *family != declared.family() {
+                    continue;
+                }
+                for rule in current_rules.iter().filter(|r| &r.chain == chain) {
+                    diff.rules_to_delete.push((
+                        table.clone(),
+                        *family,
+                        chain.clone(),
+                        RuleHandle(rule.handle),
+                    ));
+                }
+            }
         }
 
         Ok(diff)
