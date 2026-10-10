@@ -192,6 +192,12 @@ ChannelWidth = NL80211_CHAN_WIDTH
     Width320 -> 320
 InterfaceType = NL80211_IFTYPE
 PowerSaveState = NL80211_PS
+WifiBand = NL80211_BAND
+    Band2Ghz -> 2GHZ
+    Band5Ghz -> 5GHZ
+    Band60Ghz -> 60GHZ
+    Band6Ghz -> 6GHZ
+    S1Ghz -> S1GHZ
 
 # --------------------------------------------------------------------- devlink
 ConfigMode = DEVLINK_PARAM_CMODE

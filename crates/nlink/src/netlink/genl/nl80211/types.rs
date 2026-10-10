@@ -227,14 +227,10 @@ impl WirelessInterface {
         })
     }
 
-    /// Get frequency as a channel number (approximate).
+    /// The channel number of the interface's frequency
+    /// ([`freq_to_channel`]); `None` with no frequency, or one in no band.
     pub fn channel(&self) -> Option<u32> {
-        self.frequency.map(|f| match f {
-            2412..=2484 => (f - 2407) / 5,
-            5180..=5825 => (f - 5000) / 5,
-            5955..=7115 => (f - 5950) / 5,
-            _ => 0,
-        })
+        self.frequency.and_then(freq_to_channel)
     }
 }
 
@@ -554,15 +550,80 @@ impl Frequency {
         self.max_power_mbm as f32 / 100.0
     }
 
-    /// Approximate channel number.
+    /// The channel number ([`freq_to_channel`]), or 0 for a frequency in
+    /// no band.
     pub fn channel(&self) -> u32 {
-        match self.freq {
-            2412..=2484 => (self.freq - 2407) / 5,
-            5180..=5825 => (self.freq - 5000) / 5,
-            5955..=7115 => (self.freq - 5950) / 5,
-            _ => 0,
-        }
+        freq_to_channel(self.freq).unwrap_or(0)
     }
+}
+
+/// A frequency band (`enum nl80211_band`).
+///
+/// Channel numbers repeat across bands — channel 1 is 2412 MHz, 5005 MHz
+/// and 5955 MHz — so turning one back into a frequency needs the band
+/// ([`channel_to_freq`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u32)]
+#[non_exhaustive]
+pub enum WifiBand {
+    /// 2.4 GHz ISM band.
+    Band2Ghz = 0,
+    /// Around 5 GHz (4.9–5.9 GHz).
+    Band5Ghz = 1,
+    /// Around 60 GHz (58.32–69.12 GHz).
+    Band60Ghz = 2,
+    /// Around 6 GHz (5.9–7.2 GHz).
+    Band6Ghz = 3,
+    /// Around 900 MHz, for S1G PHYs. Its channels are 500 kHz apart; see
+    /// [`channel_to_freq_khz`].
+    S1Ghz = 4,
+    /// Light communication (a placeholder in the kernel).
+    Lc = 5,
+}
+
+/// The channel number of a frequency in MHz, as the kernel's
+/// `ieee80211_freq_khz_to_channel` computes it — 2484 MHz is channel 14,
+/// which the old `(f - 2407) / 5` made 15 (#508). `None` for a frequency
+/// in no band.
+pub fn freq_to_channel(freq_mhz: u32) -> Option<u32> {
+    match freq_mhz {
+        2484 => Some(14),
+        2412..=2472 => Some((freq_mhz - 2407) / 5),
+        4910..=4980 => Some((freq_mhz - 4000) / 5),
+        5005..=5920 => Some((freq_mhz - 5000) / 5),
+        5935 => Some(2),
+        5955..=7115 => Some((freq_mhz - 5950) / 5),
+        58320..=70200 => Some((freq_mhz - 56160) / 2160),
+        _ => None,
+    }
+}
+
+/// The centre frequency in MHz of `channel` in `band`, as the kernel's
+/// `ieee80211_channel_to_freq_khz` computes it. `None` for a channel the
+/// band does not have, and for S1G, whose channels fall on 500 kHz steps
+/// ([`channel_to_freq_khz`]).
+pub fn channel_to_freq(channel: u32, band: WifiBand) -> Option<u32> {
+    match band {
+        WifiBand::S1Ghz => None,
+        _ => channel_to_freq_khz(channel, band).map(|khz| khz / 1000),
+    }
+}
+
+/// [`channel_to_freq`] in kHz, which S1G needs.
+pub fn channel_to_freq_khz(channel: u32, band: WifiBand) -> Option<u32> {
+    let mhz = match (band, channel) {
+        (_, 0) => return None,
+        (WifiBand::Band2Ghz | WifiBand::Lc, 14) => 2484,
+        (WifiBand::Band2Ghz | WifiBand::Lc, 1..=13) => 2407 + channel * 5,
+        (WifiBand::Band5Ghz, 182..=196) => 4000 + channel * 5,
+        (WifiBand::Band5Ghz, 1..=184) => 5000 + channel * 5,
+        (WifiBand::Band6Ghz, 2) => 5935,
+        (WifiBand::Band6Ghz, 1..=233) => 5950 + channel * 5,
+        (WifiBand::Band60Ghz, 1..=6) => 56160 + channel * 2160,
+        (WifiBand::S1Ghz, _) => return channel.checked_mul(500)?.checked_add(902_000),
+        _ => return None,
+    };
+    Some(mhz * 1000)
 }
 
 /// Regulatory domain information.
@@ -706,5 +767,70 @@ impl ConnectRequest {
     pub fn auth_type(mut self, auth: AuthType) -> Self {
         self.auth_type = auth;
         self
+    }
+}
+
+#[cfg(test)]
+mod channel_tests {
+    use super::*;
+
+    /// #508: 2484 MHz is channel 14 (Japan); `(f - 2407) / 5` made it 15.
+    #[test]
+    fn channel_14_is_2484_mhz() {
+        assert_eq!(freq_to_channel(2484), Some(14));
+        let f = Frequency {
+            freq: 2484,
+            ..Default::default()
+        };
+        assert_eq!(f.channel(), 14);
+        assert_eq!(channel_to_freq(14, WifiBand::Band2Ghz), Some(2484));
+    }
+
+    /// Spot values from the kernel's `ieee80211_channel_to_freq_khz`, and a
+    /// round trip over every channel of every band with integral MHz.
+    #[test]
+    fn conversions_follow_the_kernel() {
+        for (freq, ch) in [
+            (2412, 1),
+            (2472, 13),
+            (4920, 184),
+            (5180, 36),
+            (5825, 165),
+            (5935, 2),
+            (5955, 1),
+            (7115, 233),
+            (58320, 1),
+            (69120, 6),
+        ] {
+            assert_eq!(freq_to_channel(freq), Some(ch), "{freq} MHz");
+        }
+        for freq in [0, 2400, 2477, 5925, 45000] {
+            assert_eq!(freq_to_channel(freq), None, "{freq} MHz is in no band");
+        }
+        let bands = [
+            (WifiBand::Band2Ghz, 1..=14),
+            (WifiBand::Band5Ghz, 1..=196),
+            (WifiBand::Band6Ghz, 1..=233),
+            (WifiBand::Band60Ghz, 1..=6),
+        ];
+        for (band, channels) in bands {
+            for ch in channels {
+                let freq = channel_to_freq(ch, band).unwrap_or_else(|| panic!("{band:?} {ch}"));
+                assert_eq!(
+                    freq_to_channel(freq),
+                    Some(ch),
+                    "{band:?} channel {ch} = {freq} MHz"
+                );
+            }
+        }
+        assert_eq!(channel_to_freq(197, WifiBand::Band5Ghz), None);
+        assert_eq!(channel_to_freq(0, WifiBand::Band2Ghz), None);
+        assert_eq!(channel_to_freq(15, WifiBand::Band2Ghz), None);
+        assert_eq!(channel_to_freq_khz(1, WifiBand::S1Ghz), Some(902_500));
+        assert_eq!(
+            channel_to_freq(1, WifiBand::S1Ghz),
+            None,
+            "S1G is in 500 kHz steps"
+        );
     }
 }

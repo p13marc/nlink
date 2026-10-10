@@ -32,6 +32,20 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **nl80211: 2484 MHz read as channel 15, and nothing turned a channel back
+  into a frequency (#508).** `Interface::channel()` and
+  `Frequency::channel()` computed `(f - 2407) / 5` across the 2.4 GHz band,
+  which makes Japan's channel 14 (2484 MHz) 15, and they ignored 4.9 GHz,
+  the lower 5 GHz channels, 6 GHz channel 2 and 60 GHz. Both now go
+  through `freq_to_channel`, which mirrors the kernel's
+  `ieee80211_freq_khz_to_channel`. The new `channel_to_freq(channel,
+  WifiBand)` and `channel_to_freq_khz` mirror
+  `ieee80211_channel_to_freq_khz`. `WifiBand` is `enum nl80211_band`,
+  checked by the UAPI audit. `Interface::channel()` is `None`, not
+  `Some(0)`, for a frequency in no band. Unit tests check channel 14, the
+  kernel's values per band, and a round trip over every channel of
+  2.4/5/6/60 GHz.
+
 - **u32: port matches never matched a port, and `ht`/`link` named the
   wrong hash table (#492, #562).**
   - `match_src_port`/`match_dst_port` were next-header keys
@@ -616,6 +630,9 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`nl80211::{WifiBand, freq_to_channel, channel_to_freq,
+  channel_to_freq_khz}`** (#508).
 
 - **`U32Filter::{handle, match_nexthdr_src_port, match_nexthdr_dst_port,
   offset_at, offset_plus, eat}`** and `u32::pack_key16_nexthdr` (#492).
