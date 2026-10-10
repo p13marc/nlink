@@ -153,6 +153,8 @@ pub struct EventSubscription<'a, P: EventSource> {
     /// streams/dumps on a shared `Arc<Connection>` from racing recv.
     backend: EventBackend,
     terminated: bool,
+    /// #504 — ends the stream when its namespace is deleted.
+    netns_watch: Option<NetnsWatch>,
 }
 
 impl<'a, P: EventSource> EventSubscription<'a, P> {
@@ -163,7 +165,50 @@ impl<'a, P: EventSource> EventSubscription<'a, P> {
             pending: Vec::new(),
             backend,
             terminated: false,
+            netns_watch: NetnsWatch::for_socket(conn.socket()),
         }
+    }
+}
+
+/// Checks, once a [`NetnsWatch::PERIOD`], that the marker a namespaced
+/// socket was opened through still names its namespace (#504).
+///
+/// The socket holds a reference on its namespace, so a deleted namespace
+/// lives on — interfaces and all — for as long as the stream does, and the
+/// stream itself sees nothing: no event marks the deletion. Polling a
+/// `stat` of the marker is what is left.
+pub(crate) struct NetnsWatch {
+    marker: super::namespace::NamespaceMarker,
+    tick: tokio::time::Interval,
+}
+
+impl NetnsWatch {
+    /// How often the marker is checked.
+    pub(crate) const PERIOD: std::time::Duration = std::time::Duration::from_secs(1);
+
+    fn for_socket(socket: &super::socket::NetlinkSocket) -> Option<Self> {
+        let marker = socket.namespace_marker()?.clone();
+        let mut tick =
+            tokio::time::interval_at(tokio::time::Instant::now() + Self::PERIOD, Self::PERIOD);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        Some(Self { marker, tick })
+    }
+
+    /// `Some(error)` once the namespace is gone; registers the next check
+    /// with `cx` otherwise.
+    fn poll_deleted(&mut self, cx: &mut Context<'_>) -> Option<crate::Error> {
+        while self.tick.poll_tick(cx).is_ready() {
+            if !self.marker.is_live() {
+                tracing::info!(
+                    path = %self.marker.path().display(),
+                    "event stream: its network namespace was deleted; ending"
+                );
+                return Some(crate::Error::NamespaceDeleted {
+                    path: self.marker.path().to_path_buf(),
+                });
+            }
+        }
+        None
     }
 }
 
@@ -178,6 +223,7 @@ fn poll_event_backend<P: EventSource>(
     buffer: &mut Vec<u8>,
     pending: &mut Vec<P::Event>,
     terminated: &mut bool,
+    netns_watch: &mut Option<NetnsWatch>,
     cx: &mut Context<'_>,
 ) -> Poll<Option<Result<P::Event>>> {
     if let Some(event) = pending.pop() {
@@ -185,6 +231,14 @@ fn poll_event_backend<P: EventSource>(
     }
     if *terminated {
         return Poll::Ready(None);
+    }
+    // A deleted namespace ends the stream: nothing more happens in it,
+    // and only dropping the socket lets the kernel free it (#504).
+    if let Some(watch) = netns_watch
+        && let Some(e) = watch.poll_deleted(cx)
+    {
+        *terminated = true;
+        return Poll::Ready(Some(Err(e)));
     }
     loop {
         let data: Vec<u8> = match backend {
@@ -278,6 +332,7 @@ impl<P: EventSource> Stream for EventSubscription<'_, P> {
             &mut this.buffer,
             &mut this.pending,
             &mut this.terminated,
+            &mut this.netns_watch,
             cx,
         )
     }
@@ -322,16 +377,20 @@ pub struct OwnedEventStream<P: EventSource> {
     /// dispatcher mode it's the driver-routed event channel.
     backend: EventBackend,
     terminated: bool,
+    /// #504 — see [`EventSubscription`].
+    netns_watch: Option<NetnsWatch>,
 }
 
 impl<P: EventSource> OwnedEventStream<P> {
     pub(crate) fn new(conn: Connection<P>, backend: EventBackend) -> Self {
+        let netns_watch = NetnsWatch::for_socket(conn.socket());
         Self {
             conn,
             buffer: Vec::new(),
             pending: Vec::new(),
             backend,
             terminated: false,
+            netns_watch,
         }
     }
 
@@ -362,6 +421,7 @@ impl<P: EventSource> Stream for OwnedEventStream<P> {
             &mut this.buffer,
             &mut this.pending,
             &mut this.terminated,
+            &mut this.netns_watch,
             cx,
         )
     }
@@ -391,6 +451,21 @@ impl<P: EventSource> Connection<P> {
     /// waits until the first stream is dropped. Use a second connection,
     /// or [`with_dispatcher()`](Connection::with_dispatcher), where none of
     /// this applies: events and requests share the socket.
+    ///
+    /// **Namespaces (#504).** A socket keeps its network namespace alive,
+    /// so a stream would keep a deleted namespace, with its interfaces,
+    /// alive and silent for as long as it ran. A stream on a connection
+    /// opened through a namespace *path* — [`namespace::connection_for`],
+    /// [`Connection::new_in_namespace_path`], `LabNamespace::connection` —
+    /// checks once a second that the path still names its namespace. Once
+    /// the namespace is deleted it yields
+    /// [`Error::NamespaceDeleted`](crate::Error::NamespaceDeleted) and ends;
+    /// drop it, and the connection, to let the kernel free the namespace.
+    /// The resync wrappers pass that on and end too. A connection opened
+    /// from a file descriptor or a `/proc/<pid>/ns/net` path is not
+    /// watched.
+    ///
+    /// [`namespace::connection_for`]: crate::netlink::namespace::connection_for
     ///
     /// # Example
     ///
@@ -445,7 +520,8 @@ impl<P: EventSource> Connection<P> {
     /// ```
     ///
     /// **0.19 Finding B — now `async`.** Same locking semantics as
-    /// [`Self::events`]; see that method's docstring for the trade-off.
+    /// [`Self::events`]; see that method's docstring for the trade-off,
+    /// and for how a stream ends when its namespace is deleted (#504).
     pub async fn into_events(self) -> OwnedEventStream<P> {
         let backend = self.event_backend().await;
         OwnedEventStream::new(self, backend)

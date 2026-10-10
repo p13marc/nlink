@@ -676,7 +676,11 @@ impl<P: ProtocolState> Connection<P> {
         // Registered before the check, so a stream that claims the lock
         // after it still wakes this request.
         let claimed = self.event_claim.claimed.notified();
-        if self.event_claim.active.load(std::sync::atomic::Ordering::Acquire) {
+        if self
+            .event_claim
+            .active
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
             return Err(Error::EventStreamActive);
         }
         tokio::select! {
@@ -3993,7 +3997,10 @@ mod send_sync_tests {
         assert!(dump.is_err_and(|e| e.is_event_stream_active()));
 
         drop(events);
-        let links = conn.get_links().await.expect("usable once the stream drops");
+        let links = conn
+            .get_links()
+            .await
+            .expect("usable once the stream drops");
         assert!(!links.is_empty());
     }
 
@@ -4080,7 +4087,10 @@ mod send_sync_tests {
             assert_eq!(info.id, GENL_ID_CTRL);
         }
         conn.clear_cache();
-        let err = conn.get_family("no-such-family").await.expect_err("unknown");
+        let err = conn
+            .get_family("no-such-family")
+            .await
+            .expect_err("unknown");
         assert!(matches!(err, Error::FamilyNotFound { .. }), "{err}");
     }
 

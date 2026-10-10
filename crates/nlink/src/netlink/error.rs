@@ -246,6 +246,21 @@ pub enum Error {
         name: String,
     },
 
+    /// The network namespace an event stream's socket lives in was deleted
+    /// (#504): the marker the socket was opened through — a
+    /// `/var/run/netns` name or another bind mount — is gone, or names
+    /// another namespace now. The stream has ended. Its socket was what
+    /// kept the namespace, and its interfaces, alive; drop the stream (and,
+    /// for a borrowed `events()` stream, the connection) so the kernel can
+    /// free it.
+    ///
+    /// Added in 0.31.0.
+    #[error("network namespace deleted: {} no longer names this stream's namespace", path.display())]
+    NamespaceDeleted {
+        /// The marker the socket was opened through.
+        path: std::path::PathBuf,
+    },
+
     /// Qdisc not found.
     #[error("qdisc not found: {kind} on {interface}")]
     QdiscNotFound {
@@ -856,6 +871,14 @@ impl Error {
     /// Added in 0.31.0 (#505).
     pub fn is_event_stream_active(&self) -> bool {
         matches!(self, Self::EventStreamActive)
+    }
+
+    /// Check if this is an [`Error::NamespaceDeleted`] — an event stream
+    /// whose namespace was deleted under it, and which has ended.
+    ///
+    /// Added in 0.31.0 (#504).
+    pub fn is_namespace_deleted(&self) -> bool {
+        matches!(self, Self::NamespaceDeleted { .. })
     }
 
     /// Check if this is an [`Error::DumpInterrupted`].

@@ -788,6 +788,61 @@ pub fn is_namespace(name: &str) -> bool {
 /// namespace is gone" (#348). The stale case is also logged at `warn`,
 /// because a marker with no mount behind it is usually a bug the operator
 /// wants to know about.
+/// The file a namespaced socket was opened through, and the namespace it
+/// named then (#504).
+///
+/// A socket holds a reference on its network namespace, so deleting the
+/// namespace — unmounting and removing its marker — does not free it while
+/// the socket is open: its interfaces, the root-side ends of its veths
+/// included, live on, and nothing tells the socket's owner. The namespace
+/// sends no `RTM_DELNSID` either, because it is not being destroyed: the
+/// socket is what holds it. So a stream watches the marker instead.
+#[derive(Debug, Clone)]
+pub(crate) struct NamespaceMarker {
+    path: PathBuf,
+    dev: u64,
+    ino: u64,
+}
+
+impl NamespaceMarker {
+    /// The marker for a namespace opened at `path` as `file`. `None` for a
+    /// `/proc/<pid>/ns/net` path: that file goes when the process exits,
+    /// which does not end its namespace. Following a process's namespace
+    /// needs a pidfd (#520).
+    pub(crate) fn of(path: &Path, file: &std::fs::File) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+        if path.starts_with("/proc") {
+            return None;
+        }
+        let meta = file.metadata().ok()?;
+        Some(Self {
+            path: path.to_path_buf(),
+            dev: meta.dev(),
+            ino: meta.ino(),
+        })
+    }
+
+    /// Whether the marker still names the namespace it named at open. One
+    /// that is gone, or now is something else — the plain file left once
+    /// the namespace is unmounted, or a new namespace under the same name —
+    /// does not. Any other error (`EACCES`) cannot tell, and counts as live.
+    pub(crate) fn is_live(&self) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        match std::fs::metadata(&self.path) {
+            Ok(meta) => meta.dev() == self.dev && meta.ino() == self.ino,
+            Err(e) => !matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ),
+        }
+    }
+
+    /// The marker's path.
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 pub(crate) fn live_named_path(ns_name: &str) -> Result<PathBuf> {
     live_path_in(Path::new(NETNS_RUN_DIR), ns_name)
 }
@@ -2063,6 +2118,43 @@ mod tests {
         assert!(matches!(&err, Error::NamespaceNotFound { name } if name == "stale"));
         let err = missing.expect_err("an absent marker is not a namespace");
         assert!(err.is_not_found(), "got unclassifiable error: {err}");
+    }
+
+    /// #504: a marker is live while the path names what was opened. A
+    /// namespace deleted under a socket leaves a plain file (unmounted) or
+    /// nothing (removed); a new namespace of the same name is a new inode.
+    /// Plain files stand in for the nsfs mounts here — the check is the
+    /// same `stat`.
+    #[test]
+    fn a_namespace_marker_is_live_until_its_path_names_something_else() {
+        let dir = std::env::temp_dir().join(format!("nlink-ns-marker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("lab");
+        std::fs::write(&path, b"").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let marker = NamespaceMarker::of(&path, &file).expect("a marker path");
+        let opened = marker.is_live();
+
+        // Replaced: same name, another file.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"").unwrap();
+        let replaced = marker.is_live();
+        // Removed.
+        std::fs::remove_file(&path).unwrap();
+        let removed = marker.is_live();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(opened, "the marker names what was opened");
+        assert!(
+            !replaced,
+            "a new file under the same name is not the namespace"
+        );
+        assert!(!removed, "a removed marker is not the namespace");
+
+        // A process's namespace file is not a marker: it goes when the
+        // process does, which does not end the namespace.
+        let own = std::fs::File::open("/proc/self/ns/net").unwrap();
+        assert!(NamespaceMarker::of(Path::new("/proc/self/ns/net"), &own).is_none());
     }
 
     /// The resolver accepts a real nsfs path: `/proc/self/ns` is the one

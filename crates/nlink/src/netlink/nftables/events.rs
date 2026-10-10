@@ -204,7 +204,10 @@ pub(crate) fn parse_nftables_event(msg_type: u16, body: &[u8]) -> Option<Nftable
         Some(family) => family,
         None if (msg_type & 0xFF) as u8 == NFT_MSG_NEWGEN => Family::Inet,
         None => {
-            tracing::debug!(family = body[0], "nftables event in an unknown family; dropped");
+            tracing::debug!(
+                family = body[0],
+                "nftables event in an unknown family; dropped"
+            );
             return None;
         }
     };

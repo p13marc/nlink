@@ -94,6 +94,10 @@ pub struct NetlinkSocket {
     /// Atomic load/store via `OnceLock` so the read path on `recv_msg`
     /// is a single relaxed load.
     dispatcher: std::sync::OnceLock<Dispatcher>,
+    /// #504 — the marker this socket's namespace was opened through, if
+    /// it was opened through one. Event streams watch it so they can end
+    /// when the namespace is deleted instead of keeping it alive, silent.
+    namespace_marker: Option<super::namespace::NamespaceMarker>,
 }
 
 impl NetlinkSocket {
@@ -202,7 +206,14 @@ impl NetlinkSocket {
         // errors keep their errno — never a stringly InvalidMessage.
         let ns_file = File::open(ns_path.as_ref())
             .map_err(|e| super::namespace::namespace_open_error(ns_path.as_ref(), e))?;
-        Self::new_in_namespace(protocol, ns_file.as_raw_fd())
+        let mut socket = Self::new_in_namespace(protocol, ns_file.as_raw_fd())?;
+        socket.namespace_marker = super::namespace::NamespaceMarker::of(ns_path.as_ref(), &ns_file);
+        Ok(socket)
+    }
+
+    /// The marker this socket's namespace was opened through (#504).
+    pub(crate) fn namespace_marker(&self) -> Option<&super::namespace::NamespaceMarker> {
+        self.namespace_marker.as_ref()
     }
 
     /// Internal helper to create the socket.
@@ -247,6 +258,7 @@ impl NetlinkSocket {
             pid,
             protocol,
             dispatcher: std::sync::OnceLock::new(),
+            namespace_marker: None,
         })
     }
 
@@ -1544,9 +1556,7 @@ mod recv_msg_truncate_tests {
     #[tokio::test]
     async fn a_datagram_past_the_initial_buffer_arrives_whole() {
         let (rx, tx, to) = usersock_pair();
-        let big: Vec<u8> = (0..RECV_INITIAL_CAPACITY + 8192)
-            .map(|i| i as u8)
-            .collect();
+        let big: Vec<u8> = (0..RECV_INITIAL_CAPACITY + 8192).map(|i| i as u8).collect();
         let small = vec![0xcd; 64];
         for _ in 0..3 {
             tx.send_to(&big, &to, 0).expect("send big");
