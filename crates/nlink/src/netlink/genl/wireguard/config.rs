@@ -252,6 +252,7 @@ impl WireguardConfig {
     /// diff again — the fresh device's configuration lands in
     /// `devices_to_modify`.
     pub async fn diff(&self, conn: &Connection<Wireguard>) -> Result<WireguardConfigDiff> {
+        self.validate()?;
         let mut diff = WireguardConfigDiff::default();
 
         for declared in &self.devices {
@@ -274,6 +275,62 @@ impl WireguardConfig {
         }
 
         Ok(diff)
+    }
+
+    /// Refuse an allowed-IP prefix declared on two peers of one device
+    /// (#498), and a device declared twice.
+    ///
+    /// The kernel keeps a device's allowed IPs in one trie, so a prefix
+    /// belongs to at most one peer: writing it on peer B takes it from
+    /// peer A, silently. Declared on both, every apply rewrote every peer
+    /// that "lost" it and the diff never emptied — a hub declaring each
+    /// spoke with the tunnel's /24 is the usual way in. Compared as the
+    /// kernel stores them, masked to their prefix. [`diff`](Self::diff)
+    /// runs this first.
+    pub fn validate(&self) -> Result<()> {
+        use crate::netlink::error::ValidationErrorInfo;
+        let mut errors = Vec::new();
+        let mut names = std::collections::HashSet::new();
+        for device in &self.devices {
+            // Two declarations of one device are diffed separately and
+            // undo each other.
+            if !names.insert(device.ifname.as_str()) {
+                errors.push(ValidationErrorInfo::new(
+                    format!("devices.{}", device.ifname),
+                    "declared more than once",
+                ));
+            }
+            let mut owner: std::collections::HashMap<(IpAddr, u8), &[u8; WG_KEY_LEN]> =
+                std::collections::HashMap::new();
+            for peer in &device.peers {
+                for prefix in allowed_ip_set(&peer.allowed_ips) {
+                    match owner.get(&prefix) {
+                        Some(first) if *first != &peer.public_key => {
+                            errors.push(ValidationErrorInfo::new(
+                                format!("devices.{}.peers", device.ifname),
+                                format!(
+                                    "{}/{} is an allowed IP of two peers, {} and {}; \
+                                     the kernel gives a prefix to one peer only",
+                                    prefix.0,
+                                    prefix.1,
+                                    b64_encode_32(first),
+                                    b64_encode_32(&peer.public_key),
+                                ),
+                            ));
+                        }
+                        Some(_) => {}
+                        None => {
+                            owner.insert(prefix, &peer.public_key);
+                        }
+                    }
+                }
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(crate::netlink::Error::validation(errors))
+        }
     }
 
     /// Create any declared WireGuard links that don't exist yet and
@@ -1386,6 +1443,36 @@ const _PLAN_196_MARKER: Option<Error> = None;
 
 #[cfg(test)]
 mod tests {
+
+    /// One prefix on two peers of a device is refused, masked the way the
+    /// kernel stores it; the same prefix on two devices is fine (#498).
+    /// A device declared twice is refused too.
+    #[test]
+    fn a_prefix_on_two_peers_is_refused() {
+        use std::net::Ipv4Addr;
+        let tunnel = |host: u8| AllowedIp::v4(Ipv4Addr::new(10, 99, 0, host), 24);
+        let shared = WireguardConfig::new().device("wg0", |d| {
+            d.peer(key(1), |p| p.allowed_ip(tunnel(1)))
+                .peer(key(2), |p| p.allowed_ip(tunnel(5)))
+        });
+        let err = shared.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("10.99.0.0/24 is an allowed IP of two peers"),
+            "{err}"
+        );
+
+        let ok = WireguardConfig::new()
+            .device("wg0", |d| d.peer(key(1), |p| p.allowed_ip(tunnel(1))))
+            .device("wg1", |d| d.peer(key(2), |p| p.allowed_ip(tunnel(1))));
+        ok.validate().unwrap();
+
+        let twice = WireguardConfig::new()
+            .device("wg0", |d| d.peer(key(1), |p| p.allowed_ip(tunnel(1))))
+            .device("wg0", |d| d.peer(key(2), |p| p.allowed_ip(tunnel(2))));
+        let err = twice.validate().unwrap_err().to_string();
+        assert!(err.contains("devices.wg0"), "{err}");
+    }
+
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         time::Duration,
