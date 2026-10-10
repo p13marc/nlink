@@ -1841,7 +1841,7 @@ impl Connection<Ethtool> {
         builder.set_pid(self.socket().pid());
 
         // #134 — dual-mode recv (dump). Register/lock before send.
-        let mut session = self.recv_session_dump(seq).await;
+        let mut session = self.recv_session_dump(seq).await?;
         let msg = builder.finish();
         self.socket().send(&msg).await?;
 
@@ -1950,7 +1950,7 @@ impl Connection<Ethtool> {
         builder.set_pid(self.socket().pid());
 
         // #134 — dual-mode recv (dump). Register/lock before send.
-        let mut session = self.recv_session_dump(seq).await;
+        let mut session = self.recv_session_dump(seq).await?;
         let msg = builder.finish();
         self.socket().send(&msg).await?;
 
@@ -2022,7 +2022,7 @@ impl Connection<Ethtool> {
         builder.set_pid(self.socket().pid());
 
         // #134 — dual-mode recv (single doit). Register/lock before send.
-        let mut session = self.recv_session(seq).await;
+        let mut session = self.recv_session(seq).await?;
         let msg = builder.finish();
         self.socket().send(&msg).await?;
 

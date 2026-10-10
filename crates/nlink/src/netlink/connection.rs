@@ -123,6 +123,9 @@ pub struct Connection<P: ProtocolState> {
     /// retires this mutex lands incrementally on top of the
     /// dispatcher's infrastructure (see `dispatcher.rs`).
     request_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// #505 — whether a mutex-mode event stream holds `request_lock`,
+    /// so a request fails fast instead of waiting out the stream.
+    event_claim: std::sync::Arc<EventClaim>,
     /// Plan 234 — per-Connection dispatcher. Routes ENOBUFS into
     /// `ResyncMarker::ResyncStart` for every active multicast
     /// subscriber and fans out multicast frames to per-group
@@ -142,6 +145,31 @@ impl<P: ProtocolState> Drop for Connection<P> {
         if self.dispatcher.driver_started() {
             self.dispatcher.shutdown();
         }
+    }
+}
+
+/// Whether a mutex-mode event stream owns the connection (#505). Shared
+/// between the [`Connection`] and the stream's [`EventLock`].
+#[derive(Default)]
+pub(crate) struct EventClaim {
+    active: std::sync::atomic::AtomicBool,
+    /// Wakes requests queued on the request lock when a stream claims it.
+    claimed: tokio::sync::Notify,
+}
+
+/// The request lock as a mutex-mode event stream holds it. Dropping it
+/// clears the claim before releasing the lock, so a request that sees
+/// the claim cleared never then waits behind the stream.
+pub(crate) struct EventLock {
+    claim: std::sync::Arc<EventClaim>,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl Drop for EventLock {
+    fn drop(&mut self) {
+        self.claim
+            .active
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -293,6 +321,7 @@ where
             state: P::default(),
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
             request_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            event_claim: Default::default(),
             dispatcher,
         })
     }
@@ -351,6 +380,7 @@ where
             state: P::default(),
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
             request_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            event_claim: Default::default(),
             dispatcher,
         })
     }
@@ -386,6 +416,7 @@ where
             state: P::default(),
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
             request_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            event_claim: Default::default(),
             dispatcher,
         })
     }
@@ -631,13 +662,44 @@ impl<P: ProtocolState> Connection<P> {
         self.socket.set_ext_ack(on)
     }
 
-    /// Acquire the request lock as an *owned* guard. 0.19 Finding B —
-    /// used by stream-shape APIs (`DumpStream`, `EventSubscription`)
-    /// that hold the lock for the stream's whole lifetime; the owned
-    /// guard outlives the `&Connection` borrow scope so the stream
-    /// can store it in its own struct.
-    pub(crate) async fn lock_request_owned(&self) -> tokio::sync::OwnedMutexGuard<()> {
-        self.request_lock.clone().lock_owned().await
+    /// Acquire the request lock as an *owned* guard, for one mutex-mode
+    /// request/response cycle or a `DumpStream`'s lifetime (0.19 Finding
+    /// B: the owned guard outlives the `&Connection` borrow, so a stream
+    /// can store it).
+    ///
+    /// Fails fast with [`Error::EventStreamActive`] while an event stream
+    /// holds the lock (#505): it keeps it until it is dropped, so waiting
+    /// could only end in the operation timeout, which reads as a kernel
+    /// hang. A request already queued when a stream takes the lock is
+    /// woken and fails the same way.
+    pub(crate) async fn lock_request(&self) -> Result<tokio::sync::OwnedMutexGuard<()>> {
+        // Registered before the check, so a stream that claims the lock
+        // after it still wakes this request.
+        let claimed = self.event_claim.claimed.notified();
+        if self.event_claim.active.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(Error::EventStreamActive);
+        }
+        tokio::select! {
+            biased;
+            guard = self.request_lock.clone().lock_owned() => Ok(guard),
+            () = claimed => Err(Error::EventStreamActive),
+        }
+    }
+
+    /// Take the request lock for a mutex-mode event stream's lifetime.
+    /// Until the returned guard drops, requests on this connection fail
+    /// with [`Error::EventStreamActive`] instead of queueing behind it
+    /// (#505). Requests already in flight finish first: the lock is fair.
+    pub(crate) async fn claim_for_events(&self) -> EventLock {
+        let guard = self.request_lock.clone().lock_owned().await;
+        self.event_claim
+            .active
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.event_claim.claimed.notify_waiters();
+        EventLock {
+            claim: self.event_claim.clone(),
+            _guard: guard,
+        }
     }
 
     /// Begin a hand-rolled `send + recv-loop` cycle (#134 dual-mode).
@@ -653,15 +715,15 @@ impl<P: ProtocolState> Connection<P> {
     /// **Call after computing `seq` and before sending** — dispatcher mode
     /// requires register-before-send so the driver never sees a response
     /// for an unregistered seq.
-    pub(crate) async fn recv_session(&self, seq: u32) -> RecvSession {
+    pub(crate) async fn recv_session(&self, seq: u32) -> Result<RecvSession> {
         if self.dispatcher_mode {
             self.ensure_driver();
-            RecvSession::Dispatched {
+            Ok(RecvSession::Dispatched {
                 guard: self.dispatcher.register(seq),
                 _dump_lock: None,
-            }
+            })
         } else {
-            RecvSession::Direct(self.request_lock.clone().lock_owned().await)
+            Ok(RecvSession::Direct(self.lock_request().await?))
         }
     }
 
@@ -671,15 +733,15 @@ impl<P: ProtocolState> Connection<P> {
     /// single loop; in dispatcher mode the driver routes all of them to
     /// the one channel. No dump-serialization lock — a batch isn't a dump,
     /// and its distinct seqs demux cleanly, so concurrent batches pipeline.
-    pub(crate) async fn recv_session_multi(&self, seqs: &[u32]) -> RecvSession {
+    pub(crate) async fn recv_session_multi(&self, seqs: &[u32]) -> Result<RecvSession> {
         if self.dispatcher_mode {
             self.ensure_driver();
-            RecvSession::Dispatched {
+            Ok(RecvSession::Dispatched {
                 guard: self.dispatcher.register_many(seqs),
                 _dump_lock: None,
-            }
+            })
         } else {
-            RecvSession::Direct(self.request_lock.clone().lock_owned().await)
+            Ok(RecvSession::Direct(self.lock_request().await?))
         }
     }
 
@@ -690,16 +752,16 @@ impl<P: ProtocolState> Connection<P> {
     /// dispatcher-mode dumps must still serialize even though unicast
     /// requests pipeline. In mutex mode it's identical to `recv_session`
     /// (the lock already serializes everything).
-    pub(crate) async fn recv_session_dump(&self, seq: u32) -> RecvSession {
+    pub(crate) async fn recv_session_dump(&self, seq: u32) -> Result<RecvSession> {
         if self.dispatcher_mode {
             let dump_lock = self.request_lock.clone().lock_owned().await;
             self.ensure_driver();
-            RecvSession::Dispatched {
+            Ok(RecvSession::Dispatched {
                 guard: self.dispatcher.register(seq),
                 _dump_lock: Some(dump_lock),
-            }
+            })
         } else {
-            RecvSession::Direct(self.request_lock.clone().lock_owned().await)
+            Ok(RecvSession::Direct(self.lock_request().await?))
         }
     }
 
@@ -756,6 +818,7 @@ impl<P: ProtocolState> Connection<P> {
             state,
             timeout: Some(DEFAULT_OPERATION_TIMEOUT),
             request_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            event_claim: Default::default(),
             dispatcher,
             dispatcher_mode: false,
         }
@@ -853,7 +916,7 @@ impl<P: ProtocolState> Connection<P> {
         // F1 fix — serialize the send + recv-loop pair so concurrent
         // tasks on a shared `Arc<Connection>` don't race on the recv
         // side. See struct-level "Concurrency" docstring.
-        let _guard = self.request_lock.lock().await;
+        let _guard = self.lock_request().await?;
 
         let seq = self.socket.next_seq();
         builder.set_seq(seq);
@@ -919,7 +982,7 @@ impl<P: ProtocolState> Connection<P> {
 
     async fn send_ack_mutex(&self, mut builder: MessageBuilder) -> Result<()> {
         // F1 fix — see send_request_inner.
-        let _guard = self.request_lock.lock().await;
+        let _guard = self.lock_request().await?;
 
         let seq = self.socket.next_seq();
         builder.set_seq(seq);
@@ -978,7 +1041,7 @@ impl<P: ProtocolState> Connection<P> {
 
     async fn send_dump_mutex(&self, mut builder: MessageBuilder) -> Result<Vec<Vec<u8>>> {
         // F1 fix — see send_request_inner.
-        let _guard = self.request_lock.lock().await;
+        let _guard = self.lock_request().await?;
 
         let seq = self.socket.next_seq();
         builder.set_seq(seq);
@@ -3664,7 +3727,7 @@ impl Connection<Generic> {
         let seq = self.socket.next_seq();
         builder.set_seq(seq);
         builder.set_pid(self.socket.pid());
-        let mut session = self.recv_session(seq).await;
+        let mut session = self.recv_session(seq).await?;
 
         // Plan 208 Phase 1 — wrap in with_timeout. Pre-0.19 a kernel
         // that dropped the ACK for any custom GENL command hung
@@ -3703,7 +3766,7 @@ impl Connection<Generic> {
         let seq = self.socket.next_seq();
         builder.set_seq(seq);
         builder.set_pid(self.socket.pid());
-        let mut session = self.recv_session_dump(seq).await;
+        let mut session = self.recv_session_dump(seq).await?;
 
         // Plan 208 Phase 1+2 — wrap in with_timeout, add
         // NLM_F_DUMP_INTR detection. Pre-0.19 every custom GENL
@@ -3933,5 +3996,71 @@ mod send_sync_tests {
         // Dropping the stream deregisters the listener.
         drop(events);
         assert_eq!(conn.dispatcher().event_listener_count(), 0);
+    }
+
+    /// #505: in mutex mode an events stream holds the request lock for its
+    /// life, so a request on the same connection waited out the 30 s
+    /// operation timeout and read like a kernel hang. It fails at once now,
+    /// with an error that says why, and works again once the stream drops.
+    #[tokio::test]
+    async fn mutex_mode_requests_fail_fast_while_events_own_the_connection() {
+        let conn = Connection::<Route>::new().expect("socket open");
+        let events = conn.events().await;
+
+        let got = tokio::time::timeout(Duration::from_secs(2), conn.get_links())
+            .await
+            .expect("a request must not wait behind an events stream");
+        let err = got.expect_err("the events stream owns the connection");
+        assert!(err.is_event_stream_active(), "{err}");
+
+        let dump = conn
+            .dump_stream::<LinkMessage>(super::super::message::NlMsgType::RTM_GETLINK)
+            .await;
+        assert!(dump.is_err_and(|e| e.is_event_stream_active()));
+
+        drop(events);
+        let links = conn.get_links().await.expect("usable once the stream drops");
+        assert!(!links.is_empty());
+    }
+
+    /// A request already queued on the lock when a stream claims it is
+    /// woken with the error rather than left waiting (#505). One queued
+    /// *before* the stream finishes first: the lock is fair.
+    #[tokio::test]
+    async fn a_queued_request_is_woken_when_a_stream_claims_the_lock() {
+        let conn = std::sync::Arc::new(Connection::<Route>::new().expect("socket open"));
+        // Hold the lock as an in-flight request would, so what follows
+        // queues behind it in a known order.
+        let held = conn.lock_request().await.expect("free");
+
+        let first = tokio::spawn({
+            let conn = conn.clone();
+            async move { conn.get_links().await }
+        });
+        tokio::task::yield_now().await;
+        let stream = tokio::spawn({
+            let conn = conn.clone();
+            async move { conn.claim_for_events().await }
+        });
+        tokio::task::yield_now().await;
+        let late = tokio::spawn({
+            let conn = conn.clone();
+            async move { conn.get_links().await }
+        });
+        tokio::task::yield_now().await;
+
+        drop(held);
+        let within = Duration::from_secs(2);
+        let first = tokio::time::timeout(within, first).await.expect("first");
+        assert!(first.expect("join").is_ok(), "queued before the stream");
+        let claim = tokio::time::timeout(within, stream).await.expect("stream");
+        let late = tokio::time::timeout(within, late)
+            .await
+            .expect("a queued request must be woken, not left waiting");
+        let err = late.expect("join").expect_err("queued behind the stream");
+        assert!(err.is_event_stream_active(), "{err}");
+
+        drop(claim.expect("join"));
+        conn.get_links().await.expect("usable once the claim drops");
     }
 }

@@ -696,6 +696,13 @@ async fn run_driver(socket: Arc<NetlinkSocket>, dispatcher: Dispatcher) {
             }
             res = socket.recv_msg_from() => match res {
                 Ok((buf, multicast)) => dispatcher.route_buffer(Arc::new(buf), multicast),
+                // A notification past the receive cap was dropped: lost
+                // events, as with an overflow (#505).
+                Err(crate::Error::FrameTruncated { received, .. }) => {
+                    tracing::warn!(received, "dispatcher driver: dropped an oversized frame");
+                    dispatcher.emit_enobufs();
+                    continue;
+                }
                 Err(e) if e.is_no_buffer_space() => {
                     // ENOBUFS: `recv_msg` already fanned out
                     // ResyncMarker::ResyncStart to subscribers via the

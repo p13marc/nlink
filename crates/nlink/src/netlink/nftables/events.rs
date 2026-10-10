@@ -67,11 +67,10 @@ impl NftablesGroup {
 
 /// An event delivered on the nftables multicast stream.
 ///
-/// One variant per ruleset-mutating wire message the kernel emits.
-/// Set elements (`NFT_MSG_NEWSETELEM` / `NFT_MSG_DELSETELEM`) and
-/// generation announcements (`NFT_MSG_NEWGEN`) are not currently
-/// parsed into typed event variants — they're silently dropped
-/// from the stream. Wire when a consumer asks.
+/// One variant per ruleset-mutating wire message the kernel emits, plus
+/// the generation announcement (`NFT_MSG_NEWGEN`) that closes each
+/// committed batch. A message nlink cannot parse — or one in an address
+/// family it does not know — is dropped with a `tracing` debug record.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum NftablesEvent {
@@ -197,8 +196,18 @@ pub(crate) fn parse_nftables_event(msg_type: u16, body: &[u8]) -> Option<Nftable
     if body.len() < NFGENMSG_HDRLEN {
         return None;
     }
-    let family = Family::from_u8(body[0]).unwrap_or(Family::Inet);
     let attrs = &body[NFGENMSG_HDRLEN..];
+    // A generation message is the ruleset's, family AF_UNSPEC. Anything
+    // else in a family nlink does not know is dropped with a trace; it was
+    // reported as `inet`, which it is not (#505).
+    let family = match Family::from_u8(body[0]) {
+        Some(family) => family,
+        None if (msg_type & 0xFF) as u8 == NFT_MSG_NEWGEN => Family::Inet,
+        None => {
+            tracing::debug!(family = body[0], "nftables event in an unknown family; dropped");
+            return None;
+        }
+    };
 
     match (msg_type & 0xFF) as u8 {
         NFT_MSG_NEWTABLE => parse_table(attrs, family).map(NftablesEvent::NewTable),
@@ -259,6 +268,26 @@ mod tests {
         let msg_type = (NFNL_SUBSYS_NFTABLES << 8) | 17u16;
         let body = vec![0u8; NFGENMSG_HDRLEN];
         assert!(parse_nftables_event(msg_type, &body).is_none());
+    }
+
+    /// #505: a message in a family nlink does not know was reported as
+    /// `inet`, which it is not. It is dropped now; a known family is not.
+    #[test]
+    fn unknown_family_is_dropped_not_reported_as_inet() {
+        use crate::netlink::builder::MessageBuilder;
+        use crate::netlink::nftables::NFTA_TABLE_NAME;
+        let table = |family: u8| {
+            let mut b = MessageBuilder::new(0, 0);
+            b.append_bytes(&[family, 0, 0, 0]);
+            b.append_attr_str(NFTA_TABLE_NAME, "t");
+            b.as_bytes()[16..].to_vec()
+        };
+        let msg_type = (NFNL_SUBSYS_NFTABLES << 8) | NFT_MSG_NEWTABLE as u16;
+        assert!(parse_nftables_event(msg_type, &table(99)).is_none());
+        match parse_nftables_event(msg_type, &table(2)) {
+            Some(NftablesEvent::NewTable(t)) => assert_eq!(t.family, Family::Ip),
+            other => panic!("expected an ip NewTable, got {other:?}"),
+        }
     }
 
     #[test]

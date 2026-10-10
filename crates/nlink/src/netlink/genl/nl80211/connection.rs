@@ -187,7 +187,7 @@ impl Connection<Nl80211> {
 
         let seq = self.socket().next_seq();
 
-        let mut session = self.recv_session(seq).await;
+        let mut session = self.recv_session(seq).await?;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
@@ -224,7 +224,7 @@ impl Connection<Nl80211> {
 
         let seq = self.socket().next_seq();
 
-        let mut session = self.recv_session_dump(seq).await;
+        let mut session = self.recv_session_dump(seq).await?;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
@@ -286,7 +286,7 @@ impl Connection<Nl80211> {
 
         let seq = self.socket().next_seq();
 
-        let mut session = self.recv_session_dump(seq).await;
+        let mut session = self.recv_session_dump(seq).await?;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
@@ -327,7 +327,7 @@ impl Connection<Nl80211> {
 
         let seq = self.socket().next_seq();
 
-        let mut session = self.recv_session_dump(seq).await;
+        let mut session = self.recv_session_dump(seq).await?;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
@@ -403,7 +403,7 @@ impl Connection<Nl80211> {
 
         let seq = self.socket().next_seq();
 
-        let mut session = self.recv_session(seq).await;
+        let mut session = self.recv_session(seq).await?;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
@@ -448,7 +448,7 @@ impl Connection<Nl80211> {
 
         let seq = self.socket().next_seq();
 
-        let mut session = self.recv_session(seq).await;
+        let mut session = self.recv_session(seq).await?;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
@@ -494,7 +494,7 @@ impl Connection<Nl80211> {
 
         let seq = self.socket().next_seq();
 
-        let mut session = self.recv_session(seq).await;
+        let mut session = self.recv_session(seq).await?;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
@@ -524,7 +524,7 @@ impl Connection<Nl80211> {
 
         let seq = self.socket().next_seq();
 
-        let mut session = self.recv_session(seq).await;
+        let mut session = self.recv_session(seq).await?;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
@@ -557,7 +557,7 @@ impl Connection<Nl80211> {
 
         let seq = self.socket().next_seq();
 
-        let mut session = self.recv_session(seq).await;
+        let mut session = self.recv_session(seq).await?;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
@@ -588,7 +588,7 @@ impl Connection<Nl80211> {
 
         let seq = self.socket().next_seq();
 
-        let mut session = self.recv_session(seq).await;
+        let mut session = self.recv_session(seq).await?;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
@@ -611,7 +611,7 @@ impl Connection<Nl80211> {
 
         let seq = self.socket().next_seq();
 
-        let mut session = self.recv_session(seq).await;
+        let mut session = self.recv_session(seq).await?;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
@@ -676,7 +676,7 @@ impl Connection<Nl80211> {
 
         let seq = self.socket().next_seq();
 
-        let mut session = self.recv_session(seq).await;
+        let mut session = self.recv_session(seq).await?;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
@@ -704,7 +704,7 @@ impl Connection<Nl80211> {
 
         let seq = self.socket().next_seq();
 
-        let mut session = self.recv_session(seq).await;
+        let mut session = self.recv_session(seq).await?;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
@@ -730,7 +730,7 @@ impl Connection<Nl80211> {
 
         let seq = self.socket().next_seq();
 
-        let mut session = self.recv_session_dump(seq).await;
+        let mut session = self.recv_session_dump(seq).await?;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
@@ -756,7 +756,7 @@ impl Connection<Nl80211> {
 
         let seq = self.socket().next_seq();
 
-        let mut session = self.recv_session_dump(seq).await;
+        let mut session = self.recv_session_dump(seq).await?;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 

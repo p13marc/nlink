@@ -293,7 +293,7 @@ impl Connection<SockDiag> {
     /// ```
     pub async fn destroy_tcp_socket(&self, socket: &InetSocket) -> Result<()> {
         let seq = self.socket().next_seq();
-        let mut session = self.recv_session(seq).await;
+        let mut session = self.recv_session(seq).await?;
         let pid = self.socket().pid();
 
         let mut buf = Vec::with_capacity(128);
@@ -526,7 +526,7 @@ impl Connection<SockDiag> {
         // NLM_F_DUMP_INTR detection.
         self.with_timeout(async move {
             let seq = self.socket().next_seq();
-            let mut session = self.recv_session_dump(seq).await;
+            let mut session = self.recv_session_dump(seq).await?;
             let pid = self.socket().pid();
 
             let mut buf = Vec::with_capacity(256);
@@ -682,7 +682,7 @@ impl Connection<SockDiag> {
         // NLM_F_DUMP_INTR detection.
         self.with_timeout(async move {
             let seq = self.socket().next_seq();
-            let mut session = self.recv_session_dump(seq).await;
+            let mut session = self.recv_session_dump(seq).await?;
             let pid = self.socket().pid();
 
             let mut buf = Vec::with_capacity(64);
@@ -800,7 +800,7 @@ impl Connection<SockDiag> {
         // NLM_F_DUMP_INTR detection.
         self.with_timeout(async move {
             let seq = self.socket().next_seq();
-            let mut session = self.recv_session_dump(seq).await;
+            let mut session = self.recv_session_dump(seq).await?;
             let pid = self.socket().pid();
 
             let mut buf = Vec::with_capacity(64);
@@ -909,7 +909,7 @@ impl Connection<SockDiag> {
     async fn query_packet(&self, filter: &PacketFilter) -> Result<Vec<SocketInfo>> {
         self.with_timeout(async move {
             let seq = self.socket().next_seq();
-            let mut session = self.recv_session_dump(seq).await;
+            let mut session = self.recv_session_dump(seq).await?;
             let pid = self.socket().pid();
 
             // struct packet_diag_req {

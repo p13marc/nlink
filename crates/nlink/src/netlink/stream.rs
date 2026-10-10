@@ -6,7 +6,9 @@
 //! # Overview
 //!
 //! Protocols that implement [`EventSource`] can produce events via:
-//! - [`Connection::events()`] - returns a borrowed stream, connection remains usable
+//! - [`Connection::events()`] - returns a borrowed stream; the connection is yours
+//!   again when it is dropped (and serves requests meanwhile only in
+//!   dispatcher mode — see [`EventSubscription`])
 //! - [`Connection::into_events()`] - consumes connection, returns owned stream
 //!
 //! # Example
@@ -77,8 +79,9 @@ pub(crate) enum EventBackend {
     /// Mutex mode — hold the request lock for the stream's lifetime and
     /// poll the socket. (0.19 Finding B: the lock keeps concurrent dumps
     /// / streams on a shared `Arc<Connection>` from racing on `poll_recv`.)
+    /// While it is held, requests fail with `EventStreamActive` (#505).
     /// The guard is held purely for its `Drop` (lock release), never read.
-    Direct(#[allow(dead_code)] tokio::sync::OwnedMutexGuard<()>),
+    Direct(#[allow(dead_code)] super::connection::EventLock),
     /// Dispatcher mode — consume driver-routed multicast frames.
     Dispatched(super::dispatcher::EventGuard),
 }
@@ -117,8 +120,13 @@ pub trait EventSource: ProtocolState + private::Sealed {
 
 /// A stream of events that borrows the underlying connection.
 ///
-/// Created by [`Connection::events()`]. The connection remains
-/// usable for queries while this stream is active.
+/// Created by [`Connection::events()`]. In the default mutex mode the
+/// stream holds the connection's request lock until it is dropped, and a
+/// request on the connection meanwhile fails at once with
+/// [`Error::EventStreamActive`](crate::Error::EventStreamActive) (#505).
+/// Send requests on a second connection, or build this one with
+/// [`Connection::with_dispatcher`], where events and requests share the
+/// socket.
 ///
 /// # Example
 ///
@@ -195,6 +203,22 @@ fn poll_event_backend<P: EventSource>(
                 // producing an unbounded error stream. Only a consumer
                 // that broke on the first error escaped. The
                 // `Dispatched` arm below already got this right (#277).
+                // A notification past the receive cap was dropped: an
+                // event lost, like an overflow, not a dead socket. Report
+                // it as one so a resync wrapper re-dumps (#505).
+                Poll::Ready(Err(crate::Error::FrameTruncated {
+                    received,
+                    buffer_size,
+                })) => {
+                    tracing::warn!(
+                        received,
+                        buffer_size,
+                        "event stream: dropped a notification larger than the receive cap"
+                    );
+                    return Poll::Ready(Some(Err(crate::Error::Io(
+                        std::io::Error::from_raw_os_error(libc::ENOBUFS),
+                    ))));
+                }
                 Poll::Ready(Err(e)) => {
                     if !e.is_no_buffer_space() {
                         *terminated = true;
@@ -356,14 +380,17 @@ impl<P: EventSource> Connection<P> {
     /// remains usable for **non-recv** operations (`set_strict_checking`,
     /// `subscribe` to add more groups, etc.) while the stream is active.
     ///
-    /// **0.19 Finding B — now `async`.** Acquires the connection's
-    /// request lock for the subscription's lifetime so concurrent
-    /// streams (multiple `events()`, `events()` + `dump_stream()`)
-    /// no longer race on `poll_recv` and steal each other's frames.
-    /// Concurrent dumps on a connection with an active events stream
-    /// will block until the events stream is dropped — use a second
-    /// Connection (or `ConnectionPool`) for query-in-parallel
-    /// patterns.
+    /// **0.19 Finding B — now `async`.** In the default mutex mode it
+    /// acquires the connection's request lock for the subscription's
+    /// lifetime so concurrent streams (multiple `events()`, `events()` +
+    /// `dump_stream()`) do not race on `poll_recv` and steal each other's
+    /// frames. A request or dump on the connection while the stream is
+    /// alive fails at once with
+    /// [`Error::EventStreamActive`](crate::Error::EventStreamActive) (#505;
+    /// it used to wait out the operation timeout), and a second `events()`
+    /// waits until the first stream is dropped. Use a second connection,
+    /// or [`with_dispatcher()`](Connection::with_dispatcher), where none of
+    /// this applies: events and requests share the socket.
     ///
     /// # Example
     ///
@@ -393,8 +420,9 @@ impl<P: EventSource> Connection<P> {
 
     /// Convert this connection into an owned event stream.
     ///
-    /// This consumes the connection. Use [`events()`](Self::events)
-    /// if you need to keep using the connection for queries.
+    /// This consumes the connection. Use [`events()`](Self::events) to
+    /// keep it — in mutex mode it serves requests again once that stream
+    /// is dropped.
     ///
     /// # Example
     ///
@@ -425,13 +453,13 @@ impl<P: EventSource> Connection<P> {
 
     /// Build the right [`EventBackend`] for this connection's mode (#134).
     /// Dispatcher mode ensures the driver is running and registers a
-    /// raw-frame event listener; mutex mode takes the owned request lock.
+    /// raw-frame event listener; mutex mode claims the request lock.
     async fn event_backend(&self) -> EventBackend {
         if self.is_dispatcher_mode() {
             self.ensure_driver();
             EventBackend::Dispatched(self.dispatcher().subscribe_events())
         } else {
-            EventBackend::Direct(self.lock_request_owned().await)
+            EventBackend::Direct(self.claim_for_events().await)
         }
     }
 }
@@ -463,7 +491,17 @@ impl EventSource for Route {
     fn parse_events(data: &[u8]) -> Vec<NetworkEvent> {
         let mut events = Vec::new();
 
-        for (header, payload) in MessageIter::new(data).flatten() {
+        for msg in MessageIter::new(data) {
+            // A malformed frame must not end a long-lived subscription
+            // (Plan 193 rule 3), but it should not vanish without a trace
+            // either (#505).
+            let (header, payload) = match msg {
+                Ok(msg) => msg,
+                Err(e) => {
+                    tracing::debug!(error = %e, "event stream: skipping a malformed frame");
+                    continue;
+                }
+            };
             if let Some(event) = parse_route_event(header.nlmsg_type, payload) {
                 events.push(event);
             }
@@ -473,29 +511,41 @@ impl EventSource for Route {
     }
 }
 
+/// Log a notification that does not parse and drop it (#505).
+fn dropped<E: std::fmt::Display>(e: E) -> E {
+    tracing::debug!(error = %e, "event stream: dropping a notification that does not parse");
+    e
+}
+
 fn parse_route_event(msg_type: u16, payload: &[u8]) -> Option<NetworkEvent> {
     match msg_type {
         // Link events
         t if t == NlMsgType::RTM_NEWLINK => LinkMessage::from_bytes(payload)
+            .map_err(dropped)
             .ok()
             .map(NetworkEvent::NewLink),
         t if t == NlMsgType::RTM_DELLINK => LinkMessage::from_bytes(payload)
+            .map_err(dropped)
             .ok()
             .map(NetworkEvent::DelLink),
 
         // Address events
         t if t == NlMsgType::RTM_NEWADDR => AddressMessage::from_bytes(payload)
+            .map_err(dropped)
             .ok()
             .map(NetworkEvent::NewAddress),
         t if t == NlMsgType::RTM_DELADDR => AddressMessage::from_bytes(payload)
+            .map_err(dropped)
             .ok()
             .map(NetworkEvent::DelAddress),
 
         // Route events
         t if t == NlMsgType::RTM_NEWROUTE => RouteMessage::from_bytes(payload)
+            .map_err(dropped)
             .ok()
             .map(NetworkEvent::NewRoute),
         t if t == NlMsgType::RTM_DELROUTE => RouteMessage::from_bytes(payload)
+            .map_err(dropped)
             .ok()
             .map(NetworkEvent::DelRoute),
 
@@ -523,49 +573,61 @@ fn parse_route_event(msg_type: u16, payload: &[u8]) -> Option<NetworkEvent> {
 
         // TC events - qdiscs
         t if t == NlMsgType::RTM_NEWQDISC => TcMessage::from_bytes(payload)
+            .map_err(dropped)
             .ok()
             .map(NetworkEvent::NewQdisc),
         t if t == NlMsgType::RTM_DELQDISC => TcMessage::from_bytes(payload)
+            .map_err(dropped)
             .ok()
             .map(NetworkEvent::DelQdisc),
 
         // TC events - classes
         t if t == NlMsgType::RTM_NEWTCLASS => TcMessage::from_bytes(payload)
+            .map_err(dropped)
             .ok()
             .map(NetworkEvent::NewClass),
         t if t == NlMsgType::RTM_DELTCLASS => TcMessage::from_bytes(payload)
+            .map_err(dropped)
             .ok()
             .map(NetworkEvent::DelClass),
 
         // TC events - filters
         t if t == NlMsgType::RTM_NEWTFILTER => TcMessage::from_bytes(payload)
+            .map_err(dropped)
             .ok()
             .map(NetworkEvent::NewFilter),
         t if t == NlMsgType::RTM_DELTFILTER => TcMessage::from_bytes(payload)
+            .map_err(dropped)
             .ok()
             .map(NetworkEvent::DelFilter),
 
         // TC events - actions
         t if t == NlMsgType::RTM_NEWACTION => TcMessage::from_bytes(payload)
+            .map_err(dropped)
             .ok()
             .map(NetworkEvent::NewAction),
         t if t == NlMsgType::RTM_DELACTION => TcMessage::from_bytes(payload)
+            .map_err(dropped)
             .ok()
             .map(NetworkEvent::DelAction),
 
         // Policy-routing rule events
         t if t == NlMsgType::RTM_NEWRULE => super::messages::RuleMessage::from_bytes(payload)
+            .map_err(dropped)
             .ok()
             .map(NetworkEvent::NewRule),
         t if t == NlMsgType::RTM_DELRULE => super::messages::RuleMessage::from_bytes(payload)
+            .map_err(dropped)
             .ok()
             .map(NetworkEvent::DelRule),
 
         // Nexthop-object events
         t if t == NlMsgType::RTM_NEWNEXTHOP => super::nexthop::Nexthop::parse(payload)
+            .map_err(dropped)
             .ok()
             .map(NetworkEvent::NewNexthop),
         t if t == NlMsgType::RTM_DELNEXTHOP => super::nexthop::Nexthop::parse(payload)
+            .map_err(dropped)
             .ok()
             .map(NetworkEvent::DelNexthop),
 

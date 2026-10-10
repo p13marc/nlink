@@ -388,7 +388,7 @@ impl Connection<FibLookup> {
         // mistaken for the response.
         self.with_timeout(async move {
             let seq = self.socket().next_seq();
-            let mut session = self.recv_session(seq).await;
+            let mut session = self.recv_session(seq).await?;
             let pid = self.socket().pid();
 
             let mut buf = Vec::with_capacity(64);

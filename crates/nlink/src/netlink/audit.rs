@@ -418,7 +418,7 @@ impl Connection<Audit> {
         // forever waiting for an ACK that never arrived.
         self.with_timeout(async move {
             let seq = self.socket().next_seq();
-            let mut session = self.recv_session(seq).await;
+            let mut session = self.recv_session(seq).await?;
             let pid = self.socket().pid();
 
             // Build request message
@@ -575,7 +575,7 @@ impl Connection<Audit> {
         // See `get_status` for the timeout/seq-filter rationale.
         self.with_timeout(async move {
             let seq = self.socket().next_seq();
-            let mut session = self.recv_session(seq).await;
+            let mut session = self.recv_session(seq).await?;
             let pid = self.socket().pid();
 
             // Build request message
@@ -668,7 +668,7 @@ impl Connection<Audit> {
         // See `get_status` for the timeout/seq-filter rationale.
         self.with_timeout(async move {
             let seq = self.socket().next_seq();
-            let mut session = self.recv_session(seq).await;
+            let mut session = self.recv_session(seq).await?;
             let pid = self.socket().pid();
 
             // Build request message

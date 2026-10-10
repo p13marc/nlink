@@ -211,7 +211,14 @@ impl Connection<Nftables> {
     }
 
     /// Same as [`Self::into_events_with_resync`] but borrows the
-    /// connection so it stays usable for queries.
+    /// connection, which is yours again once the stream is dropped.
+    ///
+    /// While the stream is alive the connection serves requests only in
+    /// dispatcher mode ([`Connection::with_dispatcher`]). In the default
+    /// mutex mode the stream holds its request lock, and a request fails
+    /// at once with [`Error::EventStreamActive`](crate::Error::EventStreamActive)
+    /// (#505). The snapshot itself never uses this connection: it runs on
+    /// one from the factory.
     ///
     /// Returns a stream that holds `&self` for `'a`. If you need
     /// to spawn the stream onto a tokio task, prefer
