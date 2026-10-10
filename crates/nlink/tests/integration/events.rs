@@ -413,3 +413,73 @@ async fn the_rtnetlink_snapshot_covers_what_the_stream_subscribes_to() -> Result
     );
     Ok(())
 }
+
+/// Whether `b`'s end of the pair still exists.
+async fn peer_end_exists(pair: &crate::common::topo::NsPair) -> Result<bool> {
+    let conn = pair.b.connection()?;
+    Ok(conn.get_link_by_name(pair.b_if).await?.is_some())
+}
+
+/// #504: a socket keeps its namespace alive, so deleting the namespace
+/// left the stream idling forever — and the namespace with it, interfaces
+/// and all: here, the far end of a veth into it. The stream now ends with
+/// `NamespaceDeleted` once the marker is gone, and dropping it frees the
+/// namespace, which takes the veth's far end down with it.
+#[tokio::test]
+async fn an_event_stream_ends_when_its_namespace_is_deleted() -> Result<()> {
+    use nlink::netlink::namespace;
+    use tokio_stream::StreamExt;
+    require_root!();
+    nlink::require_module!("veth");
+
+    let pair = crate::common::topo::NsPair::new("nsdel", 61).await?;
+    let conn = pair.a.connection()?;
+    conn.subscribe_all()?;
+    let mut stream = conn.into_events().await;
+
+    // A live namespace does not end the stream: three checks pass.
+    let quiet = tokio::time::Instant::now() + Duration::from_millis(3200);
+    while let Ok(Some(item)) = tokio::time::timeout_at(quiet, stream.next()).await {
+        if let Err(e) = item {
+            panic!("the stream failed while its namespace was live: {e}");
+        }
+    }
+
+    namespace::delete(pair.a.name())?;
+    // Still pinned by the stream: the veth's far end is still there.
+    assert!(
+        peer_end_exists(&pair).await?,
+        "the stream should still pin the namespace"
+    );
+
+    let end = tokio::time::Instant::now() + WITHIN;
+    let ended = loop {
+        match tokio::time::timeout_at(end, stream.next()).await {
+            Ok(Some(Err(e))) if e.is_namespace_deleted() => break true,
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(e))) => panic!("unexpected error: {e}"),
+            Ok(None) | Err(_) => break false,
+        }
+    };
+    assert!(
+        ended,
+        "no NamespaceDeleted within {WITHIN:?} of the deletion"
+    );
+    assert!(
+        stream.next().await.is_none(),
+        "the stream ends after the error"
+    );
+
+    // Dropping the stream closes the last socket in the namespace; the
+    // kernel frees it, and the veth's far end goes with it.
+    drop(stream);
+    let gone_by = tokio::time::Instant::now() + WITHIN;
+    while peer_end_exists(&pair).await? {
+        assert!(
+            tokio::time::Instant::now() < gone_by,
+            "the namespace was not freed after the stream dropped"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Ok(())
+}

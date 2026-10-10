@@ -260,6 +260,9 @@ async fn a_resync_stream_announces_devices_that_predate_the_join() -> Result<()>
         };
         event?;
     }
-    assert!(announced(&store, "late0"), "a live NewLink after the snapshot");
+    assert!(
+        announced(&store, "late0"),
+        "a live NewLink after the snapshot"
+    );
     Ok(())
 }

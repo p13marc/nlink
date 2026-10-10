@@ -26,6 +26,26 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **An event stream kept a deleted namespace alive and idled forever
+  (#504).** A socket holds a reference on its network namespace.
+  `namespace::delete` unmounts the marker, but the namespace lives on for
+  as long as a stream's socket does, with its interfaces, including the
+  far ends of veths into it. And the stream got no event: the namespace is
+  not destroyed, so there is no `RTM_DELNSID`. nlink-lab's `events
+  --follow` held a lab's namespaces this way after the lab was destroyed.
+  A socket opened through a namespace path (`namespace::connection_for`,
+  `new_in_namespace_path`, `LabNamespace::connection`,
+  `Connection::<KobjectUevent>::in_namespace`) now records the marker's
+  device and inode. Its event streams check them once a second, and when
+  the marker is gone or names another namespace, a stream yields the new
+  `Error::NamespaceDeleted { path }` and ends. The resync wrappers pass
+  that on and end too. A root test deletes one end of an `NsPair` under a
+  live stream. The far veth end outlives the deletion, `NamespaceDeleted`
+  arrives, and once the stream is dropped the far end goes. On master no
+  error came within 5 s. Sockets opened from a file descriptor or a
+  `/proc/<pid>` path are not watched; that needs the `Netns` handle
+  (#520).
+
 - **`NetdevLifecycle` could not take a resync stream, so its device set
   was only as good as a stream that never overflows (#510, item 3).** It
   required `Stream<Item = Result<NetworkEvent>>`. An overflow therefore
@@ -524,6 +544,8 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`Error::NamespaceDeleted` and `Error::is_namespace_deleted()`** (#504).
 
 - **`netdev::LinkSourceItem`**: what `NetdevLifecycle` takes from its
   link source, `NetworkEvent` or `ResyncedEvent<NetworkEvent>` (#510).

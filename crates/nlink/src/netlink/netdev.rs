@@ -377,9 +377,9 @@ mod sealed {
             match self {
                 ResyncedEvent::Event(event) => LinkItem::Event(event),
                 ResyncedEvent::Resynced(event) => LinkItem::Snapshot(event),
-                ResyncedEvent::Marker(ResyncMarker::ResyncStart | ResyncMarker::InitialSyncStart) => {
-                    LinkItem::SnapshotStart
-                }
+                ResyncedEvent::Marker(
+                    ResyncMarker::ResyncStart | ResyncMarker::InitialSyncStart,
+                ) => LinkItem::SnapshotStart,
                 ResyncedEvent::Marker(ResyncMarker::ResyncEnd) => LinkItem::SnapshotEnd,
             }
         }
@@ -1252,7 +1252,10 @@ mod tests {
         let mut h = Harness::<ResyncedEvent<NetworkEvent>>::build(Some(store.clone()));
 
         // The initial snapshot: everything is new.
-        assert!(h.feed_link(Marker(ResyncMarker::InitialSyncStart)).is_empty());
+        assert!(
+            h.feed_link(Marker(ResyncMarker::InitialSyncStart))
+                .is_empty()
+        );
         for (ifindex, name) in [(1, "lo"), (2, "veth0"), (3, "veth1")] {
             let events = h.feed_link(Resynced(NetworkEvent::NewLink(link(ifindex, name))));
             assert!(matches!(events[..], [NetdevEvent::Added(_)]), "{events:?}");
@@ -1274,7 +1277,11 @@ mod tests {
         assert!(
             matches!(
                 events[..],
-                [NetdevEvent::Changed(_), NetdevEvent::Changed(_), NetdevEvent::Added(_)]
+                [
+                    NetdevEvent::Changed(_),
+                    NetdevEvent::Changed(_),
+                    NetdevEvent::Added(_)
+                ]
             ),
             "{events:?}"
         );
