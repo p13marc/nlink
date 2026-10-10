@@ -6,7 +6,7 @@ use crate::netlink::{
     attr::AttrIter,
     builder::MessageBuilder,
     connection::Connection,
-    dump_frame::{Classification, classify},
+    dump_frame::{Classification, classify, ends_dump},
     error::{Error, Result},
     message::{
         MessageIter, NLM_F_ACK, NLM_F_APPEND, NLM_F_CREATE, NLM_F_DUMP, NLM_F_EXCL, NLM_F_REPLACE,
@@ -1202,7 +1202,25 @@ impl Connection<Nftables> {
     /// Send a dump request and collect responses.
     ///
     /// Returns (nfgen_family, payload_after_nfgenmsg) tuples.
-    async fn nft_dump(&self, mut builder: MessageBuilder) -> Result<Vec<(u8, Vec<u8>)>> {
+    ///
+    /// A dump the kernel marks `NLM_F_DUMP_INTR` — the ruleset changed under
+    /// it — is read to its end and sent again, a bounded number of times,
+    /// rather than failing the caller's diff (#494).
+    async fn nft_dump(&self, builder: MessageBuilder) -> Result<Vec<(u8, Vec<u8>)>> {
+        const ATTEMPTS: usize = 10;
+        let mut attempt = 0;
+        loop {
+            match self.nft_dump_once(builder.clone()).await {
+                Err(e) if e.is_dump_interrupted() && attempt + 1 < ATTEMPTS => {
+                    attempt += 1;
+                    tracing::debug!(attempt, "nftables dump interrupted; re-dumping");
+                }
+                other => return other,
+            }
+        }
+    }
+
+    async fn nft_dump_once(&self, mut builder: MessageBuilder) -> Result<Vec<(u8, Vec<u8>)>> {
         // F1 fix — serialize the send + recv-loop pair so concurrent
         // tasks on a shared `Arc<Connection>` don't race on the recv
         // side. See connection.rs `Concurrency` docstring.
@@ -1220,6 +1238,7 @@ impl Connection<Nftables> {
         // the dump indefinitely.
         self.with_timeout(async {
             let mut results = Vec::new();
+            let mut interrupted = false;
 
             loop {
                 let data: Vec<u8> = self.socket().recv_msg().await?;
@@ -1227,6 +1246,15 @@ impl Connection<Nftables> {
 
                 for msg_result in MessageIter::new(&data) {
                     let (header, payload) = msg_result?;
+
+                    // Read a torn dump to its end before the retry, so its
+                    // frames are not left for the next request (#494).
+                    if interrupted {
+                        if ends_dump(header, seq) {
+                            return Err(Error::DumpInterrupted);
+                        }
+                        continue;
+                    }
 
                     // `diff()` builds its plan from these dumps and
                     // `apply()` commits the plan in one atomic batch, so
@@ -1238,6 +1266,12 @@ impl Connection<Nftables> {
                     // (#267, #271).
                     match classify(header, payload, seq) {
                         Classification::SkipSeq | Classification::Ack => continue,
+                        Classification::Error(Error::DumpInterrupted) => {
+                            if ends_dump(header, seq) {
+                                return Err(Error::DumpInterrupted);
+                            }
+                            interrupted = true;
+                        }
                         Classification::Error(e) => return Err(e),
                         Classification::Done(result) => {
                             result?;

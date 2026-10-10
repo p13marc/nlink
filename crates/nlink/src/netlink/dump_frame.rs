@@ -97,6 +97,17 @@ pub(crate) fn classify<'a>(
     Classification::Data { payload }
 }
 
+/// Does this frame end the dump sent with `seq` — its `NLMSG_DONE`, or an
+/// error that ends it?
+///
+/// For reading an interrupted dump to its end (#494): once
+/// [`classify`] has said [`Error::DumpInterrupted`], the frames that follow
+/// are skipped up to this one, whatever flags they carry (the `DONE` itself
+/// can carry `NLM_F_DUMP_INTR`).
+pub(crate) fn ends_dump(header: &NlMsgHdr, seq: u32) -> bool {
+    header.nlmsg_seq == seq && (header.is_done() || header.is_error())
+}
+
 /// Read the result code out of an `NLMSG_DONE` payload.
 ///
 /// Tolerates both shapes the kernel sends. `netlink_dump()` appends a
@@ -138,6 +149,20 @@ mod tests {
             nlmsg_seq: seq,
             nlmsg_pid: 0,
         }
+    }
+
+    /// An interrupted dump is read to its `DONE` — flagged or not — or to
+    /// an error with its seq; a data frame or another dump's `DONE` does
+    /// not end it (#494).
+    #[test]
+    fn ends_dump_is_this_dumps_done_or_error() {
+        let done = NlMsgType::DONE;
+        let error = NlMsgType::ERROR;
+        assert!(ends_dump(&hdr(done, 7, 0), 7));
+        assert!(ends_dump(&hdr(done, 7, NLM_F_DUMP_INTR), 7));
+        assert!(ends_dump(&hdr(error, 7, 0), 7));
+        assert!(!ends_dump(&hdr(done, 8, 0), 7));
+        assert!(!ends_dump(&hdr(16, 7, NLM_F_DUMP_INTR), 7));
     }
 
     #[test]

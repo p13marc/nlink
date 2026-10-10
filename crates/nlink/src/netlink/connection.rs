@@ -7,7 +7,7 @@ use tracing::{instrument, warn};
 use super::{
     builder::MessageBuilder,
     dispatcher::Dispatcher,
-    dump_frame::{Classification, classify},
+    dump_frame::{Classification, classify, ends_dump},
     error::{Error, Result},
     interface_ref::InterfaceRef,
     message::{
@@ -812,7 +812,27 @@ impl<P: ProtocolState> Connection<P> {
         // sibling leaves the maximum where it was. Guarded by the
         // `route_tc_minimal_caller` example, which fails to build without
         // this line. One allocation on a path about to make a syscall.
-        Box::pin(self.send_dump_inner(builder)).await
+        //
+        // A dump the kernel marks `NLM_F_DUMP_INTR` is a torn snapshot: the
+        // state changed under it. It is re-sent, a bounded number of times
+        // — any concurrent change in the namespace (a routing daemon, DAD
+        // finishing, a link flap) used to abort the caller's whole
+        // operation instead of costing one re-dump (#494). The dump loops
+        // read an interrupted dump to its end first, so the retry starts on
+        // an empty socket.
+        let mut attempt = 0;
+        loop {
+            match Box::pin(self.send_dump_inner(builder.clone())).await {
+                Err(e) if e.is_dump_interrupted() && attempt + 1 < DUMP_INTR_ATTEMPTS => {
+                    attempt += 1;
+                    tracing::debug!(
+                        attempt,
+                        "dump interrupted by a concurrent change; re-dumping"
+                    );
+                }
+                other => return other,
+            }
+        }
     }
 
     #[instrument(level = "trace", skip_all, fields(seq))]
@@ -965,6 +985,7 @@ impl<P: ProtocolState> Connection<P> {
         self.socket.send(&msg).await?;
 
         let mut responses = Vec::new();
+        let mut interrupted = false;
 
         // Per-batch frame buffer. When the `syscall_batch` feature
         // is on we collect up to NL_BATCH_SIZE frames per syscall
@@ -1015,12 +1036,27 @@ impl<P: ProtocolState> Connection<P> {
                     // and the DONE result code all live in one place
                     // now — they used to be copy-pasted per loop and
                     // the copies disagreed (#267, #271).
+                    // An interrupted dump is read to its end, so the retry
+                    // in `send_dump` does not find its frames (#494).
+                    if interrupted {
+                        if ends_dump(header, seq) {
+                            return Err(Error::DumpInterrupted);
+                        }
+                        msg_start = msg_start.saturating_add(aligned);
+                        continue;
+                    }
                     match classify(header, payload, seq) {
                         Classification::SkipSeq => {
                             msg_start = msg_start.saturating_add(aligned);
                             continue;
                         }
                         Classification::Ack => {}
+                        Classification::Error(Error::DumpInterrupted) => {
+                            if ends_dump(header, seq) {
+                                return Err(Error::DumpInterrupted);
+                            }
+                            interrupted = true;
+                        }
                         Classification::Error(e) => return Err(e),
                         // A dump that gave up says so in the DONE
                         // payload, not with NLMSG_ERROR. Returning the
@@ -1160,6 +1196,7 @@ impl<P: ProtocolState> Connection<P> {
         self.socket.send(&msg).await?;
 
         let mut responses = Vec::new();
+        let mut interrupted = false;
         'outer: loop {
             // Per-frame deadline, as in the mutex path above (#272).
             let next = match self.timeout {
@@ -1179,12 +1216,26 @@ impl<P: ProtocolState> Connection<P> {
                 };
                 let msg_len = header.nlmsg_len as usize;
                 let aligned = nlmsg_align(msg_len);
+                // As in the mutex path: read an interrupted dump to its end.
+                if interrupted {
+                    if ends_dump(header, seq) {
+                        return Err(Error::DumpInterrupted);
+                    }
+                    msg_start = msg_start.saturating_add(aligned);
+                    continue;
+                }
                 match classify(header, payload, seq) {
                     Classification::SkipSeq => {
                         msg_start = msg_start.saturating_add(aligned);
                         continue;
                     }
                     Classification::Ack => {}
+                    Classification::Error(Error::DumpInterrupted) => {
+                        if ends_dump(header, seq) {
+                            return Err(Error::DumpInterrupted);
+                        }
+                        interrupted = true;
+                    }
                     Classification::Error(e) => return Err(e),
                     Classification::Done(result) => {
                         result?;
@@ -1445,6 +1496,12 @@ impl Connection<Route> {
 }
 
 /// Helper to build a dump request.
+/// How many times [`Connection::send_dump`] sends a dump the kernel keeps
+/// marking `NLM_F_DUMP_INTR` before it gives up with
+/// [`Error::DumpInterrupted`] (#494). Cilium allows about 30; a dump torn
+/// that often is a namespace that will not hold still.
+const DUMP_INTR_ATTEMPTS: usize = 10;
+
 pub(crate) fn dump_request(msg_type: u16) -> MessageBuilder {
     MessageBuilder::new(msg_type, NLM_F_REQUEST | NLM_F_DUMP)
 }

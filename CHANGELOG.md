@@ -26,6 +26,24 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **A dump torn by a concurrent change failed the caller, and left its
+  remaining frames in the socket (#494).** The kernel marks a multi-part
+  dump `NLM_F_DUMP_INTR` when the table changes under it. nlink returned
+  `DumpInterrupted` on the first flagged frame and left the rest of the
+  dump unread. No reconcile retried it: `NetworkConfig::apply_reconcile`
+  diffed outside its retry loop, and every retry predicate was "busy or
+  try again". So any concurrent change in the namespace aborted a whole
+  reconcile: a routing daemon installing routes, DAD finishing, a link
+  flapping. Now the rtnetlink dumps (`send_dump`, both modes) and the
+  nftables dumps read an interrupted dump to its `NLMSG_DONE`, which can
+  carry the flag itself (`dump_frame::ends_dump`), then send it again,
+  up to 10 times. The reconcile loops of `NetworkConfig`,
+  `NftablesDiff` and `WireguardConfig` also retry `is_dump_interrupted()`,
+  and `NetworkConfig`'s retries its diff. A root test dumps 400 links 60
+  times on a multi-threaded runtime while another connection adds and
+  deletes links. Before the fix it failed with `DumpInterrupted`; it has
+  now passed 25 runs in a row.
+
 - **sysctl: an interface name with a dot could not be addressed, a missing
   key was `InvalidMessage`, and I/O errors lost the key (#477).** Every
   `.` in a key became a path separator, so `net.ipv4.conf.eth0.100.rp_filter`

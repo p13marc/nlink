@@ -433,7 +433,10 @@ impl NftablesDiff {
                         change_count: self.change_count(),
                     });
                 }
-                Err(e) if (e.is_busy() || e.is_try_again()) && attempt < opts.max_retries => {
+                Err(e)
+                    if (e.is_busy() || e.is_try_again() || e.is_dump_interrupted())
+                        && attempt < opts.max_retries =>
+                {
                     let backoff = opts.backoff.saturating_mul(1u32 << attempt.min(10));
                     tokio::time::sleep(backoff).await;
                     attempt += 1;

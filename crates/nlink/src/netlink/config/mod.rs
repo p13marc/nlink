@@ -277,7 +277,19 @@ impl NetworkConfig {
         loop {
             // Compute fresh diff against current kernel state, with the
             // purge scope the caller asked for.
-            let diff = self.diff_with_options(conn, diff_opts.clone()).await?;
+            // A diff is dumps, and a dump torn by a concurrent change
+            // (`NLM_F_DUMP_INTR`, past `send_dump`'s own re-dumps) is
+            // worth another attempt like a busy apply is (#494).
+            let diff = match self.diff_with_options(conn, diff_opts.clone()).await {
+                Ok(diff) => diff,
+                Err(e) if e.is_dump_interrupted() && attempt < opts.max_retries => {
+                    let backoff = opts.backoff.saturating_mul(1u32 << attempt.min(10));
+                    tokio::time::sleep(backoff).await;
+                    attempt += 1;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             if diff.is_empty() {
                 return Ok(crate::netlink::nftables::config::ReconcileReport {
                     attempts: attempt + 1,
@@ -293,7 +305,9 @@ impl NetworkConfig {
                         change_count: cumulative_changes,
                     });
                 }
-                Err(e) if (e.is_busy() || e.is_try_again()) && attempt < opts.max_retries => {
+                Err(e) if (e.is_busy() || e.is_try_again() || e.is_dump_interrupted())
+                    && attempt < opts.max_retries =>
+                {
                     let backoff = opts.backoff.saturating_mul(1u32 << attempt.min(10));
                     tokio::time::sleep(backoff).await;
                     attempt += 1;
