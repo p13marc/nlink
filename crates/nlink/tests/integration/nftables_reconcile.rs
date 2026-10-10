@@ -33,6 +33,7 @@ use nlink::netlink::nftables::config::{NftDiffOptions, NftablesConfig, Reconcile
 use nlink::netlink::nftables::types::{ChainType, Family, Hook, Policy, Priority, SetKeyType};
 use nlink::netlink::{Nftables, namespace};
 
+use crate::common::converge::{assert_converges, case};
 use crate::common::{TestNamespace, with_timeout};
 
 /// Build a canonical "filter / input" config with N keyed rules.
@@ -1223,4 +1224,87 @@ async fn reconcile_changes_a_live_chain_policy() -> nlink::Result<()> {
         Ok(())
     })
     .await
+}
+
+// ============================================================================
+// #460 — removing something a rule used
+// ============================================================================
+
+/// `ip t` with a base `input` chain holding `rules`, plus whatever `extra`
+/// declares (objects, sets, more chains).
+fn input_table(
+    extra: impl FnOnce(
+        nlink::netlink::nftables::config::DeclaredTableBuilder,
+    ) -> nlink::netlink::nftables::config::DeclaredTableBuilder
+    + 'static,
+) -> NftablesConfig {
+    NftablesConfig::new().table("t", Family::Ip, move |t| {
+        extra(t.chain("input", |c| {
+            c.hook(Hook::Input)
+                .priority(Priority::Filter)
+                .chain_type(ChainType::Filter)
+        }))
+    })
+}
+
+/// A rename of a named counter or set, dropping a chain whose rule used a
+/// counter, and retargeting a jump to a chain that goes away: each one
+/// removes something a rule still uses until the batch replaces or
+/// deletes that rule. The deletes went first, so every one of these
+/// failed with EBUSY, on every apply (#460).
+#[tokio::test]
+async fn removing_what_a_rule_used_converges_in_one_apply() -> nlink::Result<()> {
+    use nlink::netlink::nftables::ObjectConfig;
+    use nlink::netlink::nftables::types::ChainName;
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let counted = |name: &'static str| {
+        input_table(move |t| {
+            t.object(name, ObjectConfig::Counter)
+                .rule_keyed("input", "ssh", move |r| {
+                    r.match_tcp_dport(22).counter_named(name).drop()
+                })
+        })
+    };
+    let blocked = |name: &'static str| {
+        input_table(move |t| {
+            t.set(name, |s| {
+                s.key_type(SetKeyType::Ipv4Addr)
+                    .ipv4(std::net::Ipv4Addr::new(192, 0, 2, 1))
+            })
+            .rule_keyed("input", "deny", move |r| r.match_saddr_in_set(name).drop())
+        })
+    };
+    let with_output = |output: bool| {
+        input_table(move |t| {
+            if !output {
+                return t;
+            }
+            t.object("x", ObjectConfig::Counter)
+                .chain("output", |c| {
+                    c.hook(Hook::Output)
+                        .priority(Priority::Filter)
+                        .chain_type(ChainType::Filter)
+                })
+                .rule_keyed("output", "count", |r| r.counter_named("x"))
+        })
+    };
+    let jumping_to = |target: &'static str| {
+        input_table(move |t| {
+            t.chain(target, |c| c)
+                .rule_keyed(target, "accept", |r| r.accept())
+                .rule_keyed("input", "web", move |r| {
+                    r.match_tcp_dport(80).jump(ChainName::new(target).unwrap())
+                })
+        })
+    };
+
+    let cases = vec![
+        case("counter-renamed", vec![counted("a"), counted("b")]),
+        case("set-renamed", vec![blocked("blocked"), blocked("deny")]),
+        case("chain-using-a-counter-dropped", vec![with_output(true), with_output(false)]),
+        case("jump-retargeted", vec![jumping_to("web"), jumping_to("http")]),
+    ];
+    assert_converges("nft-rm-used", cases).await
 }

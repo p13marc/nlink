@@ -6,6 +6,26 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Removing a set, named object or chain that a rule used failed with
+  `EBUSY` on every apply (#460).** `NftablesDiff::apply` sent set, object
+  and chain deletes before the rule replaces, but the kernel releases what
+  a rule uses only when it processes the message that deletes or replaces
+  that rule. So renaming a named counter or set, dropping a chain whose
+  rule used a counter, or retargeting a jump away from a chain the config
+  drops each aborted the batch: `Device or resource busy (at request
+  offset 28)`, every time, with the firewall stuck on the old ruleset. The
+  rules of a deleted chain were not deleted explicitly either: they went
+  with DELCHAIN, after the deletes of what they used.
+
+  The batch now runs in four phases. First release: rule deletes,
+  including every rule of a chain being deleted, then element removes,
+  then deletes of sets and objects recreated under the same name. Then
+  every add, then the rule inserts and replaces, and last the deletes of
+  sets, objects, chains, flowtables and tables that nothing uses any more.
+  A diff that drops a chain now lists that chain's rules in
+  `rules_to_delete`. A root test runs all four edits as A→B transitions;
+  each failed with `EBUSY` before the fix.
+
 - **A declared chain policy change failed with `EEXIST` (#456).** #200
   (0.25) made the nftables diff report a chain whose policy drifted
   (`chains_to_modify`), but `NftablesDiff::apply` sent it through

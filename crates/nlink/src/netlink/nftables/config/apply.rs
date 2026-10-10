@@ -8,23 +8,21 @@
 //! observable to other readers (the kernel takes the nftables
 //! mutex for the duration of the batch).
 //!
-//! Operations are enqueued in dependency-correct order so the
-//! kernel's intra-batch validation accepts them (after the in-place set
-//! updates, which commit first in a batch of their own):
-//! 1. Rule deletes, and deletes of the rules being moved
-//! 2. Set-element removes (for sets that persist)
-//! 3. Set deletes, then object deletes (after what used them)
-//! 4. Chain deletes
-//! 5. Flowtable deletes
-//! 6. Table deletes (cascades any leftover children)
-//! 7. Table adds and flag updates
-//! 8. Chain adds and updates (a verdict map's elements name chains), then
-//!    object adds and quota updates (object maps' elements name objects)
-//! 9. Flowtable adds (a rule's `flow add @ft` names one)
-//! 10. Set adds
-//! 11. Set-element adds
-//! 12. Rule inserts and moves, in planned order
-//! 13. Rule replaces
+//! Operations are enqueued in four phases (after the in-place set
+//! updates, which commit first in a batch of their own). The kernel
+//! releases what a rule uses — a set, an object, a jump target — only when
+//! the message deleting or replacing that rule is processed, so anything a
+//! rule used is deleted last (#460):
+//!
+//! 1. **Release:** rule deletes (including every rule of a chain being
+//!    deleted) and the delete half of moves; set-element removes; deletes
+//!    of sets and objects recreated under the same name.
+//! 2. **Add:** tables and flag updates; chains and chain updates (a
+//!    verdict map's elements name chains); objects and quota updates
+//!    (object maps' elements name objects); flowtables (a rule's
+//!    `flow add @ft` names one); sets; set elements.
+//! 3. **Rules:** inserts and moves in planned order, then replaces.
+//! 4. **Delete:** sets, objects, chains, flowtables, tables.
 //!
 //! Tables with flags (`NFT_TABLE_F_DORMANT` / `_OWNER` /
 //! `_PERSIST`) route through `Transaction::add_table_with_flags`
@@ -39,6 +37,7 @@ use std::time::Duration;
 
 use super::diff::{NftablesDiff, RulePlacement};
 use super::types::{DeclaredChain, DeclaredRule};
+use super::super::ObjectType;
 use super::super::connection::Transaction;
 use super::super::types::{Chain, Family, Rule};
 use crate::netlink::{
@@ -125,7 +124,21 @@ impl NftablesDiff {
 
         let mut tx: Transaction = conn.transaction();
 
-        // 1. Rule deletes — handle-targeted, family-aware.
+        // The batch runs in four phases, because the kernel releases what a
+        // rule uses — sets, objects, jump targets — only when the message
+        // that deletes or replaces that rule is processed. A DELSET, DELOBJ
+        // or DELCHAIN sent ahead of it is EBUSY, and was, for every rename
+        // of a named counter or set and every chain dropped with a rule in
+        // it (#460).
+        //
+        // Phase 1 — release. Rule deletes and the delete half of rule
+        // moves, then element removes, then whatever this diff deletes
+        // only to add back under the same name.
+
+        // 1. Rule deletes — handle-targeted, family-aware. This includes
+        //    every rule of a chain the diff deletes: DELCHAIN would take
+        //    them, but only at its own place in phase 4, after the sets and
+        //    objects they use.
         //
         // The diff carries (table, family, chain, handle). The
         // kernel rejects a DELRULE with an empty NFTA_RULE_CHAIN
@@ -137,47 +150,46 @@ impl NftablesDiff {
         }
         // ...and the rules being moved: out of declared order, or bound to
         // a set being recreated, which must be gone before its DELSET
-        // (EBUSY otherwise). Re-inserted in step 12.
+        // (EBUSY otherwise). Re-inserted in step 10.
         for m in &self.rules_to_move {
             tx = tx.del_rule(&m.table, &m.chain, m.family, m.from.0);
         }
 
-        // 2. Set-element removes — must precede set/table deletes
-        //    and follow rule deletes (a rule referencing the set by
-        //    `@name` is released above). Only for sets that persist;
-        //    whole-set deletes (step 3) drop their elements.
+        // 2. Set-element removes, for sets that persist (a deleted set takes
+        //    its elements). Before any delete: a verdict map's element holds
+        //    its chain, an object map's element its object.
         for change in &self.set_elements_to_remove {
             tx = tx.del_set_elements(&change.set, &change.elements);
         }
 
-        // 3. Set deletes — after the rules that reference them are
-        //    gone, before the owning table is deleted.
+        // 3. Sets and objects recreated under the same name: deleted here,
+        //    so the add in phase 2 does not find them (EEXIST). The rules
+        //    bound to them were moved out of the way in step 1. Sets first:
+        //    an object map holds its objects.
+        let recreated_set = |table: &str, family: Family, name: &str| {
+            self.sets_to_add
+                .iter()
+                .any(|(t, f, s)| t == table && *f == family && s.name() == name)
+        };
+        let recreated_object = |table: &str, family: Family, name: &str, ty: ObjectType| {
+            self.objects_to_add.iter().any(|(t, f, o)| {
+                t == table && *f == family && o.name() == name && o.config().object_type() == ty
+            })
+        };
         for (table, family, name) in &self.sets_to_delete {
-            tx = tx.del_set(table, name, *family);
+            if recreated_set(table, *family, name) {
+                tx = tx.del_set(table, name, *family);
+            }
         }
-
-        // 3b. Object deletes — after the rules (step 1), map elements (2)
-        //     and maps (3) that used them: a used object is EBUSY.
         for (table, family, name, object_type) in &self.objects_to_delete {
-            tx = tx.del_object(table, name, *object_type, *family);
+            if recreated_object(table, *family, name, *object_type) {
+                tx = tx.del_object(table, name, *object_type, *family);
+            }
         }
 
-        // 4. Chain deletes.
-        for (table, family, name) in &self.chains_to_delete {
-            tx = tx.del_chain(table, name, *family);
-        }
+        // Phase 2 — add, in dependency order.
 
-        // 5. Flowtable deletes.
-        for (family, table, name) in &self.flowtables_to_delete {
-            tx = tx.del_flowtable(*family, table, name);
-        }
-
-        // 6. Table deletes (cascades any leftover children).
-        for (family, name) in &self.tables_to_delete {
-            tx = tx.del_table(name, *family);
-        }
-
-        // 7. Table adds (must precede chain/rule/flowtable adds
+        // 4. Table adds (must precede chain/rule/flowtable adds
         //    that reference them). Flagged tables route through
         //    Transaction::add_table_with_flags so they stay
         //    inside the atomic batch.
@@ -189,14 +201,14 @@ impl NftablesDiff {
             }
         }
 
-        // 7b. Table flag updates. NFT_MSG_NEWTABLE updates an existing table,
+        // 4b. Table flag updates. NFT_MSG_NEWTABLE updates an existing table,
         //     so a flag change converges without a delete+recreate — which
         //     would cascade away every chain and rule inside it (#208).
         for (family, name, flags) in &self.tables_to_modify {
             tx = tx.add_table_with_flags(name, *family, *flags);
         }
 
-        // 8. Chain adds, then chain property updates — before the sets,
+        // 5. Chain adds, then chain property updates — before the sets,
         //    whose elements (a verdict map's jumps) can name chains. An
         //    update is `NFT_MSG_NEWCHAIN` *without* `NLM_F_EXCL`, which the
         //    kernel treats as an update of the existing chain, so a drifted
@@ -212,8 +224,8 @@ impl NftablesDiff {
             tx = tx.update_chain(build_chain(table_name, *family, declared)?);
         }
 
-        // 8b. Object adds and quota updates — before the object maps' elements
-        //     (step 11) that name them and the rules (step 12) that use them.
+        // 6. Object adds and quota updates — before the object maps' elements
+        //     (step 9) that name them and the rules (step 10) that use them.
         for (table, family, declared) in &self.objects_to_add {
             tx = tx.add_object(&declared.to_object(table, *family));
         }
@@ -221,7 +233,7 @@ impl NftablesDiff {
             tx = tx.update_object(&declared.to_object(table, *family));
         }
 
-        // 9. Flowtable adds — **before** the rules.
+        // 7. Flowtable adds — **before** the rules.
         //
         //    A rule carrying `flow add @ft` for a flowtable created in
         //    the same diff is validated when the batch is committed,
@@ -246,20 +258,22 @@ impl NftablesDiff {
             tx = tx.add_flowtable(&runtime);
         }
 
-        // 10. Set adds — after the owning table exists, before the
-        //    rules (step 12) that reference them by `@name`. Re-build
+        // 8. Set adds — after the owning table exists, before the
+        //    rules (step 10) that reference them by `@name`. Re-build
         //    a runtime `Set` from `DeclaredSet`.
         for (table_name, family, declared) in &self.sets_to_add {
             tx = tx.add_set(declared.to_set(table_name, *family));
         }
 
-        // 11. Set-element adds — after their set is created (step 10 or
+        // 9. Set-element adds — after their set is created (step 8 or
         //    a prior apply), before the rules that match on them.
         for change in &self.set_elements_to_add {
             tx = tx.add_set_elements(&change.set, &change.elements);
         }
 
-        // 12. Rule inserts, new and moved, in the order the diff planned:
+        // Phase 3 — rules.
+
+        // 10. Rule inserts, new and moved, in the order the diff planned:
         //     inserts before the same anchor in declared order, inserts
         //     after one in reverse, so the chain ends up in declared
         //     order. Each anchor is a rule that stays, so its handle is
@@ -275,13 +289,47 @@ impl NftablesDiff {
             tx = place_rule(tx, keyed_body(rule), placement);
         }
 
-        // 13. Rule in-place replaces, last — emits
+        // 11. Rule in-place replaces — emits
         //     `NFT_MSG_NEWRULE | NLM_F_REPLACE | NFTA_RULE_HANDLE`.
         //     Kernel atomically swaps the body at that handle
-        //     (preserves position, no flush). Last, so no insert above
-        //     anchors on a handle a replace has already retired.
+        //     (preserves position, no flush), releasing what the old body
+        //     used. After the inserts, so no insert anchors on a handle a
+        //     replace has already retired.
         for (_table, _family, _chain, handle, declared) in &self.rules_to_replace {
             tx = tx.replace_rule(keyed_body(declared), handle.0);
+        }
+
+        // Phase 4 — delete what nothing uses any more: sets (an object map
+        // holds its objects, a verdict map its chains), then objects, then
+        // chains (whose rules went in step 1), flowtables, tables.
+
+        // 12. Set deletes.
+        for (table, family, name) in &self.sets_to_delete {
+            if !recreated_set(table, *family, name) {
+                tx = tx.del_set(table, name, *family);
+            }
+        }
+
+        // 13. Object deletes.
+        for (table, family, name, object_type) in &self.objects_to_delete {
+            if !recreated_object(table, *family, name, *object_type) {
+                tx = tx.del_object(table, name, *object_type, *family);
+            }
+        }
+
+        // 14. Chain deletes.
+        for (table, family, name) in &self.chains_to_delete {
+            tx = tx.del_chain(table, name, *family);
+        }
+
+        // 15. Flowtable deletes — after the rules that `flow add` to them.
+        for (family, table, name) in &self.flowtables_to_delete {
+            tx = tx.del_flowtable(*family, table, name);
+        }
+
+        // 16. Table deletes (cascades any leftover children).
+        for (family, name) in &self.tables_to_delete {
+            tx = tx.del_table(name, *family);
         }
 
         tx.commit(conn).await?;
