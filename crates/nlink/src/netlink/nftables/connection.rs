@@ -1739,12 +1739,25 @@ impl Transaction {
         self
     }
 
-    /// Add a chain creation to the batch.
-    pub fn add_chain(mut self, chain: Chain) -> Self {
-        let mut builder = MessageBuilder::new(
-            nft_msg_type(NFT_MSG_NEWCHAIN),
-            NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL,
-        );
+    /// Add a chain creation to the batch. Fails (`EEXIST`) if the chain
+    /// exists; see [`update_chain`](Self::update_chain).
+    pub fn add_chain(self, chain: Chain) -> Self {
+        self.push_newchain(chain, NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL)
+    }
+
+    /// Change an existing chain in place, or create it if it does not
+    /// exist (`nft add chain`): `NFT_MSG_NEWCHAIN` without `NLM_F_EXCL`,
+    /// which `nf_tables_newchain` turns into `nf_tables_updchain` for an
+    /// existing chain. That changes a base chain's **policy** and keeps its
+    /// rules. The kernel refuses to change a live base chain's hook,
+    /// priority or type (`EEXIST`); those need the chain deleted and
+    /// created again (#456).
+    pub fn update_chain(self, chain: Chain) -> Self {
+        self.push_newchain(chain, NLM_F_REQUEST | NLM_F_CREATE)
+    }
+
+    fn push_newchain(mut self, chain: Chain, flags: u16) -> Self {
+        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_NEWCHAIN), flags);
         let nfgenmsg = NfGenMsg::new(chain.family);
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_CHAIN_TABLE, chain.table.as_str());

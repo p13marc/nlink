@@ -1188,3 +1188,57 @@ async fn reconcile_delete_set_when_removed_from_config() -> nlink::Result<()> {
     })
     .await
 }
+
+/// A declared chain policy change reaches the live chain, in place (#456).
+/// #200 made the diff report it, but the apply sent it with `add_chain`'s
+/// `NLM_F_EXCL` and the kernel refused it with `EEXIST`, so it never
+/// applied. Sent as an update, the chain keeps its rules.
+#[tokio::test]
+async fn reconcile_changes_a_live_chain_policy() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("rec-chain-policy")?;
+        let nft = nft_in_ns(&ns)?;
+        let cfg = |policy: Policy| {
+            NftablesConfig::new().table("filter_pol", Family::Inet, move |t| {
+                t.chain("input", move |c| {
+                    c.hook(Hook::Input)
+                        .priority(Priority::Filter)
+                        .chain_type(ChainType::Filter)
+                        .policy(policy)
+                })
+                .rule_keyed("input", "ssh", |r| r.match_tcp_dport(22).accept())
+            })
+        };
+        cfg(Policy::Drop).diff(&nft).await?.apply(&nft).await?;
+        let handle = |rules: &[nlink::netlink::nftables::RuleInfo]| {
+            rules
+                .iter()
+                .find(|r| r.key.as_deref() == Some("ssh"))
+                .map(|r| r.handle)
+        };
+        let before = handle(&nft.list_rules("filter_pol", Family::Inet).await?);
+        assert!(before.is_some());
+
+        let diff = cfg(Policy::Accept).diff(&nft).await?;
+        assert_eq!(diff.chains_to_modify.len(), 1, "{diff:?}");
+        diff.apply(&nft).await?; // EEXIST before #456
+
+        let chains = nft.list_chains_in("filter_pol", Family::Inet).await?;
+        let input = chains.iter().find(|c| c.name == "input").expect("input chain");
+        assert_eq!(input.policy, Some(Policy::Accept.to_u32()));
+        assert!(
+            cfg(Policy::Accept).diff(&nft).await?.is_empty(),
+            "the policy change must converge"
+        );
+        assert_eq!(
+            before,
+            handle(&nft.list_rules("filter_pol", Family::Inet).await?),
+            "an update keeps the chain's rules"
+        );
+        Ok(())
+    })
+    .await
+}
