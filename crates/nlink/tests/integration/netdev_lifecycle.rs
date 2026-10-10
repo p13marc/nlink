@@ -208,3 +208,58 @@ async fn removal_evicts_the_device_from_the_store() -> Result<()> {
 
     Ok(())
 }
+
+/// #510: fed a resync stream, the join starts from the initial snapshot,
+/// so a device that existed before it subscribed is in the store; a plain
+/// stream could not be fed in, and would never have announced it.
+#[tokio::test]
+async fn a_resync_stream_announces_devices_that_predate_the_join() -> Result<()> {
+    use nlink::netlink::{Route, namespace, resync::ConnectionFactory};
+    use std::sync::Arc;
+    require_root!();
+    nlink::require_module!("dummy");
+
+    let ns = TestNamespace::new("netdevrs")?;
+    ns.exec("ip", &["link", "add", "early0", "type", "dummy"])?;
+
+    let name = ns.name().to_string();
+    let factory: ConnectionFactory<Route> = Arc::new(move || {
+        let name = name.clone();
+        Box::pin(async move { namespace::connection_for::<Route>(&name) })
+    });
+    let links = ns.connection()?.into_events_with_resync(factory).await?;
+    let uevents = Connection::<KobjectUevent>::in_namespace(ns.name())?;
+    let store: Store<u32, NetdevInfo> = Store::new();
+    let mut lifecycle =
+        NetdevLifecycle::new(links, uevents.events().await).with_store(store.clone());
+
+    let announced = |store: &Store<u32, NetdevInfo>, name: &str| {
+        store.values().iter().any(|info| info.name() == Some(name))
+    };
+    let deadline = tokio::time::Instant::now() + SETTLE;
+    while !(announced(&store, "lo") && announced(&store, "early0")) {
+        let Ok(Some(event)) = tokio::time::timeout_at(deadline, lifecycle.next()).await else {
+            break;
+        };
+        event?;
+    }
+    assert!(announced(&store, "lo"), "lo is in the initial snapshot");
+    assert!(
+        announced(&store, "early0"),
+        "a device created before the join is in the initial snapshot"
+    );
+
+    // Live events still flow after the snapshot.
+    ns.connection()?
+        .add_link(nlink::netlink::link::DummyLink::new("late0"))
+        .await?;
+    let deadline = tokio::time::Instant::now() + SETTLE;
+    while !announced(&store, "late0") {
+        let Ok(Some(event)) = tokio::time::timeout_at(deadline, lifecycle.next()).await else {
+            break;
+        };
+        event?;
+    }
+    assert!(announced(&store, "late0"), "a live NewLink after the snapshot");
+    Ok(())
+}

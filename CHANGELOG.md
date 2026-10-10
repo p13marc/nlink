@@ -26,6 +26,22 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`NetdevLifecycle` could not take a resync stream, so its device set
+  was only as good as a stream that never overflows (#510, item 3).** It
+  required `Stream<Item = Result<NetworkEvent>>`. An overflow therefore
+  lost whatever link events it dropped, a lost `DelLink` among them, and
+  the device stayed in the join and its store for good. The docs said
+  the store "cannot be missing devices", which was not true. And a device
+  that existed before the join subscribed was never announced. The link
+  side now also takes `ResyncedEvent<NetworkEvent>`, through the sealed
+  `LinkSourceItem`. Each snapshot's links are `Added`, or `Changed` if
+  known. When a snapshot ends, every device the join knew that the
+  snapshot did not list is `Removed`. The `netdev-lifecycle` recipe and
+  example feed it a link-only resync stream that opens with a snapshot.
+  A unit test drives an initial snapshot, a live add, and a resync that
+  drops two devices and adds one; it checks the events and the store. A
+  root test checks that a device created before the join is in the store.
+
 - **GENL: `command()` and family lookups read one datagram, so the next
   call read a stale ACK; family resolution had no timeout (#496).** A
   `doit` reply and its ACK are two datagrams: `genlmsg_reply` unicasts
@@ -508,6 +524,9 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`netdev::LinkSourceItem`**: what `NetdevLifecycle` takes from its
+  link source, `NetworkEvent` or `ResyncedEvent<NetworkEvent>` (#510).
 
 - **`Error::EventStreamActive` and `Error::is_event_stream_active()`**
   (#505).
