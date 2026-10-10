@@ -155,3 +155,50 @@ async fn concurrent_ack_requests_on_shared_connection_succeed() -> Result<()> {
 
     Ok(())
 }
+
+/// A link dump torn by links coming and going is re-dumped, not returned
+/// as an error: the kernel marks such a dump `NLM_F_DUMP_INTR`, and
+/// nlink used to hand that straight to the caller — one concurrent change
+/// anywhere in the namespace aborted a whole reconcile — and leave the
+/// rest of the torn dump in the socket for the next request (#494).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dump_torn_by_concurrent_changes_is_redumped() -> nlink::Result<()> {
+    use nlink::netlink::link::DummyLink;
+    require_root!();
+    nlink::require_modules!("dummy");
+
+    let ns = crate::common::TestNamespace::new("dumpintr")?;
+    let conn = ns.connection()?;
+    // Enough links that a dump spans many reads.
+    for i in 0..400 {
+        conn.add_link(DummyLink::new(format!("d{i}"))).await?;
+    }
+    let churn = ns.connection()?;
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let churning = {
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            let mut n = 0u32;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let name = format!("x{}", n % 8);
+                let _ = churn.add_link(DummyLink::new(&name)).await;
+                let _ = churn.del_link(name.as_str()).await;
+                n += 1;
+            }
+        })
+    };
+    let mut result = Ok(());
+    for _ in 0..60 {
+        if let Err(e) = conn.get_links().await {
+            result = Err(e);
+            break;
+        }
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    churning.await.expect("churn task");
+    result?;
+    // Nothing of a torn dump is left for the next request.
+    let links = conn.get_links().await?;
+    assert!(links.len() >= 400, "{} links", links.len());
+    Ok(())
+}
