@@ -26,6 +26,19 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **One allowed-IP prefix on two WireGuard peers never converged (#498).**
+  The kernel keeps a device's allowed IPs in one trie, so a prefix belongs
+  to at most one peer. Writing it on peer B silently takes it from peer A.
+  The diff compared each peer on its own, so a hub that declared every
+  spoke with the tunnel /24 rewrote every peer on every apply, and only
+  the last one written routed the prefix. The new
+  `WireguardConfig::validate()`, run by `diff` and so by `apply`, refuses
+  such a prefix before anything is written. It names the masked prefix and
+  both peers. It also refuses a device declared twice, which was diffed
+  twice in the same way. A root test applies a two-peer /24 hub. Before
+  the fix the apply wrote both peers; now it is refused with nothing
+  written.
+
 - **A bridge created with an MTU gave it up to its ports (#474).** The
   kernel treats a bridge MTU as the user's (`BROPT_MTU_SET_BY_USER`) only
   after `br_change_mtu`, an `RTM_SETLINK` that changes it. The `IFLA_MTU`
@@ -286,6 +299,8 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`WireguardConfig::validate()`** (#498).
 
 - **`Connection::pin_bridge_mtu{,_by_index}` and the provided
   `LinkConfig::pinned_mtu`** (#474).

@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use nlink::netlink::genl::wireguard::{AllowedIp, WireguardConfig};
 
+use crate::common::TestNamespace;
 use crate::common::converge::{assert_converges, case};
 
 const UNCLAMPED: [u8; 32] = [0xaa; 32];
@@ -212,4 +213,32 @@ PersistentKeepalive = 15
 ";
     let cfg = WireguardConfig::from_wg_quick("wg0", profile)?;
     assert_converges("wge", vec![case("wg-quick", vec![cfg])]).await
+}
+
+/// One allowed-IP prefix on two peers of a device is refused before
+/// anything is written. The kernel gives a prefix to one peer, so writing
+/// it on the second took it from the first, and every apply rewrote every
+/// peer — a hub declaring each spoke with the tunnel /24 (#498).
+#[tokio::test]
+async fn a_prefix_on_two_peers_is_refused() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_host_root!();
+    nlink::require_modules!("wireguard");
+
+    let ns = TestNamespace::new("wge-shared")?;
+    let tunnel = AllowedIp::v4(Ipv4Addr::new(10, 99, 0, 0), 24);
+    let cfg = WireguardConfig::new().device("wg0", |d| {
+        d.private_key(UNCLAMPED)
+            .peer(peer_key(0xb1), |p| p.allowed_ip(tunnel))
+            .peer(peer_key(0xb2), |p| p.allowed_ip(tunnel))
+    });
+    cfg.ensure_devices(&ns.connection()?).await?;
+    let wg = ns
+        .connection_for_async::<nlink::netlink::Wireguard>()
+        .await?;
+    let err = cfg.apply(&wg).await.unwrap_err();
+    assert!(err.to_string().contains("allowed IP of two peers"), "{err}");
+    let device = wg.get_device_by_name("wg0").await?;
+    assert!(device.peers.is_empty(), "nothing was written: {device:?}");
+    Ok(())
 }
