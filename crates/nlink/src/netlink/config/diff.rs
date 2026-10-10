@@ -144,11 +144,20 @@ pub struct ConfigDiff {
     /// interfaces the config declares addresses on are touched.
     pub addresses_to_remove: Vec<DeclaredAddress>,
 
-    /// Routes to remove (purge mode only). Populated only under
-    /// [`DiffOptions::purge`]. Restricted to the main table and to
-    /// admin/user-managed protocols (`static` / `boot`); kernel,
-    /// RA, DHCP and redirect routes are excluded so dynamic and
-    /// auto-configured routing is never clobbered.
+    /// Routes to remove.
+    ///
+    /// Always: a route a declared route *supersedes* — same destination,
+    /// table, type, gateway and device, a different metric. A replace
+    /// only replaces a route of the same metric, so without this a metric
+    /// change left the old route installed, and winning (#468).
+    ///
+    /// Under [`DiffOptions::purge`], also every route nothing declared
+    /// carries, compared on the full identity (gateway, device, metric,
+    /// type), not on `(dst, prefix, table)`. Restricted to the tables the
+    /// config owns, to IPv4/IPv6, and to admin/user-managed protocols
+    /// (`static` / `boot`); kernel, RA, DHCP and redirect routes are
+    /// excluded so dynamic and auto-configured routing is never
+    /// clobbered.
     pub routes_to_remove: Vec<DeclaredRoute>,
 
     /// Declared bridge MTUs to re-assert after the link changes, for
@@ -1154,51 +1163,9 @@ fn diff_routes(
         // that destination.
         let matches_existing = !declared_dev_unresolved
             && current_by_key.get(&key).is_some_and(|kernel_routes| {
-            kernel_routes.iter().any(|r| {
-                // Gateway: compare Option<IpAddr> ↔ Option<&IpAddr>.
-                let gw_match = match (declared.gateway, r.gateway()) {
-                    (None, None) => true,
-                    (Some(a), Some(b)) => a == *b,
-                    _ => false,
-                };
-                // Output interface (ifindex).
-                let dev_match = match (declared_oif, r.oif()) {
-                    (None, None) => true,
-                    (Some(a), Some(b)) => a == b,
-                    // declared has no `dev` but kernel oif is
-                    // set — accept (the kernel auto-selects oif
-                    // from gateway). Treat as match to avoid
-                    // unnecessary REPLACE churn.
-                    (None, Some(_)) => true,
-                    (Some(_), None) => false,
-                };
-                // Metric (priority). A route added without an explicit
-                // metric does not come back as 0 for both families:
-                // IPv4 leaves it 0, but IPv6 substitutes
-                // `IP6_RT_PRIO_USER` (1024, include/net/ip6_route.h).
-                // Comparing a declared `None` against 0 therefore never
-                // matched an IPv6 route, so every one of them sat in
-                // `routes_to_add` on every diff — forever, and with
-                // `apply` reporting no changes at the same time,
-                // because the apply path does not go through here
-                // (#366).
-                //
-                // An explicit 0 is the same as none for IPv6: the kernel
-                // tests the value, not its presence (`if (cfg->fc_metric
-                // == 0) cfg->fc_metric = IP6_RT_PRIO_USER;` in
-                // `ip6_route_info_create`), so `.metric(0)` installs 1024
-                // and comparing it as 0 re-added the route on every apply
-                // (#TBD).
-                let metric_match = kernel_metric(declared) == r.priority().unwrap_or(0);
-                // Type. The key above admits unicast, blackhole,
-                // unreachable and prohibit alike, and a declared blackhole
-                // has neither gateway nor dev, so without this a declared
-                // `unicast → blackhole` change matched the old unicast
-                // route: the diff came back empty and the kernel kept
-                // forwarding (#TBD).
-                let type_match = r.route_type() == declared.route_type.kernel_type();
-                gw_match && dev_match && metric_match && type_match
-            })
+                kernel_routes
+                    .iter()
+                    .any(|r| route_matches(declared, declared_oif, r))
             });
 
         if !matches_existing {
@@ -1206,42 +1173,48 @@ fn diff_routes(
         }
     }
 
-    if !purge {
-        return;
-    }
-
-    // Purge: remove admin/user routes the kernel has but the config
-    // doesn't declare. Heavily fenced for safety:
-    //   - only the tables the config owns: main (254), every table a
-    //     declared route names, and `opts.purge_tables` — leaves
-    //     local/default and any VRF table nobody declared into
-    //     (#333, #335: main-only made a declared VRF route a one-way
-    //     street — added and updated, never removed),
-    //   - `static`/`boot` protocol only — never kernel-derived,
-    //     RA, DHCP or redirect routes (those are dynamic / auto),
-    //   - same route-type filter as the add path (unicast +
-    //     blackhole/unreachable/prohibit).
-    // Identity for "is it declared" is `(dst, prefix, table)`, the
-    // same key the add path uses, so a route being replaced is never
-    // also queued for removal.
-    let desired_keys: HashSet<(IpAddr, u8, u32)> = config
-        .routes
-        .iter()
-        .map(|r| {
-            (
+    // Which kernel routes go. A route goes when nothing declared carries
+    // it — compared on the full identity, as the add path does, not on
+    // `(dst, prefix, table)` alone (#468):
+    //   - always, a route a declared route **supersedes**: same key, type,
+    //     gateway and device, only the metric differs. The add is a
+    //     replace, and `NLM_F_REPLACE` only replaces a route of the same
+    //     metric, so a metric change used to install the new route next
+    //     to the old one, which kept winning;
+    //   - with purge, every other admin/user route nothing declared
+    //     matches. Heavily fenced:
+    //       - only the tables the config owns: main (254), every table a
+    //         declared route names, and `opts.purge_tables` — leaves
+    //         local/default and any VRF table nobody declared into
+    //         (#333, #335: main-only made a declared VRF route a one-way
+    //         street — added and updated, never removed),
+    //       - `static`/`boot` protocol only — never kernel-derived, RA,
+    //         DHCP or redirect routes (those are dynamic / auto),
+    //       - unicast/blackhole/unreachable/prohibit, IPv4 and IPv6 only.
+    // A route a declared route will *replace* in place — same key and
+    // metric — is never removed: the replace overwrites it.
+    let declared_by_key: HashMap<(IpAddr, u8, u32), Vec<&DeclaredRoute>> =
+        config.routes.iter().fold(HashMap::new(), |mut map, r| {
+            map.entry((
                 kernel_destination(r.destination, r.prefix_len),
                 r.prefix_len,
                 r.table.unwrap_or(254),
-            )
-        })
-        .collect();
+            ))
+            .or_default()
+            .push(r);
+            map
+        });
+    let oif_of = |d: &DeclaredRoute| {
+        d.dev
+            .as_deref()
+            .and_then(|n| name_to_ifindex.get(n).copied())
+    };
     let tables = opts.purge_table_scope(config);
 
     for r in current {
-        if !tables.contains(&r.table_id()) {
-            continue;
-        }
-        if !matches!(r.protocol(), RouteProtocol::Static | RouteProtocol::Boot) {
+        if !(r.is_ipv4() || r.is_ipv6())
+            || !matches!(r.protocol(), RouteProtocol::Static | RouteProtocol::Boot)
+        {
             continue;
         }
         let route_type = match r.route_type() {
@@ -1260,8 +1233,22 @@ fn diff_routes(
                 IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
             }
         });
-        let key = (dst, r.dst_len(), r.table_id());
-        if desired_keys.contains(&key) {
+        let declared_here = declared_by_key
+            .get(&(dst, r.dst_len(), r.table_id()))
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let carried = declared_here.iter().any(|d| route_matches(d, oif_of(d), r));
+        let replaced = declared_here
+            .iter()
+            .any(|d| kernel_metric(d) == r.priority().unwrap_or(0));
+        if carried || replaced {
+            continue;
+        }
+        let superseded = declared_here
+            .iter()
+            .any(|d| route_matches_but_metric(d, oif_of(d), r));
+        let purged = purge && tables.contains(&r.table_id());
+        if !(superseded || purged) {
             continue;
         }
         let dev = r
@@ -1278,6 +1265,56 @@ fn diff_routes(
             route_type,
         });
     }
+}
+
+/// Does the kernel route `r`, at `declared`'s key, carry `declared`?
+/// `declared_oif` is the declared device's ifindex, if it resolves.
+fn route_matches(declared: &DeclaredRoute, declared_oif: Option<u32>, r: &RouteMessage) -> bool {
+    // Metric (priority). A route added without an explicit metric does
+    // not come back as 0 for both families: IPv4 leaves it 0, but IPv6
+    // substitutes `IP6_RT_PRIO_USER` (1024, include/net/ip6_route.h).
+    // Comparing a declared `None` against 0 therefore never matched an
+    // IPv6 route, so every one of them sat in `routes_to_add` on every
+    // diff — forever, and with `apply` reporting no changes at the same
+    // time, because the apply path does not go through here (#366).
+    //
+    // An explicit 0 is the same as none for IPv6: the kernel tests the
+    // value, not its presence (`if (cfg->fc_metric == 0) cfg->fc_metric =
+    // IP6_RT_PRIO_USER;` in `ip6_route_info_create`), so `.metric(0)`
+    // installs 1024 and comparing it as 0 re-added the route on every
+    // apply.
+    route_matches_but_metric(declared, declared_oif, r)
+        && kernel_metric(declared) == r.priority().unwrap_or(0)
+}
+
+/// [`route_matches`] without the metric: same gateway, device and type.
+fn route_matches_but_metric(
+    declared: &DeclaredRoute,
+    declared_oif: Option<u32>,
+    r: &RouteMessage,
+) -> bool {
+    // Gateway: compare Option<IpAddr> ↔ Option<&IpAddr>.
+    let gw_match = match (declared.gateway, r.gateway()) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a == *b,
+        _ => false,
+    };
+    // Output interface (ifindex). A declared route with no `dev` accepts
+    // whatever oif the kernel chose from the gateway, to avoid needless
+    // REPLACE churn.
+    let dev_match = match (declared_oif, r.oif()) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a == b,
+        (None, Some(_)) => true,
+        (Some(_), None) => false,
+    };
+    // Type. The key admits unicast, blackhole, unreachable and prohibit
+    // alike, and a declared blackhole has neither gateway nor dev, so
+    // without this a declared `unicast → blackhole` change matched the
+    // old unicast route: the diff came back empty and the kernel kept
+    // forwarding.
+    let type_match = r.route_type() == declared.route_type.kernel_type();
+    gw_match && dev_match && type_match
 }
 
 fn diff_qdiscs(

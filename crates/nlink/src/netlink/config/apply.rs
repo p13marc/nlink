@@ -1039,13 +1039,21 @@ async fn del_address(conn: &Connection<Route>, addr: &DeclaredAddress) -> Result
 /// `Ok(true)` when the route was deleted, `Ok(false)` when the kernel
 /// no longer had it.
 async fn del_route(conn: &Connection<Route>, route: &DeclaredRoute) -> Result<bool> {
-    // The kernel matches a route delete on its key (dst, prefix,
-    // table) plus any specified attributes. We replay the same
-    // gateway/dev/metric/table the diff recorded so the delete is
-    // unambiguous when multiple routes share a (dst, prefix, table).
+    // Delete the way `ip route del` does: type 0, scope
+    // `RT_SCOPE_NOWHERE`, protocol 0, and only the attributes that pick
+    // *this* route out — metric, device, gateway, table. The kernel
+    // matches type, scope and protocol whenever they are set, and the
+    // builder's defaults (unicast, boot) are what it sent before, so a
+    // `proto static` route or a blackhole/unreachable/prohibit route was
+    // never matched: the delete came back ESRCH, counted as "already
+    // absent", and the next diff listed the route again, forever (#467).
+    use crate::netlink::types::route::{RouteProtocol, RouteScope, RouteType};
     match route.destination {
         IpAddr::V4(dst) => {
-            let mut config = Ipv4Route::from_addr(dst, route.prefix_len);
+            let mut config = Ipv4Route::from_addr(dst, route.prefix_len)
+                .route_type(RouteType::Unspec)
+                .protocol(RouteProtocol::Unspec)
+                .scope(RouteScope::Nowhere);
             if let Some(IpAddr::V4(gw)) = route.gateway {
                 config = config.gateway(gw);
             }
@@ -1061,7 +1069,10 @@ async fn del_route(conn: &Connection<Route>, route: &DeclaredRoute) -> Result<bo
             conn.del_route_if_exists(config).await
         }
         IpAddr::V6(dst) => {
-            let mut config = Ipv6Route::from_addr(dst, route.prefix_len);
+            let mut config = Ipv6Route::from_addr(dst, route.prefix_len)
+                .route_type(RouteType::Unspec)
+                .protocol(RouteProtocol::Unspec)
+                .scope(RouteScope::Nowhere);
             if let Some(IpAddr::V6(gw)) = route.gateway {
                 config = config.gateway(gw);
             }

@@ -19,6 +19,31 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Route purge could not delete a `proto static` route or a
+  blackhole/unreachable/prohibit route, and reported it deleted (#467).**
+  The purge rebuilt each route through the add builder. Its defaults,
+  unicast and `proto boot`, went into the delete, and the kernel matches
+  type and protocol whenever they are set. So the delete missed with
+  ESRCH, was counted "already absent", and the next diff listed the
+  route again, forever. Deletes are now sent the way `ip route del` sends
+  them: type 0, scope `NOWHERE`, protocol 0, plus metric, device,
+  gateway and table. Purge is limited to IPv4/IPv6 routes.
+- **Changing a declared route's metric added a second route and kept the
+  old one, even with purge (#468).** The add is a replace, and
+  `NLM_F_REPLACE` only replaces a route of the same metric (IPv4 matches
+  tos and priority, IPv6 the metric). So metric 100 → 200 left both
+  installed, with the old one winning. The purge then spared the old
+  route, because it keyed "is it declared" on `(dst, prefix, table)`.
+  Now, with or without purge, a route that differs from a declared one
+  only in its metric is removed as superseded. The purge compares the
+  full identity: gateway, device, metric and type. So an undeclared
+  static route that shares a declared destination is purged too. Root
+  tests cover these: metric 100 → 200 in both families, with and
+  without purge, must leave exactly one route at 200 per `ip -j route`.
+  A purge must also remove hand-added `proto static`, blackhole,
+  unreachable and prohibit routes, IPv4 and IPv6. Before the fix both
+  routes stayed, and the purge's diff never emptied.
+
 - **`RateLimiter` ingress shaping dropped every ingress packet (#458).**
   The redirect to the IFB was a mirred *ingress* redirect. That hands the
   packet to the IFB's receive path, so it never reaches the IFB's

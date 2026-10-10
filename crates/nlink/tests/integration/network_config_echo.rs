@@ -28,7 +28,7 @@ use nlink::netlink::tc::{NetemLossModel, TbfConfig};
 use nlink::netlink::{Connection, Route};
 use nlink::{Bytes, Percent, Rate, TcMessage};
 
-use crate::common::converge::{assert_converges, case, converges, ip_json};
+use crate::common::converge::{assert_converges, assert_transition, case, converges, ip_json};
 use crate::common::{STEP_TIMEOUT, TestNamespace};
 
 const MAC_A: [u8; 6] = [0x02, 0x00, 0x5e, 0x10, 0x00, 0x01];
@@ -1743,6 +1743,150 @@ async fn a_route_through_a_link_declared_down_fails_in_the_same_apply() -> nlink
         Err(e) => assert_eq!(e.errno(), Some(libc::ENETDOWN), "{e}"),
     }
     Ok(())
+}
+
+/// The routes a route listing shows for `dst`, as `(type, metric)`.
+fn routes_at(ns: &TestNamespace, family: &str, dst: &str) -> Result<Vec<(String, u64)>, String> {
+    let routes = ip_json(ns, &[family, "route", "show", "table", "all", dst])?;
+    Ok(routes
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|r| {
+            let ty = r["type"].as_str().unwrap_or("unicast").to_string();
+            (ty, r["metric"].as_u64().unwrap_or(0))
+        })
+        .collect())
+}
+
+/// Changing a declared route's metric leaves one route, at the new metric,
+/// with purge and without. `NLM_F_REPLACE` only replaces a route of the
+/// same metric, so the new one was added next to the old, which kept
+/// winning — and the purge kept the old one because its
+/// `(dst, prefix, table)` was declared (#468).
+#[tokio::test]
+async fn a_metric_change_leaves_one_route() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy");
+
+    let at = |dst: &'static str, metric: u32| {
+        dummy_up("d0")
+            .address("d0", "10.5.0.1/24")
+            .unwrap()
+            .address("d0", "fd00:5::1/64")
+            .unwrap()
+            .route(dst, move |r| r.dev("d0").metric(metric))
+            .unwrap()
+    };
+    let only = |family: &'static str, dst: &'static str| {
+        move |ns: &TestNamespace| {
+            let routes = routes_at(ns, family, dst)?;
+            if routes == [("unicast".to_string(), 200)] {
+                Ok(())
+            } else {
+                Err(format!(
+                    "want one route at metric 200, the kernel has {routes:?}"
+                ))
+            }
+        }
+    };
+    let cases = vec![
+        case(
+            "v4-purge",
+            vec![at("10.55.0.0/16", 100), at("10.55.0.0/16", 200)],
+        )
+        .purging()
+        .check(only("-4", "10.55.0.0/16")),
+        case("v4", vec![at("10.55.0.0/16", 100), at("10.55.0.0/16", 200)])
+            .check(only("-4", "10.55.0.0/16")),
+        case(
+            "v6-purge",
+            vec![at("2001:db8:55::/48", 100), at("2001:db8:55::/48", 200)],
+        )
+        .purging()
+        .check(only("-6", "2001:db8:55::/48")),
+        case(
+            "v6",
+            vec![at("2001:db8:55::/48", 100), at("2001:db8:55::/48", 200)],
+        )
+        .check(only("-6", "2001:db8:55::/48")),
+    ];
+    assert_converges("nce-metric", cases).await
+}
+
+/// A purge removes undeclared routes whatever their protocol and type:
+/// `proto static`, blackhole, unreachable, prohibit. The delete replayed
+/// the builder's defaults (unicast, `proto boot`), the kernel matched
+/// those, missed, and the purge called the route "already absent" — on
+/// every apply (#467).
+#[tokio::test]
+async fn purge_removes_static_and_typed_routes() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy");
+
+    let ns = TestNamespace::new("nce-purge-typed")?;
+    let cfg = dummy_up("d0")
+        .address("d0", "10.6.0.1/24")?
+        .address("d0", "fd00:6::1/64")?;
+    let applied = cfg.apply(&ns.connection()?).await?;
+    assert!(applied.is_success(), "{applied:?}");
+    for args in [
+        &[
+            "-4",
+            "route",
+            "add",
+            "10.77.0.0/16",
+            "dev",
+            "d0",
+            "proto",
+            "static",
+        ][..],
+        &["-4", "route", "add", "10.78.0.0/16", "dev", "d0"],
+        &["-4", "route", "add", "blackhole", "10.79.0.0/16"],
+        &["-4", "route", "add", "unreachable", "10.80.0.0/16"],
+        &[
+            "-4",
+            "route",
+            "add",
+            "prohibit",
+            "10.81.0.0/16",
+            "proto",
+            "static",
+        ],
+        &[
+            "-6",
+            "route",
+            "add",
+            "2001:db8:77::/48",
+            "dev",
+            "d0",
+            "proto",
+            "static",
+        ],
+        &["-6", "route", "add", "blackhole", "2001:db8:79::/48"],
+    ] {
+        ns.exec("ip", args)?;
+    }
+    let mut converged = Ok(());
+    assert_transition(&ns, &[cfg], true, async |_, _conn| {
+        for (family, dst) in [
+            ("-4", "10.77.0.0/16"),
+            ("-4", "10.78.0.0/16"),
+            ("-4", "10.79.0.0/16"),
+            ("-4", "10.80.0.0/16"),
+            ("-4", "10.81.0.0/16"),
+            ("-6", "2001:db8:77::/48"),
+            ("-6", "2001:db8:79::/48"),
+        ] {
+            let left = routes_at(&ns, family, dst)?;
+            if !left.is_empty() {
+                converged = Err(format!("{dst} survived the purge: {left:?}"));
+            }
+        }
+        converged.clone()
+    })
+    .await
 }
 
 /// A purge keys "is it declared" on the same destination the add path
