@@ -57,8 +57,10 @@ the workflow. For local validation as a non-root user, the
 `examples/netfilter/conntrack.rs --apply`).
 
 ```bash
-cargo test --test integration --features lab --no-run
-sudo ./target/debug/deps/integration-* --test-threads=1
+# The CI lane's features; the runner puts sudo in front of the test binary only.
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER='sudo -E' \
+  cargo test -p nlink --test integration --features lab,sockdiag,namespace_watcher \
+  -- --test-threads=1
 ```
 
 For new tests that need root, gate with `nlink::require_root!()`
@@ -91,6 +93,36 @@ features (`ovpn` needs 6.16) would just teach everyone to ignore the
 job.
 
 For new examples, prefer the `--apply` runner pattern over assertions.
+
+### Test helpers and the red→green rule
+
+Shared helpers live in `crates/nlink/tests/common/` (test-only, not
+`nlink::lab`), and `tests/integration/harness.rs` checks each one where
+it must fail:
+
+- `traffic` — `in_ns`, `lo_up`, `send_udp`, `send_tcp_syns`,
+  `deliver_udp` (counts what arrives in the other namespace), `ping`;
+- `counters` — `rule_packets`, `class_stats`;
+- `topo::NsPair` — two namespaces, a veth, both families, operstate UP;
+- `converge` — `case(..).purging().check(..)` + `assert_converges` for
+  tables of declarative cases, and `assert_transition` for "apply A, then
+  B": every step applies, diffs empty, applies with no changes, diffs
+  empty. Implemented for `NetworkConfig`, `NftablesConfig`,
+  `WireguardConfig`; `ip_json` reads the kernel through something other
+  than nlink;
+- `events::expect_event{,_without}` — an expected event that does not
+  arrive is a failure.
+
+The 0.31 audit filed 53 bugs that a suite of ~2400 tests missed, nearly
+all in shapes no test exercised: a declared value changed **A→B** in place
+(the echo tests only re-applied), a removal of something still
+**referenced**, traffic through **ingress/forwarding**, an event that
+**never came** (`events.rs` accepted that "due to timing"). So a bug fix
+lands with a test that **fails without the fix** — run it against the
+unfixed code first and say so in the PR — written in the shape that
+missed it. A test that needs a module outside the CI strict list adds it
+to both the guard step and `NLINK_TEST_STRICT_MODULES` in
+`.forgejo/workflows/integration.yml`, or it skips there and reports `ok`.
 
 ## Architecture
 

@@ -1,19 +1,41 @@
 //! Event monitoring integration tests.
 //!
-//! Tests for netlink event subscription and monitoring using network namespaces.
+//! Every test subscribes first and makes its change on a second
+//! connection. rtnetlink queues the notification on the subscribed socket
+//! before it acknowledges the change, so by the time that call returns the
+//! event is waiting — and one that never arrives is a bug, not timing.
+//! The tests wait for it with `expect_event`, which fails instead of
+//! shrugging. (They used to accept a missed event "due to timing", which
+//! meant no event bug could ever fail them.)
 
 use std::{
-    net::{IpAddr, Ipv4Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     time::Duration,
 };
 
 use nlink::{
     Result,
-    netlink::{NetworkEvent, RtnetlinkGroup, addr::Ipv4Address, link::DummyLink, tc::NetemConfig},
+    netlink::{
+        NetworkEvent, RtnetlinkGroup,
+        addr::{Ipv4Address, Ipv6Address},
+        link::DummyLink,
+        tc::NetemConfig,
+    },
 };
-use tokio_stream::StreamExt;
 
 use crate::common::TestNamespace;
+use crate::common::events::{expect_event, expect_event_without};
+
+/// Long enough for a loaded CI box; the event is already queued.
+const WITHIN: Duration = Duration::from_secs(5);
+
+fn new_link(name: &'static str) -> impl FnMut(&NetworkEvent) -> bool {
+    move |e| matches!(e, NetworkEvent::NewLink(l) if l.name() == Some(name))
+}
+
+fn new_address(ip: IpAddr) -> impl FnMut(&NetworkEvent) -> bool {
+    move |e| matches!(e, NetworkEvent::NewAddress(a) if a.address() == Some(&ip))
+}
 
 #[tokio::test]
 async fn test_link_events() -> Result<()> {
@@ -22,31 +44,18 @@ async fn test_link_events() -> Result<()> {
 
     let ns = TestNamespace::new("linkev")?;
     let conn = ns.connection()?;
-
-    // Subscribe to link events
     conn.subscribe(&[RtnetlinkGroup::Link])?;
-
-    // Create a stream with timeout
     let mut events = conn.events().await;
 
-    // Create a dummy interface (will generate NewLink event)
-    {
-        let conn2 = ns.connection()?;
-        conn2.add_link(DummyLink::new("dummy0")).await?;
-    }
+    ns.connection()?.add_link(DummyLink::new("dummy0")).await?;
 
-    // Wait for event with timeout
-    let event = tokio::time::timeout(Duration::from_secs(2), events.next()).await;
-
-    if let Ok(Some(Ok(NetworkEvent::NewLink(link)))) = event {
-        assert_eq!(link.name(), Some("dummy0"));
-    } else {
-        // Event might have been missed due to timing, that's ok for this test
-    }
-
+    expect_event(&mut events, WITHIN, "NewLink dummy0", new_link("dummy0")).await?;
     Ok(())
 }
 
+/// An address event arrives, and nothing from a group the socket did not
+/// join arrives before it: the link was flipped up first, and its NewLink
+/// must not leak onto an `Ipv4Addr`-only subscription.
 #[tokio::test]
 async fn test_address_events() -> Result<()> {
     require_root!();
@@ -54,70 +63,47 @@ async fn test_address_events() -> Result<()> {
 
     let ns = TestNamespace::new("addrev")?;
     let conn = ns.connection()?;
-
-    // Create dummy first
     conn.add_link(DummyLink::new("dummy0")).await?;
-    conn.set_link_up("dummy0").await?;
-
-    // Subscribe to address events
     conn.subscribe(&[RtnetlinkGroup::Ipv4Addr])?;
-
     let mut events = conn.events().await;
 
-    // Add address (will generate NewAddr event)
-    {
-        let conn2 = ns.connection()?;
-        conn2
-            .add_address(Ipv4Address::new(
-                "dummy0",
-                Ipv4Addr::new(192, 168, 1, 1),
-                24,
-            ))
-            .await?;
-    }
+    let conn2 = ns.connection()?;
+    conn2.set_link_up("dummy0").await?;
+    let ip = Ipv4Addr::new(192, 168, 1, 1);
+    conn2
+        .add_address(Ipv4Address::new("dummy0", ip, 24))
+        .await?;
 
-    // Wait for event
-    let event = tokio::time::timeout(Duration::from_secs(2), events.next()).await;
-
-    if let Ok(Some(Ok(NetworkEvent::NewAddress(addr)))) = event {
-        let expected: IpAddr = Ipv4Addr::new(192, 168, 1, 1).into();
-        assert_eq!(addr.address(), Some(&expected));
-    }
-
+    expect_event_without(
+        &mut events,
+        WITHIN,
+        "NewAddress 192.168.1.1",
+        new_address(ip.into()),
+        |e| matches!(e, NetworkEvent::NewLink(_)),
+    )
+    .await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_tc_events() -> Result<()> {
     require_root!();
-    nlink::require_module!("dummy");
+    nlink::require_modules!("dummy", "sch_netem");
 
     let ns = TestNamespace::new("tcev")?;
     let conn = ns.connection()?;
-
-    // Create dummy first
     conn.add_link(DummyLink::new("dummy0")).await?;
     conn.set_link_up("dummy0").await?;
-
-    // Subscribe to TC events
     conn.subscribe(&[RtnetlinkGroup::Tc])?;
-
     let mut events = conn.events().await;
 
-    // Add qdisc (will generate NewQdisc event)
-    {
-        let conn2 = ns.connection()?;
-        let netem = NetemConfig::new().delay(Duration::from_millis(10)).build();
-        conn2.add_qdisc("dummy0", netem).await?;
-    }
+    let netem = NetemConfig::new().delay(Duration::from_millis(10)).build();
+    ns.connection()?.add_qdisc("dummy0", netem).await?;
 
-    // Wait for event
-    let event = tokio::time::timeout(Duration::from_secs(2), events.next()).await;
-
-    if let Ok(Some(Ok(NetworkEvent::NewQdisc(tc)))) = event {
-        assert_eq!(tc.kind(), Some("netem"));
-    }
-
+    expect_event(&mut events, WITHIN, "NewQdisc netem", |e| {
+        matches!(e, NetworkEvent::NewQdisc(tc) if tc.kind() == Some("netem"))
+    })
+    .await?;
     Ok(())
 }
 
@@ -128,26 +114,16 @@ async fn test_subscribe_all() -> Result<()> {
 
     let ns = TestNamespace::new("suball")?;
     let conn = ns.connection()?;
-
-    // Subscribe to all common groups
     conn.subscribe_all()?;
-
-    // Verify subscription worked by creating something
     let mut events = conn.events().await;
 
-    // Create dummy interface
-    {
-        let conn2 = ns.connection()?;
-        conn2.add_link(DummyLink::new("dummy0")).await?;
-    }
+    ns.connection()?.add_link(DummyLink::new("dummy0")).await?;
 
-    // Should receive an event
-    let event = tokio::time::timeout(Duration::from_secs(2), events.next()).await;
-    assert!(event.is_ok(), "should receive some event");
-
+    expect_event(&mut events, WITHIN, "NewLink dummy0", new_link("dummy0")).await?;
     Ok(())
 }
 
+/// One socket, three groups: each delivers its own event.
 #[tokio::test]
 async fn test_multiple_subscriptions() -> Result<()> {
     require_root!();
@@ -155,23 +131,32 @@ async fn test_multiple_subscriptions() -> Result<()> {
 
     let ns = TestNamespace::new("multisub")?;
     let conn = ns.connection()?;
-
-    // Subscribe to multiple groups
     conn.subscribe(&[
         RtnetlinkGroup::Link,
         RtnetlinkGroup::Ipv4Addr,
         RtnetlinkGroup::Ipv4Route,
     ])?;
+    let mut events = conn.events().await;
 
-    // Create interface and add address
-    conn.add_link(DummyLink::new("dummy0")).await?;
-    conn.set_link_up("dummy0").await?;
+    let conn2 = ns.connection()?;
+    conn2.add_link(DummyLink::new("dummy0")).await?;
+    conn2.set_link_up("dummy0").await?;
+    let ip = Ipv4Addr::new(10, 0, 0, 1);
+    conn2
+        .add_address(Ipv4Address::new("dummy0", ip, 24))
+        .await?;
 
-    // We should be receiving events now
-    // Just verify the subscription doesn't error
+    expect_event(&mut events, WITHIN, "NewLink dummy0", new_link("dummy0")).await?;
+    expect_event(&mut events, WITHIN, "NewAddress 10.0.0.1", new_address(ip.into())).await?;
+    expect_event(&mut events, WITHIN, "a NewRoute for the address", |e| {
+        matches!(e, NetworkEvent::NewRoute(_))
+    })
+    .await?;
     Ok(())
 }
 
+/// Bringing a link down announces it down. A NewLink that still says up
+/// (linkwatch can report late) is skipped, not taken as the answer.
 #[tokio::test]
 async fn test_link_down_event() -> Result<()> {
     require_root!();
@@ -179,31 +164,17 @@ async fn test_link_down_event() -> Result<()> {
 
     let ns = TestNamespace::new("linkdown")?;
     let conn = ns.connection()?;
-
-    // Create dummy first
     conn.add_link(DummyLink::new("dummy0")).await?;
     conn.set_link_up("dummy0").await?;
-
-    // Subscribe to link events
     conn.subscribe(&[RtnetlinkGroup::Link])?;
-
     let mut events = conn.events().await;
 
-    // Bring down interface
-    {
-        let conn2 = ns.connection()?;
-        conn2.set_link_down("dummy0").await?;
-    }
+    ns.connection()?.set_link_down("dummy0").await?;
 
-    // Wait for event
-    let event = tokio::time::timeout(Duration::from_secs(2), events.next()).await;
-
-    // Should receive a NewLink event with updated flags
-    if let Ok(Some(Ok(NetworkEvent::NewLink(link)))) = event {
-        assert_eq!(link.name(), Some("dummy0"));
-        // The link should be down (up flag not set)
-    }
-
+    expect_event(&mut events, WITHIN, "NewLink dummy0, down", |e| {
+        matches!(e, NetworkEvent::NewLink(l) if l.name() == Some("dummy0") && !l.is_up())
+    })
+    .await?;
     Ok(())
 }
 
@@ -214,28 +185,16 @@ async fn test_del_link_event() -> Result<()> {
 
     let ns = TestNamespace::new("dellinkev")?;
     let conn = ns.connection()?;
-
-    // Create dummy first
     conn.add_link(DummyLink::new("dummy0")).await?;
-
-    // Subscribe to link events
     conn.subscribe(&[RtnetlinkGroup::Link])?;
-
     let mut events = conn.events().await;
 
-    // Delete interface
-    {
-        let conn2 = ns.connection()?;
-        conn2.del_link("dummy0").await?;
-    }
+    ns.connection()?.del_link("dummy0").await?;
 
-    // Wait for event
-    let event = tokio::time::timeout(Duration::from_secs(2), events.next()).await;
-
-    if let Ok(Some(Ok(NetworkEvent::DelLink(link)))) = event {
-        assert_eq!(link.name(), Some("dummy0"));
-    }
-
+    expect_event(&mut events, WITHIN, "DelLink dummy0", |e| {
+        matches!(e, NetworkEvent::DelLink(l) if l.name() == Some("dummy0"))
+    })
+    .await?;
     Ok(())
 }
 
@@ -246,33 +205,20 @@ async fn test_del_address_event() -> Result<()> {
 
     let ns = TestNamespace::new("deladdrev")?;
     let conn = ns.connection()?;
-
-    // Create dummy and add address
     conn.add_link(DummyLink::new("dummy0")).await?;
     conn.set_link_up("dummy0").await?;
-
     let ip = Ipv4Addr::new(10, 0, 0, 1);
     conn.add_address(Ipv4Address::new("dummy0", ip, 24)).await?;
-
-    // Subscribe to address events
     conn.subscribe(&[RtnetlinkGroup::Ipv4Addr])?;
-
     let mut events = conn.events().await;
 
-    // Delete address
-    {
-        let conn2 = ns.connection()?;
-        conn2.del_address("dummy0", ip.into(), 24).await?;
-    }
+    ns.connection()?.del_address("dummy0", ip.into(), 24).await?;
 
-    // Wait for event
-    let event = tokio::time::timeout(Duration::from_secs(2), events.next()).await;
-
-    if let Ok(Some(Ok(NetworkEvent::DelAddress(addr)))) = event {
-        let expected: IpAddr = ip.into();
-        assert_eq!(addr.address(), Some(&expected));
-    }
-
+    let expected: IpAddr = ip.into();
+    expect_event(&mut events, WITHIN, "DelAddress 10.0.0.1", |e| {
+        matches!(e, NetworkEvent::DelAddress(a) if a.address() == Some(&expected))
+    })
+    .await?;
     Ok(())
 }
 
@@ -283,32 +229,19 @@ async fn test_owned_event_stream() -> Result<()> {
 
     let ns = TestNamespace::new("ownedstream")?;
     let conn = ns.connection()?;
-
-    // Subscribe before converting to owned stream
     conn.subscribe(&[RtnetlinkGroup::Link])?;
-
-    // Convert to owned stream
     let mut stream = conn.into_events().await;
 
-    // Create dummy interface from another connection
-    {
-        let conn2 = ns.connection()?;
-        conn2.add_link(DummyLink::new("dummy0")).await?;
-    }
+    ns.connection()?.add_link(DummyLink::new("dummy0")).await?;
 
-    // Wait for event on owned stream
-    let event = tokio::time::timeout(Duration::from_secs(2), stream.next()).await;
+    expect_event(&mut stream, WITHIN, "NewLink dummy0", new_link("dummy0")).await?;
 
-    if let Ok(Some(Ok(NetworkEvent::NewLink(link)))) = event {
-        assert_eq!(link.name(), Some("dummy0"));
-    }
-
-    // Recover connection from stream if needed
+    // The connection comes back out of the stream.
     let _conn = stream.into_connection();
-
     Ok(())
 }
 
+/// The stream keeps delivering: three links, three events, in order.
 #[tokio::test]
 async fn test_event_stream_continues() -> Result<()> {
     require_root!();
@@ -316,32 +249,22 @@ async fn test_event_stream_continues() -> Result<()> {
 
     let ns = TestNamespace::new("streamcont")?;
     let conn = ns.connection()?;
-
-    // Subscribe to link events
     conn.subscribe(&[RtnetlinkGroup::Link])?;
-
     let mut events = conn.events().await;
 
-    // Create multiple interfaces
     let conn2 = ns.connection()?;
-    conn2.add_link(DummyLink::new("dummy0")).await?;
-    conn2.add_link(DummyLink::new("dummy1")).await?;
-    conn2.add_link(DummyLink::new("dummy2")).await?;
-
-    // Collect events with timeout
-    let mut received = 0;
-    while let Ok(Some(Ok(_))) =
-        tokio::time::timeout(Duration::from_millis(500), events.next()).await
-    {
-        received += 1;
+    for name in ["dummy0", "dummy1", "dummy2"] {
+        conn2.add_link(DummyLink::new(name)).await?;
     }
 
-    // Should have received multiple events
-    assert!(received >= 1, "should receive at least one event");
-
+    expect_event(&mut events, WITHIN, "NewLink dummy0", new_link("dummy0")).await?;
+    expect_event(&mut events, WITHIN, "NewLink dummy1", new_link("dummy1")).await?;
+    expect_event(&mut events, WITHIN, "NewLink dummy2", new_link("dummy2")).await?;
     Ok(())
 }
 
+/// The event for the address added, not the link-local one or a DAD
+/// update for something else.
 #[tokio::test]
 async fn test_ipv6_address_events() -> Result<()> {
     require_root!();
@@ -349,36 +272,16 @@ async fn test_ipv6_address_events() -> Result<()> {
 
     let ns = TestNamespace::new("addr6ev")?;
     let conn = ns.connection()?;
-
-    // Create dummy first
     conn.add_link(DummyLink::new("dummy0")).await?;
     conn.set_link_up("dummy0").await?;
-
-    // Subscribe to IPv6 address events
     conn.subscribe(&[RtnetlinkGroup::Ipv6Addr])?;
-
     let mut events = conn.events().await;
 
-    // Add IPv6 address
-    {
-        use std::net::Ipv6Addr;
+    let ip: Ipv6Addr = "fd00::1".parse().unwrap();
+    ns.connection()?
+        .add_address(Ipv6Address::new("dummy0", ip, 64))
+        .await?;
 
-        use nlink::netlink::addr::Ipv6Address;
-
-        let conn2 = ns.connection()?;
-        let ip: Ipv6Addr = "fd00::1".parse().unwrap();
-        conn2
-            .add_address(Ipv6Address::new("dummy0", ip, 64))
-            .await?;
-    }
-
-    // Wait for event
-    let event = tokio::time::timeout(Duration::from_secs(2), events.next()).await;
-
-    // Should receive NewAddress event
-    if let Ok(Some(Ok(NetworkEvent::NewAddress(_)))) = event {
-        // Got it
-    }
-
+    expect_event(&mut events, WITHIN, "NewAddress fd00::1", new_address(ip.into())).await?;
     Ok(())
 }
