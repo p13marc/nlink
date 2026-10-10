@@ -19,6 +19,38 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`replace_qdisc` failed with `EINVAL` in three common cases, and
+  `add_qdisc` quietly changed a live qdisc (#486).** All of these checks
+  were made on Linux 6.12.
+  - **An fq_codel with `flows`:** `fq_codel_change` refuses the attribute
+    on a live qdisc even when the value is unchanged, so replacing it
+    with any other knob changed was `EINVAL`.
+  - **sfq and htb:** neither has a change operation.
+  - **A different kind at the live qdisc's own handle**, such as `prio`
+    over a recipe's HTB at `1:`: the kernel answered "Invalid qdisc name".
+
+  The fallbacks existed only in the declarative applier. `replace_qdisc`
+  now looks at the slot. A same kind is changed in place, with the
+  options in change mode. A kind that cannot change, a different
+  `flows`, or a kind change at a fixed handle gets a new qdisc grafted
+  over the live one, through a free temporary handle, so the slot is
+  never bare. A same-kind qdisc that has classes is refused rather than
+  emptied. `change_qdisc` sends change mode too.
+
+  `add_qdisc` now sends `NLM_F_EXCL`, as `tc qdisc add` does. An add
+  over a live qdisc of the same kind, or at a handle in use, is
+  `EEXIST`. The declarative applier's sfq fallback is gone, and so is
+  `apply_netem`'s ENOENT fallback, which could never run.
+
+  Two root tests cover this:
+  - fq_codel with `flows` replaced twice, and a different `flows`;
+  - sfq, then htb `1:` → prio `1:`, then EEXIST on an add over a live
+    qdisc, and an htb with a class whose same-kind replace is refused
+    and keeps the class.
+
+  Before the fix they failed with
+  `Invalid argument: Change operation not supported by specified qdisc`.
+
 - **A prio qdisc with fewer than three bands always failed with `EINVAL`
   (#487).** `PrioConfig::bands(n)` kept the three-band default priomap,
   which names band 2, and `prio_tune` refuses a priomap entry past the
@@ -142,6 +174,11 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`QdiscConfig::{in_place, write_change_options}` and `InPlace`**
+  (#486). These are provided methods, so existing implementations keep
+  compiling. They tell `replace_qdisc` how a live qdisc of a kind takes a
+  change.
 
 - **`Error::NftBatch` and `NftBatchFailure`** — a refused nftables batch,
   one entry per refused operation (#481).

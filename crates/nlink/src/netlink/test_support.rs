@@ -60,7 +60,7 @@ pub(crate) fn builder_attrs(builder: &MessageBuilder) -> AttrMap {
     parse_attrs(&builder.as_bytes()[NLMSG_HDRLEN..])
 }
 
-fn encode(f: impl FnOnce(&mut MessageBuilder) -> crate::Result<()>) -> AttrMap {
+pub(crate) fn encode(f: impl FnOnce(&mut MessageBuilder) -> crate::Result<()>) -> AttrMap {
     let mut builder = MessageBuilder::new(0, 0);
     f(&mut builder).expect("write_options failed");
     builder_attrs(&builder)
