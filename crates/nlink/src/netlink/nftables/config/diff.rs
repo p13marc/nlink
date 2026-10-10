@@ -9,7 +9,8 @@ use super::types::{
 use super::super::object::{ObjectConfig, ObjectType};
 use super::super::expr::RuleExpr;
 use super::super::types::{
-    ChainInfo, Family, Hook, Policy, Priority, RuleInfo, Set, SetElement, SetInfo,
+    ChainInfo, Family, Hook, Policy, Priority, RuleInfo, Set, SetElement, SetFlags, SetInfo,
+    Verdict,
 };
 use crate::netlink::{
     builder::MessageBuilder, connection::Connection, error::Result, protocol::Nftables,
@@ -255,6 +256,87 @@ pub struct SetElementsChange {
     pub elements: Vec<SetElement>,
 }
 
+/// An undeclared chain, set, flowtable or object in a managed table that
+/// [`NftablesDiff`] leaves in place, because a rule that stays — one nlink
+/// does not manage — still uses it.
+///
+/// The kernel refuses to delete what a rule uses (`EBUSY`), and one refused
+/// message fails the whole batch, so deleting it would fail every apply until
+/// someone removed the rule by hand (#459).
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum KeptInUse {
+    /// A chain a kept rule jumps or goes to.
+    Chain {
+        /// Owning table.
+        table: String,
+        /// Owning family.
+        family: Family,
+        /// Chain name.
+        name: String,
+    },
+    /// A named set or map a kept rule looks up or updates.
+    Set {
+        /// Owning table.
+        table: String,
+        /// Owning family.
+        family: Family,
+        /// Set name.
+        name: String,
+    },
+    /// A flowtable a kept rule offloads to (`flow add @ft`).
+    Flowtable {
+        /// Owning table.
+        table: String,
+        /// Owning family.
+        family: Family,
+        /// Flowtable name.
+        name: String,
+    },
+    /// A named object a kept rule references.
+    Object {
+        /// Owning table.
+        table: String,
+        /// Owning family.
+        family: Family,
+        /// Object name.
+        name: String,
+        /// Object type.
+        object_type: ObjectType,
+    },
+}
+
+impl std::fmt::Display for KeptInUse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (kind, table, family, name) = match self {
+            Self::Chain {
+                table,
+                family,
+                name,
+            } => ("chain", table, family, name),
+            Self::Set {
+                table,
+                family,
+                name,
+            } => ("set", table, family, name),
+            Self::Flowtable {
+                table,
+                family,
+                name,
+            } => ("flowtable", table, family, name),
+            Self::Object {
+                table,
+                family,
+                name,
+                object_type,
+            } => return write!(f, "object {family:?} {table}/{name} ({object_type:?})"),
+        };
+        write!(f, "{kind} {family:?} {table}/{name}")
+    }
+}
+
 /// The result of comparing a declared [`NftablesConfig`] against
 /// the kernel's current state. Apply via
 /// [`Self::apply`](super::NftablesDiff::apply).
@@ -360,6 +442,12 @@ pub struct NftablesDiff {
     pub objects_to_update: Vec<(String, Family, DeclaredObject)>,
     /// Stateful objects to delete — (table, family, name, type).
     pub objects_to_delete: Vec<(String, Family, String, ObjectType)>,
+    /// Undeclared chains, sets, flowtables and objects the diff does **not** delete,
+    /// because a rule that stays still uses them — see [`KeptInUse`]. Not a
+    /// change: [`is_empty`](Self::is_empty) and
+    /// [`change_count`](Self::change_count) ignore it, and nothing in it is
+    /// sent to the kernel.
+    pub kept_in_use: Vec<KeptInUse>,
 }
 
 impl NftablesDiff {
@@ -550,7 +638,7 @@ impl NftablesDiff {
                 c.set.name(),
             ));
         }
-        if lines.is_empty() {
+        let mut out = if lines.is_empty() {
             "NftablesDiff: no changes".to_string()
         } else {
             format!(
@@ -559,7 +647,13 @@ impl NftablesDiff {
                 if lines.len() == 1 { "" } else { "s" },
                 lines.join("\n  ")
             )
+        };
+        for kept in &self.kept_in_use {
+            out.push_str(&format!(
+                "\n  ! {kept} kept: a rule nlink does not manage uses it"
+            ));
         }
+        out
     }
 }
 
@@ -655,6 +749,147 @@ fn references_object(rule: &RuleInfo, name: &str, object_type: ObjectType) -> bo
             e,
             RuleExpr::Objref(ObjrefExpr::Named { object_type: t, name: n })
                 if n == name && *t == object_type
+        )
+    })
+}
+
+/// Move the undeclared chains, sets, flowtables and objects of `declared`'s table that a
+/// staying rule uses from the diff's delete lists to `kept_in_use`.
+///
+/// A staying rule is one in the kernel that the diff neither deletes,
+/// replaces nor moves, in a chain the diff does not delete. Sets and objects
+/// recreated under the same name are declared, so they are never kept.
+fn keep_what_staying_rules_use(
+    diff: &mut NftablesDiff,
+    declared: &DeclaredTable,
+    current_rules: &[RuleInfo],
+) {
+    let (table, family) = (declared.name(), declared.family());
+    let here = |t: &str, f: Family| t == table && f == family;
+    let mut gone: HashSet<u64> = HashSet::new();
+    for (t, f, _, h) in &diff.rules_to_delete {
+        if here(t, *f) {
+            gone.insert(h.0);
+        }
+    }
+    for (t, f, _, h, _) in &diff.rules_to_replace {
+        if here(t, *f) {
+            gone.insert(h.0);
+        }
+    }
+    for m in &diff.rules_to_move {
+        if here(&m.table, m.family) {
+            gone.insert(m.from.0);
+        }
+    }
+    let recreated_sets: HashSet<String> = diff
+        .sets_to_add
+        .iter()
+        .filter(|(t, f, _)| here(t, *f))
+        .map(|(_, _, s)| s.name().to_string())
+        .collect();
+    let recreated_objects: Vec<(String, ObjectType)> = diff
+        .objects_to_add
+        .iter()
+        .filter(|(t, f, _)| here(t, *f))
+        .map(|(_, _, o)| (o.name().to_string(), o.config().object_type()))
+        .collect();
+
+    loop {
+        let deleted_chains: HashSet<&str> = diff
+            .chains_to_delete
+            .iter()
+            .filter(|(t, f, _)| here(t, *f))
+            .map(|(_, _, name)| name.as_str())
+            .collect();
+        let staying: Vec<&RuleInfo> = current_rules
+            .iter()
+            .filter(|r| !gone.contains(&r.handle) && !deleted_chains.contains(r.chain.as_str()))
+            .collect();
+        let used = |pred: &dyn Fn(&RuleInfo) -> bool| staying.iter().any(|r| pred(r));
+        let mut kept = Vec::new();
+
+        diff.chains_to_delete.retain(|(t, f, name)| {
+            let keep = here(t, *f) && used(&|r| references_chain(r, name));
+            if keep {
+                kept.push(KeptInUse::Chain {
+                    table: t.clone(),
+                    family: *f,
+                    name: name.clone(),
+                });
+            }
+            !keep
+        });
+        diff.sets_to_delete.retain(|(t, f, name)| {
+            let keep =
+                here(t, *f) && !recreated_sets.contains(name) && used(&|r| references_set(r, name));
+            if keep {
+                kept.push(KeptInUse::Set {
+                    table: t.clone(),
+                    family: *f,
+                    name: name.clone(),
+                });
+            }
+            !keep
+        });
+        diff.flowtables_to_delete.retain(|(f, t, name)| {
+            let keep = here(t, *f) && used(&|r| references_flowtable(r, name));
+            if keep {
+                kept.push(KeptInUse::Flowtable {
+                    table: t.clone(),
+                    family: *f,
+                    name: name.clone(),
+                });
+            }
+            !keep
+        });
+        diff.objects_to_delete.retain(|(t, f, name, ty)| {
+            let keep = here(t, *f)
+                && !recreated_objects
+                    .iter()
+                    .any(|(n, rt)| n == name && rt == ty)
+                && used(&|r| references_object(r, name, *ty));
+            if keep {
+                kept.push(KeptInUse::Object {
+                    table: t.clone(),
+                    family: *f,
+                    name: name.clone(),
+                    object_type: *ty,
+                });
+            }
+            !keep
+        });
+
+        if kept.is_empty() {
+            return;
+        }
+        for k in &kept {
+            tracing::warn!(
+                kept = %k,
+                "not deleting an undeclared nftables item: a rule nlink does not manage uses it",
+            );
+        }
+        diff.kept_in_use.extend(kept);
+    }
+}
+
+/// Does `rule` offload to the flowtable `name`?
+fn references_flowtable(rule: &RuleInfo, name: &str) -> bool {
+    use crate::netlink::attr::{AttrIter, get};
+    rule.expressions().iter().any(|e| match e {
+        // NFTA_FLOW_TABLE_NAME = 1
+        RuleExpr::Unknown { name: n, data } if n == "flow_offload" => AttrIter::new(data)
+            .any(|(attr, payload)| attr == 1 && get::string(payload).ok() == Some(name)),
+        _ => false,
+    })
+}
+
+/// Does `rule` jump or go to `chain`?
+fn references_chain(rule: &RuleInfo, chain: &str) -> bool {
+    rule.expressions().iter().any(|e| {
+        matches!(
+            e,
+            RuleExpr::Verdict(Verdict::JumpTo(c) | Verdict::GotoTo(c)) if c.as_str() == chain
         )
     })
 }
@@ -1217,9 +1452,16 @@ impl NftablesConfig {
             // Server-side table-scoped (Plan 181), so this is one
             // round-trip per declared table — cheaper than a
             // kernel-wide GETSET dump indexed in the loop.
-            let current_sets = conn
+            // Anonymous sets (`tcp dport { 22, 80 }`) belong to the rule that
+            // created them: the kernel creates and frees them with it, `nft`
+            // never lists them, and the diff must not delete one either. A
+            // DELSET for one is EBUSY while its rule exists (#459).
+            let current_sets: Vec<SetInfo> = conn
                 .list_sets_in(declared.name(), declared.family())
-                .await?;
+                .await?
+                .into_iter()
+                .filter(|s| !s.flags.contains(SetFlags::ANONYMOUS))
+                .collect();
             let declared_set_names: HashSet<&str> =
                 declared.sets().iter().map(|s| s.name()).collect();
             let current_set_names: HashSet<&str> =
@@ -1432,6 +1674,14 @@ impl NftablesConfig {
                     ));
                 }
             }
+
+            // Undeclared chains, sets and objects that a rule which stays
+            // still uses are kept, not deleted: the rule planner leaves rules
+            // nlink did not write alone, and deleting what one of them uses
+            // is EBUSY, failing every apply (#459). Repeated until nothing
+            // changes, because a kept chain keeps its rules, which can use
+            // more.
+            keep_what_staying_rules_use(&mut diff, declared, &current_rules);
 
             // The rules of a chain this diff deletes go explicitly, in the
             // apply's first phase. DELCHAIN would take them too, but only at
@@ -1997,6 +2247,42 @@ mod tests {
             userdata_raw: None,
             expression_bytes,
         }
+    }
+
+    #[test]
+    fn references_chain_and_flowtable_see_what_a_rule_names() {
+        use crate::netlink::nftables::types::{ChainName, Rule};
+
+        let jump = Rule::new("t", "c").jump(ChainName::new("dbg").unwrap());
+        let jump = rule_info(lower_to_expression_bytes(&jump));
+        assert!(references_chain(&jump, "dbg"));
+        assert!(!references_chain(&jump, "other"));
+
+        let goto = Rule::new("t", "c").goto(ChainName::new("dbg").unwrap());
+        let goto = rule_info(lower_to_expression_bytes(&goto));
+        assert!(references_chain(&goto, "dbg"));
+
+        let offload = Rule::new("t", "c").flow_offload("ft");
+        let offload = rule_info(lower_to_expression_bytes(&offload));
+        assert!(references_flowtable(&offload, "ft"));
+        assert!(!references_flowtable(&offload, "other"));
+        assert!(!references_chain(&offload, "ft"));
+    }
+
+    #[test]
+    fn kept_in_use_is_not_a_change_but_is_shown() {
+        let mut d = NftablesDiff::default();
+        d.kept_in_use.push(KeptInUse::Set {
+            table: "t".into(),
+            family: Family::Inet,
+            name: "blocked".into(),
+        });
+        assert!(d.is_empty());
+        assert_eq!(d.change_count(), 0);
+        assert_eq!(
+            d.to_string(),
+            "NftablesDiff: no changes\n  ! set Inet t/blocked kept: a rule nlink does not manage uses it"
+        );
     }
 
     #[test]

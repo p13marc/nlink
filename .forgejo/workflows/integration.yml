@@ -53,7 +53,10 @@ jobs:
           # with `ping`; without it they fail (or the LabNamespace
           # exec_ignore helper silently sends nothing and the counter
           # assertion fails), which the flag below used to hide (#350).
-          apt-get install -y --no-install-recommends iproute2 conntrack nodejs git iputils-ping
+          # nftables: tests that need a rule nlink did not write add it the
+          # way a person does, with `nft` (#459).
+          apt-get install -y --no-install-recommends iproute2 conntrack nodejs git iputils-ping \
+            nftables
       - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - name: Guard that kernel modules are available on the runner VM
         shell: bash
