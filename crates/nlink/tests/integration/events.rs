@@ -360,3 +360,56 @@ async fn a_resynced_mirror_equals_a_fresh_dump() -> Result<()> {
     assert_eq!(mirror, fresh);
     Ok(())
 }
+
+/// The resync stream starts with the state as it is, and that snapshot
+/// holds everything the stream subscribes to that the kernel can dump —
+/// qdiscs, rules and nexthops included. It held links, addresses, routes
+/// and neighbours only, so a mirror of the rest was emptied by the first
+/// overflow; and there was no initial snapshot at all (#503).
+#[tokio::test]
+async fn the_rtnetlink_snapshot_covers_what_the_stream_subscribes_to() -> Result<()> {
+    use nlink::netlink::resync::{ConnectionFactory, ResyncedEvent};
+    use nlink::netlink::{Route, namespace};
+    use std::sync::Arc;
+    use tokio_stream::StreamExt;
+    require_root!();
+    nlink::require_modules!("dummy", "sch_netem");
+
+    let ns = TestNamespace::new("resync-full")?;
+    ns.exec("ip", &["link", "add", "d0", "type", "dummy"])?;
+    ns.exec("ip", &["link", "set", "d0", "up"])?;
+    ns.exec("ip", &["nexthop", "add", "id", "7", "dev", "d0"])?;
+    ns.exec("ip", &["rule", "add", "pref", "1234", "table", "100"])?;
+    ns.exec(
+        "tc",
+        &["qdisc", "add", "dev", "d0", "root", "netem", "delay", "1ms"],
+    )?;
+
+    let name = ns.name().to_string();
+    let factory: ConnectionFactory<Route> = Arc::new(move || {
+        let name = name.clone();
+        Box::pin(async move { namespace::connection_for::<Route>(&name) })
+    });
+    let mut stream = ns.connection()?.into_events_with_resync(factory).await?;
+    let first = stream.next().await.expect("an item")?;
+    assert!(first.is_initial_sync_start(), "{first:?}");
+    let (mut qdisc, mut rule, mut nexthop) = (false, false, false);
+    loop {
+        match stream.next().await.expect("the initial sync ends")? {
+            ResyncedEvent::Resynced(NetworkEvent::NewQdisc(q)) if q.kind() == Some("netem") => {
+                qdisc = true;
+            }
+            ResyncedEvent::Resynced(NetworkEvent::NewRule(r)) if r.priority() == 1234 => {
+                rule = true
+            }
+            ResyncedEvent::Resynced(NetworkEvent::NewNexthop(n)) if n.id() == 7 => nexthop = true,
+            item if item.is_resync_end() => break,
+            _ => {}
+        }
+    }
+    assert!(
+        qdisc && rule && nexthop,
+        "qdisc={qdisc} rule={rule} nexthop={nexthop}"
+    );
+    Ok(())
+}

@@ -764,6 +764,26 @@ impl Connection<Nftables> {
     /// a counter back to zero, a quota's consumption to none — returning
     /// its state from just before (`nft reset counter`). Nothing is lost
     /// between the read and the reset. `None` if there is no such object.
+    /// The ruleset's current generation: the id every committed batch
+    /// increments (`NFT_MSG_GETGEN`).
+    ///
+    /// Read it before and after a set of dumps; if it moved, the dumps may
+    /// mix two rulesets and should be taken again (#503).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "generation"))]
+    pub async fn generation(&self) -> Result<u32> {
+        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_GETGEN), NLM_F_REQUEST);
+        // AF_UNSPEC: the generation is the ruleset's, not a family's.
+        builder.append(&NfGenMsg {
+            nfgen_family: 0,
+            version: 0,
+            res_id: 0,
+        });
+        let (_, payload) = self.nft_get_one(builder).await?;
+        super::events::parse_gen(&payload)
+            .map(|g| g.id)
+            .ok_or_else(|| Error::InvalidMessage("nftables: GETGEN answer without an id".into()))
+    }
+
     #[tracing::instrument(level = "debug", skip_all, fields(method = "reset_object"))]
     pub async fn reset_object(
         &self,

@@ -162,7 +162,7 @@ fn parse_set_elements_event(attrs: &[u8], family: Family) -> Option<SetElementsE
     })
 }
 
-fn parse_gen(attrs: &[u8]) -> Option<GenInfo> {
+pub(crate) fn parse_gen(attrs: &[u8]) -> Option<GenInfo> {
     let mut id = None;
     let mut pid = None;
     let mut proc_name = None;

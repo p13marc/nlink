@@ -359,8 +359,11 @@ where
             }
             Poll::Ready(Some(Ok(item))) => {
                 match &item {
-                    ResyncedEvent::Marker(ResyncMarker::ResyncStart) => {
-                        // Begin staging a fresh snapshot.
+                    ResyncedEvent::Marker(
+                        ResyncMarker::ResyncStart | ResyncMarker::InitialSyncStart,
+                    ) => {
+                        // Begin staging a fresh snapshot — after an
+                        // overflow, or the initial one (#503).
                         this.staging = Some(HashMap::new());
                     }
                     ResyncedEvent::Marker(ResyncMarker::ResyncEnd) => {

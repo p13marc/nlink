@@ -57,30 +57,84 @@ use crate::netlink::resync::{ConnectionFactory, ResyncStream, events_with_resync
 use crate::netlink::stream::{EventSubscription, OwnedEventStream};
 use crate::{Connection, Result};
 
-/// Walk the current rtnetlink state — links, addresses, routes,
-/// neighbors — and return one `NewX(...)` event per existing
-/// entity. Used internally by [`Connection::<Route>::into_events_with_resync`]
-/// for ENOBUFS recovery; exposed publicly so callers wiring
-/// their own resync can re-use it. Plan 191 §2.5.
+/// Walk the current rtnetlink state and return one `NewX(...)` event per
+/// existing entity. Used internally by
+/// [`Connection::<Route>::into_events_with_resync`] for ENOBUFS recovery
+/// and the initial sync; exposed publicly so callers wiring their own
+/// resync can re-use it. Plan 191 §2.5.
 ///
-/// Walk order: links → addresses → routes → neighbors. Matches
-/// the order the kernel itself emits when a fresh netns boots —
-/// resync consumers replaying snapshot items as "creates" stay
-/// consistent with their runtime delta handler.
+/// It covers what [`subscribe_all`](Connection::subscribe_all) joins and
+/// the kernel can dump: links → addresses → nexthops → routes → rules →
+/// neighbours → qdiscs → classes → filters → bridge MDB. It used to stop
+/// at neighbours, so a mirror of qdiscs, rules or nexthops was emptied by
+/// its first overflow and stayed empty (#503). Nexthops come before the
+/// routes that use them. Network-namespace ids are subscribed to but have
+/// no dump, so they are not here.
 pub async fn rtnetlink_snapshot(conn: &Connection<Route>) -> Result<Vec<NetworkEvent>> {
     let mut out = Vec::new();
 
-    for link in conn.get_links().await? {
-        out.push(NetworkEvent::NewLink(link));
+    let links = conn.get_links().await?;
+    let bridges: Vec<u32> = links
+        .iter()
+        .filter(|l| l.kind() == Some("bridge"))
+        .map(|l| l.ifindex())
+        .collect();
+    out.extend(links.into_iter().map(NetworkEvent::NewLink));
+    out.extend(
+        conn.get_addresses()
+            .await?
+            .into_iter()
+            .map(NetworkEvent::NewAddress),
+    );
+    // A kernel without nexthop objects says so; that is an empty dump.
+    match conn.get_nexthops().await {
+        Ok(nhs) => out.extend(nhs.into_iter().map(NetworkEvent::NewNexthop)),
+        Err(e) if e.is_not_supported() || e.is_invalid_argument() => {}
+        Err(e) => return Err(e),
     }
-    for addr in conn.get_addresses().await? {
-        out.push(NetworkEvent::NewAddress(addr));
-    }
-    for route in conn.get_routes().await? {
-        out.push(NetworkEvent::NewRoute(route));
-    }
-    for neigh in conn.get_neighbors().await? {
-        out.push(NetworkEvent::NewNeighbor(neigh));
+    out.extend(
+        conn.get_routes()
+            .await?
+            .into_iter()
+            .map(NetworkEvent::NewRoute),
+    );
+    out.extend(
+        conn.get_rules()
+            .await?
+            .into_iter()
+            .map(NetworkEvent::NewRule),
+    );
+    out.extend(
+        conn.get_neighbors()
+            .await?
+            .into_iter()
+            .map(NetworkEvent::NewNeighbor),
+    );
+    out.extend(
+        conn.get_qdiscs()
+            .await?
+            .into_iter()
+            .map(NetworkEvent::NewQdisc),
+    );
+    out.extend(
+        conn.get_classes()
+            .await?
+            .into_iter()
+            .map(NetworkEvent::NewClass),
+    );
+    out.extend(
+        conn.get_filters()
+            .await?
+            .into_iter()
+            .map(NetworkEvent::NewFilter),
+    );
+    for bridge in bridges {
+        out.extend(
+            conn.get_mdb_by_index(bridge)
+                .await?
+                .into_iter()
+                .map(NetworkEvent::NewMdb),
+        );
     }
 
     Ok(out)
@@ -152,7 +206,7 @@ impl Connection<Route> {
     ) -> Result<OwnedResyncStream> {
         self.subscribe_all()?;
         let stream = self.into_events().await;
-        Ok(events_with_resync(stream, make_snapshot_fn(factory)))
+        Ok(events_with_resync(stream, make_snapshot_fn(factory)).initial_snapshot(true))
     }
 
     /// Same as [`Self::into_events_with_resync`] but borrows the
@@ -172,7 +226,7 @@ impl Connection<Route> {
     ) -> Result<BorrowedResyncStream<'_>> {
         self.subscribe_all()?;
         let stream = self.events().await;
-        Ok(events_with_resync(stream, make_snapshot_fn(factory)))
+        Ok(events_with_resync(stream, make_snapshot_fn(factory)).initial_snapshot(true))
     }
 }
 

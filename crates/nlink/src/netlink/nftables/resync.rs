@@ -71,15 +71,34 @@ use crate::{Connection, Result};
 /// Walk the full ruleset on a freshly-opened connection,
 /// returning everything as `NewX(...)` events.
 ///
-/// The walk order is: tables → chains → flowtables → sets →
-/// rules per table. This matches the order the kernel itself
-/// emits when something is created, so consumers replaying
-/// snapshot items as "creates" stay consistent with their
-/// runtime mutation handler.
+/// The walk order is: tables → chains → flowtables → named objects →
+/// sets → set elements → rules, per table — what a rule or a map element
+/// names comes before it. Named objects and set elements were missing:
+/// the live stream reports both (`NewObject`, `NewSetElements`), so a
+/// mirror lost every named counter and set element on its first overflow
+/// (#503).
+///
+/// The dumps are taken between two reads of the ruleset generation and
+/// taken again if it moved — a commit in between would leave a snapshot
+/// of two rulesets. After several tries the error is
+/// [`Error::DumpInterrupted`](crate::Error::DumpInterrupted), which the
+/// resync wrapper retries.
 ///
 /// Used internally by the resync wrapper; exposed here so
 /// callers building bespoke ENOBUFS handling can reuse it.
 pub async fn nftables_snapshot(conn: &Connection<Nftables>) -> Result<Vec<NftablesEvent>> {
+    const ATTEMPTS: usize = 5;
+    for _ in 0..ATTEMPTS {
+        let before = conn.generation().await?;
+        let out = walk_ruleset(conn).await?;
+        if conn.generation().await? == before {
+            return Ok(out);
+        }
+    }
+    Err(crate::Error::DumpInterrupted)
+}
+
+async fn walk_ruleset(conn: &Connection<Nftables>) -> Result<Vec<NftablesEvent>> {
     let mut out = Vec::new();
 
     let tables = conn.list_tables().await?;
@@ -87,7 +106,7 @@ pub async fn nftables_snapshot(conn: &Connection<Nftables>) -> Result<Vec<Nftabl
         out.push(NftablesEvent::NewTable(t.clone()));
     }
 
-    // chains, flowtables, sets, rules per-table — server-side
+    // chains, flowtables, objects, sets, rules per-table — server-side
     // family filtering is unsound on these dump types (Plan 181
     // finding), so we walk per-table by-name with client-side
     // matching via list_*_in.
@@ -98,8 +117,23 @@ pub async fn nftables_snapshot(conn: &Connection<Nftables>) -> Result<Vec<Nftabl
         for f in conn.list_flowtables_in(&t.name, t.family).await? {
             out.push(NftablesEvent::NewFlowtable(f));
         }
+        for o in conn.list_objects_in(&t.name, t.family).await? {
+            out.push(NftablesEvent::NewObject(o));
+        }
         for s in conn.list_sets_in(&t.name, t.family).await? {
+            let elements = conn.list_set_elements(&t.name, &s.name, t.family).await?;
+            let set_name = s.name.clone();
             out.push(NftablesEvent::NewSet(s));
+            if !elements.is_empty() {
+                out.push(NftablesEvent::NewSetElements(
+                    super::events::SetElementsEvent {
+                        family: t.family,
+                        table: t.name.to_string(),
+                        set: set_name,
+                        elements,
+                    },
+                ));
+            }
         }
         // list_rules takes the table name — already family-scoped.
         let _: Family = t.family;
@@ -173,7 +207,7 @@ impl Connection<Nftables> {
     ) -> Result<OwnedResyncStream> {
         self.subscribe_all()?;
         let stream = self.into_events().await;
-        Ok(events_with_resync(stream, make_snapshot_fn(factory)))
+        Ok(events_with_resync(stream, make_snapshot_fn(factory)).initial_snapshot(true))
     }
 
     /// Same as [`Self::into_events_with_resync`] but borrows the
@@ -192,7 +226,7 @@ impl Connection<Nftables> {
     ) -> Result<BorrowedResyncStream<'_>> {
         self.subscribe_all()?;
         let stream = self.events().await;
-        Ok(events_with_resync(stream, make_snapshot_fn(factory)))
+        Ok(events_with_resync(stream, make_snapshot_fn(factory)).initial_snapshot(true))
     }
 }
 
