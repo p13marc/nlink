@@ -870,14 +870,14 @@ async fn create_link(conn: &Connection<Route>, link: &DeclaredLink) -> Result<()
 
     // Enslave before bringing up: a bond refuses a port that is already
     // up (see `enslave`).
-    if let Some(master) = &link.master {
+    if let Some(master) = link.master.name() {
         enslave(conn, &link.name, master).await?;
     }
 
     match link.state {
         super::types::LinkState::Up => conn.set_link_up(&link.name).await?,
         // Created down, but a bond opens the port it enslaves.
-        super::types::LinkState::Down if link.master.is_some() => {
+        super::types::LinkState::Down if link.master.name().is_some() => {
             conn.set_link_down(&link.name).await?;
         }
         _ => {}
@@ -1319,7 +1319,7 @@ mod tests {
             link_type,
             state: LinkState::Unchanged,
             mtu: None,
-            master: None,
+            master: crate::netlink::config::MasterSpec::Unmanaged,
             address,
         }
     }

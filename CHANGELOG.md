@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Breaking Changes
 
+- **A link declaration that does not mention a master leaves it alone
+  (#462).** Use `LinkBuilder::nomaster()` to release a link from its
+  master; a declaration without `master()` or `nomaster()` no longer does.
+  `NetworkConfig::link` called twice for one name updates the first
+  declaration, and `DeclaredLink::master_spec()`/`MasterSpec` expose the
+  three states. See the migration guide.
+
 - **`DeclaredQdiscType::Prio` gains `priomap` and `#[non_exhaustive]`
   (#487).** Construct it with `QdiscBuilder::prio()`; match it with `..`.
 
@@ -18,6 +25,27 @@ All notable changes to this project will be documented in this file.
   [`docs/migration_guide/0.30.0-to-0.31.0.md`](docs/migration_guide/0.30.0-to-0.31.0.md).
 
 ### Fixed
+
+- **A partial or duplicate link declaration released the link from its
+  master, and two declarations flipped it on every apply (#462).** A
+  declaration's `master: None` meant "no master", unlike MTU and MAC,
+  where unset means "don't care". So `.link("eth0", |l| l.mtu(9000))`
+  released eth0 from a bridge someone else manages. `NetworkConfig::link`
+  always pushed, so a link declared twice was diffed twice. Take a VLAN
+  declared once by kind and once with `.master("red")`: each apply undid
+  the last, and every VRF enslave or release flushed the link's IPv6
+  addresses and routes.
+
+  The master is now a `MasterSpec`: `Unmanaged` (the default), `None`
+  (set with `nomaster()`), or `Name`. `link()` for a name already
+  declared updates that declaration. `NetworkConfig::validate()` refuses
+  a link, a route (same destination, table and metric) or a qdisc (same
+  device and parent) declared twice. It runs before every diff and on
+  JSON input. In JSON, an absent `master` is unmanaged, `null` is no
+  master, and a string names one. Echo cases for an MTU-only declaration
+  of a bridge port, a VRF member declared in two parts, and `nomaster()`
+  check the result through `ip -j`. Before the fix the port was released
+  and the two-part declaration never converged.
 
 - **Changing an IPv6 address's prefix length removed the address (purge)
   or never converged (#461).** The address diff keys on `(dev, address,
@@ -239,6 +267,9 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`NetworkConfig::validate()`, `LinkBuilder::nomaster()`, `MasterSpec`,
+  `DeclaredLink::master_spec()`** (#462).
 
 - **`QdiscConfig::{in_place, write_change_options}` and `InPlace`**
   (#486). These are provided methods, so existing implementations keep
