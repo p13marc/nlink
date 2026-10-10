@@ -503,13 +503,14 @@ pub mod __rt {
 
             if header.is_error() {
                 let err = NlMsgError::from_bytes(payload)?;
+                err.warn_if_ack_warns(header.nlmsg_flags, payload);
                 if !err.is_ack() {
                     if err.error == -libc::ENOENT {
                         return Err(Error::FamilyNotFound {
                             name: name.to_string(),
                         });
                     }
-                    return Err(err.into_error(payload));
+                    return Err(err.to_error(header.nlmsg_flags, payload));
                 }
                 continue;
             }
@@ -582,13 +583,14 @@ pub mod __rt {
 
             if header.is_error() {
                 let err = NlMsgError::from_bytes(payload)?;
+                err.warn_if_ack_warns(header.nlmsg_flags, payload);
                 if !err.is_ack() {
                     if err.error == -libc::ENOENT {
                         return Err(Error::FamilyNotFound {
                             name: name.to_string(),
                         });
                     }
-                    return Err(err.into_error(payload));
+                    return Err(err.to_error(header.nlmsg_flags, payload));
                 }
                 continue;
             }

@@ -2036,10 +2036,11 @@ impl Connection<Ethtool> {
                     }
                     if header.is_error() {
                         let err = NlMsgError::from_bytes(payload)?;
+                        err.warn_if_ack_warns(header.nlmsg_flags, payload);
                         if err.is_ack() {
                             continue;
                         }
-                        return Err(err.into_error(payload));
+                        return Err(err.to_error(header.nlmsg_flags, payload));
                     }
                     if header.is_done() {
                         return Err(Error::InvalidMessage("no response received".into()));

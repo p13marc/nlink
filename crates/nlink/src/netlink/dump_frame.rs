@@ -81,8 +81,11 @@ pub(crate) fn classify<'a>(
 
     if header.is_error() {
         return match NlMsgError::from_bytes(payload) {
-            Ok(err) if err.is_ack() => Classification::Ack,
-            Ok(err) => Classification::Error(err.into_error(payload)),
+            Ok(err) if err.is_ack() => {
+                err.warn_if_ack_warns(header.nlmsg_flags, payload);
+                Classification::Ack
+            }
+            Ok(err) => Classification::Error(err.to_error(header.nlmsg_flags, payload)),
             Err(e) => Classification::Error(e),
         };
     }

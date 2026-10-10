@@ -236,6 +236,13 @@ pub const NLM_F_EXCL: u16 = 0x200;
 pub const NLM_F_CREATE: u16 = 0x400;
 pub const NLM_F_APPEND: u16 = 0x800;
 
+// Flags on an NLMSG_ERROR (an error or an ACK)
+/// The error carries only the request's header, not the whole request
+/// (`NETLINK_CAP_ACK`).
+pub const NLM_F_CAPPED: u16 = 0x100;
+/// Extended-ack TLVs follow the error (`NETLINK_EXT_ACK`).
+pub const NLM_F_ACK_TLVS: u16 = 0x200;
+
 /// Iterator over netlink messages in a buffer.
 pub struct MessageIter<'a> {
     data: &'a [u8],
@@ -326,8 +333,20 @@ pub mod nlmsgerr_attr {
     pub const POLICY: u16 = 4;
     /// Type of a missing required attribute.
     pub const MISS_TYPE: u16 = 5;
-    /// Type of a missing required nested attribute.
+    /// Offset, in the request, of the nest the missing attribute belongs
+    /// in; absent when it is missing at the top level.
     pub const MISS_NEST: u16 = 6;
+}
+
+/// `NL_POLICY_TYPE_ATTR_*` from `include/uapi/linux/netlink.h`: what an
+/// `NLMSGERR_ATTR_POLICY` nest says the rejected attribute had to be.
+mod policy_attr {
+    pub const MIN_VALUE_S: u16 = 2;
+    pub const MAX_VALUE_S: u16 = 3;
+    pub const MIN_VALUE_U: u16 = 4;
+    pub const MAX_VALUE_U: u16 = 5;
+    pub const MIN_LENGTH: u16 = 6;
+    pub const MAX_LENGTH: u16 = 7;
 }
 
 /// Parsed extended-ack TLVs from a netlink error response.
@@ -341,14 +360,99 @@ pub mod nlmsgerr_attr {
 /// populates them — older kernels and some subsystems still return
 /// bare errno. Absence is normal, not error.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ParsedExtAck {
     /// Human-readable kernel error string. `None` if the kernel did
     /// not include `NLMSGERR_ATTR_MSG` or it was empty / malformed.
+    ///
+    /// On a successful ACK this is a **warning** — the change was made,
+    /// and the kernel has something to say about it (`sch_htb: quantum of
+    /// class 10002 is big`).
     pub message: Option<String>,
     /// Byte offset into the original request where the kernel
     /// detected the problem. `None` if the kernel did not include
     /// `NLMSGERR_ATTR_OFFS`.
     pub offset: Option<u32>,
+    /// The type of a required attribute the request did not carry
+    /// (`NLMSGERR_ATTR_MISS_TYPE`). Generic netlink families report a
+    /// missing attribute this way and with no message at all, so without
+    /// it the error is a bare `EINVAL`.
+    pub missing_type: Option<u32>,
+    /// The offset of the nest the missing attribute belongs in
+    /// (`NLMSGERR_ATTR_MISS_NEST`); `None` when it is missing at the top
+    /// level.
+    pub missing_nest: Option<u32>,
+    /// The raw `NLMSGERR_ATTR_POLICY` nest: what the rejected attribute
+    /// had to be. [`Self::describe`] renders its bounds.
+    pub policy: Option<Vec<u8>>,
+}
+
+impl ParsedExtAck {
+    /// `true` when the kernel sent nothing this struct models.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// One line saying everything the TLVs say: the message, a missing
+    /// attribute, the policy's bounds. `None` when there is nothing.
+    ///
+    /// The offset is left out; [`Error`] renders it on its own.
+    pub fn describe(&self) -> Option<String> {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(msg) = &self.message {
+            parts.push(msg.clone());
+        }
+        if let Some(ty) = self.missing_type {
+            let mut missing = format!("missing required attribute (type {ty})");
+            if let Some(nest) = self.missing_nest {
+                missing.push_str(&format!(" in the nest at request offset {nest}"));
+            }
+            parts.push(missing);
+        }
+        if let Some(bounds) = self.policy.as_deref().and_then(describe_policy) {
+            parts.push(bounds);
+        }
+        (!parts.is_empty()).then(|| parts.join("; "))
+    }
+}
+
+/// The bounds an `NLMSGERR_ATTR_POLICY` nest gives, as `policy: value in
+/// 1..=4096, length 4..=16`, or `None` if it gives none.
+fn describe_policy(nest: &[u8]) -> Option<String> {
+    let (mut min, mut max, mut min_len, mut max_len) = (None, None, None, None);
+    for (ty, payload) in AttrIter::new(nest) {
+        let u64_of = |p: &[u8]| {
+            p.get(..8)
+                .map(|b| u64::from_ne_bytes(b.try_into().unwrap()))
+        };
+        let u32_of = |p: &[u8]| {
+            p.get(..4)
+                .map(|b| u32::from_ne_bytes(b.try_into().unwrap()))
+        };
+        match ty & 0x7FFF {
+            policy_attr::MIN_VALUE_U => min = u64_of(payload).map(|v| v.to_string()),
+            policy_attr::MAX_VALUE_U => max = u64_of(payload).map(|v| v.to_string()),
+            policy_attr::MIN_VALUE_S => min = u64_of(payload).map(|v| (v as i64).to_string()),
+            policy_attr::MAX_VALUE_S => max = u64_of(payload).map(|v| (v as i64).to_string()),
+            policy_attr::MIN_LENGTH => min_len = u32_of(payload),
+            policy_attr::MAX_LENGTH => max_len = u32_of(payload),
+            _ => {}
+        }
+    }
+    let mut bounds = Vec::new();
+    if min.is_some() || max.is_some() {
+        bounds.push(format!(
+            "value in {}..={}",
+            min.unwrap_or_default(),
+            max.unwrap_or_default()
+        ));
+    }
+    if min_len.is_some() || max_len.is_some() {
+        let min_len = min_len.map(|v| v.to_string()).unwrap_or_default();
+        let max_len = max_len.map(|v| v.to_string()).unwrap_or_default();
+        bounds.push(format!("length {min_len}..={max_len}"));
+    }
+    (!bounds.is_empty()).then(|| format!("policy: {}", bounds.join(", ")))
 }
 
 impl NlMsgError {
@@ -367,7 +471,71 @@ impl NlMsgError {
         self.error == 0
     }
 
+    /// The extended-ack TLVs of this error or ACK, found by the header's
+    /// flags: none unless `NLM_F_ACK_TLVS` is set; right after the echoed
+    /// header when `NLM_F_CAPPED` is (or on an ACK, which never echoes the
+    /// request); after the whole echoed request otherwise.
+    ///
+    /// `flags` is the `nlmsg_flags` of the `NLMSG_ERROR` message whose
+    /// body is `payload`.
+    pub fn ext_ack_attrs<'a>(&self, flags: u16, payload: &'a [u8]) -> AttrIter<'a> {
+        if flags & NLM_F_ACK_TLVS == 0 {
+            return AttrIter::new(&[]);
+        }
+        let header_end = std::mem::size_of::<Self>();
+        let start = if flags & NLM_F_CAPPED != 0 || self.is_ack() {
+            header_end
+        } else {
+            // The echoed request: its header is already in `self.msg`,
+            // its body follows. The TLVs start at the next 4-byte boundary.
+            let echoed = (self.msg.nlmsg_len as usize).max(NLMSG_HDRLEN);
+            4 + nlmsg_align(echoed)
+        };
+        AttrIter::new(payload.get(start..).unwrap_or(&[]))
+    }
+
+    /// Parse the extended-ack TLVs, located by the header's flags (see
+    /// [`Self::ext_ack_attrs`]): the message, offset, missing attribute
+    /// and policy.
+    pub fn ext_ack(&self, flags: u16, payload: &[u8]) -> ParsedExtAck {
+        parse_ext_ack(self.ext_ack_attrs(flags, payload))
+    }
+
+    /// Construct an [`Error`] from this error message, reading the
+    /// extended-ack TLVs where the header's flags say they are.
+    ///
+    /// A missing attribute and the policy's bounds go into the error's
+    /// ext-ack text along with the kernel's message, so a generic netlink
+    /// family's bare `EINVAL` says what was missing.
+    pub fn to_error(&self, flags: u16, payload: &[u8]) -> Error {
+        let ext = self.ext_ack(flags, payload);
+        Error::from_errno_ext_ack(self.error, ext.describe(), ext.offset)
+    }
+
+    /// Log the warning a successful ACK carries, if any.
+    ///
+    /// The kernel reports what it did but would rather not have —
+    /// `sch_htb: quantum of class 10002 is big. Consider r2q change.` — as
+    /// an `NLMSGERR_ATTR_MSG` on the ACK. `tc(8)` prints it; nlink used to
+    /// drop it.
+    pub(crate) fn warn_if_ack_warns(&self, flags: u16, payload: &[u8]) {
+        if !self.is_ack() || flags & NLM_F_ACK_TLVS == 0 {
+            return;
+        }
+        if let Some(warning) = self.ext_ack(flags, payload).describe() {
+            tracing::warn!(
+                warning = %warning,
+                request_type = self.msg.nlmsg_type,
+                "the kernel accepted the request with a warning"
+            );
+        }
+    }
+
     /// Get attributes after the error message (extended ACK).
+    ///
+    /// Reads them right after the echoed header, which is where they are
+    /// only when the error is capped (nlink's default; see
+    /// [`Self::ext_ack_attrs`], which checks).
     pub fn attrs<'a>(&self, payload: &'a [u8]) -> AttrIter<'a> {
         let offset = std::mem::size_of::<Self>();
         if payload.len() > offset {
@@ -384,50 +552,57 @@ impl NlMsgError {
     ///
     /// Centralizes the "parse ext-ack + build Error" pattern that's
     /// repeated across every protocol's response-handling loop.
+    ///
+    /// Assumes a capped error (nlink's default); prefer
+    /// [`Self::to_error`], which reads the header's flags.
     pub fn into_error(&self, payload: &[u8]) -> Error {
         let ext = self.parsed_ext_ack(payload);
-        Error::from_errno_ext_ack(self.error, ext.message, ext.offset)
+        Error::from_errno_ext_ack(self.error, ext.describe(), ext.offset)
     }
 
-    /// Parse the extended-ack TLVs (`NLMSGERR_ATTR_MSG` +
-    /// `NLMSGERR_ATTR_OFFS`) from an error-response payload.
+    /// Parse the extended-ack TLVs from an error-response payload,
+    /// assuming a capped error (nlink's default). Prefer
+    /// [`Self::ext_ack`], which reads the header's flags.
     ///
     /// Returns an all-`None` [`ParsedExtAck`] if no recognized TLVs
-    /// are present. Other recognized TLVs (`COOKIE`, `POLICY`,
-    /// `MISS_TYPE`, `MISS_NEST`) are deliberately ignored at this
-    /// level — they're niche, and surfacing them would inflate the
-    /// `Error` variants without a clear user-value story. They can
-    /// be re-extracted via [`Self::attrs`] if a caller needs them.
+    /// are present.
     pub fn parsed_ext_ack(&self, payload: &[u8]) -> ParsedExtAck {
-        let mut out = ParsedExtAck::default();
-        for (attr_type, attr_payload) in self.attrs(payload) {
-            match attr_type {
-                nlmsgerr_attr::MSG => {
-                    // Kernel strings are typically NUL-terminated;
-                    // strip the NUL + tolerate non-UTF8 by lossy
-                    // decode (we'd rather show "?" than swallow the
-                    // whole message).
-                    let trimmed = attr_payload
-                        .iter()
-                        .position(|&b| b == 0)
-                        .map(|n| &attr_payload[..n])
-                        .unwrap_or(attr_payload);
-                    if !trimmed.is_empty() {
-                        out.message = Some(String::from_utf8_lossy(trimmed).into_owned());
-                    }
-                }
-                nlmsgerr_attr::OFFS if attr_payload.len() >= 4 => {
-                    // SAFETY of the unwrap: the guard above ensures
-                    // ≥ 4 bytes; `try_into` on `&[u8; 4]` is infallible
-                    // when the slice is exactly 4 bytes.
-                    let bytes: [u8; 4] = attr_payload[..4].try_into().expect("len ≥ 4");
-                    out.offset = Some(u32::from_ne_bytes(bytes));
-                }
-                _ => {} // ignore COOKIE/POLICY/MISS_TYPE/MISS_NEST + unknown
-            }
-        }
-        out
+        parse_ext_ack(self.attrs(payload))
     }
+}
+
+/// Read the `NLMSGERR_ATTR_*` TLVs nlink models. `COOKIE` and unknown
+/// types are ignored.
+fn parse_ext_ack(attrs: AttrIter<'_>) -> ParsedExtAck {
+    let mut out = ParsedExtAck::default();
+    let u32_of = |p: &[u8]| {
+        p.get(..4)
+            .map(|b| u32::from_ne_bytes(b.try_into().unwrap()))
+    };
+    for (attr_type, attr_payload) in attrs {
+        match attr_type & 0x7FFF {
+            nlmsgerr_attr::MSG => {
+                // Kernel strings are typically NUL-terminated;
+                // strip the NUL + tolerate non-UTF8 by lossy
+                // decode (we'd rather show "?" than swallow the
+                // whole message).
+                let trimmed = attr_payload
+                    .iter()
+                    .position(|&b| b == 0)
+                    .map(|n| &attr_payload[..n])
+                    .unwrap_or(attr_payload);
+                if !trimmed.is_empty() {
+                    out.message = Some(String::from_utf8_lossy(trimmed).into_owned());
+                }
+            }
+            nlmsgerr_attr::OFFS => out.offset = u32_of(attr_payload),
+            nlmsgerr_attr::MISS_TYPE => out.missing_type = u32_of(attr_payload),
+            nlmsgerr_attr::MISS_NEST => out.missing_nest = u32_of(attr_payload),
+            nlmsgerr_attr::POLICY => out.policy = Some(attr_payload.to_vec()),
+            _ => {} // COOKIE + unknown
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -517,6 +692,139 @@ mod nlmsgerr_tests {
         // Lossy decode produces replacement characters; what we
         // actually care about is "we didn't crash / return None".
         assert!(parsed.message.is_some());
+    }
+
+    /// One TLV, aligned.
+    fn tlv(ty: u16, value: &[u8]) -> Vec<u8> {
+        let mut out = ((4 + value.len()) as u16).to_ne_bytes().to_vec();
+        out.extend_from_slice(&ty.to_ne_bytes());
+        out.extend_from_slice(value);
+        out.resize(nla_align(out.len()), 0);
+        out
+    }
+
+    /// An error response carrying `request` whole (uncapped) or only its
+    /// header (capped), then `tlvs`.
+    fn error_payload(error: i32, request: &[u8], capped: bool, tlvs: &[Vec<u8>]) -> Vec<u8> {
+        let mut out = error.to_ne_bytes().to_vec();
+        out.extend_from_slice(if capped { &request[..16] } else { request });
+        out.resize(4 + nla_align(out.len() - 4), 0);
+        for t in tlvs {
+            out.extend_from_slice(t);
+        }
+        out
+    }
+
+    /// A 40-byte request whose body is itself shaped like an `OFFS` TLV,
+    /// so reading it as ext-ack finds an offset there is none of.
+    fn request() -> Vec<u8> {
+        let mut req = 40u32.to_ne_bytes().to_vec();
+        req.extend_from_slice(&[0u8; 12]);
+        req.extend_from_slice(&tlv(nlmsgerr_attr::OFFS, &99u32.to_ne_bytes()));
+        req.resize(40, 0);
+        req
+    }
+
+    /// Uncapped (`NETLINK_CAP_ACK` off), the request is echoed whole and
+    /// the TLVs follow it. Reading them at the fixed capped offset parsed
+    /// the request's own body as ext-ack (#507).
+    #[test]
+    fn uncapped_tlvs_are_found_after_the_echoed_request() {
+        let msg = tlv(nlmsgerr_attr::MSG, b"the real message\0");
+        let payload = error_payload(-22, &request(), false, &[msg]);
+        let err = NlMsgError::from_bytes(&payload).unwrap();
+        let parsed = err.ext_ack(NLM_F_ACK_TLVS, &payload);
+        assert_eq!(parsed.message.as_deref(), Some("the real message"));
+        assert_eq!(parsed.offset, None);
+        // The fixed-offset reader takes the request's body for TLVs.
+        assert_eq!(err.parsed_ext_ack(&payload).offset, Some(99));
+    }
+
+    #[test]
+    fn capped_tlvs_are_found_after_the_header() {
+        let msg = tlv(nlmsgerr_attr::MSG, b"capped\0");
+        let payload = error_payload(-22, &request(), true, &[msg]);
+        let err = NlMsgError::from_bytes(&payload).unwrap();
+        let parsed = err.ext_ack(NLM_F_ACK_TLVS | NLM_F_CAPPED, &payload);
+        assert_eq!(parsed.message.as_deref(), Some("capped"));
+    }
+
+    /// Without `NLM_F_ACK_TLVS` there are no TLVs, whatever the bytes say.
+    #[test]
+    fn no_ack_tlvs_flag_means_no_tlvs() {
+        let msg = tlv(nlmsgerr_attr::MSG, b"not ext-ack\0");
+        let payload = error_payload(-22, &request(), true, &[msg]);
+        let err = NlMsgError::from_bytes(&payload).unwrap();
+        assert!(err.ext_ack(NLM_F_CAPPED, &payload).is_empty());
+    }
+
+    /// A generic netlink family reports a missing attribute with
+    /// `MISS_TYPE`/`MISS_NEST` and no message; the error says so instead of
+    /// a bare EINVAL.
+    #[test]
+    fn a_missing_attribute_is_described() {
+        let payload = error_payload(
+            -22,
+            &request(),
+            true,
+            &[
+                tlv(nlmsgerr_attr::MISS_TYPE, &3u32.to_ne_bytes()),
+                tlv(nlmsgerr_attr::MISS_NEST, &24u32.to_ne_bytes()),
+            ],
+        );
+        let err = NlMsgError::from_bytes(&payload).unwrap();
+        let flags = NLM_F_ACK_TLVS | NLM_F_CAPPED;
+        let parsed = err.ext_ack(flags, &payload);
+        assert_eq!(
+            (parsed.missing_type, parsed.missing_nest),
+            (Some(3), Some(24))
+        );
+        let shown = err.to_error(flags, &payload).to_string();
+        assert!(
+            shown.contains("missing required attribute (type 3) in the nest at request offset 24"),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn policy_bounds_are_described() {
+        let mut policy = tlv(policy_attr::MIN_VALUE_U, &1u64.to_ne_bytes());
+        policy.extend(tlv(policy_attr::MAX_VALUE_U, &4096u64.to_ne_bytes()));
+        let payload = error_payload(
+            -34,
+            &request(),
+            true,
+            &[
+                tlv(nlmsgerr_attr::MSG, b"integer out of range\0"),
+                tlv(nlmsgerr_attr::POLICY, &policy),
+            ],
+        );
+        let err = NlMsgError::from_bytes(&payload).unwrap();
+        let described = err
+            .ext_ack(NLM_F_ACK_TLVS | NLM_F_CAPPED, &payload)
+            .describe();
+        assert_eq!(
+            described.as_deref(),
+            Some("integer out of range; policy: value in 1..=4096")
+        );
+    }
+
+    /// A successful ACK can carry a warning; it is parsed like an error's
+    /// message (an ACK never echoes the request, capped or not).
+    #[test]
+    fn a_warning_on_an_ack_is_read() {
+        let warning = tlv(
+            nlmsgerr_attr::MSG,
+            b"sch_htb: quantum of class 10002 is big.\0",
+        );
+        let payload = error_payload(0, &request(), true, &[warning]);
+        let err = NlMsgError::from_bytes(&payload).unwrap();
+        assert!(err.is_ack());
+        let parsed = err.ext_ack(NLM_F_ACK_TLVS, &payload);
+        assert_eq!(
+            parsed.message.as_deref(),
+            Some("sch_htb: quantum of class 10002 is big.")
+        );
     }
 }
 

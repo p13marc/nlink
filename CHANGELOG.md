@@ -4,7 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- **`ParsedExtAck` gains fields and `#[non_exhaustive]` (#507).** The
+  workspace moves to 0.31.0 with it. See
+  [`docs/migration_guide/0.30.0-to-0.31.0.md`](docs/migration_guide/0.30.0-to-0.31.0.md).
+
 ### Fixed
+
+- **Extended-ack: TLVs read at the wrong place, missing attributes and
+  policies ignored, warnings on success dropped (#507).** The error's
+  TLVs were read at a fixed offset, which is right only when the kernel
+  caps the echoed request; with `set_cap_ack(false)` the request's own
+  bytes were parsed as ext-ack. `NLMSGERR_ATTR_MISS_TYPE`/`MISS_NEST`
+  and `POLICY` were ignored, so a generic netlink family's missing
+  attribute — which comes with no message — was a bare `EINVAL`. And a
+  successful ACK's warning (`sch_htb: quantum of class 10002 is big.
+  Consider r2q change.`, which `tc(8)` prints) was dropped. The TLVs are
+  now found by the header's `NLM_F_ACK_TLVS`/`NLM_F_CAPPED`; a missing
+  attribute and the policy's bounds are part of the error text; and an
+  ACK's warning is logged as a `tracing` WARN. Unit tests cover capped,
+  uncapped, flagless, missing-attribute, policy and warning payloads; a
+  root run of the tc tests now logs the HTB quantum warnings it used to
+  swallow.
 
 - **A rule added by hand to a declared table made every apply fail with
   `EBUSY` (#459).** The rule planner leaves rules nlink did not write
@@ -66,6 +88,11 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`NlMsgError::{ext_ack, ext_ack_attrs, to_error}`** read the
+  extended-ack TLVs where the header's flags say they are, and
+  `ParsedExtAck::{missing_type, missing_nest, policy, describe,
+  is_empty}` (#507). `NLM_F_CAPPED` and `NLM_F_ACK_TLVS` are exported.
 
 - **`NftablesDiff::kept_in_use` and `KeptInUse`**: what the diff would
   delete but leaves because a rule nlink does not manage uses it (#459).

@@ -870,9 +870,10 @@ impl<P: ProtocolState> Connection<P> {
                 found_seq = true;
                 if header.is_error() {
                     let err = NlMsgError::from_bytes(payload)?;
+                    err.warn_if_ack_warns(header.nlmsg_flags, payload);
                     if !err.is_ack() {
                         warn!(errno = err.error, "kernel returned error for request");
-                        return Err(err.into_error(payload));
+                        return Err(err.to_error(header.nlmsg_flags, payload));
                     }
                 }
             }
@@ -920,9 +921,10 @@ impl<P: ProtocolState> Connection<P> {
                 }
                 if header.is_error() {
                     let err = NlMsgError::from_bytes(payload)?;
+                    err.warn_if_ack_warns(header.nlmsg_flags, payload);
                     if !err.is_ack() {
                         warn!(errno = err.error, "kernel returned error for ack");
-                        return Err(err.into_error(payload));
+                        return Err(err.to_error(header.nlmsg_flags, payload));
                     }
                     return Ok(());
                 }
@@ -1080,9 +1082,10 @@ impl<P: ProtocolState> Connection<P> {
                 found_seq = true;
                 if header.is_error() {
                     let err = NlMsgError::from_bytes(payload)?;
+                    err.warn_if_ack_warns(header.nlmsg_flags, payload);
                     if !err.is_ack() {
                         warn!(errno = err.error, "kernel returned error for request");
-                        return Err(err.into_error(payload));
+                        return Err(err.to_error(header.nlmsg_flags, payload));
                     }
                 }
             }
@@ -1117,9 +1120,10 @@ impl<P: ProtocolState> Connection<P> {
                 }
                 if header.is_error() {
                     let err = NlMsgError::from_bytes(payload)?;
+                    err.warn_if_ack_warns(header.nlmsg_flags, payload);
                     if !err.is_ack() {
                         warn!(errno = err.error, "kernel returned error for ack");
-                        return Err(err.into_error(payload));
+                        return Err(err.to_error(header.nlmsg_flags, payload));
                     }
                     return Ok(());
                 }
@@ -3465,6 +3469,7 @@ impl Connection<Generic> {
             // Check for error
             if header.is_error() {
                 let err = NlMsgError::from_bytes(payload)?;
+                err.warn_if_ack_warns(header.nlmsg_flags, payload);
                 if !err.is_ack() {
                     // ENOENT means family not found
                     if err.error == -libc::ENOENT {
@@ -3472,7 +3477,7 @@ impl Connection<Generic> {
                             name: name.to_string(),
                         });
                     }
-                    return Err(err.into_error(payload));
+                    return Err(err.to_error(header.nlmsg_flags, payload));
                 }
                 continue;
             }
@@ -3690,8 +3695,9 @@ impl Connection<Generic> {
 
             if header.is_error() {
                 let err = NlMsgError::from_bytes(payload)?;
+                err.warn_if_ack_warns(header.nlmsg_flags, payload);
                 if !err.is_ack() {
-                    return Err(err.into_error(payload));
+                    return Err(err.to_error(header.nlmsg_flags, payload));
                 }
             }
         }
