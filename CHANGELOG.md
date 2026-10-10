@@ -26,6 +26,21 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **After an overflow, the resync stream replayed pre-overflow events on
+  top of its snapshot (#464).** On ENOBUFS, `ResyncStream` took the
+  snapshot at once. The kernel reports the overflow before it dequeues
+  anything, so every frame queued before the overflow was still in the
+  socket, and was delivered *after* `ResyncEnd`. A `NewLink` whose
+  `DelLink` the overflow had dropped therefore came after a snapshot that
+  correctly lacked the link, and a watch-cache kept it forever. The
+  stream now drains the inner stream until it has nothing queued, then
+  takes the snapshot. That also empties the socket, which the kernel
+  requires before it delivers broadcasts again (`netlink_rcv_wake`). A
+  root test gives a resync stream a 1 KiB buffer and a 300-link burst
+  that starts with a link that is deleted again, then compares the
+  mirrored link set with a fresh dump. Before the fix the mirror kept
+  the deleted `t1`. A unit test pins the drain.
+
 - **Dispatcher mode lost overflows, buffered without bound, and raced its
   own driver (#466).**
   - An ENOBUFS reached only the typed subscriber surface nothing reads,
