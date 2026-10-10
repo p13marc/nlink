@@ -30,41 +30,85 @@ use std::path::PathBuf;
 
 use super::error::{Error, Result};
 
-/// Convert a dotted sysctl key to a `/proc/sys/` path.
+/// Convert a sysctl key to a `/proc/sys/` path.
 ///
-/// # Example
+/// Two forms, as `sysctl(8)` takes them:
+/// - dotted, `net.ipv4.ip_forward`: every `.` is a path separator;
+/// - slashed, `net/ipv4/conf/eth0.100/rp_filter`: taken verbatim, so a
+///   segment can contain dots — an interface named `eth0.100` can only be
+///   addressed this way (#477). [`ipv4_conf_key`] and [`ipv6_conf_key`]
+///   build it.
 ///
 /// ```text
 /// sysctl_path("net.ipv4.ip_forward")
 ///     == PathBuf::from("/proc/sys/net/ipv4/ip_forward")
+/// sysctl_path("net/ipv4/conf/eth0.100/rp_filter")
+///     == PathBuf::from("/proc/sys/net/ipv4/conf/eth0.100/rp_filter")
 /// ```
 ///
 /// Shown rather than run: this function is private, and a doctest compiles
 /// as a separate crate.
 fn sysctl_path(key: &str) -> Result<PathBuf> {
     validate_key(key)?;
-    let relative = key.replace('.', "/");
+    let relative = if key.contains('/') {
+        key.to_string()
+    } else {
+        key.replace('.', "/")
+    };
     Ok(PathBuf::from("/proc/sys").join(relative))
 }
 
 /// Validate a sysctl key to prevent path traversal.
 fn validate_key(key: &str) -> Result<()> {
+    let invalid = || Error::InvalidMessage(format!("invalid sysctl key: {key}"));
     if key.is_empty() {
         return Err(Error::InvalidMessage("sysctl key cannot be empty".into()));
     }
-    if key.contains("..") || key.starts_with('/') || key.contains('\0') {
-        return Err(Error::InvalidMessage(format!(
-            "invalid sysctl key: {}",
-            key
-        )));
+    if key.starts_with('/') || key.contains('\0') {
+        return Err(invalid());
+    }
+    if key.contains('/') {
+        // Slashed: every segment is a name, never `.`/`..` or empty.
+        if key
+            .split('/')
+            .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+        {
+            return Err(invalid());
+        }
+    } else if key.contains("..") {
+        return Err(invalid());
     }
     Ok(())
+}
+
+/// The key of a per-interface IPv4 setting, `net/ipv4/conf/<dev>/<setting>`,
+/// in the slashed form that addresses a device whose name has dots in it.
+///
+/// ```no_run
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use nlink::netlink::sysctl;
+///
+/// sysctl::set(&sysctl::ipv4_conf_key("eth0.100", "rp_filter"), "2")?;
+/// # Ok(())
+/// # }
+/// ```
+pub fn ipv4_conf_key(dev: &str, setting: &str) -> String {
+    format!("net/ipv4/conf/{dev}/{setting}")
+}
+
+/// The key of a per-interface IPv6 setting, `net/ipv6/conf/<dev>/<setting>`;
+/// see [`ipv4_conf_key`].
+pub fn ipv6_conf_key(dev: &str, setting: &str) -> String {
+    format!("net/ipv6/conf/{dev}/{setting}")
 }
 
 /// Read a sysctl value.
 ///
 /// Reads from `/proc/sys/` in the current namespace. For namespace-aware
 /// operations, use [`super::namespace::get_sysctl`].
+///
+/// A missing key is an [`Error::Sysctl`] for which `is_not_found()` holds;
+/// every error names the key.
 ///
 /// # Example
 ///
@@ -79,12 +123,9 @@ fn validate_key(key: &str) -> Result<()> {
 /// ```
 pub fn get(key: &str) -> Result<String> {
     let path = sysctl_path(key)?;
-    let contents = std::fs::read_to_string(&path).map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => {
-            Error::InvalidMessage(format!("sysctl key not found: {}", key))
-        }
-        std::io::ErrorKind::PermissionDenied => Error::Io(e),
-        _ => Error::Io(e),
+    let contents = std::fs::read_to_string(&path).map_err(|source| Error::Sysctl {
+        key: key.to_string(),
+        source,
     })?;
     Ok(contents.trim_end().to_string())
 }
@@ -93,7 +134,7 @@ pub fn get(key: &str) -> Result<String> {
 ///
 /// Writes to `/proc/sys/` in the current namespace. Requires root or
 /// `CAP_SYS_ADMIN`. For namespace-aware operations, use
-/// [`super::namespace::set_sysctl`].
+/// [`super::namespace::set_sysctl`]. Errors as for [`get`].
 ///
 /// # Example
 ///
@@ -107,12 +148,9 @@ pub fn get(key: &str) -> Result<String> {
 /// ```
 pub fn set(key: &str, value: &str) -> Result<()> {
     let path = sysctl_path(key)?;
-    std::fs::write(&path, value).map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => {
-            Error::InvalidMessage(format!("sysctl key not found: {}", key))
-        }
-        std::io::ErrorKind::PermissionDenied => Error::Io(e),
-        _ => Error::Io(e),
+    std::fs::write(&path, value).map_err(|source| Error::Sysctl {
+        key: key.to_string(),
+        source,
     })?;
     Ok(())
 }
@@ -164,6 +202,34 @@ mod tests {
         assert!(validate_key("/etc/passwd").is_err());
         assert!(validate_key("").is_err());
         assert!(validate_key("net.ipv4\0.ip_forward").is_err());
+    }
+
+    /// A slashed key is taken verbatim, so a device name with a dot in it
+    /// can be addressed (#477).
+    #[test]
+    fn a_slashed_key_keeps_the_dots_in_its_segments() {
+        assert_eq!(
+            sysctl_path(&ipv4_conf_key("eth0.100", "rp_filter")).unwrap(),
+            PathBuf::from("/proc/sys/net/ipv4/conf/eth0.100/rp_filter")
+        );
+        assert_eq!(
+            sysctl_path("net/ipv6/conf/v.1/forwarding").unwrap(),
+            PathBuf::from("/proc/sys/net/ipv6/conf/v.1/forwarding")
+        );
+        assert!(validate_key("net/ipv4/../../etc").is_err());
+        assert!(validate_key("net//ipv4").is_err());
+        assert!(validate_key("net/./ipv4").is_err());
+    }
+
+    /// A missing key is not-found and names itself (#477).
+    #[test]
+    fn a_missing_key_is_not_found_and_named() {
+        let err = get("net.ipv4.nlink_no_such_key").unwrap_err();
+        assert!(err.is_not_found(), "{err:?}");
+        assert!(
+            err.to_string().contains("net.ipv4.nlink_no_such_key"),
+            "{err}"
+        );
     }
 
     #[test]

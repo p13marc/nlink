@@ -97,3 +97,26 @@ fn test_sysctl_validate_key_rejects_traversal() {
     assert!(sysctl::get("/etc/passwd").is_err());
     assert!(sysctl::get("").is_err());
 }
+
+/// A device whose name has a dot in it is addressed with the slashed key:
+/// the dotted form turned every `.` into a path separator (#477). And a
+/// missing key is not-found, naming the key, rather than `InvalidMessage`.
+#[tokio::test]
+async fn a_dotted_device_name_is_addressable() -> Result<()> {
+    require_root!();
+    nlink::require_module!("dummy");
+    nlink::require_writable_sysctl!("/proc/sys/net/ipv4/ip_forward");
+
+    let ns = TestNamespace::new("sysctl-dots")?;
+    ns.connection()?
+        .add_link(nlink::netlink::link::DummyLink::new("d0.100"))
+        .await?;
+    let key = "net/ipv4/conf/d0.100/rp_filter";
+    namespace::set_sysctl(ns.name(), key, "2")?;
+    assert_eq!(namespace::get_sysctl(ns.name(), key)?, "2");
+
+    let err = namespace::get_sysctl(ns.name(), "net.ipv4.conf.nosuchdev.rp_filter").unwrap_err();
+    assert!(err.is_not_found(), "{err:?}");
+    assert!(err.to_string().contains("nosuchdev"), "{err}");
+    Ok(())
+}
