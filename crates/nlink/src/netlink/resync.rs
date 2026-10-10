@@ -235,6 +235,18 @@ enum ResyncState<'a, T> {
     /// yielded as `Event(T)` or — on ENOBUFS — kicks the state
     /// machine into `RunningSnapshot`.
     Forwarding,
+    /// After an ENOBUFS: discarding what the inner stream had already
+    /// queued, until it returns `Pending`, before the snapshot is taken.
+    ///
+    /// The kernel reports the overflow before it dequeues anything, so
+    /// every frame queued *before* the overflow is still there. Taken
+    /// first, the snapshot was followed by those older frames: a
+    /// `NewAddress` whose matching `DelAddress` the overflow dropped was
+    /// replayed on top of a snapshot that correctly lacked the address,
+    /// and a `Store` kept it forever (#464). Draining also empties the
+    /// socket, which the kernel requires before it delivers broadcasts
+    /// again (`netlink_rcv_wake`).
+    Draining,
     /// Snapshot future is being driven. When it resolves, we
     /// flush `Marker(ResyncStart)` + each item as `Resynced(t)` +
     /// `Marker(ResyncEnd)` via the `Replaying` state.
@@ -334,10 +346,9 @@ where
                             return Poll::Ready(Some(Ok(ResyncedEvent::Event(item))));
                         }
                         Poll::Ready(Some(Err(e))) if e.is_no_buffer_space() => {
-                            // ENOBUFS — kick off snapshot.
-                            let fut = (this.resync)();
-                            this.state = ResyncState::RunningSnapshot { fut, attempts: 1 };
-                            // Loop around to drive the future.
+                            // ENOBUFS — drain what predates it, then
+                            // snapshot (#464).
+                            this.state = ResyncState::Draining;
                         }
                         Poll::Ready(Some(Err(e))) => {
                             this.state = ResyncState::Done;
@@ -353,6 +364,27 @@ where
                         }
                     }
                 }
+
+                ResyncState::Draining => match Pin::new(&mut this.inner).poll_next(cx) {
+                    // Older than the overflow: superseded by the snapshot.
+                    Poll::Ready(Some(Ok(_))) => this.state = ResyncState::Draining,
+                    Poll::Ready(Some(Err(e))) if e.is_no_buffer_space() => {
+                        this.state = ResyncState::Draining;
+                    }
+                    Poll::Ready(Some(Err(e))) => {
+                        this.state = ResyncState::Done;
+                        return Poll::Ready(Some(Err(e)));
+                    }
+                    Poll::Ready(None) => {
+                        this.state = ResyncState::Done;
+                        return Poll::Ready(None);
+                    }
+                    // Nothing queued any more: snapshot now.
+                    Poll::Pending => {
+                        let fut = (this.resync)();
+                        this.state = ResyncState::RunningSnapshot { fut, attempts: 1 };
+                    }
+                },
 
                 ResyncState::RunningSnapshot { mut fut, attempts } => {
                     match fut.as_mut().poll(cx) {
@@ -548,16 +580,50 @@ mod tests {
     /// `Result<u32>` items so we can drive the state machine
     /// through every branch without a kernel.
     struct ScriptedStream {
-        items: VecDeque<crate::Result<u32>>,
+        items: VecDeque<Step>,
+    }
+
+    /// One step of a script: an item, or a moment with nothing queued.
+    enum Step {
+        Item(crate::Result<u32>),
+        Pending,
+    }
+
+    impl ScriptedStream {
+        /// The items as a socket delivers them: with nothing queued right
+        /// after each overflow, so what follows one is newer than the
+        /// snapshot.
+        fn new(items: Vec<crate::Result<u32>>) -> Self {
+            let mut steps = VecDeque::new();
+            for item in items {
+                let overflow = matches!(&item, Err(e) if e.is_no_buffer_space());
+                steps.push_back(Step::Item(item));
+                if overflow {
+                    steps.push_back(Step::Pending);
+                }
+            }
+            Self { items: steps }
+        }
+
+        /// The steps exactly as given.
+        fn steps(steps: Vec<Step>) -> Self {
+            Self {
+                items: steps.into(),
+            }
+        }
     }
 
     impl Stream for ScriptedStream {
         type Item = crate::Result<u32>;
-        fn poll_next(
-            mut self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<Option<Self::Item>> {
-            Poll::Ready(self.items.pop_front())
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            match self.items.pop_front() {
+                Some(Step::Item(item)) => Poll::Ready(Some(item)),
+                Some(Step::Pending) => {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+                None => Poll::Ready(None),
+            }
         }
     }
 
@@ -567,9 +633,7 @@ mod tests {
 
     #[tokio::test]
     async fn resync_stream_passes_events_through() {
-        let s = ScriptedStream {
-            items: vec![Ok(1u32), Ok(2), Ok(3)].into(),
-        };
+        let s = ScriptedStream::new(vec![Ok(1u32), Ok(2), Ok(3)]);
         let mut stream = events_with_resync(s, || {
             Box::pin(async move { Ok::<Vec<u32>, crate::Error>(vec![]) })
         });
@@ -585,9 +649,7 @@ mod tests {
 
     #[tokio::test]
     async fn resync_stream_handles_enobufs_with_replay() {
-        let s = ScriptedStream {
-            items: vec![Ok(1u32), Err(enobufs()), Ok(99)].into(),
-        };
+        let s = ScriptedStream::new(vec![Ok(1u32), Err(enobufs()), Ok(99)]);
         let mut stream = events_with_resync(s, || {
             Box::pin(async move { Ok::<Vec<u32>, crate::Error>(vec![10, 20, 30]) })
         });
@@ -623,9 +685,7 @@ mod tests {
         // `DumpInterrupted` (#271).
         let attempts = std::sync::Arc::new(AtomicU8::new(0));
         let a = attempts.clone();
-        let s = ScriptedStream {
-            items: vec![Ok(1u32), Err(enobufs())].into(),
-        };
+        let s = ScriptedStream::new(vec![Ok(1u32), Err(enobufs())]);
         let mut stream = events_with_resync(s, move || {
             let a = a.clone();
             Box::pin(async move {
@@ -657,9 +717,7 @@ mod tests {
 
         let attempts = std::sync::Arc::new(AtomicU8::new(0));
         let a = attempts.clone();
-        let s = ScriptedStream {
-            items: vec![Err(enobufs())].into(),
-        };
+        let s = ScriptedStream::new(vec![Err(enobufs())]);
         let mut stream = events_with_resync(s, move || {
             let a = a.clone();
             Box::pin(async move {
@@ -676,9 +734,7 @@ mod tests {
 
     #[tokio::test]
     async fn resync_stream_replay_with_empty_snapshot_still_emits_markers() {
-        let s = ScriptedStream {
-            items: vec![Err(enobufs()), Ok(1u32)].into(),
-        };
+        let s = ScriptedStream::new(vec![Err(enobufs()), Ok(1u32)]);
         let mut stream = events_with_resync(s, || {
             Box::pin(async move { Ok::<Vec<u32>, crate::Error>(vec![]) })
         });
@@ -696,14 +752,11 @@ mod tests {
 
     #[tokio::test]
     async fn resync_stream_propagates_non_enobufs_error_and_fuses() {
-        let s = ScriptedStream {
-            items: vec![
-                Ok(1u32),
-                Err(crate::Error::from_errno(-libc::EPERM)),
-                Ok(99), // should NOT be yielded
-            ]
-            .into(),
-        };
+        let s = ScriptedStream::new(vec![
+            Ok(1u32),
+            Err(crate::Error::from_errno(-libc::EPERM)),
+            Ok(99), // should NOT be yielded
+        ]);
         let mut stream = events_with_resync(s, || {
             Box::pin(async move { Ok::<Vec<u32>, crate::Error>(vec![]) })
         });
@@ -722,9 +775,7 @@ mod tests {
 
     #[tokio::test]
     async fn resync_stream_propagates_snapshot_failure_and_fuses() {
-        let s = ScriptedStream {
-            items: vec![Err(enobufs())].into(),
-        };
+        let s = ScriptedStream::new(vec![Err(enobufs())]);
         let mut stream = events_with_resync(s, || {
             Box::pin(async move {
                 Err::<Vec<u32>, crate::Error>(crate::Error::from_errno(-libc::ENODEV))
@@ -739,18 +790,39 @@ mod tests {
         assert!(results[0].as_ref().unwrap_err().errno() == Some(libc::ENODEV));
     }
 
+    /// What the stream had queued when the overflow was reported is
+    /// older than the snapshot and is dropped; only what arrives after the
+    /// queue emptied is delivered after `ResyncEnd` (#464). Taken first,
+    /// the snapshot was followed by the stale `NewAddress` of an address
+    /// whose `DelAddress` the overflow had dropped.
+    #[tokio::test]
+    async fn frames_queued_before_an_overflow_are_not_replayed() {
+        let s = ScriptedStream::steps(vec![
+            Step::Item(Ok(1u32)),
+            Step::Item(Err(enobufs())),
+            Step::Item(Ok(2)), // queued before the overflow: stale
+            Step::Item(Ok(3)), // stale
+            Step::Pending,     // the queue is empty
+            Step::Item(Ok(4)), // after the snapshot
+        ]);
+        let mut stream = events_with_resync(s, || {
+            Box::pin(async move { Ok::<Vec<u32>, crate::Error>(vec![10]) })
+        });
+        let mut got = Vec::new();
+        while let Some(item) = stream.next().await {
+            got.push(item.unwrap());
+        }
+        assert!(matches!(got[0], ResyncedEvent::Event(1)));
+        assert!(got[1].is_resync_start());
+        assert!(matches!(got[2], ResyncedEvent::Resynced(10)));
+        assert!(got[3].is_resync_end());
+        assert!(matches!(got[4], ResyncedEvent::Event(4)));
+        assert_eq!(got.len(), 5, "the stale 2 and 3 were dropped");
+    }
+
     #[tokio::test]
     async fn resync_stream_handles_multiple_enobufs_recoveries() {
-        let s = ScriptedStream {
-            items: vec![
-                Ok(1u32),
-                Err(enobufs()),
-                Ok(2),
-                Err(enobufs()),
-                Ok(3),
-            ]
-            .into(),
-        };
+        let s = ScriptedStream::new(vec![Ok(1u32), Err(enobufs()), Ok(2), Err(enobufs()), Ok(3)]);
         let mut call_count = 0;
         let mut stream = events_with_resync(s, move || {
             call_count += 1;

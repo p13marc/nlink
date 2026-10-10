@@ -285,3 +285,78 @@ async fn test_ipv6_address_events() -> Result<()> {
     expect_event(&mut events, WITHIN, "NewAddress fd00::1", new_address(ip.into())).await?;
     Ok(())
 }
+
+/// After an overflow the watch-cache equals a fresh dump. The resync took
+/// its snapshot without draining the socket, then delivered the frames
+/// queued before the overflow on top of it — the `NewLink` of a link whose
+/// `DelLink` the overflow had dropped, kept forever (#464).
+#[tokio::test]
+async fn a_resynced_mirror_equals_a_fresh_dump() -> Result<()> {
+    use nlink::netlink::resync::ResyncMarker;
+    use nlink::netlink::resync::{ConnectionFactory, ResyncedEvent};
+    use nlink::netlink::{Route, namespace};
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+    use tokio_stream::StreamExt;
+    require_root!();
+    nlink::require_module!("dummy");
+
+    let ns = TestNamespace::new("resync-drain")?;
+    let name = ns.name().to_string();
+    let factory: ConnectionFactory<Route> = Arc::new(move || {
+        let name = name.clone();
+        Box::pin(async move { namespace::connection_for::<Route>(&name) })
+    });
+    let conn = ns.connection()?;
+    conn.socket().set_rcvbuf(1024)?;
+    let mut stream = conn.into_events_with_resync(factory).await?;
+
+    // A burst the tiny buffer cannot hold, read nothing meanwhile: links
+    // that come and go, and some that stay.
+    let other = ns.connection()?;
+    // It starts with a link that goes again: what the full buffer holds is
+    // that link's NewLink, and the DelLink is what the overflow drops.
+    for i in 1..=300 {
+        let name = format!("t{i}");
+        other.add_link(DummyLink::new(name.as_str())).await?;
+        if i % 10 != 0 {
+            other.del_link(name.as_str()).await?;
+        }
+    }
+
+    let mut mirror: BTreeSet<String> = BTreeSet::new();
+    let mut resyncs = 0;
+    loop {
+        let next = tokio::time::timeout(Duration::from_secs(1), stream.next()).await;
+        let Ok(Some(item)) = next else { break };
+        match item? {
+            ResyncedEvent::Marker(ResyncMarker::ResyncStart) => {
+                resyncs += 1;
+                mirror.clear();
+            }
+            ResyncedEvent::Event(NetworkEvent::NewLink(l))
+            | ResyncedEvent::Resynced(NetworkEvent::NewLink(l)) => {
+                mirror.extend(l.name().map(str::to_string));
+            }
+            ResyncedEvent::Event(NetworkEvent::DelLink(l)) => {
+                if let Some(n) = l.name() {
+                    mirror.remove(n);
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        resyncs > 0,
+        "the burst should have overflowed the 1 KiB buffer"
+    );
+    let fresh: BTreeSet<String> = ns
+        .connection()?
+        .get_links()
+        .await?
+        .iter()
+        .filter_map(|l| l.name().map(str::to_string))
+        .collect();
+    assert_eq!(mirror, fresh);
+    Ok(())
+}
