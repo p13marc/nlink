@@ -438,10 +438,12 @@ impl<'a> Batch<'a> {
 
                             if header.is_error() {
                                 let err = NlMsgError::from_bytes(payload)?;
+                                err.warn_if_ack_warns(header.nlmsg_flags, payload);
                                 if err.is_ack() {
                                     results[idx] = Some(Ok(()));
                                 } else {
-                                    results[idx] = Some(Err(err.into_error(payload)));
+                                    results[idx] =
+                                        Some(Err(err.to_error(header.nlmsg_flags, payload)));
                                 }
                                 remaining -= 1;
                             }

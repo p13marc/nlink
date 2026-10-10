@@ -216,8 +216,9 @@ where
 
         if header.is_error() {
             let err = NlMsgError::from_bytes(payload)?;
+            err.warn_if_ack_warns(header.nlmsg_flags, payload);
             if !err.is_ack() {
-                return Err(err.into_error(payload));
+                return Err(err.to_error(header.nlmsg_flags, payload));
             }
             continue;
         }
@@ -317,7 +318,8 @@ where
                         if err.is_ack() {
                             continue;
                         }
-                        self.pending.push_back(Err(err.into_error(payload)));
+                        self.pending
+                            .push_back(Err(err.to_error(header.nlmsg_flags, payload)));
                         self.errored = true;
                         return;
                     }

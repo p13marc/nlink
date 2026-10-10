@@ -288,7 +288,8 @@ impl<'a, P: ProtocolState, T: FromNetlink + Unpin> DumpStream<'a, P, T> {
                         // itself failed. Always fuse here regardless
                         // of skip_malformed; the caller wants to know
                         // their dump errored at the source.
-                        self.pending.push_back(Err(err.into_error(payload)));
+                        self.pending
+                            .push_back(Err(err.to_error(header.nlmsg_flags, payload)));
                         self.errored = true;
                         return;
                     }

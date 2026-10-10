@@ -1028,6 +1028,7 @@ impl Connection<Nftables> {
 
                     if header.is_error() {
                         let err = NlMsgError::from_bytes(payload)?;
+                        err.warn_if_ack_warns(header.nlmsg_flags, payload);
                         if err.is_ack() {
                             // (2) Only the BATCH_END ACK means the batch
                             //     committed. Per-op ACKs can fire mid-batch
@@ -1040,7 +1041,7 @@ impl Connection<Nftables> {
                         // (3) Non-ack error — the kernel rejected an op and
                         //     the batch will not commit. Surface immediately,
                         //     with the op's seq for context.
-                        return Err(err.into_error(payload));
+                        return Err(err.to_error(header.nlmsg_flags, payload));
                     }
 
                     // NLMSG_DONE is a *dump* terminator; nfnetlink never emits
