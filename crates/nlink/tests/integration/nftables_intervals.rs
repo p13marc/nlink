@@ -2,53 +2,15 @@
 //! traffic: a range matches its ends and nothing past them.
 
 use std::net::Ipv4Addr;
-use std::time::Duration;
 
 use nlink::netlink::nftables::config::NftablesConfig;
 use nlink::netlink::nftables::types::{
     Chain, ChainType, Family, Hook, PacketField, Priority, Rule, Set, SetElement, SetKeyType,
 };
-use nlink::netlink::{Connection, Nftables, Route, namespace};
+use nlink::netlink::{Connection, Nftables};
 
-use crate::common::TestNamespace;
-
-async fn with_timeout<F>(body: F) -> nlink::Result<()>
-where
-    F: std::future::Future<Output = nlink::Result<()>>,
-{
-    match tokio::time::timeout(Duration::from_secs(30), body).await {
-        Ok(result) => result,
-        Err(_elapsed) => Err(nlink::Error::Timeout),
-    }
-}
-
-fn nft_in_ns(ns: &TestNamespace) -> nlink::Result<Connection<Nftables>> {
-    namespace::connection_for(ns.name())
-}
-
-async fn lo_up(ns: &TestNamespace) -> nlink::Result<()> {
-    let route: Connection<Route> = namespace::connection_for(ns.name())?;
-    let lo = route
-        .get_link_by_name("lo")
-        .await?
-        .expect("every netns has a loopback device");
-    route.set_link_up_by_index(lo.ifindex()).await
-}
-
-/// Send one UDP datagram from inside `ns` to each of `targets`.
-fn send_udp(ns: &TestNamespace, targets: &[&str]) {
-    let name = ns.name().to_string();
-    let targets: Vec<std::net::SocketAddr> = targets.iter().map(|t| t.parse().unwrap()).collect();
-    std::thread::spawn(move || {
-        let _ns = namespace::enter(&name).expect("enter test netns");
-        let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
-        for target in targets {
-            let _ = socket.send_to(b"nlink", target);
-        }
-    })
-    .join()
-    .expect("UDP thread panicked");
-}
+use crate::common::traffic::{lo_up, send_udp};
+use crate::common::{TestNamespace, with_timeout};
 
 /// `ip t` with an output chain counting UDP whose `field` is in `set`.
 async fn counting_chain(
@@ -98,7 +60,7 @@ async fn a_port_range_matches_its_ends_and_nothing_past_them() -> nlink::Result<
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-iv-port")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         lo_up(&ns).await?;
@@ -108,6 +70,7 @@ async fn a_port_range_matches_its_ends_and_nothing_past_them() -> nlink::Result<
         send_udp(
             &ns,
             &["127.0.0.1:999", "127.0.0.1:1000", "127.0.0.1:2000", "127.0.0.1:2001"],
+            1,
         );
         assert_eq!(counted(&conn).await?, 2);
         Ok(())
@@ -122,7 +85,7 @@ async fn a_prefix_matches_its_addresses_only() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-iv-prefix")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         lo_up(&ns).await?;
@@ -132,6 +95,7 @@ async fn a_prefix_matches_its_addresses_only() -> nlink::Result<()> {
         send_udp(
             &ns,
             &["127.0.0.3:9", "127.0.0.4:9", "127.0.0.7:9", "127.0.0.8:9"],
+            1,
         );
         assert_eq!(counted(&conn).await?, 2, "only .4 and .7 are in the /30");
         Ok(())
@@ -148,14 +112,14 @@ async fn a_single_address_in_an_interval_set_is_just_that_address() -> nlink::Re
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-iv-single")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         lo_up(&ns).await?;
         let set = interval_set("n", SetKeyType::Ipv4Addr);
         let one = SetElement::ipv4(Ipv4Addr::new(127, 0, 0, 10));
         counting_chain(&conn, &set, &[one], PacketField::Ip4Daddr).await?;
-        send_udp(&ns, &["127.0.0.10:9", "127.0.0.11:9", "127.0.0.200:9"]);
+        send_udp(&ns, &["127.0.0.10:9", "127.0.0.11:9", "127.0.0.200:9"], 1);
         assert_eq!(counted(&conn).await?, 1);
         Ok(())
     })
@@ -184,7 +148,7 @@ async fn declared_ranges_converge_and_change_one_at_a_time() -> nlink::Result<()
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-iv-decl")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         let single = SetElement::ipv4(Ipv4Addr::new(192, 0, 2, 7));

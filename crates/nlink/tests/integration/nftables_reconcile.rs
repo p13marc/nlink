@@ -31,26 +31,9 @@ use std::time::Duration;
 
 use nlink::netlink::nftables::config::{NftDiffOptions, NftablesConfig, ReconcileOptions};
 use nlink::netlink::nftables::types::{ChainType, Family, Hook, Policy, Priority, SetKeyType};
-use nlink::netlink::{Connection, Nftables, namespace};
+use nlink::netlink::{Nftables, namespace};
 
-use crate::common::TestNamespace;
-
-/// Wrap a test body in a 30-second timeout. On expiry, fail
-/// the test with `Error::Timeout` so CI surfaces the hang as a
-/// clear failure (not an indefinite job hang).
-async fn with_timeout<F>(body: F) -> nlink::Result<()>
-where
-    F: std::future::Future<Output = nlink::Result<()>>,
-{
-    match tokio::time::timeout(Duration::from_secs(30), body).await {
-        Ok(result) => result,
-        Err(_elapsed) => Err(nlink::Error::Timeout),
-    }
-}
-
-fn nft_in_ns(ns: &TestNamespace) -> nlink::Result<Connection<Nftables>> {
-    namespace::connection_for(ns.name())
-}
+use crate::common::{TestNamespace, with_timeout};
 
 /// Build a canonical "filter / input" config with N keyed rules.
 fn cfg_with_n_rules(n: usize) -> NftablesConfig {
@@ -77,7 +60,7 @@ async fn reconcile_empty_to_full_applies_everything() -> nlink::Result<()> {
 
     with_timeout(async {
         let ns = TestNamespace::new("rec-empty-to-full")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
 
         let cfg = cfg_with_n_rules(3);
         let diff = cfg.diff(&nft).await?;
@@ -99,7 +82,7 @@ async fn reconcile_idempotent_reapply_yields_empty_diff() -> nlink::Result<()> {
 
     with_timeout(async {
         let ns = TestNamespace::new("rec-idempotent")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
 
         let cfg = cfg_with_n_rules(2);
         cfg.diff(&nft).await?.apply(&nft).await?;
@@ -141,7 +124,7 @@ async fn reconcile_nat_exprs_without_attributes_are_idempotent() -> nlink::Resul
 
     with_timeout(async {
         let ns = TestNamespace::new("rec-nat-dataless")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
 
         let cfg = NftablesConfig::new().table("nat_dataless", Family::Inet, |t| {
             t.chain("postrouting", |c| {
@@ -188,7 +171,7 @@ async fn reconcile_add_one_rule_in_existing_chain() -> nlink::Result<()> {
 
     with_timeout(async {
         let ns = TestNamespace::new("rec-add-rule")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
 
         cfg_with_n_rules(1).diff(&nft).await?.apply(&nft).await?;
         let bigger = cfg_with_n_rules(2);
@@ -209,7 +192,7 @@ async fn reconcile_replace_one_rule_emits_replace_op() -> nlink::Result<()> {
 
     with_timeout(async {
         let ns = TestNamespace::new("rec-replace")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
 
         cfg_with_n_rules(2).diff(&nft).await?.apply(&nft).await?;
 
@@ -244,7 +227,7 @@ async fn reconcile_delete_one_rule_emits_delete_op() -> nlink::Result<()> {
 
     with_timeout(async {
         let ns = TestNamespace::new("rec-del-rule")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
 
         cfg_with_n_rules(2).diff(&nft).await?.apply(&nft).await?;
 
@@ -273,7 +256,7 @@ async fn reconcile_cascade_delete_table_via_empty_config() -> nlink::Result<()> 
 
     with_timeout(async {
         let ns = TestNamespace::new("rec-cascade")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
 
         cfg_with_n_rules(2).diff(&nft).await?.apply(&nft).await?;
 
@@ -306,7 +289,7 @@ async fn apply_reconcile_succeeds_in_one_attempt_when_uncontended() -> nlink::Re
 
     with_timeout(async {
         let ns = TestNamespace::new("rec-reconcile-once")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
 
         let cfg = cfg_with_n_rules(2);
         let diff = cfg.diff(&nft).await?;
@@ -335,7 +318,7 @@ async fn nat_chain_chain_type_round_trips() -> nlink::Result<()> {
 
     with_timeout(async {
         let ns = TestNamespace::new("nat-chain-type")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
 
         let cfg = nlink::netlink::nftables::config::NftablesConfig::new().table(
             "nat-test",
@@ -392,7 +375,7 @@ async fn netdev_chain_device_round_trips() -> nlink::Result<()> {
         ns.add_dummy("dummy0")?;
         ns.link_up("dummy0")?;
 
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
         let cfg = nlink::netlink::nftables::config::NftablesConfig::new().table(
             "ft",
             Family::Netdev,
@@ -425,7 +408,6 @@ async fn netdev_chain_device_round_trips() -> nlink::Result<()> {
     .await
 }
 
-
 // ============================================================================
 // Plan 181 — list_*_in filter family
 // ============================================================================
@@ -442,7 +424,7 @@ async fn list_in_filters_match_only_target_table() -> nlink::Result<()> {
 
     with_timeout(async {
         let ns = TestNamespace::new("list-in")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
 
         // Build two minimal tables in the Inet family. Each has
         // one chain; t1 also gets a set so the set-filter assertion
@@ -547,7 +529,7 @@ async fn into_events_with_resync_recovers_from_enobufs() -> nlink::Result<()> {
                     .policy(Policy::Accept)
             })
         });
-        let seed = nft_in_ns(&ns)?;
+        let seed = ns.connection_for::<Nftables>()?;
         cfg.diff(&seed).await?.apply(&seed).await?;
         drop(seed);
 
@@ -555,7 +537,7 @@ async fn into_events_with_resync_recovers_from_enobufs() -> nlink::Result<()> {
         // SO_RCVBUFFORCE helper landed in this same plan, so the
         // flood overflows it in a handful of mutations rather
         // than minutes.
-        let event_conn = nft_in_ns(&ns)?;
+        let event_conn = ns.connection_for::<Nftables>()?;
         event_conn.socket().set_rcvbuf(256)?;
 
         // Factory: open fresh Nftables connections inside the
@@ -683,7 +665,7 @@ async fn nftables_snapshot_walks_ruleset() -> nlink::Result<()> {
 
     with_timeout(async {
         let ns = TestNamespace::new("nft-snap")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
 
         // Build a 2-table ruleset so the snapshot has something
         // structural to enumerate.
@@ -780,7 +762,7 @@ async fn dnat_v6_rule_round_trips() -> nlink::Result<()> {
         use std::net::Ipv6Addr;
 
         let ns = TestNamespace::new("dnat-v6")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
 
         let target: Ipv6Addr = "fd30::2".parse().unwrap();
         let cfg = NftablesConfig::new().table("nat6", Family::Ip6, |t| {
@@ -824,7 +806,7 @@ async fn snat_v6_rule_round_trips() -> nlink::Result<()> {
         use std::net::Ipv6Addr;
 
         let ns = TestNamespace::new("snat-v6")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
 
         let target: Ipv6Addr = "fd30::1".parse().unwrap();
         let cfg = NftablesConfig::new().table("nat6", Family::Ip6, |t| {
@@ -867,7 +849,7 @@ async fn inet_addr_matches_round_trip() -> nlink::Result<()> {
         use std::net::{Ipv4Addr, Ipv6Addr};
 
         let ns = TestNamespace::new("inet-addr-rt")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
 
         let v4: Ipv4Addr = "10.1.2.3".parse().unwrap();
         let v6: Ipv6Addr = "2001:db8::1".parse().unwrap();
@@ -906,7 +888,7 @@ async fn inet_icmp_type_matches_round_trip() -> nlink::Result<()> {
 
     with_timeout(async {
         let ns = TestNamespace::new("inet-icmp-rt")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
 
         let cfg = NftablesConfig::new().table("filter_icmp", Family::Inet, |t| {
             t.chain("input", |c| {
@@ -940,7 +922,7 @@ async fn snat_v6_addr_only_round_trips() -> nlink::Result<()> {
     with_timeout(async {
         use std::net::Ipv6Addr;
         let ns = TestNamespace::new("snat-v6-addr")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
         let target: Ipv6Addr = "fd30::1".parse().unwrap();
         let cfg = NftablesConfig::new().table("n", Family::Ip6, |t| {
             t.chain("post", |c| {
@@ -978,7 +960,7 @@ async fn inet_snat_with_prefix_source_round_trips() -> nlink::Result<()> {
     with_timeout(async {
         use std::net::Ipv6Addr;
         let ns = TestNamespace::new("inet-snat-prefix-src")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
         let src_prefix: Ipv6Addr = "fd30:beef::".parse().unwrap();
         let target: Ipv6Addr = "fd30::1".parse().unwrap();
         let cfg = NftablesConfig::new().table("n", Family::Inet, |t| {
@@ -1033,7 +1015,7 @@ async fn reconcile_empty_to_set_with_elements_applies() -> nlink::Result<()> {
 
     with_timeout(async {
         let ns = TestNamespace::new("rec-set-create")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
 
         let cfg = cfg_with_set(&[(10, 0, 0, 1), (10, 0, 0, 2)]);
         let diff = cfg.diff(&nft).await?;
@@ -1062,7 +1044,7 @@ async fn reconcile_set_idempotent_reapply_is_empty() -> nlink::Result<()> {
 
     with_timeout(async {
         let ns = TestNamespace::new("rec-set-idem")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
 
         let cfg = cfg_with_set(&[(10, 0, 0, 1), (10, 0, 0, 2)]);
         cfg.diff(&nft).await?.apply(&nft).await?;
@@ -1084,7 +1066,7 @@ async fn reconcile_add_one_set_element() -> nlink::Result<()> {
 
     with_timeout(async {
         let ns = TestNamespace::new("rec-set-add-elem")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
 
         cfg_with_set(&[(10, 0, 0, 1)])
             .diff(&nft)
@@ -1128,7 +1110,7 @@ async fn reconcile_remove_one_set_element() -> nlink::Result<()> {
 
     with_timeout(async {
         let ns = TestNamespace::new("rec-set-del-elem")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
 
         cfg_with_set(&[(10, 0, 0, 1), (10, 0, 0, 2)])
             .diff(&nft)
@@ -1168,7 +1150,7 @@ async fn reconcile_delete_set_when_removed_from_config() -> nlink::Result<()> {
 
     with_timeout(async {
         let ns = TestNamespace::new("rec-set-delete")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
 
         cfg_with_set(&[(10, 0, 0, 1)])
             .diff(&nft)
@@ -1200,7 +1182,7 @@ async fn reconcile_changes_a_live_chain_policy() -> nlink::Result<()> {
 
     with_timeout(async {
         let ns = TestNamespace::new("rec-chain-policy")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
         let cfg = |policy: Policy| {
             NftablesConfig::new().table("filter_pol", Family::Inet, move |t| {
                 t.chain("input", move |c| {

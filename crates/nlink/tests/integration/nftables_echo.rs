@@ -14,7 +14,6 @@
 //! arm instead.
 
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::time::Duration;
 
 use nlink::netlink::nftables::config::NftablesConfig;
 use nlink::netlink::nftables::types::{
@@ -23,40 +22,22 @@ use nlink::netlink::nftables::types::{
 use nlink::netlink::nftables::{
     CmpOp, Expr, LogExpr, LookupExpr, MetaKey, NFT_REJECT_TCP_RST, PayloadBase, Register, Verdict,
 };
-use nlink::netlink::{Connection, Nftables, namespace};
+use nlink::netlink::{Connection, Nftables};
 use nlink::TcHandle;
 
-use crate::common::TestNamespace;
+use crate::common::converge::converges;
+use crate::common::{TestNamespace, with_timeout};
 
-async fn with_timeout<F>(body: F) -> nlink::Result<()>
-where
-    F: std::future::Future<Output = nlink::Result<()>>,
-{
-    match tokio::time::timeout(Duration::from_secs(30), body).await {
-        Ok(result) => result,
-        Err(_elapsed) => Err(nlink::Error::Timeout),
-    }
-}
-
-fn nft_in_ns(ns: &TestNamespace) -> nlink::Result<Connection<Nftables>> {
-    namespace::connection_for(ns.name())
-}
-
-/// Apply `cfg`, then assert the next two diffs are empty.
+/// Apply `cfg`; the diffs after it, and a second apply, must all be empty.
 async fn assert_reconciles(conn: &Connection<Nftables>, cfg: &NftablesConfig) -> nlink::Result<()> {
-    cfg.diff(conn).await?.apply(conn).await?;
-    let again = cfg.diff(conn).await?;
-    assert!(
-        again.is_empty(),
-        "every rule below was written by nlink and echoed by the kernel \
-         unchanged, so the second diff must be empty. Rules it lists are \
-         ones whose writer disagrees with the kernel's dump: {again}"
-    );
-    // A third diff after the (no-op) apply of the second, in case apply
-    // itself perturbs a rule.
-    again.apply(conn).await?;
-    let third = cfg.diff(conn).await?;
-    assert!(third.is_empty(), "third diff must be empty too: {third}");
+    if let Err(why) = converges(conn, cfg, false).await {
+        panic!(
+            "every rule here was written by nlink and echoed by the kernel \
+             unchanged, so nothing may be left to do after an apply. A rule \
+             the diff lists is one whose writer disagrees with the kernel's \
+             dump: {why}"
+        );
+    }
     Ok(())
 }
 
@@ -67,7 +48,7 @@ async fn every_filter_rule_shape_reconciles() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables", "nft_limit", "nft_log", "nft_reject_inet", "nft_ct");
 
     let ns = TestNamespace::new("nft-echo-filter")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     let v4: Ipv4Addr = "192.0.2.0".parse().unwrap();
     let v6: Ipv6Addr = "2001:db8::".parse().unwrap();
@@ -211,7 +192,7 @@ async fn every_nat_rule_shape_reconciles() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables", "nft_nat", "nft_masq", "nft_redir");
 
     let ns = TestNamespace::new("nft-echo-nat")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         let cfg = NftablesConfig::new().table("nat_shapes", Family::Inet, |t| {
@@ -268,7 +249,7 @@ async fn flow_offload_rule_installs_and_reconciles() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables", "nf_flow_table", "nft_flow_offload");
 
     let ns = TestNamespace::new("nft-echo-flow")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         let cfg = NftablesConfig::new().table("flow", Family::Inet, |t| {

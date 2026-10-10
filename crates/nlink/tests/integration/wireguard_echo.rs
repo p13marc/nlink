@@ -14,9 +14,8 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use nlink::netlink::genl::wireguard::{AllowedIp, WireguardConfig};
-use nlink::netlink::{Connection, Route, Wireguard};
 
-use crate::common::TestNamespace;
+use crate::common::converge::{assert_converges, case};
 
 const UNCLAMPED: [u8; 32] = [0xaa; 32];
 
@@ -30,83 +29,6 @@ fn clamped(mut key: [u8; 32]) -> [u8; 32] {
 
 fn peer_key(byte: u8) -> [u8; 32] {
     [byte; 32]
-}
-
-struct Case {
-    name: &'static str,
-    steps: Vec<WireguardConfig>,
-}
-
-fn case(name: &'static str, steps: Vec<WireguardConfig>) -> Case {
-    Case { name, steps }
-}
-
-/// Bootstrap the links, apply, and check convergence: the diff after the
-/// apply is empty, a second apply writes nothing, the diff after that is
-/// empty.
-async fn converges(
-    route: &Connection<Route>,
-    wg: &Connection<Wireguard>,
-    cfg: &WireguardConfig,
-) -> Result<(), String> {
-    cfg.ensure_devices(route)
-        .await
-        .map_err(|e| format!("ensure_devices failed: {e}"))?;
-    let _first = cfg
-        .apply(wg)
-        .await
-        .map_err(|e| format!("first apply failed: {e}"))?;
-    let diff = cfg
-        .diff(wg)
-        .await
-        .map_err(|e| format!("diff after apply failed: {e}"))?;
-    if !diff.is_empty() {
-        return Err(format!("diff after apply is not empty:\n{diff}"));
-    }
-    let second = cfg
-        .apply(wg)
-        .await
-        .map_err(|e| format!("second apply failed: {e}"))?;
-    if second.total_writes() != 0 {
-        return Err(format!("second apply wrote {second:?}"));
-    }
-    let third = cfg
-        .diff(wg)
-        .await
-        .map_err(|e| format!("diff after second apply failed: {e}"))?;
-    if !third.is_empty() {
-        return Err(format!("diff after second apply is not empty:\n{third}"));
-    }
-    Ok(())
-}
-
-async fn assert_converges(cases: Vec<Case>) -> nlink::Result<()> {
-    let mut failures = Vec::new();
-    for case in cases {
-        let ns = TestNamespace::new("wge")?;
-        let route = ns.connection()?;
-        let wg = ns.connection_for_async::<Wireguard>().await?;
-        for (i, step) in case.steps.iter().enumerate() {
-            let outcome =
-                match tokio::time::timeout(Duration::from_secs(30), converges(&route, &wg, step))
-                    .await
-                {
-                    Ok(outcome) => outcome,
-                    Err(_elapsed) => Err("timed out".to_string()),
-                };
-            if let Err(why) = outcome {
-                failures.push(format!("[{}] step {}: {why}", case.name, i + 1));
-                break;
-            }
-        }
-    }
-    assert!(
-        failures.is_empty(),
-        "{} case(s) did not converge:\n\n{}",
-        failures.len(),
-        failures.join("\n\n")
-    );
-    Ok(())
 }
 
 fn v4_endpoint() -> SocketAddr {
@@ -261,7 +183,7 @@ async fn every_wireguard_shape_converges() -> nlink::Result<()> {
             ],
         ),
     ];
-    assert_converges(cases).await
+    assert_converges("wge", cases).await
 }
 
 /// A `wg-quick` profile as people write them: an unclamped private key
@@ -289,5 +211,5 @@ AllowedIPs = 10.200.0.2/32, 10.201.0.9/16, fd00:200::1/64
 PersistentKeepalive = 15
 ";
     let cfg = WireguardConfig::from_wg_quick("wg0", profile)?;
-    assert_converges(vec![case("wg-quick", vec![cfg])]).await
+    assert_converges("wge", vec![case("wg-quick", vec![cfg])]).await
 }

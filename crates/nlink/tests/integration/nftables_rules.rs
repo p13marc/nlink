@@ -4,50 +4,12 @@
 //! up in declared order, and a rule nobody changed must be left alone: not
 //! replaced (which resets its counters), not duplicated, not moved.
 
-use std::time::Duration;
-
 use nlink::netlink::nftables::config::NftablesConfig;
 use nlink::netlink::nftables::types::{ChainType, Family, Hook, Priority, Rule};
-use nlink::netlink::{Connection, Nftables, Route, namespace};
+use nlink::netlink::{Connection, Nftables};
 
-use crate::common::TestNamespace;
-
-async fn with_timeout<F>(body: F) -> nlink::Result<()>
-where
-    F: std::future::Future<Output = nlink::Result<()>>,
-{
-    match tokio::time::timeout(Duration::from_secs(30), body).await {
-        Ok(result) => result,
-        Err(_elapsed) => Err(nlink::Error::Timeout),
-    }
-}
-
-fn nft_in_ns(ns: &TestNamespace) -> nlink::Result<Connection<Nftables>> {
-    namespace::connection_for(ns.name())
-}
-
-async fn lo_up(ns: &TestNamespace) -> nlink::Result<()> {
-    let route: Connection<Route> = namespace::connection_for(ns.name())?;
-    let lo = route
-        .get_link_by_name("lo")
-        .await?
-        .expect("every netns has a loopback device");
-    route.set_link_up_by_index(lo.ifindex()).await
-}
-
-/// Send `count` UDP datagrams from inside `ns` to 127.0.0.1:9.
-fn send_udp(ns: &TestNamespace, count: usize) {
-    let name = ns.name().to_string();
-    std::thread::spawn(move || {
-        let _ns = namespace::enter(&name).expect("enter test netns");
-        let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
-        for _ in 0..count {
-            let _ = socket.send_to(b"nlink", "127.0.0.1:9");
-        }
-    })
-    .join()
-    .expect("UDP thread panicked");
-}
+use crate::common::traffic::{lo_up, send_udp};
+use crate::common::{TestNamespace, with_timeout};
 
 /// A declared rule: its key and how to build its body.
 type KeyedRule = (&'static str, fn(Rule) -> Rule);
@@ -112,7 +74,7 @@ async fn a_rule_declared_between_installed_rules_lands_there() -> nlink::Result<
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-rule-mid")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         lo_up(&ns).await?;
@@ -129,7 +91,7 @@ async fn a_rule_declared_between_installed_rules_lands_there() -> nlink::Result<
         after.diff(&conn).await?.apply(&conn).await?;
 
         assert_eq!(keys(&conn).await?, ["first", "count9", "drop9"]);
-        send_udp(&ns, 3);
+        send_udp(&ns, &["127.0.0.1:9"], 3);
         assert!(
             packets_of(&conn, "count9").await? >= 3,
             "count9 never saw the datagrams: it is not ahead of drop9",
@@ -149,7 +111,7 @@ async fn reordering_moves_only_the_rules_that_must_move() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-rule-reorder")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         let a = |r: Rule| r.match_udp_dport(1).counter();
@@ -188,7 +150,7 @@ async fn a_counter_that_has_counted_is_left_alone() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-rule-counter")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         lo_up(&ns).await?;
@@ -196,7 +158,7 @@ async fn a_counter_that_has_counted_is_left_alone() -> nlink::Result<()> {
             vec![("count9", |r| r.match_udp_dport(9).counter())];
         let config = cfg(counted);
         config.diff(&conn).await?.apply(&conn).await?;
-        send_udp(&ns, 4);
+        send_udp(&ns, &["127.0.0.1:9"], 4);
         assert!(packets_of(&conn, "count9").await? >= 4);
 
         let again = config.diff(&conn).await?;
@@ -219,7 +181,7 @@ async fn a_keyed_rule_with_a_comment_keeps_its_identity() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-rule-comment")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         let commented: Vec<KeyedRule> =
@@ -252,7 +214,7 @@ async fn an_overlong_key_is_an_error() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-rule-longkey")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         let key = "k".repeat(122);
@@ -279,7 +241,7 @@ async fn unkeyed_rules_converge() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-rule-unkeyed")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         let config = NftablesConfig::new().table("t", Family::Ip, |t| {
@@ -312,7 +274,7 @@ async fn duplicate_keyed_rules_are_cleaned_up() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-rule-dup")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         let one: Vec<KeyedRule> = vec![("k", |r| r.match_udp_dport(1))];
@@ -348,7 +310,7 @@ async fn an_exclusive_chain_removes_foreign_rules() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-rule-excl")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         let config = NftablesConfig::new().table("t", Family::Ip, |t| {

@@ -12,27 +12,11 @@
 //! `Connection<Nftables>` dump/commit path that hung the
 //! reconcile suite, so the timeout is preventive.
 
-use std::time::Duration;
-
 use nlink::netlink::nftables::Flowtable;
 use nlink::netlink::nftables::types::Family;
-use nlink::netlink::{Connection, Nftables, namespace};
+use nlink::netlink::Nftables;
 
-use crate::common::TestNamespace;
-
-async fn with_timeout<F>(body: F) -> nlink::Result<()>
-where
-    F: std::future::Future<Output = nlink::Result<()>>,
-{
-    match tokio::time::timeout(Duration::from_secs(30), body).await {
-        Ok(result) => result,
-        Err(_elapsed) => Err(nlink::Error::Timeout),
-    }
-}
-
-fn nft_in_ns(ns: &TestNamespace) -> nlink::Result<Connection<Nftables>> {
-    namespace::connection_for(ns.name())
-}
+use crate::common::{TestNamespace, with_timeout};
 
 #[tokio::test]
 async fn add_flowtable_basic_roundtrips() -> nlink::Result<()> {
@@ -41,7 +25,7 @@ async fn add_flowtable_basic_roundtrips() -> nlink::Result<()> {
 
     with_timeout(async {
         let ns = TestNamespace::new("ft-basic")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
 
         nft.add_table("filter", Family::Inet).await?;
 
@@ -69,7 +53,7 @@ async fn flowtable_hw_offload_flag_round_trips() -> nlink::Result<()> {
 
     with_timeout(async {
         let ns = TestNamespace::new("ft-hwoff")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
 
         nft.add_table("filter", Family::Inet).await?;
 

@@ -19,21 +19,7 @@ use nlink::netlink::{
     namespace,
 };
 
-use crate::common::TestNamespace;
-
-/// 30-second timeout wrapper. Same shape as the existing
-/// `network_config_apply.rs` helper — if a backfill test hangs
-/// (likely the kernel-side surface broke), the CI gate fires
-/// `Error::Timeout` rather than a 60-minute job timeout.
-async fn with_timeout<F>(body: F) -> Result<()>
-where
-    F: std::future::Future<Output = Result<()>>,
-{
-    match tokio::time::timeout(Duration::from_secs(30), body).await {
-        Ok(result) => result,
-        Err(_elapsed) => Err(nlink::Error::Timeout),
-    }
-}
+use crate::common::{TestNamespace, with_timeout};
 
 fn route_in_ns(ns: &TestNamespace) -> Result<Connection<Route>> {
     namespace::connection_for::<Route>(ns.name())

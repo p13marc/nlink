@@ -22,24 +22,12 @@ use nlink::netlink::filter::FwFilter;
 use nlink::netlink::link::DummyLink;
 use nlink::netlink::route::{Ipv4Route, RouteMetrics};
 use nlink::netlink::tc::{HtbClassConfig, HtbQdiscConfig};
-use nlink::netlink::{Connection, Nftables, Route, namespace};
+use nlink::netlink::{Connection, Nftables, Route};
 use nlink::{Rate, TcHandle};
 
-use crate::common::TestNamespace;
-
-async fn with_timeout<F>(body: F) -> nlink::Result<()>
-where
-    F: std::future::Future<Output = nlink::Result<()>>,
-{
-    match tokio::time::timeout(Duration::from_secs(30), body).await {
-        Ok(result) => result,
-        Err(_elapsed) => Err(nlink::Error::Timeout),
-    }
-}
-
-fn nft_in_ns(ns: &TestNamespace) -> nlink::Result<Connection<Nftables>> {
-    namespace::connection_for(ns.name())
-}
+use crate::common::counters::{class_stats, rule_packets};
+use crate::common::traffic::{lo_up, send_tcp_syns, send_udp};
+use crate::common::{TestNamespace, with_timeout};
 
 async fn add_mangle_chain(conn: &Connection<Nftables>, hook: Hook) -> nlink::Result<()> {
     conn.add_table("t", Family::Ip).await?;
@@ -53,54 +41,6 @@ async fn add_mangle_chain(conn: &Connection<Nftables>, hook: Hook) -> nlink::Res
     .await
 }
 
-/// Bring `lo` up inside `ns`, so locally generated traffic can flow.
-async fn lo_up(ns: &TestNamespace) -> nlink::Result<()> {
-    let route: Connection<Route> = namespace::connection_for(ns.name())?;
-    let lo = route
-        .get_link_by_name("lo")
-        .await?
-        .expect("every netns has a loopback device");
-    route.set_link_up_by_index(lo.ifindex()).await
-}
-
-/// Send one TCP SYN from inside `ns` to 127.0.0.1:9. Nothing listens, so
-/// the answer is a RST — by then the SYN has crossed `output` and
-/// `postrouting`, which is all these tests need.
-///
-/// Entering a netns affects the whole thread, so this runs on a thread of
-/// its own that exits afterwards instead of restoring.
-fn send_syn(ns: &TestNamespace) {
-    send_syn_to(ns, "127.0.0.1:9", Duration::from_secs(1));
-}
-
-/// Send one TCP SYN from inside `ns` to `target`, giving up after
-/// `timeout` (an off-link target never answers; the SYN is out by then).
-fn send_syn_to(ns: &TestNamespace, target: &str, timeout: Duration) {
-    let name = ns.name().to_string();
-    let target = target.parse().unwrap();
-    std::thread::spawn(move || {
-        let _ns = namespace::enter(&name).expect("enter test netns");
-        let _ = std::net::TcpStream::connect_timeout(&target, timeout);
-    })
-    .join()
-    .expect("SYN thread panicked");
-}
-
-/// Send `count` UDP datagrams from inside `ns` to `target`.
-fn send_udp(ns: &TestNamespace, target: &str, count: usize) {
-    let name = ns.name().to_string();
-    let target: std::net::SocketAddr = target.parse().unwrap();
-    std::thread::spawn(move || {
-        let _ns = namespace::enter(&name).expect("enter test netns");
-        let socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind");
-        for _ in 0..count {
-            socket.send_to(b"nlink", target).expect("send");
-        }
-    })
-    .join()
-    .expect("UDP thread panicked");
-}
-
 /// A `dummy0` inside `ns`, up, with 10.98.0.1/24 — an egress device with
 /// no peer: what leaves through it is counted and dropped.
 async fn add_dummy(ns: &TestNamespace) -> nlink::Result<Connection<Route>> {
@@ -111,21 +51,6 @@ async fn add_dummy(ns: &TestNamespace) -> nlink::Result<Connection<Route>> {
         .add_address(Ipv4Address::new("dummy0", Ipv4Addr::new(10, 98, 0, 1), 24))
         .await?;
     Ok(route)
-}
-
-/// Packets counted by the `index`-th rule of `chain` (declaration order).
-async fn rule_packets(
-    conn: &Connection<Nftables>,
-    chain: &str,
-    index: usize,
-) -> nlink::Result<u64> {
-    let rules = conn.list_rules("t", Family::Ip).await?;
-    let rule = rules
-        .iter()
-        .filter(|r| r.chain == chain)
-        .nth(index)
-        .unwrap_or_else(|| panic!("no rule #{index} in chain {chain}"));
-    Ok(rule.counter().expect("rule has a counter").0)
 }
 
 /// An `output` and a `postrouting` mangle chain in table `ip t`.
@@ -179,16 +104,6 @@ async fn add_dummy_with_htb(ns: &TestNamespace) -> nlink::Result<Connection<Rout
     Ok(route)
 }
 
-/// Packets HTB class `class` on `dummy0` has sent.
-async fn class_packets(route: &Connection<Route>, class: TcHandle) -> nlink::Result<u64> {
-    let classes = route.get_classes_by_name("dummy0").await?;
-    Ok(classes
-        .iter()
-        .find(|c| c.handle() == class)
-        .unwrap_or_else(|| panic!("class {class} exists"))
-        .packets())
-}
-
 /// `tcp option maxseg size == <mss> counter` in `chain`, as raw
 /// expressions — the load form of `exthdr`, which no `Rule` helper emits.
 fn count_mss(chain: &str, mss: u16) -> Rule {
@@ -228,7 +143,7 @@ async fn meta_mark_set_round_trips_through_the_kernel() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-markset")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         add_mangle_chain(&conn, Hook::Postrouting).await?;
@@ -272,7 +187,7 @@ async fn tcp_mss_clamp_round_trips_through_the_kernel() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-mss")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         add_mangle_chain(&conn, Hook::Forward).await?;
@@ -324,7 +239,7 @@ async fn tcp_mss_clamp_lowers_a_syn_and_never_raises_it() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-mss-live")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         lo_up(&ns).await?;
@@ -339,18 +254,18 @@ async fn tcp_mss_clamp_lowers_a_syn_and_never_raises_it() -> nlink::Result<()> {
             .await?;
         conn.add_rule(count_mss("post", 1360)).await?;
 
-        send_syn(&ns);
+        send_tcp_syns(&ns, &["127.0.0.1:9"], 1, Duration::from_secs(1));
 
         assert!(
-            rule_packets(&conn, "out", 0).await? >= 1,
+            rule_packets(&conn, "t", Family::Ip, "out", 0).await? >= 1,
             "clamp to 1360 never saw the SYN"
         );
         assert!(
-            rule_packets(&conn, "out", 1).await? >= 1,
+            rule_packets(&conn, "t", Family::Ip, "out", 1).await? >= 1,
             "a clamp that does not lower the MSS ended rule evaluation",
         );
         assert!(
-            rule_packets(&conn, "post", 0).await? >= 1,
+            rule_packets(&conn, "t", Family::Ip, "post", 0).await? >= 1,
             "the SYN left with an MSS other than 1360",
         );
         Ok(())
@@ -365,7 +280,7 @@ async fn meta_mark_set_marks_the_packet() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-mark-live")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         lo_up(&ns).await?;
@@ -385,10 +300,10 @@ async fn meta_mark_set_marks_the_packet() -> nlink::Result<()> {
         )
         .await?;
 
-        send_syn(&ns);
+        send_tcp_syns(&ns, &["127.0.0.1:9"], 1, Duration::from_secs(1));
 
         assert!(
-            rule_packets(&conn, "post", 0).await? >= 1,
+            rule_packets(&conn, "t", Family::Ip, "post", 0).await? >= 1,
             "no packet left with mark 0x10",
         );
         Ok(())
@@ -403,7 +318,7 @@ async fn set_size_is_enforced_by_the_kernel() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-setsize")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         conn.add_table("t", Family::Ip).await?;
@@ -437,7 +352,7 @@ async fn reconcile_statements_are_idempotent() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-stmt-rec")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         let cfg = NftablesConfig::new().table("mangle", Family::Ip, |t| {
@@ -469,7 +384,7 @@ async fn masked_mark_set_keeps_the_foreign_bits() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-xmark-live")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         lo_up(&ns).await?;
@@ -483,14 +398,14 @@ async fn masked_mark_set_keeps_the_foreign_bits() -> nlink::Result<()> {
         conn.add_rule(post().match_mark_masked(0x34, 0xff).counter())
             .await?;
 
-        send_syn(&ns);
+        send_tcp_syns(&ns, &["127.0.0.1:9"], 1, Duration::from_secs(1));
 
         assert!(
-            rule_packets(&conn, "post", 0).await? >= 1,
+            rule_packets(&conn, "t", Family::Ip, "post", 0).await? >= 1,
             "the mark is not 0xff000034: the foreign bits were lost or ours not set",
         );
         assert!(
-            rule_packets(&conn, "post", 1).await? >= 1,
+            rule_packets(&conn, "t", Family::Ip, "post", 1).await? >= 1,
             "match_mark_masked(0x34, 0xff) missed mark 0xff000034",
         );
         Ok(())
@@ -508,7 +423,7 @@ async fn connmark_save_and_restore_carry_the_mark() -> nlink::Result<()> {
     with_timeout(async {
         // Save: packet mark -> conntrack mark.
         let ns = TestNamespace::new("nft-ctsave")?;
-        let conn = nft_in_ns(&ns)?;
+        let conn = ns.connection_for::<Nftables>()?;
         lo_up(&ns).await?;
         add_output_and_postrouting(&conn).await?;
         conn.add_rule(
@@ -526,15 +441,15 @@ async fn connmark_save_and_restore_carry_the_mark() -> nlink::Result<()> {
                 .counter(),
         )
         .await?;
-        send_syn(&ns);
+        send_tcp_syns(&ns, &["127.0.0.1:9"], 1, Duration::from_secs(1));
         assert!(
-            rule_packets(&conn, "post", 0).await? >= 1,
+            rule_packets(&conn, "t", Family::Ip, "post", 0).await? >= 1,
             "the connection did not carry the saved mark 0x20",
         );
 
         // Restore: conntrack mark -> packet mark.
         let ns = TestNamespace::new("nft-ctrestore")?;
-        let conn = nft_in_ns(&ns)?;
+        let conn = ns.connection_for::<Nftables>()?;
         lo_up(&ns).await?;
         add_output_and_postrouting(&conn).await?;
         let out = || Rule::new("t", "out").family(Family::Ip).match_tcp_dport(9);
@@ -547,9 +462,9 @@ async fn connmark_save_and_restore_carry_the_mark() -> nlink::Result<()> {
                 .counter(),
         )
         .await?;
-        send_syn(&ns);
+        send_tcp_syns(&ns, &["127.0.0.1:9"], 1, Duration::from_secs(1));
         assert!(
-            rule_packets(&conn, "post", 0).await? >= 1,
+            rule_packets(&conn, "t", Family::Ip, "post", 0).await? >= 1,
             "the packet did not get the connection's mark 0x30",
         );
         Ok(())
@@ -565,7 +480,7 @@ async fn meta_priority_set_classifies_into_an_htb_class() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables", "sch_htb");
 
     let ns = TestNamespace::new("nft-prio-htb")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         let route = add_dummy_with_htb(&ns).await?;
@@ -578,9 +493,12 @@ async fn meta_priority_set_classifies_into_an_htb_class() -> nlink::Result<()> {
         )
         .await?;
 
-        send_udp(&ns, "10.98.0.3:9", 5);
+        assert_eq!(send_udp(&ns, &["10.98.0.3:9"], 5), 5);
 
-        let sent = class_packets(&route, TcHandle::new(1, 0x10)).await?;
+        let dummy0 = route.get_link_by_name("dummy0").await?.expect("dummy0 exists").ifindex();
+        let (sent, _) = class_stats(&route, dummy0, TcHandle::new(1, 0x10))
+            .await?
+            .expect("class 1:10 exists");
         assert!(
             sent >= 5,
             "class 1:10 saw {sent} packets, not the 5 priority-1:10 datagrams",
@@ -598,7 +516,7 @@ async fn masked_mark_classifies_through_a_fw_filter() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables", "sch_htb", "cls_fw");
 
     let ns = TestNamespace::new("nft-fw-htb")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         let route = add_dummy_with_htb(&ns).await?;
@@ -627,9 +545,12 @@ async fn masked_mark_classifies_through_a_fw_filter() -> nlink::Result<()> {
         conn.add_rule(to_target().set_mark(0xab00_0000)).await?;
         conn.add_rule(to_target().set_mark_masked(0x10, 0xff)).await?;
 
-        send_udp(&ns, "10.98.0.3:9", 5);
+        assert_eq!(send_udp(&ns, &["10.98.0.3:9"], 5), 5);
 
-        let sent = class_packets(&route, TcHandle::new(1, 0x10)).await?;
+        let dummy0 = route.get_link_by_name("dummy0").await?.expect("dummy0 exists").ifindex();
+        let (sent, _) = class_stats(&route, dummy0, TcHandle::new(1, 0x10))
+            .await?
+            .expect("class 1:10 exists");
         assert!(
             sent >= 5,
             "class 1:10 saw {sent} packets: mark 0xab000010 did not reach it through fw 0x10/0xff",
@@ -648,7 +569,7 @@ async fn tcp_mss_clamp_to_pmtu_uses_the_route_mtu() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-pmtu-live")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         let route = add_dummy(&ns).await?;
@@ -672,14 +593,14 @@ async fn tcp_mss_clamp_to_pmtu_uses_the_route_mtu() -> nlink::Result<()> {
         .await?;
         conn.add_rule(count_mss("post", 1360)).await?;
 
-        send_syn_to(&ns, "10.98.0.2:9", Duration::from_millis(300));
+        send_tcp_syns(&ns, &["10.98.0.2:9"], 1, Duration::from_millis(300));
 
         assert!(
-            rule_packets(&conn, "out", 0).await? >= 1,
+            rule_packets(&conn, "t", Family::Ip, "out", 0).await? >= 1,
             "the SYN did not advertise 1460 — the test setup is not what it claims",
         );
         assert!(
-            rule_packets(&conn, "post", 0).await? >= 1,
+            rule_packets(&conn, "t", Family::Ip, "post", 0).await? >= 1,
             "the SYN was not clamped to the path MSS 1360",
         );
         Ok(())
@@ -724,7 +645,7 @@ async fn declared_set_size_applies_and_reconciles() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-dsize")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         let cfg = throttle_cfg(2, &addrs(2));
@@ -753,7 +674,7 @@ async fn declared_set_resize_is_in_place_and_admits_new_elements() -> nlink::Res
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-dresize")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         throttle_cfg(2, &addrs(2))
@@ -803,7 +724,7 @@ async fn recreating_a_set_a_rule_references_converges() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-recreate")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     // Rules bound to the set first, last, two in a row, and between plain
     // ones; `mark` is the value one bound rule sets, so a second config can
@@ -871,7 +792,7 @@ async fn rule_position_inserts_after_the_named_rule() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-position")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         add_mangle_chain(&conn, Hook::Postrouting).await?;

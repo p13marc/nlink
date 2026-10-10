@@ -14,23 +14,9 @@ use std::time::Duration;
 
 use nlink::netlink::nftables::config::{NftDiffOptions, NftablesConfig};
 use nlink::netlink::nftables::types::{Chain, ChainType, Family, Hook, Policy, Priority, Rule};
-use nlink::netlink::{Connection, Nftables, namespace};
+use nlink::netlink::Nftables;
 
-use crate::common::TestNamespace;
-
-async fn with_timeout<F>(body: F) -> nlink::Result<()>
-where
-    F: std::future::Future<Output = nlink::Result<()>>,
-{
-    match tokio::time::timeout(Duration::from_secs(30), body).await {
-        Ok(result) => result,
-        Err(_elapsed) => Err(nlink::Error::Timeout),
-    }
-}
-
-fn nft_in_ns(ns: &TestNamespace) -> nlink::Result<Connection<Nftables>> {
-    namespace::connection_for(ns.name())
-}
+use crate::common::{TestNamespace, with_timeout};
 
 /// A config declaring exactly one table, and nothing else.
 fn only_my_table() -> NftablesConfig {
@@ -62,7 +48,7 @@ async fn apply_does_not_delete_an_undeclared_table() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-noPurge")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         // A table created out-of-band — as Docker or firewalld would.
@@ -99,7 +85,7 @@ async fn purge_is_opt_in_and_still_works() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-purge")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         conn.add_table("foreign", Family::Ip).await?;
@@ -142,7 +128,7 @@ async fn rules_install_in_declaration_order() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-order")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         conn.add_table("ordering", Family::Inet).await?;
@@ -208,7 +194,7 @@ async fn a_rejected_batch_reports_the_kernel_error_not_a_timeout() -> nlink::Res
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-batchErr")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     conn.add_table("batch", Family::Inet).await?;
 

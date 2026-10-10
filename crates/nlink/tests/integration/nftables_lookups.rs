@@ -3,7 +3,6 @@
 //! real traffic or real notifications.
 
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::time::Duration;
 
 use nlink::netlink::nftables::config::NftablesConfig;
 use nlink::netlink::nftables::types::{
@@ -11,49 +10,11 @@ use nlink::netlink::nftables::types::{
     SetKeyType,
 };
 use nlink::netlink::nftables::{NftablesEvent, RawExpr};
-use nlink::netlink::{Connection, Nftables, Route, namespace};
+use nlink::netlink::{Connection, Nftables};
 use tokio_stream::StreamExt;
 
-use crate::common::TestNamespace;
-
-async fn with_timeout<F>(body: F) -> nlink::Result<()>
-where
-    F: std::future::Future<Output = nlink::Result<()>>,
-{
-    match tokio::time::timeout(Duration::from_secs(30), body).await {
-        Ok(result) => result,
-        Err(_elapsed) => Err(nlink::Error::Timeout),
-    }
-}
-
-fn nft_in_ns(ns: &TestNamespace) -> nlink::Result<Connection<Nftables>> {
-    namespace::connection_for(ns.name())
-}
-
-async fn lo_up(ns: &TestNamespace) -> nlink::Result<()> {
-    let route: Connection<Route> = namespace::connection_for(ns.name())?;
-    let lo = route
-        .get_link_by_name("lo")
-        .await?
-        .expect("every netns has a loopback device");
-    route.set_link_up_by_index(lo.ifindex()).await
-}
-
-/// Send `count` UDP datagrams from inside `ns` to `target`.
-fn send_udp(ns: &TestNamespace, target: &str, count: usize) {
-    let name = ns.name().to_string();
-    let target: std::net::SocketAddr = target.parse().unwrap();
-    std::thread::spawn(move || {
-        let _ns = namespace::enter(&name).expect("enter test netns");
-        let bind = if target.is_ipv6() { "[::1]:0" } else { "127.0.0.1:0" };
-        let socket = std::net::UdpSocket::bind(bind).expect("bind");
-        for _ in 0..count {
-            let _ = socket.send_to(b"nlink", target);
-        }
-    })
-    .join()
-    .expect("UDP thread panicked");
-}
+use crate::common::traffic::{lo_up, send_udp};
+use crate::common::{TestNamespace, with_timeout};
 
 /// An `inet t` table with an `output` filter chain `out`.
 async fn add_output_chain(conn: &Connection<Nftables>) -> nlink::Result<()> {
@@ -81,7 +42,7 @@ async fn ip6_set_lookup_matches_ipv6_traffic() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-lk-ip6")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         lo_up(&ns).await?;
@@ -100,8 +61,8 @@ async fn ip6_set_lookup_matches_ipv6_traffic() -> nlink::Result<()> {
         )
         .await?;
 
-        send_udp(&ns, "[::1]:9", 3);
-        send_udp(&ns, "127.0.0.1:9", 2);
+        send_udp(&ns, &["[::1]:9"], 3);
+        send_udp(&ns, &["127.0.0.1:9"], 2);
         assert_eq!(counted(&conn, 0).await?, 3, "only the IPv6 datagrams match");
         Ok(())
     })
@@ -115,7 +76,7 @@ async fn port_set_lookup_matches_member_ports() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-lk-port")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         lo_up(&ns).await?;
@@ -130,8 +91,8 @@ async fn port_set_lookup_matches_member_ports() -> nlink::Result<()> {
         )
         .await?;
 
-        send_udp(&ns, "127.0.0.1:9", 2);
-        send_udp(&ns, "127.0.0.1:10", 4);
+        send_udp(&ns, &["127.0.0.1:9"], 2);
+        send_udp(&ns, &["127.0.0.1:10"], 4);
         assert_eq!(counted(&conn, 0).await?, 2);
         Ok(())
     })
@@ -145,7 +106,7 @@ async fn inverted_lookup_counts_only_non_members() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-lk-inv")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         lo_up(&ns).await?;
@@ -162,8 +123,8 @@ async fn inverted_lookup_counts_only_non_members() -> nlink::Result<()> {
         )
         .await?;
 
-        send_udp(&ns, "127.0.0.1:9", 3);
-        send_udp(&ns, "127.0.0.2:9", 2);
+        send_udp(&ns, &["127.0.0.1:9"], 3);
+        send_udp(&ns, &["127.0.0.2:9"], 2);
         assert_eq!(counted(&conn, 0).await?, 3, "the member's datagrams must not count");
         Ok(())
     })
@@ -178,8 +139,8 @@ async fn set_element_and_generation_events_arrive() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-lk-events")?;
-    let conn = nft_in_ns(&ns)?;
-    let watcher = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
+    let watcher = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         watcher.subscribe_all()?;
@@ -221,7 +182,7 @@ async fn a_raw_notrack_untracks_and_converges() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables", "nft_ct");
 
     let ns = TestNamespace::new("nft-lk-raw")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         lo_up(&ns).await?;
@@ -249,7 +210,7 @@ async fn a_raw_notrack_untracks_and_converges() -> nlink::Result<()> {
         let again = cfg.diff(&conn).await?;
         assert!(again.is_empty(), "second diff must be empty: {again}");
 
-        send_udp(&ns, "127.0.0.1:9", 3);
+        send_udp(&ns, &["127.0.0.1:9"], 3);
         let rules = conn.list_rules("t", Family::Inet).await?;
         let untracked = rules
             .iter()

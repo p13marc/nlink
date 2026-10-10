@@ -8,12 +8,12 @@
 //! is not empty, and every apply after it rewrites the same thing
 //! forever. None of that is visible applying once to an empty namespace.
 //!
-//! So each case here is applied, then diffed, then applied again, then
-//! diffed again, and all four must say "nothing to do". A case with
-//! several steps applies them in order to the same namespace, which is
-//! how a replace (a knob removed, a link moved) gets exercised at all:
-//! every case that only ever installs onto a fresh device misses what a
-//! replace keeps.
+//! So each case here goes through `common::converge`: every step is
+//! applied, diffed, applied again and diffed again, and all four must say
+//! "nothing to do". A case with several steps applies them in order to the
+//! same namespace, which is how a replace (a knob removed, a link moved)
+//! gets exercised at all: every case that only ever installs onto a fresh
+//! device misses what a replace keeps.
 //!
 //! The cases are tables rather than one test each so a run reports every
 //! red shape at once instead of stopping at the first.
@@ -22,96 +22,17 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use nlink::netlink::config::{
-    ApplyOptions, BondMode, DiffOptions, MacvlanMode, NetkitMode, NetworkConfig, QdiscBuilder,
-    RouteBuilder, VlanProtocol,
+    BondMode, MacvlanMode, NetkitMode, NetworkConfig, QdiscBuilder, RouteBuilder, VlanProtocol,
 };
 use nlink::netlink::tc::{NetemLossModel, TbfConfig};
 use nlink::netlink::{Connection, Route};
 use nlink::{Bytes, Percent, Rate, TcMessage};
 
-use crate::common::TestNamespace;
+use crate::common::converge::{assert_converges, case, converges, ip_json};
+use crate::common::{STEP_TIMEOUT, TestNamespace};
 
 const MAC_A: [u8; 6] = [0x02, 0x00, 0x5e, 0x10, 0x00, 0x01];
 const MAC_B: [u8; 6] = [0x02, 0x00, 0x5e, 0x10, 0x00, 0x02];
-
-/// One declaration, or a sequence applied in order to one namespace.
-struct Case {
-    name: String,
-    steps: Vec<NetworkConfig>,
-}
-
-fn case(name: impl Into<String>, steps: Vec<NetworkConfig>) -> Case {
-    Case {
-        name: name.into(),
-        steps,
-    }
-}
-
-/// Apply `cfg` and check that it converged: the diff after the apply is
-/// empty, a second apply changes nothing, and the diff after that is
-/// empty too.
-async fn converges(conn: &Connection<Route>, cfg: &NetworkConfig) -> Result<(), String> {
-    let first = cfg
-        .apply(conn)
-        .await
-        .map_err(|e| format!("first apply failed: {e}"))?;
-    if !first.is_success() {
-        return Err(format!("first apply reported errors: {:?}", first.errors));
-    }
-    let diff = cfg
-        .diff(conn)
-        .await
-        .map_err(|e| format!("diff after apply failed: {e}"))?;
-    if !diff.is_empty() {
-        return Err(format!("diff after apply is not empty:\n{diff}"));
-    }
-    let second = cfg
-        .apply(conn)
-        .await
-        .map_err(|e| format!("second apply failed: {e}"))?;
-    if second.changes_made != 0 {
-        return Err(format!(
-            "second apply made {} change(s): {:?}",
-            second.changes_made, second.summary
-        ));
-    }
-    let third = cfg
-        .diff(conn)
-        .await
-        .map_err(|e| format!("diff after second apply failed: {e}"))?;
-    if !third.is_empty() {
-        return Err(format!("diff after second apply is not empty:\n{third}"));
-    }
-    Ok(())
-}
-
-/// Run every case in its own namespace, then fail once, listing every
-/// case that did not converge.
-async fn assert_converges(prefix: &str, cases: Vec<Case>) -> nlink::Result<()> {
-    let mut failures = Vec::new();
-    for case in cases {
-        let ns = TestNamespace::new(prefix)?;
-        let conn = ns.connection()?;
-        for (i, step) in case.steps.iter().enumerate() {
-            let outcome =
-                match tokio::time::timeout(Duration::from_secs(30), converges(&conn, step)).await {
-                    Ok(outcome) => outcome,
-                    Err(_elapsed) => Err("timed out".to_string()),
-                };
-            if let Err(why) = outcome {
-                failures.push(format!("[{}] step {}: {why}", case.name, i + 1));
-                break;
-            }
-        }
-    }
-    assert!(
-        failures.is_empty(),
-        "{} case(s) did not converge:\n\n{}",
-        failures.len(),
-        failures.join("\n\n")
-    );
-    Ok(())
-}
 
 fn dummy_up(name: &str) -> NetworkConfig {
     NetworkConfig::new().link(name, |l| l.dummy().up())
@@ -483,12 +404,12 @@ async fn link_modifiers_converge() -> nlink::Result<()> {
 /// and the kernel agree, and a diff that does not compare a parameter
 /// agrees with anything.
 fn ip_link_json(ns: &TestNamespace, dev: &str) -> Result<serde_json::Value, String> {
-    let out = ns
-        .exec("ip", &["-d", "-j", "link", "show", "dev", dev])
-        .map_err(|e| format!("ip link show {dev}: {e}"))?;
-    let mut links: Vec<serde_json::Value> =
-        serde_json::from_str(&out).map_err(|e| format!("ip link show {dev}: {e}: {out}"))?;
-    links.pop().ok_or_else(|| format!("ip link show {dev}: no link"))
+    let links = ip_json(ns, &["-d", "link", "show", "dev", dev])?;
+    links
+        .as_array()
+        .and_then(|links| links.last())
+        .cloned()
+        .ok_or_else(|| format!("ip link show {dev}: no link"))
 }
 
 /// The value at a dotted path, `Null` where any step is missing.
@@ -537,11 +458,11 @@ async fn run_kind_case(case: &KindCase) -> Result<(), String> {
         {
             ifindex_before = Some(ip_link_json(&ns, dev)?["ifindex"].clone());
         }
-        let outcome =
-            match tokio::time::timeout(Duration::from_secs(30), converges(&conn, step)).await {
-                Ok(outcome) => outcome,
-                Err(_elapsed) => Err("timed out".to_string()),
-            };
+        let outcome = match tokio::time::timeout(STEP_TIMEOUT, converges(&conn, step, false)).await
+        {
+            Ok(outcome) => outcome,
+            Err(_elapsed) => Err("timed out".to_string()),
+        };
         outcome.map_err(|why| format!("step {}: {why}", i + 1))?;
     }
     let mut wrong = Vec::new();
@@ -1591,28 +1512,21 @@ async fn purge_tolerates_an_address_the_link_change_flushed() -> nlink::Result<(
     require_root!();
     nlink::require_modules!("dummy");
 
-    let ns = TestNamespace::new("nce-addr-purge")?;
-    let conn = ns.connection()?;
-    let first = dummy_up("d0")
-        .address("d0", "fd00:2::1/64")?
-        .address("d0", "fd00:2::2/64")?
-        .apply(&conn)
-        .await?;
-    assert!(first.is_success(), "{first:?}");
-
-    let cfg = NetworkConfig::new()
-        .link("d0", |l| l.dummy().down())
-        .address("d0", "fd00:2::1/64")?;
-    let purging = ApplyOptions::default().with_purge(true);
-    let applied = cfg.apply_with_options(&conn, purging.clone()).await?;
-    assert!(applied.is_success(), "{applied:?}");
-    let diff = cfg
-        .diff_with_options(&conn, DiffOptions::default().purge(true))
-        .await?;
-    assert!(diff.is_empty(), "{diff}");
-    let again = cfg.apply_with_options(&conn, purging).await?;
-    assert_eq!(again.changes_made, 0, "{again:?}");
-    Ok(())
+    let cases = vec![
+        case(
+            "link-down-flushes-undeclared",
+            vec![
+                dummy_up("d0")
+                    .address("d0", "fd00:2::1/64")?
+                    .address("d0", "fd00:2::2/64")?,
+                NetworkConfig::new()
+                    .link("d0", |l| l.dummy().down())
+                    .address("d0", "fd00:2::1/64")?,
+            ],
+        )
+        .purging(),
+    ];
+    assert_converges("nce-addr-purge", cases).await
 }
 
 // ============================================================================
@@ -1839,21 +1753,10 @@ async fn v6_route_with_host_bits_survives_a_purge() -> nlink::Result<()> {
     require_root!();
     nlink::require_modules!("dummy");
 
-    let ns = TestNamespace::new("nce-v6-purge")?;
-    let conn = ns.connection()?;
     let cfg = dummy_up("d0")
         .address("d0", "fd00:3::1/64")?
         .route("2001:db8:3c::7/48", |r| r.dev("d0"))?;
-    let purging = ApplyOptions::default().with_purge(true);
-    let first = cfg.apply_with_options(&conn, purging.clone()).await?;
-    assert!(first.is_success(), "{first:?}");
-    let diff = cfg
-        .diff_with_options(&conn, DiffOptions::default().purge(true))
-        .await?;
-    assert!(diff.is_empty(), "a purging diff after a purging apply: {diff}");
-    let second = cfg.apply_with_options(&conn, purging).await?;
-    assert_eq!(second.changes_made, 0, "{second:?}");
-    Ok(())
+    assert_converges("nce-v6-purge", vec![case("host-bits", vec![cfg]).purging()]).await
 }
 
 // ============================================================================
