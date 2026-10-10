@@ -1303,8 +1303,82 @@ async fn removing_what_a_rule_used_converges_in_one_apply() -> nlink::Result<()>
     let cases = vec![
         case("counter-renamed", vec![counted("a"), counted("b")]),
         case("set-renamed", vec![blocked("blocked"), blocked("deny")]),
-        case("chain-using-a-counter-dropped", vec![with_output(true), with_output(false)]),
-        case("jump-retargeted", vec![jumping_to("web"), jumping_to("http")]),
+        case(
+            "chain-using-a-counter-dropped",
+            vec![with_output(true), with_output(false)],
+        ),
+        case(
+            "jump-retargeted",
+            vec![jumping_to("web"), jumping_to("http")],
+        ),
     ];
     assert_converges("nft-rm-used", cases).await
+}
+
+// ============================================================================
+// #459 — what a rule nlink does not manage still uses
+// ============================================================================
+
+/// Run `nft <cmd>` inside `ns`: rules a person adds by hand, which nlink
+/// did not write and must leave alone.
+fn nft(ns: &TestNamespace, cmd: &str) -> nlink::Result<String> {
+    let args: Vec<&str> = cmd.split_whitespace().collect();
+    ns.exec("nft", &args)
+}
+
+/// Rules added by hand to a declared chain stay, and so must what they use:
+/// the anonymous set behind an inline `{ 4001, 4002 }`, a chain they jump
+/// to, a named counter they count into. The diff deleted all three, and
+/// each delete was `EBUSY`, so every apply failed until someone removed the
+/// rules (#459). An undeclared chain nothing uses still goes.
+#[tokio::test]
+async fn what_a_hand_added_rule_uses_is_kept() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let ns = TestNamespace::new("nft-kept")?;
+    let conn = ns.connection_for::<Nftables>()?;
+    with_timeout(async {
+        let cfg = input_table(|t| t.rule_keyed("input", "ssh", |r| r.match_tcp_dport(22).accept()));
+        cfg.diff(&conn).await?.apply(&conn).await?;
+        for cmd in [
+            "add rule ip t input tcp dport { 4001, 4002 } counter accept",
+            "add chain ip t dbg",
+            "add rule ip t input tcp dport 4003 jump dbg",
+            "add counter ip t handmade",
+            "add rule ip t input tcp dport 4004 counter name handmade",
+            "add chain ip t unused",
+        ] {
+            nft(&ns, cmd)?;
+        }
+
+        let diff = cfg.diff(&conn).await?;
+        assert!(diff.sets_to_delete.is_empty(), "{diff}");
+        assert!(diff.objects_to_delete.is_empty(), "{diff}");
+        let deleted: Vec<&str> = diff
+            .chains_to_delete
+            .iter()
+            .map(|(_, _, c)| c.as_str())
+            .collect();
+        assert_eq!(deleted, ["unused"], "{diff}");
+        let mut kept: Vec<String> = diff.kept_in_use.iter().map(|k| k.to_string()).collect();
+        kept.sort();
+        assert_eq!(
+            kept,
+            ["chain Ip t/dbg", "object Ip t/handmade (Counter)"],
+            "{diff}"
+        );
+
+        diff.apply(&conn).await?;
+        let again = cfg.diff(&conn).await?;
+        assert!(again.is_empty(), "{again}");
+        let rules = conn.list_rules("t", Family::Ip).await?;
+        assert_eq!(
+            rules.iter().filter(|r| r.chain == "input").count(),
+            4,
+            "{rules:?}"
+        );
+        Ok(())
+    })
+    .await
 }

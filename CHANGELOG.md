@@ -6,6 +6,26 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **A rule added by hand to a declared table made every apply fail with
+  `EBUSY` (#459).** The rule planner leaves rules nlink did not write
+  alone, but the diff deleted every chain, set, flowtable and object the
+  config did not declare — including what those rules use. An inline set
+  (`tcp dport { 4001, 4002 }`) is an anonymous set `__set0` that `nft`
+  never lists and the kernel frees with its rule; a `jump dbg` holds chain
+  `dbg`; `counter name x` holds `x`. Each delete was refused, the batch
+  with it, on every apply until someone removed the rule by hand.
+
+  Anonymous sets are no longer read into the diff at all. An undeclared
+  chain, set, flowtable or object that a staying rule uses is left in
+  place and listed in the new `NftablesDiff::kept_in_use` (shown as
+  `! … kept` in the rendered diff; not a change, so `is_empty()` ignores
+  it). An undeclared chain nothing uses is still deleted. Leaving
+  undeclared items alone altogether (an owned/shared table mode) belongs
+  to #527. A root test adds the three rules with `nft` and checks the
+  diff keeps what they use and applies cleanly; before the fix it
+  scheduled `__set0`, `dbg` and the counter for deletion. The CI image
+  now installs `nftables` for it.
+
 - **Removing a set, named object or chain that a rule used failed with
   `EBUSY` on every apply (#460).** `NftablesDiff::apply` sent set, object
   and chain deletes before the rule replaces, but the kernel releases what
@@ -46,6 +66,9 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`NftablesDiff::kept_in_use` and `KeptInUse`**: what the diff would
+  delete but leaves because a rule nlink does not manage uses it (#459).
 
 - **`Transaction::update_chain`**: `nft add chain` semantics. It changes
   an existing chain (its policy) in place, or creates it.
