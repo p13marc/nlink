@@ -71,9 +71,9 @@ fn place_rule(tx: Transaction, body: Rule, placement: RulePlacement) -> Transact
 /// Re-build a runtime `Chain` from a `DeclaredChain`.
 ///
 /// `DeclaredChain` is a value type; `Chain` is the transaction-input type.
-/// Shared by the chain-add and chain-modify passes, which emit the same
-/// `NFT_MSG_NEWCHAIN` message — the kernel treats it as an update when the
-/// chain already exists.
+/// Shared by the chain-add and chain-modify passes. Both emit
+/// `NFT_MSG_NEWCHAIN`; the modify pass leaves out `NLM_F_EXCL`, so the
+/// kernel treats it as an update of the existing chain (#456).
 fn build_chain(table: &str, family: Family, declared: &DeclaredChain) -> Result<Chain> {
     let mut chain = Chain::new(table, declared.name())?.family(family);
     if let Some(h) = declared.hook() {
@@ -197,15 +197,19 @@ impl NftablesDiff {
         }
 
         // 8. Chain adds, then chain property updates — before the sets,
-        //    whose elements (a verdict map's jumps) can name chains. Both emit
-        //    `NFT_MSG_NEWCHAIN`, which the kernel treats as an
-        //    update when the chain already exists — so a drifted
-        //    policy/hook/priority converges without a delete+recreate
-        //    (which would drop the chain's rules). #200.
-        for (table_name, family, declared) in
-            self.chains_to_add.iter().chain(self.chains_to_modify.iter())
-        {
+        //    whose elements (a verdict map's jumps) can name chains. An
+        //    update is `NFT_MSG_NEWCHAIN` *without* `NLM_F_EXCL`, which the
+        //    kernel treats as an update of the existing chain, so a drifted
+        //    policy converges without a delete+recreate (which would drop
+        //    the chain's rules) (#200). Sent with `add_chain`'s `NLM_F_EXCL`
+        //    it was refused with `EEXIST`, and no policy change ever applied
+        //    (#456). The kernel refuses a changed hook, priority or type on
+        //    a live base chain either way.
+        for (table_name, family, declared) in &self.chains_to_add {
             tx = tx.add_chain(build_chain(table_name, *family, declared)?);
+        }
+        for (table_name, family, declared) in &self.chains_to_modify {
+            tx = tx.update_chain(build_chain(table_name, *family, declared)?);
         }
 
         // 8b. Object adds and quota updates — before the object maps' elements

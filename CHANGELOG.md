@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A declared chain policy change failed with `EEXIST` (#456).** #200
+  (0.25) made the nftables diff report a chain whose policy drifted
+  (`chains_to_modify`), but `NftablesDiff::apply` sent it through
+  `Transaction::add_chain`, which always sets `NLM_F_EXCL`, and
+  `nf_tables_newchain` refuses that for an existing chain. So flipping a
+  declared firewall from `policy(Drop)` to `policy(Accept)` showed in the
+  diff and aborted the whole batch on apply. The comment there said the
+  kernel would treat the message as an update; it does only without
+  `NLM_F_EXCL`. No test applied a `chains_to_modify` entry, so nobody saw
+  it. The update now goes as `NFT_MSG_NEWCHAIN` with `NLM_F_CREATE` only,
+  and the chain keeps its rules. A root test flips a live chain's policy,
+  checks a second diff is empty and that the chain's rule kept its
+  handle; sending it the old way fails the test with `EEXIST`.
+
+  Not fixed: the kernel also refuses to change a live base chain's hook,
+  priority or type, and the diff reports those as `chains_to_modify` too.
+  Converging them needs the chain deleted and recreated with its rules
+  moved, as sets got in #377.
+
+### Added
+
+- **`Transaction::update_chain`**: `nft add chain` semantics. It changes
+  an existing chain (its policy) in place, or creates it.
+  `Transaction::add_chain` stays a create that fails if the chain
+  exists.
+
 ## [0.30.0] - 2026-10-09
 
 > **The ipset release, and every declarative layer converges.**
