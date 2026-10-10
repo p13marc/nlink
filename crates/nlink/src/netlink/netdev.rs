@@ -106,15 +106,25 @@
 //!
 //! # Frame loss
 //!
-//! The uevent side can drop frames under burst, and has no dump to
-//! resync from (#252) — an annotation lost that way stays lost until
-//! the device is re-announced. Size the receive buffer (which
-//! [`Connection::<KobjectUevent>::new`] now does) and prefilter the
-//! stream ([`crate::netlink::uevent_filter`]) so it doesn't come to
-//! that. A cache built from this stream can be missing *annotations*;
-//! it cannot be missing *devices*, since those come from rtnetlink.
+//! Either side can drop frames under burst. The rtnetlink side has a
+//! dump to recover from, if you hand the join a **resync stream**
+//! ([`Connection::<Route>::into_events_with_resync`]) rather than plain
+//! `events()`. The join takes the snapshot the stream opens with and the
+//! one after every overflow: a device in a snapshot is `Added` or
+//! `Changed`, and a device the join knew that a snapshot lacks is
+//! `Removed`. Fed a plain stream, an overflow loses whatever link events
+//! it dropped — a `DelLink` among them leaves a device the join, and its
+//! store, keep for good (#510).
+//!
+//! The uevent side has no dump to resync from (#252) — an annotation
+//! lost that way stays lost until the device is re-announced. Size the
+//! receive buffer (which [`Connection::<KobjectUevent>::new`] now does)
+//! and prefilter the stream ([`crate::netlink::uevent_filter`]) so it
+//! doesn't come to that. So with a resync stream, a cache built from
+//! this join can be missing *annotations* but not *devices*.
 //!
 //! [`Connection::<KobjectUevent>::new`]: crate::netlink::Connection::new
+//! [`Connection::<Route>::into_events_with_resync`]: crate::netlink::Connection::into_events_with_resync
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -124,7 +134,12 @@ use std::{
 
 use tokio_stream::Stream;
 
-use super::{events::NetworkEvent, reflector::Store, uevent::Uevent};
+use super::{
+    events::NetworkEvent,
+    reflector::Store,
+    resync::{ResyncMarker, ResyncedEvent},
+    uevent::Uevent,
+};
 use crate::{LinkMessage, Result};
 
 /// Subsystem value on the uevents this join consumes.
@@ -316,11 +331,71 @@ impl NetdevEvent {
     }
 }
 
+/// An item [`NetdevLifecycle`] takes from its link source: a plain
+/// [`NetworkEvent`], from `events()`, or a [`ResyncedEvent<NetworkEvent>`],
+/// from a resync stream such as `into_events_with_resync`.
+///
+/// With a resync stream the join keeps the device set right across an
+/// overflow (#510). Each snapshot's links are `Added`, or `Changed` if
+/// already known, and once the snapshot ends every device the join knew
+/// that it did not list is `Removed`. A plain stream has no snapshots, so
+/// an overflow loses whatever it dropped.
+///
+/// Sealed: these two are the shapes nlink's link streams produce.
+pub trait LinkSourceItem: sealed::Sealed {}
+
+impl LinkSourceItem for NetworkEvent {}
+impl LinkSourceItem for ResyncedEvent<NetworkEvent> {}
+
+mod sealed {
+    use super::{NetworkEvent, ResyncMarker, ResyncedEvent};
+
+    /// What one item of the link source means to the join.
+    pub enum LinkItem {
+        /// A live event.
+        Event(NetworkEvent),
+        /// A snapshot is starting; its items follow.
+        SnapshotStart,
+        /// One item of the current snapshot.
+        Snapshot(NetworkEvent),
+        /// The snapshot is complete.
+        SnapshotEnd,
+    }
+
+    pub trait Sealed {
+        fn into_link_item(self) -> LinkItem;
+    }
+
+    impl Sealed for NetworkEvent {
+        fn into_link_item(self) -> LinkItem {
+            LinkItem::Event(self)
+        }
+    }
+
+    impl Sealed for ResyncedEvent<NetworkEvent> {
+        fn into_link_item(self) -> LinkItem {
+            match self {
+                ResyncedEvent::Event(event) => LinkItem::Event(event),
+                ResyncedEvent::Resynced(event) => LinkItem::Snapshot(event),
+                ResyncedEvent::Marker(ResyncMarker::ResyncStart | ResyncMarker::InitialSyncStart) => {
+                    LinkItem::SnapshotStart
+                }
+                ResyncedEvent::Marker(ResyncMarker::ResyncEnd) => LinkItem::SnapshotEnd,
+            }
+        }
+    }
+}
+
 /// Merged rtnetlink + uevent device lifecycle.
 ///
 /// Build it from a link-event stream and a uevent stream, both already
 /// subscribed. The two must come from **separate connections**: they
 /// are different netlink protocols.
+///
+/// The link stream can be plain `events()` or a resync stream
+/// (`into_events_with_resync`), whose snapshots keep the device set
+/// right across an overflow; see [`LinkSourceItem`] and the module's
+/// *Frame loss* section.
 ///
 /// ```no_run
 /// use nlink::netlink::{Connection, KobjectUevent, Route, RtnetlinkGroup};
@@ -361,14 +436,17 @@ pub struct NetdevLifecycle<L, U> {
     pending: VecDeque<NetdevEvent>,
     /// Optional watch-cache mirror.
     store: Option<Store<u32, NetdevInfo>>,
+    /// The devices the snapshot in progress has listed, if one is.
+    snapshot: Option<std::collections::HashSet<u32>>,
     /// Which source to poll first, flipped each wake-up so neither
     /// side can starve the other under sustained load.
     prefer_uevents: bool,
 }
 
-impl<L, U> NetdevLifecycle<L, U>
+impl<L, U, T> NetdevLifecycle<L, U>
 where
-    L: Stream<Item = Result<NetworkEvent>> + Unpin,
+    L: Stream<Item = Result<T>> + Unpin,
+    T: LinkSourceItem,
     U: Stream<Item = Result<Uevent>> + Unpin,
 {
     /// Merge a link-event stream and a uevent stream.
@@ -380,6 +458,7 @@ where
             annotations: HashMap::new(),
             pending: VecDeque::new(),
             store: None,
+            snapshot: None,
             prefer_uevents: false,
         }
     }
@@ -392,10 +471,11 @@ where
     /// clones to readers and drive this stream from one task.
     ///
     /// Note what the cache can and cannot miss: devices come from
-    /// rtnetlink, which has a dump to resync from, so the *set* of
-    /// devices is sound. Annotations come from uevents, which have no
-    /// dump — a device may sit in the store un-annotated indefinitely.
-    /// [`NetdevInfo::is_fully_attributed`] tells them apart.
+    /// rtnetlink, which has a dump to resync from, so with a resync link
+    /// stream the *set* of devices is sound — and with a plain one it is
+    /// sound until the first overflow. Annotations come from uevents,
+    /// which have no dump — a device may sit in the store un-annotated
+    /// indefinitely. [`NetdevInfo::is_fully_attributed`] tells them apart.
     pub fn with_store(mut self, store: Store<u32, NetdevInfo>) -> Self {
         self.store = Some(store);
         self
@@ -417,6 +497,52 @@ where
             link: self.known.get(&ifindex)?.clone(),
             annotation: self.annotations.get(&ifindex).cloned(),
         })
+    }
+
+    /// Fold one item of the link source into state (#510).
+    fn on_link_item(&mut self, item: sealed::LinkItem) {
+        match item {
+            sealed::LinkItem::Event(event) => self.on_link_event(event),
+            sealed::LinkItem::SnapshotStart => {
+                self.snapshot = Some(std::collections::HashSet::new());
+            }
+            sealed::LinkItem::Snapshot(event) => {
+                if let (Some(seen), NetworkEvent::NewLink(link)) = (&mut self.snapshot, &event) {
+                    seen.insert(link.ifindex());
+                }
+                self.on_link_event(event);
+            }
+            sealed::LinkItem::SnapshotEnd => {
+                let Some(seen) = self.snapshot.take() else {
+                    return;
+                };
+                // What the snapshot lacks went while the stream was
+                // overflowing; its `DelLink` was among what was lost.
+                let mut gone: Vec<u32> = self
+                    .known
+                    .keys()
+                    .filter(|ifindex| !seen.contains(ifindex))
+                    .copied()
+                    .collect();
+                gone.sort_unstable();
+                for ifindex in gone {
+                    self.remove(ifindex, None);
+                }
+            }
+        }
+    }
+
+    /// Forget a device and report it gone.
+    fn remove(&mut self, ifindex: u32, fallback_name: Option<&str>) {
+        let name = self
+            .known
+            .remove(&ifindex)
+            .and_then(|l| l.name().map(str::to_string))
+            .or_else(|| fallback_name.map(str::to_string));
+        // The index is free to be reused now; anything we know about
+        // the old occupant must go with it.
+        self.annotations.remove(&ifindex);
+        self.emit(NetdevEvent::Removed { ifindex, name });
     }
 
     fn on_link_event(&mut self, event: NetworkEvent) {
@@ -455,18 +581,7 @@ where
                     NetdevEvent::Changed(info)
                 });
             }
-            NetworkEvent::DelLink(link) => {
-                let ifindex = link.ifindex();
-                let name = self
-                    .known
-                    .remove(&ifindex)
-                    .and_then(|l| l.name().map(str::to_string))
-                    .or_else(|| link.name().map(str::to_string));
-                // The index is free to be reused now; anything we know
-                // about the old occupant must go with it.
-                self.annotations.remove(&ifindex);
-                self.emit(NetdevEvent::Removed { ifindex, name });
-            }
+            NetworkEvent::DelLink(link) => self.remove(link.ifindex(), link.name()),
             // Everything else on the link group is not this join's
             // business.
             _ => {}
@@ -546,8 +661,8 @@ where
             return Poll::Ready(None);
         };
         match Pin::new(links).poll_next(cx) {
-            Poll::Ready(Some(Ok(event))) => {
-                self.on_link_event(event);
+            Poll::Ready(Some(Ok(item))) => {
+                self.on_link_item(item.into_link_item());
                 Poll::Ready(Some(Ok(())))
             }
             Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
@@ -580,9 +695,10 @@ where
 
 impl<L, U> Unpin for NetdevLifecycle<L, U> {}
 
-impl<L, U> Stream for NetdevLifecycle<L, U>
+impl<L, U, T> Stream for NetdevLifecycle<L, U>
 where
-    L: Stream<Item = Result<NetworkEvent>> + Unpin,
+    L: Stream<Item = Result<T>> + Unpin,
+    T: LinkSourceItem,
     U: Stream<Item = Result<Uevent>> + Unpin,
 {
     type Item = Result<NetdevEvent>;
@@ -679,10 +795,18 @@ mod tests {
     /// which two sockets deliver, so the tests need to place each
     /// item precisely — which `tokio_stream::iter` cannot do, since
     /// every one of its items is ready at once.
-    #[derive(Clone)]
     struct Feed<T> {
         items: Rc<RefCell<VecDeque<Result<T>>>>,
         closed: Rc<RefCell<bool>>,
+    }
+
+    impl<T> Clone for Feed<T> {
+        fn clone(&self) -> Self {
+            Self {
+                items: self.items.clone(),
+                closed: self.closed.clone(),
+            }
+        }
     }
 
     impl<T> Feed<T> {
@@ -717,9 +841,9 @@ mod tests {
     }
 
     /// Drives the join by hand so each input's position is exact.
-    struct Harness {
-        lifecycle: NetdevLifecycle<Feed<NetworkEvent>, Feed<Uevent>>,
-        links: Feed<NetworkEvent>,
+    struct Harness<T = NetworkEvent> {
+        lifecycle: NetdevLifecycle<Feed<T>, Feed<Uevent>>,
+        links: Feed<T>,
         uevents: Feed<Uevent>,
     }
 
@@ -729,6 +853,12 @@ mod tests {
         }
 
         fn with_store(store: Option<Store<u32, NetdevInfo>>) -> Self {
+            Self::build(store)
+        }
+    }
+
+    impl<T: LinkSourceItem + Unpin> Harness<T> {
+        fn build(store: Option<Store<u32, NetdevInfo>>) -> Self {
             let links = Feed::new();
             let uevents = Feed::new();
             let mut lifecycle = NetdevLifecycle::new(links.clone(), uevents.clone());
@@ -756,7 +886,7 @@ mod tests {
             }
         }
 
-        fn feed_link(&mut self, event: NetworkEvent) -> Vec<NetdevEvent> {
+        fn feed_link(&mut self, event: T) -> Vec<NetdevEvent> {
             self.links.push(Ok(event));
             self.drain()
         }
@@ -1109,5 +1239,69 @@ mod tests {
         let events = h.feed_link(NetworkEvent::NewRoute(Default::default()));
         assert!(events.is_empty(), "{events:?}");
         assert!(h.lifecycle.is_empty());
+    }
+
+    /// #510: fed a resync stream, the join takes the initial snapshot as
+    /// the devices that exist, and after an overflow reports what the
+    /// snapshot no longer has as `Removed` — the `DelLink` the overflow
+    /// dropped. A plain stream could not be fed in at all.
+    #[test]
+    fn a_resync_snapshot_settles_the_device_set() {
+        use ResyncedEvent::{Event, Marker, Resynced};
+        let store = Store::new();
+        let mut h = Harness::<ResyncedEvent<NetworkEvent>>::build(Some(store.clone()));
+
+        // The initial snapshot: everything is new.
+        assert!(h.feed_link(Marker(ResyncMarker::InitialSyncStart)).is_empty());
+        for (ifindex, name) in [(1, "lo"), (2, "veth0"), (3, "veth1")] {
+            let events = h.feed_link(Resynced(NetworkEvent::NewLink(link(ifindex, name))));
+            assert!(matches!(events[..], [NetdevEvent::Added(_)]), "{events:?}");
+        }
+        assert!(h.feed_link(Marker(ResyncMarker::ResyncEnd)).is_empty());
+        assert_eq!(h.lifecycle.len(), 3);
+
+        // Live: a device appears.
+        let events = h.feed_link(Event(NetworkEvent::NewLink(link(4, "dummy0"))));
+        assert!(matches!(events[..], [NetdevEvent::Added(_)]), "{events:?}");
+
+        // An overflow lost veth1's and dummy0's `DelLink`s; the snapshot
+        // after it lists what is left, plus a device that came meanwhile.
+        assert!(h.feed_link(Marker(ResyncMarker::ResyncStart)).is_empty());
+        let mut events = Vec::new();
+        for (ifindex, name) in [(1, "lo"), (2, "veth0"), (5, "br0")] {
+            events.extend(h.feed_link(Resynced(NetworkEvent::NewLink(link(ifindex, name)))));
+        }
+        assert!(
+            matches!(
+                events[..],
+                [NetdevEvent::Changed(_), NetdevEvent::Changed(_), NetdevEvent::Added(_)]
+            ),
+            "{events:?}"
+        );
+        let events = h.feed_link(Marker(ResyncMarker::ResyncEnd));
+        let removed: Vec<_> = events
+            .iter()
+            .map(|e| match e {
+                NetdevEvent::Removed { ifindex, name } => (*ifindex, name.as_deref()),
+                other => panic!("expected only removals, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(removed, [(3, Some("veth1")), (4, Some("dummy0"))]);
+
+        let mut cached: Vec<u32> = store.keys();
+        cached.sort_unstable();
+        assert_eq!(cached, [1, 2, 5], "the store follows the snapshot");
+        assert_eq!(h.lifecycle.len(), 3);
+    }
+
+    /// A snapshot's non-link items are not the join's business, and a
+    /// `ResyncEnd` with no snapshot open removes nothing.
+    #[test]
+    fn a_resync_stream_without_a_snapshot_changes_nothing() {
+        use ResyncedEvent::{Event, Marker};
+        let mut h = Harness::<ResyncedEvent<NetworkEvent>>::build(None);
+        h.feed_link(Event(NetworkEvent::NewLink(link(2, "veth0"))));
+        assert!(h.feed_link(Marker(ResyncMarker::ResyncEnd)).is_empty());
+        assert_eq!(h.lifecycle.len(), 1);
     }
 }

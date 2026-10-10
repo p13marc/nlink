@@ -47,16 +47,32 @@ neither will arrive at all until something changes.
 
 ```rust,no_run
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+use std::sync::Arc;
+
 use nlink::netlink::{
-    Connection, KobjectUevent, Route, RtnetlinkGroup,
+    Connection, KobjectUevent, NetworkEvent, Route, RtnetlinkGroup,
     netdev::{NetdevEvent, NetdevInfo, NetdevLifecycle},
     reflector::Store,
+    resync::events_with_resync,
     uevent_filter::UeventFilter,
 };
 use tokio_stream::StreamExt;
 
 let links = Connection::<Route>::new()?;
 links.subscribe(&[RtnetlinkGroup::Link])?;
+// A resync stream over the link group: it opens with a snapshot of the
+// links that exist, and takes one again after an overflow. The join
+// turns each into `Added`/`Changed`, and what a snapshot lacks into
+// `Removed`. The snapshot runs on a second connection.
+let dumper = Arc::new(Connection::<Route>::new()?);
+let links = events_with_resync(links.events().await, move || {
+    let dumper = dumper.clone();
+    Box::pin(async move {
+        let links = dumper.get_links().await?;
+        Ok(links.into_iter().map(NetworkEvent::NewLink).collect())
+    })
+})
+.initial_snapshot(true);
 
 let uevents = Connection::<KobjectUevent>::new()?;
 // Drop every non-net uevent in the kernel rather than parsing and
@@ -64,7 +80,7 @@ let uevents = Connection::<KobjectUevent>::new()?;
 uevents.attach_filter(&UeventFilter::new().subsystem("net").build())?;
 
 let store: Store<u32, NetdevInfo> = Store::new();
-let mut lifecycle = NetdevLifecycle::new(links.events().await, uevents.events().await)
+let mut lifecycle = NetdevLifecycle::new(links, uevents.events().await)
     .with_store(store.clone());
 
 while let Some(event) = lifecycle.next().await {
@@ -84,6 +100,12 @@ while let Some(event) = lifecycle.next().await {
 `Store` is cheap to clone and shares its backing map, so hand
 clones to as many readers as you like while one task drives the
 stream.
+
+Plain `links.events().await` works too, but a link stream without
+snapshots cannot recover from an overflow. Whatever link events were
+lost stay lost: a lost `RTM_DELLINK` leaves its device in the store for
+good (#510). It also announces nothing about devices that already
+existed when it subscribed.
 
 ## Four things worth understanding before you rely on it
 
@@ -176,10 +198,11 @@ and issue #252. Two mitigations, both already wired in above:
   buffer only holds events you asked for.
 
 What that means for the cache: the *set of devices* comes from
-rtnetlink, which has a real dump, so it is sound. *Annotations*
-come from uevents, so a device can sit in the store
-un-annotated indefinitely. `is_fully_attributed()` distinguishes
-them; do not treat a missing annotation as a missing device.
+rtnetlink, which has a real dump. With the resync stream above, that
+set is sound: each snapshot settles it. *Annotations* come from
+uevents, so a device can sit in the store un-annotated indefinitely.
+`is_fully_attributed()` distinguishes them; do not treat a missing
+annotation as a missing device.
 
 ## Running it
 
@@ -195,7 +218,8 @@ sudo ip link del dummy0
 ## See also
 
 - [`events-with-resync`](events-with-resync.md) — the resync
-  machinery this deliberately does *not* use on the uevent side.
+  machinery this uses on the link side, and deliberately does *not*
+  use on the uevent side.
 - [`multi-namespace-events`](multi-namespace-events.md) — fanning
   the same idea across N namespaces with `StreamMap`.
 - `crates/nlink/examples/uevent/` — `filtered_monitor.rs`,

@@ -15,12 +15,13 @@
 //!   sudo ip link set dummy0 up
 //!   sudo ip link del dummy0
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use nlink::netlink::{
-    Connection, KobjectUevent, Route, RtnetlinkGroup,
+    Connection, KobjectUevent, NetworkEvent, Route, RtnetlinkGroup,
     netdev::{NetdevEvent, NetdevInfo, NetdevLifecycle},
     reflector::Store,
+    resync::events_with_resync,
     uevent_filter::UeventFilter,
 };
 use tokio_stream::StreamExt;
@@ -29,6 +30,18 @@ use tokio_stream::StreamExt;
 async fn main() -> nlink::Result<()> {
     let links = Connection::<Route>::new()?;
     links.subscribe(&[RtnetlinkGroup::Link])?;
+    // Snapshots of the links, on a second connection: one to start
+    // from, and one after any overflow, so the cache keeps the right
+    // set of devices (#510).
+    let dumper = Arc::new(Connection::<Route>::new()?);
+    let links = events_with_resync(links.events().await, move || {
+        let dumper = dumper.clone();
+        Box::pin(async move {
+            let links = dumper.get_links().await?;
+            Ok(links.into_iter().map(NetworkEvent::NewLink).collect())
+        })
+    })
+    .initial_snapshot(true);
 
     let uevents = Connection::<KobjectUevent>::new()?;
     // Shed every non-net uevent kernel-side, so this process is not
@@ -44,7 +57,7 @@ async fn main() -> nlink::Result<()> {
     // to readers while this task drives the stream.
     let store: Store<u32, NetdevInfo> = Store::new();
     let mut lifecycle =
-        NetdevLifecycle::new(links.events().await, uevents.events().await).with_store(store.clone());
+        NetdevLifecycle::new(links, uevents.events().await).with_store(store.clone());
 
     // A reader: prints the cache every few seconds, entirely
     // independent of the stream above.
