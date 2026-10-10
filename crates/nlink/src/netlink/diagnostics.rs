@@ -231,8 +231,8 @@ impl TcDiag {
             overlimits: tc.overlimits() as u64,
             backlog: tc.backlog(),
             qlen: tc.qlen(),
-            rate_bps: tc.bps() as u64,
-            rate_pps: tc.pps() as u64,
+            rate_bps: tc.bps(),
+            rate_pps: tc.pps(),
             bytes: tc.bytes(),
             packets: tc.packets(),
         }
@@ -1061,7 +1061,7 @@ impl Diagnostics {
                             qdisc.kind().unwrap_or("?")
                         ),
                         bottleneck_type: BottleneckType::QdiscDrops,
-                        current_rate: qdisc.bps() as u64,
+                        current_rate: qdisc.bps(),
                         drop_rate,
                         total_drops: drops,
                         recommendation: format!(
@@ -1080,7 +1080,7 @@ impl Diagnostics {
                 bottlenecks.push(Bottleneck {
                     location: format!("{} egress qdisc ({})", name, qdisc.kind().unwrap_or("?")),
                     bottleneck_type: BottleneckType::BufferFull,
-                    current_rate: qdisc.bps() as u64,
+                    current_rate: qdisc.bps(),
                     drop_rate: 0.0,
                     total_drops: drops,
                     recommendation: format!(
