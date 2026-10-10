@@ -85,6 +85,24 @@ pub enum Error {
         ext_ack_offset: Option<u32>,
     },
 
+    /// The kernel refused an nftables batch.
+    ///
+    /// `nfnetlink` processes every message of a batch, reports each one it
+    /// refuses, and then rolls the whole batch back: **nothing in it was
+    /// committed.** `failures` has one entry per refused operation, in
+    /// batch order, each naming the operation and — where the kernel
+    /// pointed at one — the attribute or expression it blamed (#481).
+    ///
+    /// [`errno`](Self::errno), [`ext_ack`](Self::ext_ack) and the `is_*`
+    /// predicates answer for the first failure, so `e.is_busy()` still
+    /// works on a refused batch.
+    #[error("{}", format_nft_batch(failures))]
+    #[non_exhaustive]
+    NftBatch {
+        /// Every operation the kernel refused, in batch order.
+        failures: Vec<crate::netlink::nftables::NftBatchFailure>,
+    },
+
     /// Message was truncated.
     #[error("message truncated: expected {expected} bytes, got {actual}")]
     Truncated {
@@ -378,6 +396,26 @@ fn format_kernel(
     out
 }
 
+/// `strerror(errno)`, without std's ` (os error N)` suffix: the
+/// kernel errors print `(errno N)` themselves, and saying it twice
+/// (`Device or resource busy (os error 16) (errno 16)`) was noise (#481).
+pub(crate) fn strerror(errno: i32) -> String {
+    let full = io::Error::from_raw_os_error(errno).to_string();
+    let suffix = format!(" (os error {errno})");
+    full.strip_suffix(&suffix)
+        .map(str::to_string)
+        .unwrap_or(full)
+}
+
+/// Format the Display output for [`Error::NftBatch`].
+fn format_nft_batch(failures: &[crate::netlink::nftables::NftBatchFailure]) -> String {
+    let shown: Vec<String> = failures.iter().map(|f| f.to_string()).collect();
+    format!(
+        "nftables batch refused, nothing committed: {}",
+        shown.join("; ")
+    )
+}
+
 /// Format the Display output for [`Error::KernelWithContext`].
 fn format_kernel_ctx(
     operation: &str,
@@ -431,7 +469,7 @@ impl Error {
         ext_ack_offset: Option<u32>,
     ) -> Self {
         let errno = errno.abs();
-        let message = io::Error::from_raw_os_error(errno).to_string();
+        let message = strerror(errno);
         Self::Kernel {
             errno,
             message,
@@ -458,7 +496,7 @@ impl Error {
         ext_ack_offset: Option<u32>,
     ) -> Self {
         let errno = errno.abs();
-        let message = io::Error::from_raw_os_error(errno).to_string();
+        let message = strerror(errno);
         Self::KernelWithContext {
             operation: operation.into(),
             errno,
@@ -629,6 +667,7 @@ impl Error {
     pub fn errno(&self) -> Option<i32> {
         match self {
             Self::Kernel { errno, .. } | Self::KernelWithContext { errno, .. } => Some(*errno),
+            Self::NftBatch { failures } => failures.first().map(|f| f.errno),
             Self::Io(io_err) => io_err.raw_os_error(),
             _ => None,
         }
@@ -659,6 +698,7 @@ impl Error {
             Self::Kernel { ext_ack, .. } | Self::KernelWithContext { ext_ack, .. } => {
                 ext_ack.as_deref()
             }
+            Self::NftBatch { failures } => failures.first().and_then(|f| f.ext_ack.as_deref()),
             _ => None,
         }
     }
@@ -671,6 +711,7 @@ impl Error {
         match self {
             Self::Kernel { ext_ack_offset, .. }
             | Self::KernelWithContext { ext_ack_offset, .. } => *ext_ack_offset,
+            Self::NftBatch { failures } => failures.first().and_then(|f| f.offset),
             _ => None,
         }
     }

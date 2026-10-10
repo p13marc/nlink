@@ -913,9 +913,11 @@ impl Connection<Nftables> {
     /// 2. **Terminate on the end_seq ACK specifically** — not on
     ///    the first per-op ACK, which can fire mid-batch and
     ///    leave the loop thinking the batch is done.
-    /// 3. **Surface mid-batch errors immediately** — an op-level
-    ///    `NLMSGERR` (non-ack) means the kernel rejected an op;
-    ///    the batch will not commit. Return the error.
+    /// 3. **Collect every refused operation** — an op-level
+    ///    `NLMSGERR` (non-ack) means the kernel rejected an op and
+    ///    the batch will not commit, but nfnetlink keeps going and
+    ///    reports every refused op. Read them all, then return
+    ///    [`Error::NftBatch`] naming each (#481).
     /// 4. **Hard-cap with a 30s timeout** — pending Plan 171's
     ///    `Connection<P>`-wide default timeout. If the kernel
     ///    skips the end-seq ACK (unexpected on Linux ≥ 4.6 per
@@ -992,13 +994,26 @@ impl Connection<Nftables> {
         // Every seq the kernel can legitimately answer with now lies in one
         // contiguous window: BATCH_BEGIN, the inner ops, BATCH_END.
         let window = begin_seq..=end_seq;
+        let mut failures: Vec<super::NftBatchFailure> = Vec::new();
 
         // (4) Wrap in the Connection-level operation timeout
         // (Plan 171 default: 30s). Surfaces a missing end-seq
         // ACK as Error::Timeout instead of an indefinite hang.
         self.with_timeout(async {
             loop {
-                let data: Vec<u8> = self.socket().recv_msg().await?;
+                // nfnetlink processes the whole batch inside our sendmsg and
+                // queues every answer before it returns. So once one failure
+                // is in, everything else the kernel has to say is already in
+                // the socket: drain it without waiting for an END ACK a
+                // refused batch may not get.
+                let data: Vec<u8> = if failures.is_empty() {
+                    self.socket().recv_msg().await?
+                } else {
+                    match self.socket().try_recv_msg()? {
+                        Some(data) => data,
+                        None => return Err(Error::NftBatch { failures }),
+                    }
+                };
 
                 for msg_result in MessageIter::new(&data) {
                     // (0) A malformed frame that is not ours is not our
@@ -1032,16 +1047,35 @@ impl Connection<Nftables> {
                         if err.is_ack() {
                             // (2) Only the BATCH_END ACK means the batch
                             //     committed. Per-op ACKs can fire mid-batch
-                            //     and must not be mistaken for it.
+                            //     and must not be mistaken for it — and after
+                            //     a failure it means nothing was committed.
                             if header.nlmsg_seq == end_seq {
-                                return Ok(());
+                                if failures.is_empty() {
+                                    return Ok(());
+                                }
+                                return Err(Error::NftBatch { failures });
                             }
                             continue;
                         }
-                        // (3) Non-ack error — the kernel rejected an op and
-                        //     the batch will not commit. Surface immediately,
-                        //     with the op's seq for context.
-                        return Err(err.to_error(header.nlmsg_flags, payload));
+                        // (3) The kernel refused a message. Record which one
+                        //     and keep reading: it reports every refused
+                        //     operation, then rolls the batch back (#481).
+                        let ext = err.ext_ack(header.nlmsg_flags, payload);
+                        let seq = header.nlmsg_seq;
+                        let failure = if seq == begin_seq {
+                            super::NftBatchFailure::of_batch("batch begin", err.error, ext)
+                        } else if seq == end_seq {
+                            super::NftBatchFailure::of_batch("commit", err.error, ext)
+                        } else {
+                            let index = seq.wrapping_sub(begin_seq).wrapping_sub(1) as usize;
+                            let message = messages.get(index).map_or(&[][..], Vec::as_slice);
+                            super::NftBatchFailure::of_message(index, message, err.error, ext)
+                        };
+                        failures.push(failure);
+                        if seq == end_seq {
+                            return Err(Error::NftBatch { failures });
+                        }
+                        continue;
                     }
 
                     // NLMSG_DONE is a *dump* terminator; nfnetlink never emits
@@ -1707,6 +1741,18 @@ impl Transaction {
             set_id_counter: 1,
             error: None,
         }
+    }
+
+    /// An empty transaction, for unit tests that inspect the bytes.
+    #[cfg(test)]
+    pub(crate) fn new_for_test() -> Self {
+        Self::new()
+    }
+
+    /// The messages built so far, for unit tests.
+    #[cfg(test)]
+    pub(crate) fn messages_for_test(self) -> Vec<Vec<u8>> {
+        self.messages
     }
 
     /// Keep the first deferred error.

@@ -12,6 +12,27 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **A refused nftables batch said one errno and a bare byte offset (#481).**
+  `send_batch` returned on the first error as `kernel error: Device or
+  resource busy (os error 16) (errno 16) (at request offset 36)`, whatever
+  failed. It did not say which operation that was, the offset was into a
+  message the caller never saw, the errno was printed twice, and every
+  failure after the first was discarded, although `nfnetlink` reports each
+  one. A refused batch is now `Error::NftBatch { failures }`: one
+  `NftBatchFailure` per refused operation, in batch order. Each names
+  the operation as `op #1 add rule ip t/nochain [key]`. It also gives
+  the errno, the ext-ack text, and the attribute or expression the
+  offset points at, e.g. `expression #4 (log)`. Where nlink can tell,
+  it adds a hint, e.g. "is its module available?" on an unknown
+  expression, or "something still uses it" on a refused delete. The
+  `is_*` predicates answer for the first failure, so retry loops keep
+  working. Kernel errors print their errno once (`Device or resource
+  busy (errno 16)`). A root test commits a batch with a rule for a
+  missing chain and a delete of a set a rule uses, and checks that both
+  are named and that the table the batch also added was not committed.
+  Before the fix the error was `No such file or directory (os error 2)
+  (errno 2) (at request offset 28)`.
+
 - **Extended-ack: TLVs read at the wrong place, missing attributes and
   policies ignored, warnings on success dropped (#507).** The error's
   TLVs were read at a fixed offset, which is right only when the kernel
@@ -88,6 +109,9 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`Error::NftBatch` and `NftBatchFailure`** — a refused nftables batch,
+  one entry per refused operation (#481).
 
 - **`NlMsgError::{ext_ack, ext_ack_attrs, to_error}`** read the
   extended-ack TLVs where the header's flags say they are, and
