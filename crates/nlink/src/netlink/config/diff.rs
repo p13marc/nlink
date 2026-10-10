@@ -11,7 +11,7 @@ use std::{
 use super::kind::{self, KindPlan, KindUpdate, LinkRecreate};
 use super::types::{
     DeclaredAddress, DeclaredLink, DeclaredLinkType, DeclaredQdisc, DeclaredQdiscType,
-    DeclaredRoute, DeclaredRouteType, LinkState, NetworkConfig, QdiscParent,
+    DeclaredRoute, DeclaredRouteType, LinkState, MasterSpec, NetworkConfig, QdiscParent,
 };
 use crate::netlink::{
     builder::MessageBuilder,
@@ -447,6 +447,7 @@ pub async fn compute_diff_with_options(
     conn: &Connection<Route>,
     opts: &DiffOptions,
 ) -> Result<ConfigDiff> {
+    config.validate()?;
     check_vlan_states(config)?;
     let mut diff = ConfigDiff::default();
 
@@ -639,7 +640,7 @@ fn diff_links<'a>(
                 .master()
                 .and_then(|idx| ifindex_to_name.get(&idx).copied());
             if changes.set_master.is_some() || changes.unset_master {
-                port_set_changes.extend(declared.master.as_deref());
+                port_set_changes.extend(declared.master.name());
                 port_set_changes.extend(existing_master);
             }
             // The link changes that make the kernel drop the link's routes
@@ -667,7 +668,7 @@ fn diff_links<'a>(
             // Link doesn't exist, needs to be created
             // But only if it's not a physical interface
             if declared.link_type != DeclaredLinkType::Physical {
-                port_set_changes.extend(declared.master.as_deref());
+                port_set_changes.extend(declared.master.name());
                 let mut link = declared.clone();
                 // A recreated link comes back down; one declared without a
                 // state keeps the one it had.
@@ -780,8 +781,8 @@ fn topo_sort_links_to_add(links: &mut Vec<DeclaredLink>) {
         // `master` is a separate field on the link itself —
         // applies to any link type (Dummy, Veth, Bond member,
         // etc. enslaved to a bridge / bond / VRF master).
-        if let Some(master) = &link.master {
-            deps.push(master.clone());
+        if let Some(master) = link.master.name() {
+            deps.push(master.to_string());
         }
         deps.retain(|d| names_in_batch.contains(d));
         deps
@@ -915,21 +916,21 @@ fn compute_link_changes(
         .master()
         .and_then(|idx| ifindex_to_name.get(&idx).copied());
 
-    match (declared.master.as_deref(), existing_master_name) {
-        (Some(want), Some(have)) if want == have => {
+    // A declaration that does not mention a master leaves it alone; only
+    // `nomaster()` releases one (#462).
+    match (&declared.master, existing_master_name) {
+        (MasterSpec::Name(want), Some(have)) if want == have => {
             // No change — declared master matches kernel master.
         }
-        (Some(want), _) => {
+        (MasterSpec::Name(want), _) => {
             // Either kernel has no master, or has a different master.
             // Either way, queue a set_master operation.
             changes.set_master = Some(want.to_string());
         }
-        (None, Some(_)) => {
+        (MasterSpec::None, Some(_)) => {
             changes.unset_master = true;
         }
-        (None, None) => {
-            // Both no-master — no change.
-        }
+        _ => {}
     }
 
     // A bond opens the port it enslaves and closes the one it releases —
@@ -1090,7 +1091,7 @@ const IP6_RT_PRIO_USER: u32 = 1024;
 
 /// The metric the kernel stores for a declared route: the declared one,
 /// except that IPv6 turns both "none" and 0 into `IP6_RT_PRIO_USER`.
-fn kernel_metric(route: &DeclaredRoute) -> u32 {
+pub(super) fn kernel_metric(route: &DeclaredRoute) -> u32 {
     match (route.metric, route.destination.is_ipv6()) {
         (None | Some(0), true) => IP6_RT_PRIO_USER,
         (Some(metric), _) => metric,
@@ -1608,7 +1609,7 @@ mod tests {
             link_type,
             state: LinkState::Unchanged,
             mtu: None,
-            master: None,
+            master: MasterSpec::Unmanaged,
             address: None,
         }
     }
@@ -2265,7 +2266,7 @@ mod tests {
         // Declaring `dummy0.master("br0")` before `br0` should
         // get reordered so br0 lands first.
         let mut dummy = declared("dummy0", DeclaredLinkType::Dummy);
-        dummy.master = Some("br0".into());
+        dummy.master = MasterSpec::Name("br0".into());
         let mut links = vec![dummy, declared("br0", DeclaredLinkType::Bridge)];
         topo_sort_links_to_add(&mut links);
         let positions: HashMap<String, usize> = links

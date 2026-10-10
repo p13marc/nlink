@@ -53,8 +53,65 @@ impl NetworkConfig {
     /// ```
     #[cfg(feature = "serde")]
     pub fn from_json_str(s: &str) -> crate::netlink::Result<Self> {
-        serde_json::from_str(s)
-            .map_err(|e| crate::netlink::Error::InvalidMessage(format!("config JSON parse: {e}")))
+        let cfg: Self = serde_json::from_str(s).map_err(|e| {
+            crate::netlink::Error::InvalidMessage(format!("config JSON parse: {e}"))
+        })?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// Refuse declarations that contradict each other (#462): a link, a
+    /// route (same destination, table and metric) or a qdisc (same device
+    /// and parent) declared twice.
+    ///
+    /// The builder cannot produce a duplicate link — [`link`](Self::link)
+    /// updates an earlier declaration of the name — but a JSON document can,
+    /// and two declarations of one link used to be diffed separately, each
+    /// undoing the other. [`diff`](Self::diff) and
+    /// [`from_json_str`](Self::from_json_str) run this first.
+    pub fn validate(&self) -> crate::netlink::Result<()> {
+        use crate::netlink::error::ValidationErrorInfo;
+        use std::collections::HashSet;
+
+        let mut errors = Vec::new();
+        let mut links = HashSet::new();
+        for l in &self.links {
+            if !links.insert(l.name.as_str()) {
+                errors.push(ValidationErrorInfo::new(
+                    format!("links.{}", l.name),
+                    "declared more than once",
+                ));
+            }
+        }
+        let mut routes = HashSet::new();
+        for r in &self.routes {
+            let key = (
+                super::diff::kernel_destination(r.destination, r.prefix_len),
+                r.prefix_len,
+                r.table.unwrap_or(254),
+                super::diff::kernel_metric(r),
+            );
+            if !routes.insert(key) {
+                errors.push(ValidationErrorInfo::new(
+                    format!("routes.{}/{}", r.destination, r.prefix_len),
+                    "declared more than once with the same table and metric",
+                ));
+            }
+        }
+        let mut qdiscs = HashSet::new();
+        for q in &self.qdiscs {
+            if !qdiscs.insert((q.dev.as_str(), q.effective_parent())) {
+                errors.push(ValidationErrorInfo::new(
+                    format!("qdiscs.{}", q.dev),
+                    format!("declared more than once at {:?}", q.effective_parent()),
+                ));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(crate::netlink::Error::validation(errors))
+        }
     }
 
     /// Serialize this configuration to a compact JSON string.
@@ -144,9 +201,25 @@ impl NetworkConfig {
     ///     .link("dummy0", |l| l.dummy())
     ///     .link("veth0", |l| l.veth("veth1").master("br0"));
     /// ```
+    ///
+    /// Declaring a name twice **updates** the first declaration: `f` gets
+    /// a builder holding what is already declared, so
+    /// `.link("v10", |l| l.vlan("eth0", 10)).link("v10", |l| l.master("red"))`
+    /// is one VLAN in `red`. Two declarations used to be diffed
+    /// separately, and the one without a master released the link from
+    /// the master the other named — on every other apply (#462).
     pub fn link(mut self, name: &str, f: impl FnOnce(LinkBuilder) -> LinkBuilder) -> Self {
-        let builder = f(LinkBuilder::new(name));
-        self.links.push(builder.build());
+        match self.links.iter().position(|l| l.name == name) {
+            Some(i) => {
+                let existing = self.links.remove(i);
+                let link = f(LinkBuilder::from_declared(existing)).build();
+                self.links.insert(i, link);
+            }
+            None => {
+                let builder = f(LinkBuilder::new(name));
+                self.links.push(builder.build());
+            }
+        }
         self
     }
 
@@ -250,8 +323,18 @@ pub struct DeclaredLink {
     pub(crate) state: LinkState,
     #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     pub(crate) mtu: Option<u32>,
-    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
-    pub(crate) master: Option<String>,
+    /// Absent: [`MasterSpec::Unmanaged`]; `null`: [`MasterSpec::None`];
+    /// a name: [`MasterSpec::Name`].
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            default,
+            with = "master_serde",
+            skip_serializing_if = "MasterSpec::is_unmanaged"
+        )
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
+    pub(crate) master: MasterSpec,
     /// Hardware address, round-tripped as the canonical
     /// `aa:bb:cc:dd:ee:ff` string rather than a raw byte array.
     #[cfg_attr(
@@ -285,9 +368,73 @@ impl DeclaredLink {
         self.mtu
     }
 
-    /// Get the master interface name.
+    /// Get the master interface name, when one is declared.
     pub fn master(&self) -> Option<&str> {
-        self.master.as_deref()
+        self.master.name()
+    }
+
+    /// What this declaration says about the link's master: nothing, "none",
+    /// or a name.
+    pub fn master_spec(&self) -> &MasterSpec {
+        &self.master
+    }
+}
+
+/// What a link declaration says about its master (#462).
+///
+/// MTU and MAC are `Option`s that mean "don't care" when unset, and the
+/// master was an `Option` that meant "no master": a declaration that did
+/// not mention one released the link from whatever enslaved it — a bridge
+/// someone else manages, or the VRF a second declaration of the same link
+/// named, which then flipped on every apply.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MasterSpec {
+    /// Leave the master as it is. The default.
+    #[default]
+    Unmanaged,
+    /// No master: release the link from one it has
+    /// ([`LinkBuilder::nomaster`]).
+    None,
+    /// Enslave the link to this master ([`LinkBuilder::master`]).
+    Name(String),
+}
+
+impl MasterSpec {
+    /// The master's name, for [`MasterSpec::Name`].
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Self::Name(name) => Some(name),
+            _ => None,
+        }
+    }
+
+    /// `true` for [`MasterSpec::Unmanaged`].
+    pub fn is_unmanaged(&self) -> bool {
+        matches!(self, Self::Unmanaged)
+    }
+}
+
+/// `master` as JSON: absent is unmanaged (via `#[serde(default)]`), `null`
+/// is "no master", a string is the master's name.
+#[cfg(feature = "serde")]
+mod master_serde {
+    use super::MasterSpec;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(spec: &MasterSpec, s: S) -> Result<S::Ok, S::Error> {
+        match spec {
+            MasterSpec::Name(name) => s.serialize_str(name),
+            _ => s.serialize_none(),
+        }
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<MasterSpec, D::Error> {
+        Ok(match Option::<String>::deserialize(d)? {
+            Some(name) => MasterSpec::Name(name),
+            None => MasterSpec::None,
+        })
     }
 }
 
@@ -502,7 +649,7 @@ pub struct LinkBuilder {
     link_type: DeclaredLinkType,
     state: LinkState,
     mtu: Option<u32>,
-    master: Option<String>,
+    master: MasterSpec,
     address: Option<[u8; 6]>,
 }
 
@@ -513,8 +660,21 @@ impl LinkBuilder {
             link_type: DeclaredLinkType::Physical,
             state: LinkState::Unchanged,
             mtu: None,
-            master: None,
+            master: MasterSpec::Unmanaged,
             address: None,
+        }
+    }
+
+    /// A builder holding what `link` already declares, for
+    /// [`NetworkConfig::link`]'s upsert.
+    fn from_declared(link: DeclaredLink) -> Self {
+        Self {
+            name: link.name,
+            link_type: link.link_type,
+            state: link.state,
+            mtu: link.mtu,
+            master: link.master,
+            address: link.address,
         }
     }
 
@@ -845,7 +1005,16 @@ impl LinkBuilder {
 
     /// Set the master interface (for bridging/bonding).
     pub fn master(mut self, master: &str) -> Self {
-        self.master = Some(master.to_string());
+        self.master = MasterSpec::Name(master.to_string());
+        self
+    }
+
+    /// Declare that the link has no master: release it from one it has.
+    ///
+    /// Without this, or [`master`](Self::master), the declaration leaves
+    /// the master alone (#462).
+    pub fn nomaster(mut self) -> Self {
+        self.master = MasterSpec::None;
         self
     }
 
@@ -1452,7 +1621,7 @@ impl DeclaredQdisc {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum QdiscParent {
     /// Root qdisc.
@@ -2707,7 +2876,7 @@ mod plan_190_tests {
             cfg.links[0].link_type,
             DeclaredLinkType::Vrf { table: 100 }
         ));
-        assert_eq!(cfg.links[1].master.as_deref(), Some("vrf-red"));
+        assert_eq!(cfg.links[1].master.name(), Some("vrf-red"));
     }
 }
 
@@ -3565,5 +3734,82 @@ mod schemars_tests {
         let from_value = serde_json::to_value(NetworkConfig::json_schema_value()).unwrap();
         let from_string = schema_value();
         assert_eq!(from_value, from_string, "the two json_schema accessors must agree");
+    }
+}
+
+#[cfg(test)]
+mod master_and_validate_tests {
+    //! #462 — `MasterSpec`, the `link` upsert and `validate`.
+    use super::*;
+
+    /// Declaring a link twice updates the first declaration; a link that
+    /// never mentions a master leaves it unmanaged.
+    #[test]
+    fn link_is_an_upsert_and_master_defaults_to_unmanaged() {
+        let cfg = NetworkConfig::new()
+            .link("v10", |l| l.vlan("eth0", 10))
+            .link("eth0", |l| l.mtu(9000))
+            .link("v10", |l| l.master("red"));
+        assert_eq!(cfg.links.len(), 2);
+        assert!(matches!(
+            cfg.links[0].link_type,
+            DeclaredLinkType::Vlan { .. }
+        ));
+        assert_eq!(cfg.links[0].master, MasterSpec::Name("red".into()));
+        assert_eq!(cfg.links[1].master, MasterSpec::Unmanaged);
+        let released = NetworkConfig::new().link("eth0", |l| l.nomaster());
+        assert_eq!(released.links[0].master, MasterSpec::None);
+    }
+
+    /// Duplicate routes and qdiscs are refused; the builder cannot
+    /// produce a duplicate link, JSON can.
+    #[test]
+    fn validate_refuses_duplicates() {
+        let cfg = NetworkConfig::new()
+            .route("10.0.0.0/8", |r| r.dev("eth0"))
+            .unwrap()
+            .route("10.0.0.0/8", |r| r.dev("eth1"))
+            .unwrap()
+            .qdisc("eth0", |q| q.fq_codel())
+            .qdisc("eth0", |q| q.sfq());
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("routes.10.0.0.0/8"), "{err}");
+        assert!(err.contains("qdiscs.eth0"), "{err}");
+        let distinct = NetworkConfig::new()
+            .route("10.0.0.0/8", |r| r.dev("eth0").metric(100))
+            .unwrap()
+            .route("10.0.0.0/8", |r| r.dev("eth1").metric(200))
+            .unwrap();
+        distinct.validate().unwrap();
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn json_master_absent_null_and_named() {
+        let cfg = NetworkConfig::from_json_str(
+            r#"{"links": [
+                {"name": "a", "link-type": "physical"},
+                {"name": "b", "link-type": "physical", "master": null},
+                {"name": "c", "link-type": "physical", "master": "br0"}
+            ]}"#,
+        )
+        .unwrap();
+        let specs: Vec<MasterSpec> = cfg.links.iter().map(|l| l.master.clone()).collect();
+        assert_eq!(
+            specs,
+            [
+                MasterSpec::Unmanaged,
+                MasterSpec::None,
+                MasterSpec::Name("br0".into())
+            ]
+        );
+        let back = NetworkConfig::from_json_str(&cfg.to_json_string().unwrap()).unwrap();
+        let again: Vec<MasterSpec> = back.links.iter().map(|l| l.master.clone()).collect();
+        assert_eq!(again, specs);
+        let dup = NetworkConfig::from_json_str(
+            r#"{"links": [{"name": "a", "link-type": "physical"},
+                          {"name": "a", "link-type": "physical"}]}"#,
+        );
+        assert!(dup.unwrap_err().to_string().contains("links.a"));
     }
 }

@@ -329,9 +329,13 @@ async fn link_modifiers_converge() -> nlink::Result<()> {
                     .link("d0", |l| l.dummy().master("bond0").up()),
                 NetworkConfig::new()
                     .link("bond0", |l| l.bond().up())
-                    .link("d0", |l| l.dummy().up()),
+                    .link("d0", |l| l.dummy().nomaster().up()),
             ],
-        ),
+        )
+        .check(|ns| match ip_link_json(ns, "d0")?["master"].as_str() {
+            None => Ok(()),
+            Some(m) => Err(format!("d0 still in {m}")),
+        }),
         // …and opens the one it enslaves, so a port declared down has to
         // be taken down after it joins.
         case(
@@ -397,6 +401,67 @@ async fn link_modifiers_converge() -> nlink::Result<()> {
 // ============================================================================
 // Link-kind parameters (#417)
 // ============================================================================
+
+/// A declaration that does not mention a master leaves it alone, two
+/// declarations of one link are one link, and only `nomaster()` releases.
+/// `master: None` meant "release", so `.link("d0", |l| l.mtu(..))` freed d0
+/// from its bridge, and a link declared in two parts flipped between
+/// enslaved and released on every apply (#462).
+#[tokio::test]
+async fn an_undeclared_master_is_left_alone() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "bridge", "vrf");
+
+    let master_of = |want: Option<&'static str>| {
+        move |ns: &TestNamespace| {
+            let link = ip_link_json(ns, "d0")?;
+            let have = link["master"].as_str();
+            if have == want {
+                Ok(())
+            } else {
+                Err(format!("d0's master is {have:?}, want {want:?}"))
+            }
+        }
+    };
+    let bridged = || {
+        NetworkConfig::new()
+            .link("br0", |l| l.bridge().up())
+            .link("d0", |l| l.dummy().master("br0").up())
+    };
+    let cases = vec![
+        case(
+            "mtu-only-declaration",
+            vec![
+                bridged(),
+                NetworkConfig::new()
+                    .link("br0", |l| l.bridge().up())
+                    .link("d0", |l| l.dummy().mtu(1400).up()),
+            ],
+        )
+        .check(master_of(Some("br0"))),
+        case(
+            "declared-in-two-parts",
+            vec![
+                NetworkConfig::new()
+                    .link("red", |l| l.vrf(10).up())
+                    .link("d0", |l| l.dummy().up())
+                    .link("d0", |l| l.master("red")),
+            ],
+        )
+        .check(master_of(Some("red"))),
+        case(
+            "nomaster-releases",
+            vec![
+                bridged(),
+                NetworkConfig::new()
+                    .link("br0", |l| l.bridge().up())
+                    .link("d0", |l| l.dummy().nomaster().up()),
+            ],
+        )
+        .check(master_of(None)),
+    ];
+    assert_converges("nce-master", cases).await
+}
 
 /// The kernel's view of a link, from `ip -d -j link show dev <dev>`.
 ///
@@ -1639,10 +1704,12 @@ async fn routes_a_link_change_flushes_are_put_back() -> nlink::Result<()> {
 
     let vrf = |cfg: NetworkConfig| cfg.link("vrf0", |l| l.vrf(10).up());
     let bond = |cfg: NetworkConfig| cfg.link("bond0", |l| l.bond().up());
+    // `None` is "no master": `nomaster()`, since a declaration that does
+    // not mention one leaves it alone (#462).
     let d0 = |master: Option<&'static str>| {
         NetworkConfig::new().link("d0", |l| match master {
             Some(m) => l.dummy().master(m).up(),
-            None => l.dummy().up(),
+            None => l.dummy().nomaster().up(),
         })
     };
     let vlan_on_d0 = |cfg: NetworkConfig| cfg.link("v10", |l| l.vlan("d0", 10).up());
