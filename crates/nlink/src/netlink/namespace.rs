@@ -294,6 +294,43 @@ impl<'a> NamespaceSpec<'a> {
 /// The runtime directory where named network namespaces are stored.
 pub const NETNS_RUN_DIR: &str = "/var/run/netns";
 
+/// Check a namespace name the way `ip netns` does (`invalid_name`):
+/// non-empty, no `/`, not `.` or `..`, at most `NAME_MAX` (255) bytes, no
+/// NUL.
+///
+/// Every by-name function here joins the name onto [`NETNS_RUN_DIR`] —
+/// and `delete` then lazily unmounts what it names, as root. Unchecked,
+/// `delete("")` detached `/var/run/netns` itself, and every named
+/// namespace on the host with it; `delete("..")` detached `/run`; an
+/// absolute name replaced the base directory altogether (#463).
+pub fn validate_name(name: &str) -> Result<()> {
+    let reason = if name.is_empty() {
+        Some("is empty")
+    } else if name == "." || name == ".." {
+        Some("is `.` or `..`")
+    } else if name.contains('/') {
+        Some("contains `/`")
+    } else if name.contains('\0') {
+        Some("contains NUL")
+    } else if name.len() > 255 {
+        Some("is longer than 255 bytes")
+    } else {
+        None
+    };
+    match reason {
+        Some(reason) => Err(Error::InvalidMessage(format!(
+            "invalid namespace name {name:?}: it {reason}"
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// `NETNS_RUN_DIR/<name>`, for a name [`validate_name`] accepts.
+fn named_path(name: &str) -> Result<PathBuf> {
+    validate_name(name)?;
+    Ok(PathBuf::from(NETNS_RUN_DIR).join(name))
+}
+
 /// Get a connection for a named network namespace.
 ///
 /// Named namespaces are those created via `ip netns add <name>` and stored
@@ -677,8 +714,7 @@ impl Drop for NamespaceGuard {
 /// # }
 /// ```
 pub fn exists(name: &str) -> bool {
-    let path = PathBuf::from(NETNS_RUN_DIR).join(name);
-    path.exists()
+    named_path(name).is_ok_and(|path| path.exists())
 }
 
 /// Convert a filesystem path to a `CString`, preserving its exact bytes.
@@ -736,7 +772,7 @@ pub fn is_namespace_path<P: AsRef<Path>>(path: P) -> bool {
 /// Pairs with [`exists`]: `exists` only checks the marker is present; this
 /// checks it is a live netns.
 pub fn is_namespace(name: &str) -> bool {
-    is_namespace_path(PathBuf::from(NETNS_RUN_DIR).join(name))
+    named_path(name).is_ok_and(is_namespace_path)
 }
 
 /// Resolve `ip netns` name → path, refusing anything that is not a live
@@ -759,6 +795,7 @@ pub(crate) fn live_named_path(ns_name: &str) -> Result<PathBuf> {
 /// [`live_named_path`] over an explicit run directory, so the stale-marker
 /// classification is testable without root.
 fn live_path_in(run_dir: &Path, ns_name: &str) -> Result<PathBuf> {
+    validate_name(ns_name)?;
     let path = run_dir.join(ns_name);
     if is_namespace_path(&path) {
         return Ok(path);
@@ -803,7 +840,7 @@ fn live_path_in(run_dir: &Path, ns_name: &str) -> Result<PathBuf> {
 ///
 /// See also [`create_path`] to persist a netns at an arbitrary path.
 pub fn create(name: &str) -> Result<()> {
-    create_path(PathBuf::from(NETNS_RUN_DIR).join(name))
+    create_path(named_path(name)?)
 }
 
 /// The EEXIST-shaped error [`create_path`] returns for an already-present
@@ -1069,7 +1106,7 @@ fn create_namespace_in_current_thread(name: &str, ns_path: &Path) -> Result<()> 
 ///
 /// See also [`delete_path`] to delete a netns at an arbitrary path.
 pub fn delete(name: &str) -> Result<()> {
-    delete_path(PathBuf::from(NETNS_RUN_DIR).join(name))
+    delete_path(named_path(name)?)
 }
 
 /// Delete a persistent network namespace at an arbitrary `path`.
@@ -1098,6 +1135,16 @@ pub fn delete_path<P: AsRef<Path>>(path: P) -> Result<()> {
         return Err(Error::NamespaceNotFound {
             name: ns_path.display().to_string(),
         });
+    }
+    // A namespace is a file — the nsfs inode bind-mounted over a marker, or
+    // a stale marker. Lazily unmounting a directory detaches everything
+    // mounted under it (#463).
+    let is_file = std::fs::symlink_metadata(ns_path).is_ok_and(|m| m.file_type().is_file());
+    if !is_file {
+        return Err(Error::InvalidMessage(format!(
+            "refusing to delete {}: not a namespace file",
+            ns_path.display()
+        )));
     }
 
     let ns_path_cstr = path_to_cstring(ns_path)?;
@@ -1520,6 +1567,7 @@ pub fn spawn_output_path<P: AsRef<Path>>(
 /// The returned `CString` pairs are captured by the `pre_exec` closure
 /// so that only raw syscalls (no allocations) happen after fork.
 fn prepare_etc_binds(ns_name: &str) -> Result<Vec<(std::ffi::CString, std::ffi::CString)>> {
+    validate_name(ns_name)?;
     let etc_netns = PathBuf::from("/etc/netns").join(ns_name);
 
     let entries = match std::fs::read_dir(&etc_netns) {
@@ -1818,6 +1866,36 @@ pub fn spawn_output_path_with_etc<P: AsRef<Path>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Names `ip netns` would refuse are refused before anything touches
+    /// the filesystem, and the by-name queries answer "no" for them (#463).
+    #[test]
+    fn invalid_namespace_names_are_refused() {
+        for bad in ["", ".", "..", "a/b", "/etc/passwd", "../../tmp", "x\0y"] {
+            assert!(validate_name(bad).is_err(), "{bad:?}");
+            assert!(delete(bad).is_err(), "{bad:?}");
+            assert!(create(bad).is_err(), "{bad:?}");
+            assert!(open(bad).is_err(), "{bad:?}");
+            assert!(!exists(bad), "{bad:?}");
+            assert!(!is_namespace(bad), "{bad:?}");
+        }
+        assert!(validate_name(&"n".repeat(256)).is_err());
+        for good in ["lab", "lab.1", "node-a_b", &"n".repeat(255)] {
+            validate_name(good).unwrap();
+        }
+    }
+
+    /// `delete_path` refuses a directory instead of lazily unmounting
+    /// everything under it (#463).
+    #[test]
+    fn delete_path_refuses_a_directory() {
+        let dir = std::env::temp_dir().join(format!("nlink-ns-dir-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = delete_path(&dir).unwrap_err();
+        assert!(err.to_string().contains("not a namespace file"), "{err}");
+        assert!(dir.is_dir());
+        std::fs::remove_dir(&dir).unwrap();
+    }
 
     /// #186 — `NamespaceFd` borrows as an I/O-safe fd, the same fd the
     /// raw accessor reports.
