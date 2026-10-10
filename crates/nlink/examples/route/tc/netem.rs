@@ -61,7 +61,7 @@ async fn show_netem(conn: &Connection<Route>, dev: &str) -> nlink::netlink::Resu
         let kind = qdisc.kind().unwrap_or("?");
         let parent = if qdisc.is_root() {
             "root".to_string()
-        } else if qdisc.is_ingress() {
+        } else if qdisc.parent().is_ingress() {
             "ingress".to_string()
         } else {
             qdisc.parent().to_string()

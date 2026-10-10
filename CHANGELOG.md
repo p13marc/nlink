@@ -32,6 +32,33 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **tc readback: a netem rate of 4 GB/s or more read as 4294967295, a
+  netem replace kept a slot and ECN set by `tc`, `qopt` latency was in the
+  wrong unit, and `is_ingress()`/`is_clsact()` were both true (#493).**
+  - `netem_dump` puts `TCA_NETEM_RATE64` *before* `TCA_NETEM_RATE`, whose
+    u32 then carries `~0U`. Parsed in order, the cap won. RATE64 now wins
+    wherever it comes.
+  - `NetemConfig` does not model ECN or a slot, so nothing was sent for
+    them. A replace (`netem_change`) keeps whatever it is not sent, so ones
+    set by `tc` survived every nlink replace, and `netem_matches` did not
+    look at them. `write_options` now sends ECN 0 and a zero slot (the
+    kernel's "none"), and the comparison treats a live ECN or slot as a
+    difference. A delay distribution table cannot be cleared that way:
+    `netem_change` keeps it and `netem_dump` never shows it. Only a delete
+    and add resets one.
+  - `tc_netem_qopt.latency`/`jitter` are psched ticks (64 ns), and nlink
+    wrote and read them as µs. `LATENCY64`/`JITTER64` hid this on 4.15+.
+    Below that, a delay was 15.6 times too short.
+  - An `ingress` and a `clsact` qdisc both sit at parent `TC_H_INGRESS`,
+    and both predicates compared the parent. They now compare the kind.
+    Code that means "at the ingress hook" uses `parent().is_ingress()`,
+    as the config diff and capture now do.
+
+  Unit tests cover each item. A root test sets `slot 1ms 2ms ecn` with
+  `tc`, replaces the qdisc through nlink with a 5 GB/s rate, and checks
+  nlink's readback and `tc qdisc show`. On master, ECN survived the
+  replace, and the other five tests failed as described.
+
 - **tc stats: `requeues()` was always 0, and packet counts wrapped at 2^32
   (#489).** `tc_fill_qdisc`/`tc_fill_tclass` dump `TCA_STATS2` and then,
   through `gnet_stats_finish_copy`, the legacy `TCA_STATS` block as a

@@ -1369,7 +1369,8 @@ fn diff_qdiscs(
         if let Some(name) = ifindex_to_name.get(&qdisc.ifindex()) {
             if qdisc.is_root() {
                 current_root_qdisc.insert(*name, qdisc);
-            } else if qdisc.is_ingress() {
+            } else if qdisc.parent().is_ingress() {
+                // ingress or clsact: both sit at TC_H_INGRESS.
                 current_ingress_qdisc.insert(*name, qdisc);
             }
         }

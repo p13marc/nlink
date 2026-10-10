@@ -315,6 +315,71 @@ async fn netem_replace_clears_what_the_new_config_does_not_set() -> Result<()> {
     Ok(())
 }
 
+/// The live netem on `dummy0`, parsed.
+async fn dummy0_netem(
+    conn: &Connection<Route>,
+) -> Result<nlink::netlink::tc_options::NetemOptions> {
+    let qdiscs = conn.get_qdiscs_by_name("dummy0").await?;
+    let netem = qdiscs
+        .iter()
+        .find(|q| q.kind() == Some("netem"))
+        .expect("a netem");
+    match netem.options() {
+        Some(QdiscOptions::Netem(o)) => Ok(o),
+        other => panic!("netem options did not parse: {other:?}"),
+    }
+}
+
+/// #493: `NetemConfig` does not model ECN or a slot, so `write_options`
+/// never sent them, and a replace — `netem_change()`, which keeps what it
+/// is not sent — left ones set by `tc` in place, where `tc qdisc show`
+/// still listed them. A rate past `u32::MAX` B/s read back as the capped
+/// `TCA_NETEM_RATE` the kernel dumps after `RATE64`.
+#[tokio::test]
+async fn netem_replace_clears_an_external_slot_and_ecn() -> Result<()> {
+    require_root!();
+    nlink::require_modules!("sch_netem");
+
+    let (ns, conn) = setup_tc_ns("netem-slot-ecn").await?;
+    ns.exec(
+        "tc",
+        &[
+            "qdisc", "add", "dev", "dummy0", "root", "netem", "delay", "10ms", "slot", "1ms",
+            "2ms", "ecn", "loss", "1%",
+        ],
+    )?;
+    let before = dummy0_netem(&conn).await?;
+    assert!(before.ecn(), "nlink reads the ECN tc set");
+    assert!(before.slot().is_some(), "nlink reads the slot tc set");
+
+    let fast = nlink::Rate::bytes_per_sec(5_000_000_000);
+    let cfg = NetemConfig::new()
+        .delay(Duration::from_millis(20))
+        .rate(fast)
+        .build();
+    conn.replace_qdisc("dummy0", cfg).await?;
+
+    let after = dummy0_netem(&conn).await?;
+    assert!(!after.ecn(), "ECN survived the replace");
+    assert!(
+        after.slot().is_none(),
+        "the slot survived the replace: {:?}",
+        after.slot()
+    );
+    assert_eq!(
+        after.rate_bps(),
+        Some(5_000_000_000),
+        "RATE64, not the capped RATE"
+    );
+    assert_eq!(after.delay(), Some(Duration::from_millis(20)));
+    let shown = ns.exec("tc", &["qdisc", "show", "dev", "dummy0"])?;
+    assert!(
+        !shown.contains("slot") && !shown.contains("ecn"),
+        "tc still shows them: {shown}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_del_netem() -> Result<()> {
     require_root!();

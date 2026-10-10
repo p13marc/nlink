@@ -1021,7 +1021,7 @@ pub(crate) fn plan(
                 }
                 let parent = if q.is_root() {
                     QdiscParent::Root
-                } else if q.is_ingress() || q.is_clsact() {
+                } else if q.parent().is_ingress() {
                     QdiscParent::Ingress
                 } else {
                     continue;

@@ -271,7 +271,7 @@ pub fn tc_calc_xmitsize(rate_bytes_per_sec: u64, ticks: u32) -> u32 {
 
 /// `PSCHED_SHIFT` (`include/net/pkt_sched.h`): one psched tick is
 /// `1 << 6` ns, and `PSCHED_NS2TICKS(x)` is `x >> 6`.
-const PSCHED_SHIFT: u32 = 6;
+pub(crate) const PSCHED_SHIFT: u32 = 6;
 
 /// The kernel's `psched_ratecfg_precompute__()` (net/sched/sch_generic.c):
 /// the multiplier and shift `psched_l2t_ns()` turns a length into

@@ -483,17 +483,22 @@ impl TcMessage {
     }
 
     /// Check if this is an ingress qdisc.
+    ///
+    /// Decided by kind (#493). An `ingress` and a `clsact` qdisc both sit
+    /// at parent `TC_H_INGRESS` (`TcHandle::INGRESS == TcHandle::CLSACT`),
+    /// so comparing the parent made a clsact read as ingress and an ingress
+    /// as clsact. For "anything at the ingress hook", ask
+    /// `msg.parent().is_ingress()`.
     #[inline]
     pub fn is_ingress(&self) -> bool {
-        self.header.tcm_parent == crate::netlink::types::tc::tc_handle::INGRESS
-            || self.kind() == Some("ingress")
+        self.kind() == Some("ingress")
     }
 
-    /// Check if this is a clsact qdisc.
+    /// Check if this is a clsact qdisc. Decided by kind; see
+    /// [`is_ingress`](Self::is_ingress).
     #[inline]
     pub fn is_clsact(&self) -> bool {
-        self.header.tcm_parent == crate::netlink::types::tc::tc_handle::CLSACT
-            || self.kind() == Some("clsact")
+        self.kind() == Some("clsact")
     }
 
     /// The `nlmsg_type` this message arrived with, if known.
@@ -1044,6 +1049,25 @@ mod classification_tests {
 
         assert!(!f.is_class(), "the old heuristic said class here");
         assert!(f.is_filter());
+    }
+
+    /// #493: an ingress and a clsact qdisc both sit at parent `TC_H_INGRESS`,
+    /// so comparing the parent made each read as the other.
+    #[test]
+    fn ingress_and_clsact_are_told_apart_by_kind() {
+        let at_ingress = |kind: &str| {
+            let mut m = msg(NlMsgType::RTM_NEWQDISC, 1);
+            m.header.tcm_parent = crate::netlink::types::tc::tc_handle::INGRESS;
+            m.kind = Some(kind.to_string());
+            m
+        };
+        let clsact = at_ingress("clsact");
+        assert!(clsact.is_clsact());
+        assert!(!clsact.is_ingress(), "a clsact read as ingress");
+        let ingress = at_ingress("ingress");
+        assert!(ingress.is_ingress());
+        assert!(!ingress.is_clsact(), "an ingress read as clsact");
+        assert!(clsact.parent().is_ingress() && ingress.parent().is_ingress());
     }
 
     #[test]

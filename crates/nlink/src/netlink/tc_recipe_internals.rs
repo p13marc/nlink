@@ -242,6 +242,13 @@ pub(crate) fn netem_matches(desired: &NetemConfig, live: &TcMessage) -> bool {
         return false;
     }
 
+    // ECN and a slot are not modelled, and `write_options` sends both off.
+    // One set outside nlink is therefore a difference a replace closes
+    // (#493).
+    if live_opts.ecn || live_opts.slot.is_some() {
+        return false;
+    }
+
     // Markov loss model (#368). The kernel echoes TCA_NETEM_LOSS only for
     // a model, so "none" on both sides is a match; otherwise compare in the
     // kernel's u32 units, since the read side carries u32 → f64 rounding.
@@ -580,6 +587,50 @@ mod tests {
             .loss_model(NetemLossModel::gilbert_intuitive(Percent::new(1.0)))
             .build();
         assert!(!netem_matches(&gi, &make_netem_msg(ge(99.0))));
+    }
+
+    /// #493: `qopt.latency` is psched ticks; it was written as µs.
+    #[test]
+    fn netem_writes_qopt_latency_in_psched_ticks() {
+        let cfg = NetemConfig::new()
+            .delay(Duration::from_millis(100))
+            .jitter(Duration::from_millis(10))
+            .build();
+        let opts = make_netem_msg(cfg).options.expect("options");
+        let latency = u32::from_ne_bytes(opts[0..4].try_into().unwrap());
+        let jitter = u32::from_ne_bytes(opts[20..24].try_into().unwrap());
+        assert_eq!((latency, jitter), (1_562_500, 156_250));
+    }
+
+    /// #493: ECN and a slot set outside nlink survive a replace unless it
+    /// sends them off, which `write_options` now does — so the comparison
+    /// has to see them, or the replace is never made.
+    #[test]
+    fn netem_matches_sees_an_external_ecn_or_slot() {
+        use crate::netlink::types::tc::qdisc::netem::{TCA_NETEM_ECN, TCA_NETEM_SLOT, TcNetemSlot};
+        let desired = NetemConfig::new().delay(Duration::from_millis(50)).build();
+        let with = |ty: u16, payload: &[u8]| {
+            let mut live = make_netem_msg(desired.clone());
+            let opts = live.options.as_mut().unwrap();
+            opts.extend_from_slice(&(4 + payload.len() as u16).to_ne_bytes());
+            opts.extend_from_slice(&ty.to_ne_bytes());
+            opts.extend_from_slice(payload);
+            live
+        };
+        assert!(netem_matches(&desired, &make_netem_msg(desired.clone())));
+        assert!(!netem_matches(
+            &desired,
+            &with(TCA_NETEM_ECN, &1u32.to_ne_bytes())
+        ));
+        let slot = TcNetemSlot {
+            min_delay: 1_000_000,
+            max_delay: 2_000_000,
+            ..Default::default()
+        };
+        assert!(!netem_matches(
+            &desired,
+            &with(TCA_NETEM_SLOT, slot.as_bytes())
+        ));
     }
 
     #[test]

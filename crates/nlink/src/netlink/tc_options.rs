@@ -1449,17 +1449,19 @@ fn parse_netem_options(data: &[u8]) -> NetemOptions {
 
     // First 24 bytes are TcNetemQopt
     if data.len() >= TcNetemQopt::SIZE {
-        // Parse delay/jitter as microseconds, convert to nanoseconds
-        let delay_us = u32::from_ne_bytes(data[0..4].try_into().unwrap());
-        opts.delay_ns = delay_us as u64 * 1000;
+        // `latency` and `jitter` are psched ticks (64 ns), capped at
+        // u32::MAX; TCA_NETEM_LATENCY64/JITTER64 below carry the exact
+        // values on 4.15+. They were read as µs (#493).
+        let delay_ticks = u32::from_ne_bytes(data[0..4].try_into().unwrap());
+        opts.delay_ns = u64::from(delay_ticks) << super::psched::PSCHED_SHIFT;
         opts.limit = u32::from_ne_bytes(data[4..8].try_into().unwrap());
         let loss_raw = u32::from_ne_bytes(data[8..12].try_into().unwrap());
         opts.loss_percent = prob_to_percent(loss_raw);
         opts.gap = u32::from_ne_bytes(data[12..16].try_into().unwrap());
         let dup_raw = u32::from_ne_bytes(data[16..20].try_into().unwrap());
         opts.duplicate_percent = prob_to_percent(dup_raw);
-        let jitter_us = u32::from_ne_bytes(data[20..24].try_into().unwrap());
-        opts.jitter_ns = jitter_us as u64 * 1000;
+        let jitter_ticks = u32::from_ne_bytes(data[20..24].try_into().unwrap());
+        opts.jitter_ns = u64::from(jitter_ticks) << super::psched::PSCHED_SHIFT;
     }
 
     // Parse nested attributes after TcNetemQopt
@@ -1468,6 +1470,11 @@ fn parse_netem_options(data: &[u8]) -> NetemOptions {
     } else {
         return opts;
     };
+
+    // `netem_dump` puts RATE64 *before* RATE, whose u32 then reads
+    // `u32::MAX`; read in order, a rate of 4 GB/s or more came back as
+    // 4294967295 (#493). RATE64 wins whichever comes first.
+    let mut rate64 = None;
 
     while input.len() >= 4 {
         let Some(len) = input
@@ -1529,12 +1536,14 @@ fn parse_netem_options(data: &[u8]) -> NetemOptions {
             }
             TCA_NETEM_RATE64
                 if payload.len() >= 8 => {
-                    opts.rate = u64::from_ne_bytes(payload[..8].try_into().unwrap());
+                    rate64 = Some(u64::from_ne_bytes(payload[..8].try_into().unwrap()));
                 }
             TCA_NETEM_ECN => {
-                // ECN is a flag attribute (presence means enabled)
-                // Some kernels send a u32 value, others just the attribute
-                opts.ecn = true;
+                // A u32. The kernel dumps it only when set, but nlink sends
+                // 0 to clear it, so read the value; a bare flag is "on".
+                opts.ecn = payload
+                    .get(..4)
+                    .is_none_or(|b| u32::from_ne_bytes(b.try_into().unwrap()) != 0);
             }
             TCA_NETEM_LATENCY64
                 // 64-bit latency in nanoseconds
@@ -1549,14 +1558,20 @@ fn parse_netem_options(data: &[u8]) -> NetemOptions {
             TCA_NETEM_SLOT
                 // TcNetemSlot structure
                 if payload.len() >= TcNetemSlot::SIZE => {
-                    opts.slot = Some(NetemSlotOptions {
+                    let slot = NetemSlotOptions {
                         min_delay_ns: i64::from_ne_bytes(payload[0..8].try_into().unwrap()),
                         max_delay_ns: i64::from_ne_bytes(payload[8..16].try_into().unwrap()),
                         max_packets: i32::from_ne_bytes(payload[16..20].try_into().unwrap()),
                         max_bytes: i32::from_ne_bytes(payload[20..24].try_into().unwrap()),
                         dist_delay_ns: i64::from_ne_bytes(payload[24..32].try_into().unwrap()),
                         dist_jitter_ns: i64::from_ne_bytes(payload[32..40].try_into().unwrap()),
-                    });
+                    };
+                    // The kernel's own test for a slot that does anything
+                    // (`get_slot`, `netem_dump`); the zero slot nlink sends
+                    // to clear one is no slot (#493).
+                    if slot.min_delay_ns | slot.max_delay_ns | slot.dist_jitter_ns != 0 {
+                        opts.slot = Some(slot);
+                    }
                 }
             TCA_NETEM_LOSS => {
                 // Loss model is a nested attribute containing the model type and parameters
@@ -1572,6 +1587,9 @@ fn parse_netem_options(data: &[u8]) -> NetemOptions {
         input = &input[aligned..];
     }
 
+    if let Some(rate) = rate64 {
+        opts.rate = rate;
+    }
     opts
 }
 
@@ -2082,6 +2100,41 @@ mod tests {
         assert!(!params.contains(&NetemParameter::Corrupt));
     }
 
+    /// #493: `netem_dump` sends RATE64 first, then RATE carrying `~0U`.
+    /// Read in order, a 5 GB/s rate came back as 4294967295.
+    #[test]
+    fn netem_rate64_wins_over_the_capped_rate_after_it() {
+        use super::super::types::tc::qdisc::netem::*;
+        let mut data = TcNetemQopt::new().as_bytes().to_vec();
+        let mut rate64 = Vec::new();
+        rate64.extend_from_slice(&12u16.to_ne_bytes());
+        rate64.extend_from_slice(&TCA_NETEM_RATE64.to_ne_bytes());
+        rate64.extend_from_slice(&5_000_000_000u64.to_ne_bytes());
+        data.extend(rate64);
+        let capped = TcNetemRate {
+            rate: u32::MAX,
+            ..Default::default()
+        };
+        data.extend_from_slice(&(4 + TcNetemRate::SIZE as u16).to_ne_bytes());
+        data.extend_from_slice(&TCA_NETEM_RATE.to_ne_bytes());
+        data.extend_from_slice(capped.as_bytes());
+
+        assert_eq!(parse_netem_options(&data).rate, 5_000_000_000);
+    }
+
+    /// #493: with no LATENCY64 (pre-4.15), the delay is `qopt.latency`, in
+    /// 64 ns psched ticks. It was read as µs, 15.6 times too long.
+    #[test]
+    fn netem_qopt_latency_is_in_psched_ticks() {
+        use std::time::Duration;
+
+        use super::super::types::tc::qdisc::netem::*;
+        let mut qopt = TcNetemQopt::new();
+        qopt.latency = 1_562_500;
+        let opts = parse_netem_options(qopt.as_bytes());
+        assert_eq!(opts.delay(), Some(Duration::from_millis(100)));
+    }
+
     #[test]
     fn test_netem_parse_basic() {
         use std::time::Duration;
@@ -2090,12 +2143,12 @@ mod tests {
 
         // Build TcNetemQopt with 100ms delay, 1000 packet limit, 1% loss
         let mut qopt = TcNetemQopt::new();
-        qopt.latency = 100_000; // 100ms in microseconds
+        qopt.latency = 1_562_500; // 100ms in 64 ns psched ticks
         qopt.limit = 1000;
         qopt.loss = percent_to_prob(1.0); // 1% loss
         qopt.gap = 0;
         qopt.duplicate = 0;
-        qopt.jitter = 10_000; // 10ms jitter
+        qopt.jitter = 156_250; // 10ms jitter, in ticks
 
         let data = qopt.as_bytes().to_vec();
         let opts = parse_netem_options(&data);
@@ -2116,11 +2169,11 @@ mod tests {
 
         // Build base options
         let mut qopt = TcNetemQopt::new();
-        qopt.latency = 50_000; // 50ms
+        qopt.latency = 781_250; // 50ms, in ticks
         qopt.limit = 1000;
         qopt.loss = percent_to_prob(5.0); // 5% loss
         qopt.duplicate = percent_to_prob(2.0); // 2% duplicate
-        qopt.jitter = 5_000; // 5ms jitter
+        qopt.jitter = 78_125; // 5ms jitter, in ticks
 
         // Build correlation attributes
         let corr = TcNetemCorr {
@@ -2155,7 +2208,7 @@ mod tests {
         use super::super::types::tc::qdisc::netem::*;
 
         let mut qopt = TcNetemQopt::new();
-        qopt.latency = 100_000;
+        qopt.latency = 1_562_500; // 100ms, in ticks
         qopt.limit = 1000;
         qopt.gap = 5; // reorder gap
 
@@ -2265,10 +2318,10 @@ mod tests {
 
         // Build a complete netem config with multiple attributes
         let mut qopt = TcNetemQopt::new();
-        qopt.latency = 100_000; // 100ms
+        qopt.latency = 1_562_500; // 100ms, in ticks
         qopt.limit = 1000;
         qopt.loss = percent_to_prob(1.0);
-        qopt.jitter = 10_000;
+        qopt.jitter = 156_250; // 10ms, in ticks
 
         let corr = TcNetemCorr {
             delay_corr: percent_to_prob(25.0),

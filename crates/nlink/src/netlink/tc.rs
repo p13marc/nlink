@@ -671,12 +671,17 @@ impl QdiscConfig for NetemConfig {
         let mut qopt = TcNetemQopt::new();
         qopt.limit = self.limit;
 
+        // `latency`/`jitter` are psched ticks (64 ns), not µs (#493). The
+        // LATENCY64/JITTER64 attributes below override them on 4.15+; a
+        // kernel without those read µs as ticks, 15.6 times too short.
+        let ticks = |d: Duration| {
+            u32::try_from(d.as_nanos() >> super::psched::PSCHED_SHIFT).unwrap_or(u32::MAX)
+        };
         if let Some(delay) = self.delay {
-            // Use microseconds for the basic qopt (legacy)
-            qopt.latency = delay.as_micros() as u32;
+            qopt.latency = ticks(delay);
         }
         if let Some(jitter) = self.jitter {
-            qopt.jitter = jitter.as_micros() as u32;
+            qopt.jitter = ticks(jitter);
         }
         if !self.loss.is_zero() {
             qopt.loss = self.loss.as_kernel_probability();
@@ -751,6 +756,17 @@ impl QdiscConfig for NetemConfig {
         if let Some(model) = &self.loss_model {
             model.write_attr(builder);
         }
+
+        // ECN and a slot are not modelled, so they are written off: a
+        // replace is `netem_change()`, which keeps both when they are not
+        // sent, so one set outside nlink (`tc … ecn`, `slot 1ms 2ms`) would
+        // otherwise survive every replace, unseen (#493). A zero slot is the
+        // kernel's "no slot" (`get_slot` clears `slot_next`). The delay
+        // distribution table cannot be cleared this way — `netem_change`
+        // keeps it, and `netem_dump` never shows it; only a delete and add
+        // resets one.
+        builder.append_attr_u32(TCA_NETEM_ECN, 0);
+        builder.append_attr(TCA_NETEM_SLOT, TcNetemSlot::default().as_bytes());
 
         Ok(())
     }

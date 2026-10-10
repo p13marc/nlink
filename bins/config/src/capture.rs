@@ -298,7 +298,7 @@ pub async fn run(args: CaptureArgs) -> Result<()> {
 
             let parent = if qdisc.is_root() {
                 "root".to_string()
-            } else if qdisc.is_ingress() {
+            } else if qdisc.parent().is_ingress() {
                 "ingress".to_string()
             } else {
                 qdisc.parent_str()
