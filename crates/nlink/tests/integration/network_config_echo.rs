@@ -1745,6 +1745,54 @@ async fn a_route_through_a_link_declared_down_fails_in_the_same_apply() -> nlink
     Ok(())
 }
 
+/// Changing an IPv6 address's prefix length re-prefixes it: one address,
+/// at the new prefix, with purge and without, and a route through it
+/// stays. The kernel knows an IPv6 address by the address alone, so the
+/// add was EEXIST and swallowed; with purge the old prefix was deleted
+/// after it and the interface was left with no address; without, the
+/// diff asked for the add on every apply (#461).
+#[tokio::test]
+async fn an_ipv6_prefix_change_reprefixes_the_address() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy");
+
+    let at = |prefix: u8| {
+        dummy_up("d0")
+            .address("d0", &format!("fd00:61::1/{prefix}"))
+            .unwrap()
+            .route("2001:db8:61::/48", |r| r.via("fd00:61::fe").dev("d0"))
+            .unwrap()
+    };
+    let only_56 = |ns: &TestNamespace| {
+        let addrs = ip_json(ns, &["-6", "addr", "show", "dev", "d0", "scope", "global"])?;
+        let held: Vec<(String, u64)> = addrs[0]["addr_info"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            // `ip -j` closes the list with an object that has no address.
+            .filter_map(|a| {
+                Some((
+                    a["local"].as_str()?.to_string(),
+                    a["prefixlen"].as_u64().unwrap_or(0),
+                ))
+            })
+            .collect();
+        if held != [("fd00:61::1".to_string(), 56)] {
+            return Err(format!("want fd00:61::1/56 alone, d0 has {held:?}"));
+        }
+        if routes_at(ns, "-6", "2001:db8:61::/48")?.len() != 1 {
+            return Err("the route through d0 is gone".to_string());
+        }
+        Ok(())
+    };
+    let cases = vec![
+        case("purge", vec![at(64), at(56)]).purging().check(only_56),
+        case("no-purge", vec![at(64), at(56)]).check(only_56),
+    ];
+    assert_converges("nce-v6-prefix", cases).await
+}
+
 /// The routes a route listing shows for `dst`, as `(type, metric)`.
 fn routes_at(ns: &TestNamespace, family: &str, dst: &str) -> Result<Vec<(String, u64)>, String> {
     let routes = ip_json(ns, &[family, "route", "show", "table", "all", dst])?;

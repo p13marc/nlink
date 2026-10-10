@@ -992,6 +992,28 @@ fn diff_addresses(
         if gone || !current_set.contains(&key) {
             diff.addresses_to_add.push(declared.clone());
         }
+        // The kernel knows an IPv6 address by the address alone
+        // (`ipv6_get_ifaddr`), so the same address at another prefix is
+        // this one, re-prefixed: the add would be EEXIST, and the old
+        // prefix has to go first. Keyed on the full triple, the add's
+        // EEXIST was swallowed and, with purge, the old prefix deleted
+        // after it — leaving the interface with no address (#461). IPv4
+        // keys addresses on address *and* mask (`inet_insert_ifa`), so two
+        // prefixes of one IPv4 address coexist and need nothing here.
+        if declared.address.is_ipv6() && !gone {
+            for (dev, addr, prefix) in &current_set {
+                if *dev == declared.dev.as_str()
+                    && *addr == declared.address
+                    && *prefix != declared.prefix_len
+                {
+                    diff.addresses_to_remove.push(DeclaredAddress {
+                        dev: dev.to_string(),
+                        address: *addr,
+                        prefix_len: *prefix,
+                    });
+                }
+            }
+        }
     }
 
     if !purge {
@@ -1022,12 +1044,19 @@ fn diff_addresses(
             continue;
         };
         let key = (*name, addr, a.prefix_len());
-        if !desired.contains(&key) {
-            diff.addresses_to_remove.push(DeclaredAddress {
-                dev: name.to_string(),
-                address: addr,
-                prefix_len: a.prefix_len(),
-            });
+        let removal = DeclaredAddress {
+            dev: name.to_string(),
+            address: addr,
+            prefix_len: a.prefix_len(),
+        };
+        // A re-prefixed IPv6 address is already queued above.
+        let queued = diff.addresses_to_remove.iter().any(|q| {
+            q.dev == removal.dev
+                && q.address == removal.address
+                && q.prefix_len == removal.prefix_len
+        });
+        if !desired.contains(&key) && !queued {
+            diff.addresses_to_remove.push(removal);
         }
     }
 }

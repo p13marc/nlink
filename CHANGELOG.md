@@ -19,6 +19,23 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Changing an IPv6 address's prefix length removed the address (purge)
+  or never converged (#461).** The address diff keys on `(dev, address,
+  prefix)`, but the kernel knows an IPv6 address by the address alone.
+  The add of `fd00:1::1/56` over `/64` was `EEXIST`, which the apply
+  swallowed as "already present". With purge, the old `/64` was then
+  deleted after it, leaving no global address at all. Without purge, the
+  add was listed on every diff while the apply reported no change. A
+  re-prefixed IPv6 address is now listed as removed at the old prefix
+  and added at the new one, and the apply deletes the old prefix right
+  before the add, purge or not. An `EEXIST` on an add counts as "already
+  present" only if re-reading the device finds the declared prefix. IPv4
+  needs none of this: the kernel keys IPv4 addresses on address and
+  mask. Echo cases for `/64` → `/56`, with and without purge, check
+  through `ip -j` that one address is left at `/56` and that a route
+  through it stays. Before the fix both cases listed `+ address
+  fd00:61::1/56` forever.
+
 - **Route purge could not delete a `proto static` route or a
   blackhole/unreachable/prohibit route, and reported it deleted (#467).**
   The purge rebuilt each route through the add builder. Its defaults,
