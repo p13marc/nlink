@@ -1673,12 +1673,15 @@ impl DeclaredQdiscType {
     ///
     /// [`PrioConfig`]: crate::netlink::tc::PrioConfig
     pub(crate) fn prio_config(&self) -> Option<crate::netlink::tc::PrioConfig> {
-        let Self::Prio { bands } = self else {
+        let Self::Prio { bands, priomap } = self else {
             return None;
         };
         let mut cfg = crate::netlink::tc::PrioConfig::new();
         if let Some(b) = bands {
             cfg = cfg.bands(i32::from(*b));
+        }
+        if let Some(map) = priomap {
+            cfg = cfg.priomap(*map);
         }
         Some(cfg)
     }
@@ -1830,7 +1833,18 @@ pub enum DeclaredQdiscType {
         quantum: Option<u32>,
     },
     /// Priority qdisc.
-    Prio { bands: Option<u8> },
+    ///
+    /// `#[non_exhaustive]` since 0.31: construct through
+    /// [`QdiscBuilder::prio`]; match with `..`.
+    #[non_exhaustive]
+    Prio {
+        /// Number of bands, 2..=16. `None` is the kernel's 3.
+        bands: Option<u8>,
+        /// Which band each of the 16 priorities goes to. `None` is the
+        /// default map, fitted to `bands` when there are fewer than three
+        /// (#487).
+        priomap: Option<[u8; 16]>,
+    },
     /// Ingress qdisc.
     Ingress,
     /// Clsact qdisc (for BPF).
@@ -2222,8 +2236,18 @@ impl QdiscBuilder {
     /// the declarative path could only ever install the kernel default
     /// of 3 (#361).
     pub fn bands(mut self, bands: u8) -> Self {
-        if let Some(DeclaredQdiscType::Prio { bands: b }) = &mut self.qdisc_type {
+        if let Some(DeclaredQdiscType::Prio { bands: b, .. }) = &mut self.qdisc_type {
             *b = Some(bands);
+        }
+        self
+    }
+
+    /// Set the prio priomap: the band each of the 16 priorities goes to
+    /// (`PrioConfig::priomap`). Without one, the default map is used,
+    /// fitted to [`bands`](Self::bands) below three (#487).
+    pub fn priomap(mut self, map: [u8; 16]) -> Self {
+        if let Some(DeclaredQdiscType::Prio { priomap, .. }) = &mut self.qdisc_type {
+            *priomap = Some(map);
         }
         self
     }
@@ -2338,7 +2362,10 @@ impl QdiscBuilder {
 
     /// Configure as prio qdisc.
     pub fn prio(mut self) -> Self {
-        self.qdisc_type = Some(DeclaredQdiscType::Prio { bands: None });
+        self.qdisc_type = Some(DeclaredQdiscType::Prio {
+            bands: None,
+            priomap: None,
+        });
         self
     }
 

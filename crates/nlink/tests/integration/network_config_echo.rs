@@ -1920,6 +1920,20 @@ async fn other_qdisc_kinds_converge() -> nlink::Result<()> {
         ),
         case("prio", vec![base().qdisc("d0", |q| q.prio())]),
         case("prio-bands-4", vec![base().qdisc("d0", |q| q.prio().bands(4))]),
+        // prio_tune refuses a priomap entry past the last band, and the
+        // default map names band 2 (#487).
+        case(
+            "prio-bands-2",
+            vec![base().qdisc("d0", |q| q.prio().bands(2))],
+        ),
+        case(
+            "prio-priomap",
+            vec![base().qdisc("d0", |q| {
+                q.prio()
+                    .bands(4)
+                    .priomap([3, 3, 2, 2, 1, 1, 0, 0, 3, 3, 2, 2, 1, 1, 0, 0])
+            })],
+        ),
         case("htb", vec![base().qdisc("d0", |q| q.htb().default_class(0x10))]),
         case("ingress", vec![base().qdisc("d0", |q| q.ingress())]),
         case("clsact", vec![base().qdisc("d0", |q| q.clsact())]),
