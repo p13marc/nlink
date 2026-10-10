@@ -48,7 +48,8 @@ use super::{
     connection::{ack_request, create_request, replace_request},
     error::{Error, Result},
     interface_ref::InterfaceRef,
-    message::NlMsgType,
+    message::{NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REPLACE, NLM_F_REQUEST, NlMsgType},
+    messages::TcMessage,
     protocol::Route,
     psched,
     tc_handle::TcHandle,
@@ -61,6 +62,19 @@ use super::{
 // ============================================================================
 // QdiscConfig trait
 // ============================================================================
+
+/// How a live qdisc takes a replace by one of the same kind; see
+/// [`QdiscConfig::in_place`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum InPlace {
+    /// The kernel changes the live qdisc's parameters (`qdisc_change`).
+    Change,
+    /// The live qdisc is replaced by a new one, grafted into the slot in
+    /// the same request, so the slot is never bare: the kind has no change
+    /// operation, or a parameter only creation honours differs.
+    Recreate,
+}
 
 /// Trait for qdisc configurations that can be applied.
 pub trait QdiscConfig: Send + Sync {
@@ -94,6 +108,27 @@ pub trait QdiscConfig: Send + Sync {
     /// Get the default handle for this qdisc type, if any.
     fn default_handle(&self) -> Option<u32> {
         None
+    }
+
+    /// How [`Connection::replace_qdisc`] has to treat `live`, a qdisc of
+    /// this kind already in the slot (#486).
+    ///
+    /// Default [`InPlace::Change`]: the kernel's `qdisc_change` takes the
+    /// new parameters. Kinds without a change operation (`htb`, `sfq`)
+    /// return [`InPlace::Recreate`], as does `fq_codel` when the declared
+    /// `flows` — which only `init` honours — differs from the live one.
+    fn in_place(&self, live: &TcMessage) -> InPlace {
+        let _ = live;
+        InPlace::Change
+    }
+
+    /// The options of an in-place change of a live qdisc of this kind.
+    ///
+    /// Default: [`write_options`](Self::write_options). `fq_codel`
+    /// overrides it to leave out `flows`, which `fq_codel_change` refuses
+    /// on a live qdisc even when the value is unchanged (#486).
+    fn write_change_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        self.write_options(builder)
     }
 
     /// The one parent this qdisc kind can live under, if it is
@@ -962,6 +997,32 @@ impl QdiscConfig for FqCodelConfig {
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        self.write_fq_codel(builder, true)
+    }
+
+    fn write_change_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        self.write_fq_codel(builder, false)
+    }
+
+    /// `flows` sizes the flow table, which only `fq_codel_init` allocates:
+    /// a different value needs a new qdisc.
+    fn in_place(&self, live: &TcMessage) -> InPlace {
+        let live_flows = match live.options() {
+            Some(crate::netlink::tc_options::QdiscOptions::FqCodel(o)) => Some(o.flows),
+            _ => None,
+        };
+        match self.flows {
+            Some(want) if live_flows != Some(want) => InPlace::Recreate,
+            _ => InPlace::Change,
+        }
+    }
+}
+
+impl FqCodelConfig {
+    /// `with_flows`: `false` for a change to a live fq_codel, whose
+    /// `fq_codel_change` refuses `TCA_FQ_CODEL_FLOWS` outright, even with
+    /// the live value (#361, #486).
+    fn write_fq_codel(&self, builder: &mut MessageBuilder, with_flows: bool) -> Result<()> {
         if let Some(target) = self.target {
             builder.append_attr_u32(fq_codel::TCA_FQ_CODEL_TARGET, target.as_micros() as u32);
         }
@@ -971,7 +1032,9 @@ impl QdiscConfig for FqCodelConfig {
         if let Some(limit) = self.limit {
             builder.append_attr_u32(fq_codel::TCA_FQ_CODEL_LIMIT, limit);
         }
-        if let Some(flows) = self.flows {
+        if let Some(flows) = self.flows
+            && with_flows
+        {
             builder.append_attr_u32(fq_codel::TCA_FQ_CODEL_FLOWS, flows);
         }
         if let Some(quantum) = self.quantum {
@@ -2111,6 +2174,12 @@ impl QdiscConfig for HtbQdiscConfig {
         "htb"
     }
 
+    /// `sch_htb` has no change operation: "Change operation not supported
+    /// by specified qdisc".
+    fn in_place(&self, _live: &TcMessage) -> InPlace {
+        InPlace::Recreate
+    }
+
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         let glob = htb::TcHtbGlob::new()
             .with_default(self.default_class)
@@ -2442,6 +2511,12 @@ impl SfqConfig {
 impl QdiscConfig for SfqConfig {
     fn kind(&self) -> &'static str {
         "sfq"
+    }
+
+    /// `sch_sfq` has no change operation: "Change operation not supported
+    /// by specified qdisc".
+    fn in_place(&self, _live: &TcMessage) -> InPlace {
+        InPlace::Recreate
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -7995,27 +8070,23 @@ impl Connection<Route> {
         handle: Option<TcHandle>,
         config: impl QdiscConfig,
     ) -> Result<()> {
-        let parent_handle = parent.as_raw();
-        let qdisc_handle = handle.map(|h| h.as_raw()).unwrap_or(0);
-
-        let tcmsg = TcMsg::new()
-            .with_ifindex(ifindex as i32)
-            .with_parent(parent_handle)
-            .with_handle(qdisc_handle);
-
-        let mut builder = create_request(NlMsgType::RTM_NEWQDISC);
-        builder.append(&tcmsg);
-        builder.append_attr_str(TcaAttr::Kind as u16, config.kind());
-
-        if config.has_options() {
-            let options_token = builder.nest_start(TcaAttr::Options as u16);
-            config.write_options(&mut builder)?;
-            builder.nest_end(options_token);
-        }
-
-        self.send_ack(builder)
-            .await
-            .map_err(|e| e.with_context("add_qdisc"))
+        // NLM_F_EXCL, as `tc qdisc add` sends: an add over a live qdisc of
+        // the same kind, or at a handle in use, is EEXIST. Without it the
+        // kernel quietly *changed* a same-kind qdisc, and refused a
+        // different kind with EINVAL (#486). Over a different kind with no
+        // handle, the kernel grafts the new qdisc in its place, for `tc`
+        // and for this. `replace_qdisc` is the verb for "whatever is there".
+        let flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
+        self.send_qdisc(
+            ifindex,
+            parent,
+            handle.map_or(0, |h| h.as_raw()),
+            flags,
+            &config,
+            false,
+        )
+        .await
+        .map_err(|e| e.with_context("add_qdisc"))
     }
 
     /// Delete a qdisc from an interface.
@@ -8108,7 +8179,20 @@ impl Connection<Route> {
         })
     }
 
-    /// Replace a qdisc (add or update).
+    /// Replace a qdisc (add or update) — whatever is in the root slot.
+    ///
+    /// The kernel's answer to a replace depends on the live qdisc, so this
+    /// looks first (#486):
+    /// - nothing there, or a different kind under its own handle: created
+    ///   and grafted in;
+    /// - the same kind: changed in place ([`QdiscConfig::in_place`]), with
+    ///   the options in change mode (fq_codel without `flows`);
+    /// - the same kind that cannot change in place (`htb`, `sfq`, fq_codel
+    ///   with a different `flows`), or a different kind at the live
+    ///   qdisc's own handle: a new qdisc is grafted over the live one, so
+    ///   the slot is never bare. A same-kind qdisc with classes is refused
+    ///   instead (`is_not_supported`), because the new one would not have
+    ///   them.
     ///
     /// # Example
     ///
@@ -8176,27 +8260,120 @@ impl Connection<Route> {
         handle: Option<TcHandle>,
         config: impl QdiscConfig,
     ) -> Result<()> {
-        let parent_handle = parent.as_raw();
-        let qdisc_handle = handle.map(|h| h.as_raw()).unwrap_or(0);
+        // What the kernel does with NLM_F_REPLACE depends on what is in the
+        // slot, and some of its answers are EINVAL (#486): a same-kind
+        // replace is `qdisc_change`, which `htb` and `sfq` do not have and
+        // which `fq_codel` refuses when `flows` is present; a different kind
+        // at the live qdisc's own handle is "Invalid qdisc name". So look at
+        // the slot first.
+        let live = self
+            .get_qdiscs_by_index(ifindex)
+            .await?
+            .into_iter()
+            // A handle of 0 is the device's default qdisc; the kernel
+            // ignores it here too.
+            .find(|q| q.parent() == parent && q.handle().as_raw() != 0);
+        let replace = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
+        let raw = |h: Option<TcHandle>| h.map_or(0, |h| h.as_raw());
 
-        let tcmsg = TcMsg::new()
-            .with_ifindex(ifindex as i32)
-            .with_parent(parent_handle)
-            .with_handle(qdisc_handle);
+        let Some(live) = live else {
+            return self
+                .send_qdisc(ifindex, parent, raw(handle), replace, &config, false)
+                .await
+                .map_err(|e| e.with_context("replace_qdisc"));
+        };
+        let same_kind = live.kind() == Some(config.kind());
+        let at_live_handle = handle.is_some_and(|h| h == live.handle());
 
-        let mut builder = replace_request(NlMsgType::RTM_NEWQDISC);
-        builder.append(&tcmsg);
-        builder.append_attr_str(TcaAttr::Kind as u16, config.kind());
-
-        if config.has_options() {
-            let options_token = builder.nest_start(TcaAttr::Options as u16);
-            config.write_options(&mut builder)?;
-            builder.nest_end(options_token);
+        if same_kind && config.in_place(&live) == InPlace::Change {
+            // `qdisc_change`, encoded for a change.
+            return self
+                .send_qdisc(ifindex, parent, raw(handle), replace, &config, true)
+                .await
+                .map_err(|e| e.with_context("replace_qdisc"));
+        }
+        if !same_kind && !at_live_handle {
+            // A different kind under its own handle: the kernel creates it
+            // and grafts it over the live one.
+            return self
+                .send_qdisc(ifindex, parent, raw(handle), replace, &config, false)
+                .await
+                .map_err(|e| e.with_context("replace_qdisc"));
         }
 
-        self.send_ack(builder)
-            .await
-            .map_err(|e| e.with_context("replace_qdisc"))
+        // Recreate: a new qdisc grafted over the live one. A same-kind
+        // recreate would take the live qdisc's classes with it, which a
+        // caller asking to change parameters does not expect; refuse that.
+        if same_kind {
+            let classes = self
+                .get_classes_by_index(ifindex)
+                .await?
+                .into_iter()
+                .filter(|c| c.handle().major() == live.handle().major())
+                .count();
+            if classes > 0 {
+                return Err(Error::not_supported(format!(
+                    "replace_qdisc: a {} cannot be changed in place, and replacing it would \
+                     delete its {classes} class(es); delete the qdisc and add the new one if \
+                     that is what you want",
+                    config.kind()
+                )));
+            }
+        }
+        // Graft a new qdisc over the live one at a handle nothing uses — a
+        // handle the kernel cannot look up is always "create and graft" —
+        // then graft again at the handle asked for (the live one when none
+        // was), which by then is free. The slot is never bare (#486).
+        let in_use: Vec<u16> = self
+            .get_qdiscs_by_index(ifindex)
+            .await?
+            .iter()
+            .map(|q| q.handle().major())
+            .collect();
+        let temporary = (0x7000..=0x7fffu16)
+            .rev()
+            .find(|major| !in_use.contains(major))
+            .map(TcHandle::major_only)
+            .ok_or_else(|| {
+                Error::not_supported("replace_qdisc: no free qdisc handle to graft through")
+            })?;
+        let fin = handle.unwrap_or(live.handle());
+        for step in [temporary, fin] {
+            self.send_qdisc(ifindex, parent, step.as_raw(), replace, &config, false)
+                .await
+                .map_err(|e| e.with_context("replace_qdisc"))?;
+        }
+        Ok(())
+    }
+
+    /// Send one `RTM_NEWQDISC` with `flags`, writing `config`'s options in
+    /// change mode when `change` is set.
+    async fn send_qdisc(
+        &self,
+        ifindex: u32,
+        parent: TcHandle,
+        handle: u32,
+        flags: u16,
+        config: &impl QdiscConfig,
+        change: bool,
+    ) -> Result<()> {
+        let tcmsg = TcMsg::new()
+            .with_ifindex(ifindex as i32)
+            .with_parent(parent.as_raw())
+            .with_handle(handle);
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_NEWQDISC, flags);
+        builder.append(&tcmsg);
+        builder.append_attr_str(TcaAttr::Kind as u16, config.kind());
+        if config.has_options() {
+            let options_token = builder.nest_start(TcaAttr::Options as u16);
+            if change {
+                config.write_change_options(&mut builder)?;
+            } else {
+                config.write_options(&mut builder)?;
+            }
+            builder.nest_end(options_token);
+        }
+        self.send_ack(builder).await
     }
 
     /// Change a qdisc's parameters.
@@ -8269,26 +8446,19 @@ impl Connection<Route> {
         handle: Option<TcHandle>,
         config: impl QdiscConfig,
     ) -> Result<()> {
-        let parent_handle = parent.as_raw();
-        let qdisc_handle = handle.map(|h| h.as_raw()).unwrap_or(0);
-
-        let tcmsg = TcMsg::new()
-            .with_ifindex(ifindex as i32)
-            .with_parent(parent_handle)
-            .with_handle(qdisc_handle);
-
+        // A change is `qdisc_change` on the live qdisc, so the options go in
+        // change mode (fq_codel without `flows`, #486).
         let kind = config.kind().to_string();
-        let mut builder = ack_request(NlMsgType::RTM_NEWQDISC);
-        builder.append(&tcmsg);
-        builder.append_attr_str(TcaAttr::Kind as u16, &kind);
-
-        if config.has_options() {
-            let options_token = builder.nest_start(TcaAttr::Options as u16);
-            config.write_options(&mut builder)?;
-            builder.nest_end(options_token);
-        }
-
-        self.send_ack(builder).await.map_err(|e| {
+        self.send_qdisc(
+            ifindex,
+            parent,
+            handle.map_or(0, |h| h.as_raw()),
+            NLM_F_REQUEST | NLM_F_ACK,
+            &config,
+            true,
+        )
+        .await
+        .map_err(|e| {
             if e.is_not_found() {
                 Error::QdiscNotFound {
                     kind,
@@ -8399,12 +8569,10 @@ impl Connection<Route> {
         dev: impl Into<InterfaceRef>,
         config: NetemConfig,
     ) -> Result<()> {
-        let dev = dev.into();
-        match self.replace_qdisc(dev.clone(), config.clone()).await {
-            Ok(()) => Ok(()),
-            Err(e) if e.is_not_found() => self.add_qdisc(dev, config).await,
-            Err(e) => Err(e),
-        }
+        // `replace_qdisc` creates the qdisc when the slot is empty; there
+        // was an ENOENT → add fallback here, which a CREATE request never
+        // reached (#486).
+        self.replace_qdisc(dev, config).await
     }
 
     /// Apply a netem configuration by interface index.
@@ -8414,11 +8582,7 @@ impl Connection<Route> {
     /// If no root qdisc exists, it creates one.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "apply_netem_by_index"))]
     pub async fn apply_netem_by_index(&self, ifindex: u32, config: NetemConfig) -> Result<()> {
-        match self.replace_qdisc_by_index(ifindex, config.clone()).await {
-            Ok(()) => Ok(()),
-            Err(e) if e.is_not_found() => self.add_qdisc_by_index(ifindex, config).await,
-            Err(e) => Err(e),
-        }
+        self.replace_qdisc_by_index(ifindex, config).await
     }
 
     /// Remove netem configuration from an interface.
@@ -10137,6 +10301,19 @@ mod tests {
         assert_eq!(ecn_attr(FqCodelConfig::new().ecn(false)), Some(0));
         assert_eq!(ecn_attr(FqCodelConfig::new().ecn(true)), Some(1));
         assert_eq!(ecn_attr(FqCodelConfig::new()), None);
+    }
+
+    /// A change of a live fq_codel leaves `flows` out, and a different
+    /// `flows` asks for a new qdisc (#486).
+    #[test]
+    fn fq_codel_change_mode_leaves_flows_out() {
+        use crate::netlink::test_support::encode;
+        let cfg = FqCodelConfig::new().flows(1024).limit(1000);
+        let create = encode(|b| cfg.write_options(b));
+        let change = encode(|b| cfg.write_change_options(b));
+        assert!(create.contains_key(&fq_codel::TCA_FQ_CODEL_FLOWS));
+        assert!(!change.contains_key(&fq_codel::TCA_FQ_CODEL_FLOWS));
+        assert!(change.contains_key(&fq_codel::TCA_FQ_CODEL_LIMIT));
     }
 
     /// Fewer than three bands fit the default priomap to them; a custom

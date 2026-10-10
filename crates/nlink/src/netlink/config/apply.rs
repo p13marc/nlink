@@ -1134,16 +1134,9 @@ async fn replace_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Resul
     // semantically; for those we fall back to del+add since the
     // kind is parent-fixed (ingress / clsact slots).
     //
-    // A second case needs the same fallback, but only sometimes: a
-    // *same-kind* replace becomes `qdisc_change()` in the kernel, and
-    // `sch_sfq` sets `.change = NULL`, so it answers EINVAL with
-    // "Change operation not supported by specified qdisc" for any
-    // parameter edit. A replace that changes the *kind* takes the
-    // create-and-graft path instead and is fine, which is why this is
-    // decided on the error rather than up front. Retrying is safe for
-    // these kinds specifically: the atomic attempt made no change, so
-    // del+add starts from the same live state, and if the declaration
-    // is genuinely invalid the add reports it (#361).
+    // A same-kind replace of a kind with no change operation (`sfq`) is
+    // `Connection::replace_qdisc`'s to handle now: it grafts a new qdisc
+    // over the live one instead of answering EINVAL (#361, #486).
     match &qdisc.qdisc_type {
         DeclaredQdiscType::Ingress | DeclaredQdiscType::Clsact => {
             // Kernel does not accept NLM_F_REPLACE on these
@@ -1171,22 +1164,10 @@ async fn replace_qdisc(conn: &Connection<Route>, qdisc: &DeclaredQdisc) -> Resul
         _ => {}
     }
 
-    match atomic_replace(conn, qdisc).await {
-        Err(e) if lacks_change_op(&qdisc.qdisc_type) && is_einval(&e) => {
-            tracing::debug!(
-                dev = %qdisc.dev,
-                kind = qdisc.qdisc_type.kind(),
-                "qdisc has no in-place change operation; falling back to del+add"
-            );
-            match conn.del_qdisc(&qdisc.dev, crate::TcHandle::ROOT).await {
-                Ok(()) => {}
-                Err(e) if e.is_not_found() => {}
-                Err(e) => return Err(e),
-            }
-            add_qdisc(conn, qdisc).await
-        }
-        other => other,
-    }
+    // `replace_qdisc` is kind-aware (#486): it recreates a kind with no
+    // change operation (sfq) instead of answering EINVAL, which used to
+    // need a del+add fallback here.
+    atomic_replace(conn, qdisc).await
 }
 
 /// Refuse a declared HTB root that would replace a live HTB root in place.
@@ -1230,26 +1211,6 @@ async fn refuse_htb_change_in_place(
          (Connection::del_qdisc) and apply again.",
         declared.default_class, declared.r2q
     )))
-}
-
-/// True for kinds whose `Qdisc_ops.change` is NULL, so the kernel
-/// cannot edit them in place and a same-kind replace is rejected.
-///
-/// Only `sfq` among the kinds this module installs: every other one
-/// (`netem`, `tbf`, `htb`, `fq_codel`, `prio`) has a change op.
-/// `Ingress`/`Clsact` never reach here — they del+add unconditionally
-/// above.
-fn lacks_change_op(kind: &DeclaredQdiscType) -> bool {
-    matches!(kind, DeclaredQdiscType::Sfq { .. })
-}
-
-/// The kernel's "you cannot do that" answer, whatever the ext_ack text.
-fn is_einval(e: &crate::Error) -> bool {
-    matches!(
-        e,
-        crate::Error::Kernel { errno: 22, .. }
-            | crate::Error::KernelWithContext { errno: 22, .. }
-    )
 }
 
 /// Atomic replace via NLM_F_REPLACE on RTM_NEWQDISC.

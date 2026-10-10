@@ -515,6 +515,124 @@ async fn test_replace_qdisc() -> Result<()> {
     Ok(())
 }
 
+/// `replace_qdisc` looks at the slot (#486). Each of these was EINVAL:
+/// fq_codel carrying `flows` into a change, sfq (no change operation), a
+/// different kind at the live qdisc's own handle. And `add_qdisc` over a
+/// live qdisc of its kind is EEXIST, where it used to change it quietly.
+#[tokio::test]
+async fn replace_qdisc_handles_whatever_is_in_the_slot() -> Result<()> {
+    use nlink::netlink::tc::{HtbQdiscConfig, PrioConfig, SfqConfig, TbfConfig};
+    use nlink::{Bytes, Rate, TcMessage};
+    require_root!();
+    nlink::require_modules!("sch_fq_codel", "sch_sfq", "sch_htb", "sch_prio", "sch_tbf");
+
+    let (_ns, conn) = setup_tc_ns("qdiscslot").await?;
+    let ifindex = conn
+        .get_link_by_name("dummy0")
+        .await?
+        .expect("dummy0")
+        .ifindex();
+
+    // fq_codel with flows, replaced twice: the second is a change, which
+    // must not carry `flows`.
+    let fq = |limit| FqCodelConfig::new().flows(1024).limit(limit);
+    conn.replace_qdisc_by_index(ifindex, fq(1000)).await?;
+    conn.replace_qdisc_by_index(ifindex, fq(2000)).await?;
+    let opts = |q: Option<TcMessage>| match q.and_then(|q| q.options()) {
+        Some(nlink::netlink::tc_options::QdiscOptions::FqCodel(o)) => Some((o.limit, o.flows)),
+        _ => None,
+    };
+    let live = conn.get_qdiscs_by_index(ifindex).await?;
+    let fq_live = live.into_iter().find(|q| q.parent() == TcHandle::ROOT);
+    assert_eq!(opts(fq_live), Some((2000, 1024)));
+
+    // A different `flows` needs a new qdisc.
+    conn.replace_qdisc_by_index(ifindex, FqCodelConfig::new().flows(2048))
+        .await?;
+    let live = conn.get_qdiscs_by_index(ifindex).await?;
+    let fq_live = live.into_iter().find(|q| q.parent() == TcHandle::ROOT);
+    assert_eq!(opts(fq_live).map(|(_, flows)| flows), Some(2048));
+
+    // sfq has no change operation.
+    conn.replace_qdisc_by_index(ifindex, SfqConfig::new())
+        .await?;
+    conn.replace_qdisc_by_index(ifindex, SfqConfig::new().limit(100))
+        .await?;
+
+    // htb at 1:, then prio at 1:.
+    let one = Some(TcHandle::major_only(1));
+    conn.replace_qdisc_by_index_full(ifindex, TcHandle::ROOT, one, HtbQdiscConfig::new())
+        .await?;
+    conn.replace_qdisc_by_index_full(ifindex, TcHandle::ROOT, one, PrioConfig::new())
+        .await?;
+    let live = conn.get_qdiscs_by_index(ifindex).await?;
+    let prio = live
+        .iter()
+        .find(|q| q.parent() == TcHandle::ROOT)
+        .expect("a root qdisc");
+    assert_eq!(prio.kind(), Some("prio"));
+    assert_eq!(prio.handle(), TcHandle::major_only(1));
+
+    // An add over a live qdisc of the same kind, or at a handle in use, is
+    // EEXIST. (Over a different kind with no handle the kernel grafts the
+    // new one in its place, as `tc qdisc add` does.)
+    let err = conn
+        .add_qdisc_by_index(ifindex, PrioConfig::new())
+        .await
+        .unwrap_err();
+    assert!(err.is_already_exists(), "{err}");
+    let tbf = || {
+        TbfConfig::new()
+            .rate(Rate::mbit(1))
+            .burst(Bytes::kib(32))
+            .limit(Bytes::kib(64))
+            .build()
+    };
+    let err = conn
+        .add_qdisc_by_index_full(ifindex, TcHandle::ROOT, one, tbf())
+        .await
+        .unwrap_err();
+    assert!(err.is_already_exists(), "{err}");
+    Ok(())
+}
+
+/// A same-kind replace of an HTB that has classes would delete them; it is
+/// refused, and the classes stay (#486).
+#[tokio::test]
+async fn replace_qdisc_refuses_to_drop_an_htb_tree() -> Result<()> {
+    use nlink::Rate;
+    use nlink::netlink::tc::{HtbClassConfig, HtbQdiscConfig};
+    require_root!();
+    nlink::require_modules!("sch_htb");
+
+    let (_ns, conn) = setup_tc_ns("htbtree").await?;
+    let one = Some(TcHandle::major_only(1));
+    conn.add_qdisc_full("dummy0", TcHandle::ROOT, one, HtbQdiscConfig::new())
+        .await?;
+    conn.add_class(
+        "dummy0",
+        TcHandle::major_only(1),
+        TcHandle::new(1, 1),
+        HtbClassConfig::new(Rate::mbit(10)).build(),
+    )
+    .await?;
+
+    let err = conn
+        .replace_qdisc_full(
+            "dummy0",
+            TcHandle::ROOT,
+            one,
+            HtbQdiscConfig::new().default_class(0x10),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.is_not_supported(), "{err}");
+    assert!(err.to_string().contains("1 class(es)"), "{err}");
+    let classes = conn.get_classes_by_name("dummy0").await?;
+    assert!(classes.iter().any(|c| c.handle() == TcHandle::new(1, 1)));
+    Ok(())
+}
+
 /// A replace that turns a flag off turns it off. ECN, bytemode and the
 /// dequeue-rate estimator were written only when on, and the kernel keeps
 /// what a change does not carry, so once on they stayed on (#488).
