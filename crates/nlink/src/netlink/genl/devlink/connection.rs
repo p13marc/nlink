@@ -485,10 +485,6 @@ impl Connection<Devlink> {
 
     /// Send a GENL dump request (no device filter).
     async fn devlink_dump(&self, cmd: u8) -> Result<Vec<Vec<u8>>> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring.
-        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
@@ -496,13 +492,15 @@ impl Connection<Devlink> {
         builder.append(&genl_hdr);
 
         let seq = self.socket().next_seq();
+
+        let mut session = self.recv_session_dump(seq).await;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
         let msg = builder.finish();
         self.socket().send(&msg).await?;
 
-        self.collect_dump_responses(seq).await
+        self.collect_dump_responses(&mut session, seq).await
     }
 
     /// Send a GENL dump request with device filter.
@@ -512,10 +510,6 @@ impl Connection<Devlink> {
         bus: &str,
         device: &str,
     ) -> Result<Vec<Vec<u8>>> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring.
-        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
@@ -525,21 +519,19 @@ impl Connection<Devlink> {
         builder.append_attr_str(DEVLINK_ATTR_DEV_NAME, device);
 
         let seq = self.socket().next_seq();
+
+        let mut session = self.recv_session_dump(seq).await;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
         let msg = builder.finish();
         self.socket().send(&msg).await?;
 
-        self.collect_dump_responses(seq).await
+        self.collect_dump_responses(&mut session, seq).await
     }
 
     /// Send a GENL GET request for a specific device.
     async fn devlink_get(&self, cmd: u8, bus: &str, device: &str) -> Result<Vec<u8>> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring.
-        let _guard = self.lock_request().await;
         let family_id = self.state().family_id;
 
         let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_ACK);
@@ -549,6 +541,8 @@ impl Connection<Devlink> {
         builder.append_attr_str(DEVLINK_ATTR_DEV_NAME, device);
 
         let seq = self.socket().next_seq();
+
+        let mut session = self.recv_session(seq).await;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
@@ -562,7 +556,7 @@ impl Connection<Devlink> {
             let mut result_payload: Option<Vec<u8>> = None;
 
             loop {
-                let data: Vec<u8> = self.socket().recv_unicast().await?;
+                let data: Vec<u8> = session.recv_with_timeout(self).await?;
                 let mut done = false;
 
                 for msg_result in MessageIter::new(&data) {
@@ -617,11 +611,8 @@ impl Connection<Devlink> {
 
     /// Send a command and wait for ACK.
     async fn devlink_send_ack(&self, mut builder: MessageBuilder) -> Result<()> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring.
-        let _guard = self.lock_request().await;
         let seq = self.socket().next_seq();
+        let mut session = self.recv_session(seq).await;
         builder.set_seq(seq);
         builder.set_pid(self.socket().pid());
 
@@ -632,7 +623,7 @@ impl Connection<Devlink> {
         // operation timeout (Plan 171 default: 30s).
         self.with_timeout(async {
             loop {
-                let data: Vec<u8> = self.socket().recv_unicast().await?;
+                let data: Vec<u8> = session.recv_with_timeout(self).await?;
 
                 for msg_result in MessageIter::new(&data) {
                     let (header, payload) = msg_result?;
@@ -660,14 +651,18 @@ impl Connection<Devlink> {
     }
 
     /// Collect all responses from a dump request.
-    async fn collect_dump_responses(&self, seq: u32) -> Result<Vec<Vec<u8>>> {
+    async fn collect_dump_responses(
+        &self,
+        session: &mut crate::netlink::connection::RecvSession,
+        seq: u32,
+    ) -> Result<Vec<Vec<u8>>> {
         // Plan 172 — wrap the recv loop in the Connection-level
         // operation timeout (Plan 171 default: 30s).
         self.with_timeout(async {
             let mut results = Vec::new();
 
             loop {
-                let data: Vec<u8> = self.socket().recv_unicast().await?;
+                let data: Vec<u8> = session.recv_with_timeout(self).await?;
                 let mut done = false;
 
                 for msg_result in MessageIter::new(&data) {

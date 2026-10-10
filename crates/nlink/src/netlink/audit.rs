@@ -412,18 +412,13 @@ impl Connection<Audit> {
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_status"))]
     pub async fn get_status(&self) -> Result<AuditStatus> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring. Acquired
-        // BEFORE the with_timeout wrapper so the lock spans the
-        // entire timeout window.
-        let _guard = self.lock_request().await;
         // Wrapped in with_timeout (Plan 171: 30s default) so a kernel
         // that drops the response surfaces as `Error::Timeout` rather
         // than an indefinite hang. Pre-0.19 this method could hang
         // forever waiting for an ACK that never arrived.
         self.with_timeout(async move {
             let seq = self.socket().next_seq();
+            let mut session = self.recv_session(seq).await;
             let pid = self.socket().pid();
 
             // Build request message
@@ -446,7 +441,7 @@ impl Connection<Audit> {
             // Receive responses, filtering by seq (skip any stale
             // frames from prior queries on the same socket).
             loop {
-                let data = self.socket().recv_unicast().await?;
+                let data = session.recv_with_timeout(self).await?;
 
                 if data.len() < NLMSG_HDRLEN {
                     return Err(Error::InvalidMessage("response too short".into()));
@@ -577,13 +572,10 @@ impl Connection<Audit> {
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_tty_status"))]
     pub async fn get_tty_status(&self) -> Result<AuditTtyStatus> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring.
-        let _guard = self.lock_request().await;
         // See `get_status` for the timeout/seq-filter rationale.
         self.with_timeout(async move {
             let seq = self.socket().next_seq();
+            let mut session = self.recv_session(seq).await;
             let pid = self.socket().pid();
 
             // Build request message
@@ -605,7 +597,7 @@ impl Connection<Audit> {
 
             // Receive response - skip ACK; filter by seq.
             loop {
-                let data = self.socket().recv_unicast().await?;
+                let data = session.recv_with_timeout(self).await?;
 
                 if data.len() < NLMSG_HDRLEN {
                     return Err(Error::InvalidMessage("response too short".into()));
@@ -673,13 +665,10 @@ impl Connection<Audit> {
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_features"))]
     pub async fn get_features(&self) -> Result<AuditFeatures> {
-        // F1 fix — serialize the send + recv-loop pair so concurrent
-        // tasks on a shared `Arc<Connection>` don't race on the recv
-        // side. See connection.rs `Concurrency` docstring.
-        let _guard = self.lock_request().await;
         // See `get_status` for the timeout/seq-filter rationale.
         self.with_timeout(async move {
             let seq = self.socket().next_seq();
+            let mut session = self.recv_session(seq).await;
             let pid = self.socket().pid();
 
             // Build request message
@@ -701,7 +690,7 @@ impl Connection<Audit> {
 
             // Receive response - skip ACK; filter by seq.
             loop {
-                let data = self.socket().recv_unicast().await?;
+                let data = session.recv_with_timeout(self).await?;
 
                 if data.len() < NLMSG_HDRLEN {
                     return Err(Error::InvalidMessage("response too short".into()));
