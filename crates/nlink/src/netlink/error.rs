@@ -103,6 +103,20 @@ pub enum Error {
         failures: Vec<crate::netlink::nftables::NftBatchFailure>,
     },
 
+    /// Reading or writing a sysctl under `/proc/sys` failed.
+    ///
+    /// Carries the key and the I/O error, so a failed `set_sysctls` says
+    /// which key; `is_not_found()` holds for a key that does not exist and
+    /// `is_permission_denied()` for one that cannot be written (#477).
+    #[error("sysctl {key}: {source}")]
+    Sysctl {
+        /// The key, as given.
+        key: String,
+        /// What the filesystem said.
+        #[source]
+        source: io::Error,
+    },
+
     /// Message was truncated.
     #[error("message truncated: expected {expected} bytes, got {actual}")]
     Truncated {
@@ -668,7 +682,7 @@ impl Error {
         match self {
             Self::Kernel { errno, .. } | Self::KernelWithContext { errno, .. } => Some(*errno),
             Self::NftBatch { failures } => failures.first().map(|f| f.errno),
-            Self::Io(io_err) => io_err.raw_os_error(),
+            Self::Io(io_err) | Self::Sysctl { source: io_err, .. } => io_err.raw_os_error(),
             _ => None,
         }
     }

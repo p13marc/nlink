@@ -26,6 +26,19 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **sysctl: an interface name with a dot could not be addressed, a missing
+  key was `InvalidMessage`, and I/O errors lost the key (#477).** Every
+  `.` in a key became a path separator, so `net.ipv4.conf.eth0.100.rp_filter`
+  pointed nowhere. The `/`-separated form that `sysctl(8)` accepts for
+  this was converted too. A key is now taken verbatim when it contains
+  `/`, and `sysctl::ipv4_conf_key(dev, setting)` / `ipv6_conf_key` build
+  that form. Every failure is the new `Error::Sysctl { key, source }`:
+  `is_not_found()` holds for a missing key and `is_permission_denied()`
+  for a refused write, and the message names the key. A root test sets
+  `rp_filter` on a dummy named `d0.100` and reads a missing key. Before
+  the fix the first gave `InvalidMessage("sysctl key not found:
+  net/ipv4/conf/d0.100/rp_filter")`.
+
 - **One allowed-IP prefix on two WireGuard peers never converged (#498).**
   The kernel keeps a device's allowed IPs in one trie, so a prefix belongs
   to at most one peer. Writing it on peer B silently takes it from peer A.
@@ -299,6 +312,8 @@ All notable changes to this project will be documented in this file.
   moved, as sets got in #377.
 
 ### Added
+
+- **`Error::Sysctl`, `sysctl::{ipv4_conf_key, ipv6_conf_key}`** (#477).
 
 - **`WireguardConfig::validate()`** (#498).
 
