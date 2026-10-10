@@ -22,8 +22,6 @@
 //!
 //! All tests root-gated.
 
-use std::time::Duration;
-
 use nlink::Result;
 use nlink::netlink::{
     Connection, Route,
@@ -32,19 +30,7 @@ use nlink::netlink::{
     nftables::config::ReconcileOptions,
 };
 
-use crate::common::TestNamespace;
-
-/// Wrap a test body in a 30s timeout so a hang surfaces as
-/// `Error::Timeout`, not a hung CI job.
-async fn with_timeout<F>(body: F) -> Result<()>
-where
-    F: std::future::Future<Output = Result<()>>,
-{
-    match tokio::time::timeout(Duration::from_secs(30), body).await {
-        Ok(result) => result,
-        Err(_elapsed) => Err(nlink::Error::Timeout),
-    }
-}
+use crate::common::{TestNamespace, with_timeout};
 
 fn conn_in_ns(ns: &TestNamespace) -> Result<Connection<Route>> {
     namespace::connection_for::<Route>(ns.name())

@@ -5,21 +5,23 @@
 //!
 //! # Running Tests
 //!
-//! Integration tests require root privileges:
+//! Integration tests require root privileges. Build as yourself and run
+//! only the test binary under sudo, with the CI lane's features:
 //!
 //! ```bash
+//! export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER='sudo -E'
+//! F=lab,sockdiag,namespace_watcher
+//!
 //! # Run all integration tests
-//! sudo cargo test --test integration
+//! cargo test -p nlink --test integration --features $F -- --test-threads=1
 //!
-//! # Run specific test module
-//! sudo cargo test --test integration link
-//!
-//! # Run a single test
-//! sudo cargo test --test integration test_create_veth_pair
-//!
-//! # Run with output
-//! sudo cargo test --test integration -- --nocapture
+//! # Run one module, or one test
+//! cargo test -p nlink --test integration --features $F -- --test-threads=1 events::
+//! cargo test -p nlink --test integration --features $F -- test_create_veth_pair
 //! ```
+//!
+//! Shared helpers (traffic, counters, topologies, convergence checks,
+//! strict event waits) are in `common/`; see `integration/harness.rs`.
 //!
 //! # Test Organization
 //!
@@ -282,3 +284,9 @@ mod wireguard_echo;
 
 #[path = "integration/recipes_echo.rs"]
 mod recipes_echo;
+
+// The helpers in `common/` checked against themselves, including where
+// each must fail: a helper that cannot fail turns every test built on it
+// into a pass.
+#[path = "integration/harness.rs"]
+mod harness;

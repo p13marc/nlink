@@ -4,7 +4,27 @@
 //! working without import changes while the shared helpers live in
 //! the public `lab` module.
 
+pub mod converge;
+pub mod counters;
+pub mod events;
+pub mod topo;
+pub mod traffic;
+
+use std::time::Duration;
+
 pub use nlink::lab::LabNamespace as TestNamespace;
+
+/// How long one test body, or one step of a convergence case, may take.
+pub const STEP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Run `body`, failing with `Error::Timeout` after [`STEP_TIMEOUT`]
+/// instead of hanging the suite.
+pub async fn with_timeout<T>(body: impl Future<Output = nlink::Result<T>>) -> nlink::Result<T> {
+    match tokio::time::timeout(STEP_TIMEOUT, body).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(nlink::Error::Timeout),
+    }
+}
 
 /// Check if running as root.
 pub fn is_root() -> bool {

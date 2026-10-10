@@ -34,6 +34,8 @@ use nlink::{
     },
 };
 
+use crate::common::counters::class_stats;
+use crate::common::topo::NsPair;
 use crate::common::TestNamespace;
 
 // ============================================================================
@@ -78,19 +80,6 @@ async fn assert_default_class_exists(
         classes.iter().map(|c| c.handle()).collect::<Vec<_>>()
     );
     Ok(want)
-}
-
-/// Byte counter of one class, or `None` if the class is not there.
-async fn class_bytes(
-    conn: &nlink::Connection<nlink::Route>,
-    ifindex: u32,
-    handle: TcHandle,
-) -> nlink::Result<Option<u64>> {
-    let classes = conn.get_classes_by_index(ifindex).await?;
-    Ok(classes
-        .iter()
-        .find(|c| c.handle() == handle)
-        .and_then(|c| c.stats_basic().map(|s| s.bytes)))
 }
 
 // ============================================================================
@@ -276,41 +265,32 @@ async fn per_host_traffic_lands_in_the_declared_classes() -> nlink::Result<()> {
     require_root!();
     nlink::require_modules!("sch_htb", "cls_flower", "veth");
 
-    let left = TestNamespace::new("tcs_traf_l")?;
-    let right = TestNamespace::new("tcs_traf_r")?;
-    left.connect_to(&right, "veth0", "veth1")?;
-    left.add_addr("veth0", "10.9.0.1/24")?;
-    left.link_up("veth0")?;
-    right.add_addr("veth1", "10.9.0.2/24")?;
-    right.link_up("veth1")?;
-    left.link_up("lo")?;
-
+    let pair = NsPair::new("tcs_traf", 9).await?;
+    let left = &pair.a;
     let conn = left.connection()?;
-    let ifindex = conn
-        .get_link_by_name("veth0")
-        .await?
-        .expect("veth0 exists")
-        .ifindex();
+    let ifindex = pair.a_ifindex;
 
     // 10.9.0.2 gets its own class; everything else falls to the
     // default class.
-    let limiter = PerHostLimiter::new("veth0", Rate::mbit(10))
+    let limiter = PerHostLimiter::new(pair.a_if, Rate::mbit(10))
         .limit_ip(Ipv4Addr::new(10, 9, 0, 2).into(), Rate::mbit(100));
     limiter.apply(&conn).await?;
 
     let rule_class = TcHandle::new(1, 2);
     let default_class = assert_default_class_exists(&conn, ifindex, "PerHostLimiter").await?;
 
-    let before = class_bytes(&conn, ifindex, rule_class)
+    let before = class_stats(&conn, ifindex, rule_class)
         .await?
-        .expect("rule class exists");
+        .expect("rule class exists")
+        .1;
 
     // 20 pings is enough to move a byte counter well past any noise.
     left.exec("ping", &["-c", "20", "-i", "0.05", "-W", "1", "10.9.0.2"])?;
 
-    let after = class_bytes(&conn, ifindex, rule_class)
+    let after = class_stats(&conn, ifindex, rule_class)
         .await?
-        .expect("rule class exists");
+        .expect("rule class exists")
+        .1;
 
     assert!(
         after > before,
@@ -321,15 +301,17 @@ async fn per_host_traffic_lands_in_the_declared_classes() -> nlink::Result<()> {
     // The default class must be reachable too — this is the half that
     // #258/#269 broke. Ping the network broadcast address, which no
     // rule matches.
-    let default_before = class_bytes(&conn, ifindex, default_class)
+    let default_before = class_stats(&conn, ifindex, default_class)
         .await?
-        .expect("default class exists");
+        .expect("default class exists")
+        .1;
     left.exec_ignore("ping", &["-c", "5", "-i", "0.05", "-W", "1", "-b", "10.9.0.255"]);
     // ARP for an unclaimed address also leaves via the default class.
     left.exec_ignore("ping", &["-c", "3", "-i", "0.05", "-W", "1", "10.9.0.77"]);
-    let default_after = class_bytes(&conn, ifindex, default_class)
+    let default_after = class_stats(&conn, ifindex, default_class)
         .await?
-        .expect("default class exists");
+        .expect("default class exists")
+        .1;
 
     assert!(
         default_after > default_before,
@@ -348,36 +330,28 @@ async fn ratelimiter_traffic_lands_in_the_default_class() -> nlink::Result<()> {
     require_root!();
     nlink::require_modules!("sch_htb", "veth");
 
-    let left = TestNamespace::new("tcs_rltr_l")?;
-    let right = TestNamespace::new("tcs_rltr_r")?;
-    left.connect_to(&right, "veth0", "veth1")?;
-    left.add_addr("veth0", "10.9.1.1/24")?;
-    left.link_up("veth0")?;
-    right.add_addr("veth1", "10.9.1.2/24")?;
-    right.link_up("veth1")?;
-
+    let pair = NsPair::new("tcs_rltr", 19).await?;
+    let left = &pair.a;
     let conn = left.connection()?;
-    let ifindex = conn
-        .get_link_by_name("veth0")
-        .await?
-        .expect("veth0 exists")
-        .ifindex();
+    let ifindex = pair.a_ifindex;
 
-    RateLimiter::new("veth0")
+    RateLimiter::new(pair.a_if)
         .egress(Rate::mbit(50))
         .apply(&conn)
         .await?;
 
     let default_class = assert_default_class_exists(&conn, ifindex, "RateLimiter").await?;
-    let before = class_bytes(&conn, ifindex, default_class)
+    let before = class_stats(&conn, ifindex, default_class)
         .await?
-        .expect("default class exists");
+        .expect("default class exists")
+        .1;
 
-    left.exec("ping", &["-c", "20", "-i", "0.05", "-W", "1", "10.9.1.2"])?;
+    left.exec("ping", &["-c", "20", "-i", "0.05", "-W", "1", "10.19.0.2"])?;
 
-    let after = class_bytes(&conn, ifindex, default_class)
+    let after = class_stats(&conn, ifindex, default_class)
         .await?
-        .expect("default class exists");
+        .expect("default class exists")
+        .1;
     assert!(
         after > before,
         "RateLimiter shaped nothing: default class {default_class} stayed at \

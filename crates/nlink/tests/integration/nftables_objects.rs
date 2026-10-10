@@ -4,7 +4,6 @@
 //! without moving the rules that use it.
 
 use std::net::Ipv4Addr;
-use std::time::Duration;
 
 use nlink::netlink::nftables::config::{MoveReason, NftablesConfig};
 use nlink::netlink::nftables::types::{
@@ -14,52 +13,11 @@ use nlink::netlink::nftables::types::{
 use nlink::netlink::nftables::{
     LimitExpr, NftablesEvent, Object, ObjectConfig, ObjectState, ObjectType, QuotaExpr,
 };
-use nlink::netlink::{Connection, Nftables, Route, namespace};
+use nlink::netlink::{Connection, Nftables};
 use tokio_stream::StreamExt;
 
-use crate::common::TestNamespace;
-
-async fn with_timeout<F>(body: F) -> nlink::Result<()>
-where
-    F: std::future::Future<Output = nlink::Result<()>>,
-{
-    match tokio::time::timeout(Duration::from_secs(30), body).await {
-        Ok(result) => result,
-        Err(_elapsed) => Err(nlink::Error::Timeout),
-    }
-}
-
-fn nft_in_ns(ns: &TestNamespace) -> nlink::Result<Connection<Nftables>> {
-    namespace::connection_for(ns.name())
-}
-
-async fn lo_up(ns: &TestNamespace) -> nlink::Result<()> {
-    let route: Connection<Route> = namespace::connection_for(ns.name())?;
-    let lo = route
-        .get_link_by_name("lo")
-        .await?
-        .expect("every netns has a loopback device");
-    route.set_link_up_by_index(lo.ifindex()).await
-}
-
-/// Send `count` 5-byte UDP datagrams (33 bytes on the wire) from inside `ns`
-/// to each target.
-fn send_udp(ns: &TestNamespace, targets: &[(&str, usize)]) {
-    let name = ns.name().to_string();
-    let targets: Vec<(std::net::SocketAddr, usize)> =
-        targets.iter().map(|(t, n)| (t.parse().unwrap(), *n)).collect();
-    std::thread::spawn(move || {
-        let _ns = namespace::enter(&name).expect("enter test netns");
-        let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
-        for (target, count) in targets {
-            for _ in 0..count {
-                let _ = socket.send_to(b"nlink", target);
-            }
-        }
-    })
-    .join()
-    .expect("UDP thread panicked");
-}
+use crate::common::traffic::{lo_up, send_udp};
+use crate::common::{TestNamespace, with_timeout};
 
 async fn ip_table_with_output(conn: &Connection<Nftables>) -> nlink::Result<()> {
     conn.add_table("t", Family::Ip).await?;
@@ -97,8 +55,8 @@ async fn a_named_counter_counts_and_resets() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-obj-counter")?;
-    let conn = nft_in_ns(&ns)?;
-    let watcher = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
+    let watcher = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         lo_up(&ns).await?;
@@ -125,8 +83,7 @@ async fn a_named_counter_counts_and_resets() -> nlink::Result<()> {
                 None => panic!("event stream ended"),
             }
         }
-
-        send_udp(&ns, &[("127.0.0.1:9", 4)]);
+        send_udp(&ns, &["127.0.0.1:9"], 4);
         assert_eq!(packets(&object(&conn, "c").await?), 4);
         let before = conn
             .reset_object("t", "c", ObjectType::Counter, Family::Ip)
@@ -152,7 +109,7 @@ async fn an_object_map_counts_each_destination_in_its_own_counter() -> nlink::Re
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-obj-map")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         lo_up(&ns).await?;
@@ -180,8 +137,9 @@ async fn an_object_map_counts_each_destination_in_its_own_counter() -> nlink::Re
                 .objref_from_map(PacketField::Ip4Daddr, "per_ip"),
         )
         .await?;
-
-        send_udp(&ns, &[("127.0.0.2:9", 2), ("127.0.0.3:9", 3), ("127.0.0.4:9", 5)]);
+        for (target, count) in [("127.0.0.2:9", 2), ("127.0.0.3:9", 3), ("127.0.0.4:9", 5)] {
+            send_udp(&ns, &[target], count);
+        }
         assert_eq!(packets(&object(&conn, "c2").await?), 2);
         assert_eq!(packets(&object(&conn, "c3").await?), 3);
         let elements = conn.list_set_elements("t", "per_ip", Family::Ip).await?;
@@ -200,7 +158,7 @@ async fn quotas_match_until_used_up_and_over_after() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables", "nft_quota");
 
     let ns = TestNamespace::new("nft-obj-quota")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         lo_up(&ns).await?;
@@ -214,8 +172,7 @@ async fn quotas_match_until_used_up_and_over_after() -> nlink::Result<()> {
         ] {
             conn.add_rule(rule.family(Family::Ip)).await?;
         }
-
-        send_udp(&ns, &[("127.0.0.1:9", 10)]);
+        send_udp(&ns, &["127.0.0.1:9"], 10);
         let rules = conn.list_rules("t", Family::Ip).await?;
         let counts: Vec<u64> = rules.iter().map(|r| r.counter().unwrap().0).collect();
         assert_eq!(counts, [3, 7, 3]);
@@ -272,7 +229,7 @@ async fn declared_objects_converge_and_keep_their_state() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables", "nft_quota", "nft_limit");
 
     let ns = TestNamespace::new("nft-obj-decl")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         lo_up(&ns).await?;
@@ -280,8 +237,7 @@ async fn declared_objects_converge_and_keep_their_state() -> nlink::Result<()> {
         first.diff(&conn).await?.apply(&conn).await?;
         let again = first.diff(&conn).await?;
         assert!(again.is_empty(), "second diff must be empty: {again}");
-
-        send_udp(&ns, &[("127.0.0.1:9", 3)]);
+        send_udp(&ns, &["127.0.0.1:9"], 3);
         let again = first.diff(&conn).await?;
         assert!(again.is_empty(), "traffic must not make a diff: {again}");
         // Counted by name and again through the map.

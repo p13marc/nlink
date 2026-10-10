@@ -9,47 +9,10 @@ use nlink::netlink::nftables::config::NftablesConfig;
 use nlink::netlink::nftables::types::{
     Chain, ChainType, Family, Hook, PacketField, Priority, Rule, Set, SetElement, SetKeyType,
 };
-use nlink::netlink::{Connection, Nftables, Route, namespace};
+use nlink::netlink::{Connection, Nftables};
 
-use crate::common::TestNamespace;
-
-async fn with_timeout<F>(body: F) -> nlink::Result<()>
-where
-    F: std::future::Future<Output = nlink::Result<()>>,
-{
-    match tokio::time::timeout(Duration::from_secs(30), body).await {
-        Ok(result) => result,
-        Err(_elapsed) => Err(nlink::Error::Timeout),
-    }
-}
-
-fn nft_in_ns(ns: &TestNamespace) -> nlink::Result<Connection<Nftables>> {
-    namespace::connection_for(ns.name())
-}
-
-async fn lo_up(ns: &TestNamespace) -> nlink::Result<()> {
-    let route: Connection<Route> = namespace::connection_for(ns.name())?;
-    let lo = route
-        .get_link_by_name("lo")
-        .await?
-        .expect("every netns has a loopback device");
-    route.set_link_up_by_index(lo.ifindex()).await
-}
-
-/// Send one UDP datagram from inside `ns` to each of `targets`.
-fn send_udp(ns: &TestNamespace, targets: &[&str]) {
-    let name = ns.name().to_string();
-    let targets: Vec<std::net::SocketAddr> = targets.iter().map(|t| t.parse().unwrap()).collect();
-    std::thread::spawn(move || {
-        let _ns = namespace::enter(&name).expect("enter test netns");
-        let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
-        for target in targets {
-            let _ = socket.send_to(b"nlink", target);
-        }
-    })
-    .join()
-    .expect("UDP thread panicked");
-}
+use crate::common::traffic::{lo_up, send_udp};
+use crate::common::{TestNamespace, with_timeout};
 
 /// `ip t` with an output chain, `set`, and `rule` in the chain.
 async fn chain_with(conn: &Connection<Nftables>, set: &Set, rule: Rule) -> nlink::Result<()> {
@@ -84,7 +47,7 @@ async fn update_in_set_records_each_destination_with_its_timeout() -> nlink::Res
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-to-update")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         lo_up(&ns).await?;
@@ -98,7 +61,7 @@ async fn update_in_set_records_each_destination_with_its_timeout() -> nlink::Res
             Some(Duration::from_secs(60)),
         );
         chain_with(&conn, &set, rule).await?;
-        send_udp(&ns, &["127.0.0.5:9", "127.0.0.6:9", "127.0.0.5:10"]);
+        send_udp(&ns, &["127.0.0.5:9", "127.0.0.6:9", "127.0.0.5:10"], 1);
 
         let seen = conn.list_set_elements("t", "seen", Family::Ip).await?;
         assert_eq!(keys(&seen), [ip(5), ip(6)]);
@@ -119,7 +82,7 @@ async fn delete_from_set_removes_the_destination() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-to-delete")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         lo_up(&ns).await?;
@@ -131,7 +94,7 @@ async fn delete_from_set_removes_the_destination() -> nlink::Result<()> {
         let members = [5, 6].map(|n| SetElement::ipv4(Ipv4Addr::new(127, 0, 0, n)));
         conn.add_set_elements(&set, &members).await?;
 
-        send_udp(&ns, &["127.0.0.5:9"]);
+        send_udp(&ns, &["127.0.0.5:9"], 1);
         let left = conn.list_set_elements("t", "s", Family::Ip).await?;
         assert_eq!(keys(&left), [ip(6)]);
         Ok(())
@@ -147,7 +110,7 @@ async fn elements_expire_after_the_set_default_or_their_own_timeout() -> nlink::
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-to-expire")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         conn.add_table("t", Family::Ip).await?;
@@ -210,7 +173,7 @@ async fn a_declared_dynamic_set_keeps_what_the_packet_path_put_there() -> nlink:
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-to-decl")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         lo_up(&ns).await?;
@@ -220,7 +183,7 @@ async fn a_declared_dynamic_set_keeps_what_the_packet_path_put_there() -> nlink:
         let again = cfg.diff(&conn).await?;
         assert!(again.is_empty(), "second diff must be empty: {again}");
 
-        send_udp(&ns, &["127.0.0.5:9", "127.0.0.6:9"]);
+        send_udp(&ns, &["127.0.0.5:9", "127.0.0.6:9"], 1);
         let again = cfg.diff(&conn).await?;
         assert!(again.is_empty(), "traffic must not make a diff: {again}");
         assert_eq!(again.apply(&conn).await?, 0);
@@ -255,7 +218,7 @@ async fn a_resize_keeps_the_timers_it_does_not_declare() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-to-resize")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         conn.add_table("t", Family::Ip).await?;

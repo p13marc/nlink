@@ -12,7 +12,6 @@
 //! loadable and appears in `/sys/module`.
 
 use std::net::IpAddr;
-use std::time::Duration;
 
 use nlink::Result;
 use nlink::netlink::xfrm::{
@@ -21,17 +20,7 @@ use nlink::netlink::xfrm::{
 };
 use nlink::netlink::{Connection, Xfrm, namespace};
 
-use crate::common::TestNamespace;
-
-async fn with_timeout<F>(body: F) -> Result<()>
-where
-    F: std::future::Future<Output = Result<()>>,
-{
-    match tokio::time::timeout(Duration::from_secs(30), body).await {
-        Ok(result) => result,
-        Err(_elapsed) => Err(nlink::Error::Timeout),
-    }
-}
+use crate::common::{TestNamespace, with_timeout};
 
 fn xfrm_in_ns(ns: &TestNamespace) -> Result<Connection<Xfrm>> {
     namespace::connection_for::<Xfrm>(ns.name())

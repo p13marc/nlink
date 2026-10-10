@@ -15,25 +15,9 @@
 //! alphabetically before `nftables_reconcile`, so these tests
 //! run first.
 
-use std::time::Duration;
+use nlink::netlink::Nftables;
 
-use nlink::netlink::{Connection, Nftables, namespace};
-
-use crate::common::TestNamespace;
-
-async fn with_timeout<F>(body: F) -> nlink::Result<()>
-where
-    F: std::future::Future<Output = nlink::Result<()>>,
-{
-    match tokio::time::timeout(Duration::from_secs(30), body).await {
-        Ok(result) => result,
-        Err(_elapsed) => Err(nlink::Error::Timeout),
-    }
-}
-
-fn nft_in_ns(ns: &TestNamespace) -> nlink::Result<Connection<Nftables>> {
-    namespace::connection_for(ns.name())
-}
+use crate::common::{TestNamespace, with_timeout};
 
 #[tokio::test]
 async fn diag_list_tables_on_empty_namespace() -> nlink::Result<()> {
@@ -42,7 +26,7 @@ async fn diag_list_tables_on_empty_namespace() -> nlink::Result<()> {
 
     with_timeout(async {
         let ns = TestNamespace::new("nft-diag-tables")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
         let tables = nft.list_tables().await?;
         assert!(
             tables.is_empty(),
@@ -61,7 +45,7 @@ async fn diag_list_chains_on_empty_namespace() -> nlink::Result<()> {
 
     with_timeout(async {
         let ns = TestNamespace::new("nft-diag-chains")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
         let chains = nft.list_chains().await?;
         assert!(
             chains.is_empty(),
@@ -80,7 +64,7 @@ async fn diag_list_flowtables_on_empty_namespace() -> nlink::Result<()> {
 
     with_timeout(async {
         let ns = TestNamespace::new("nft-diag-flowtables")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
         let flowtables = nft.list_flowtables().await?;
         assert!(
             flowtables.is_empty(),
@@ -106,7 +90,7 @@ async fn diag_cfg_diff_on_empty_namespace() -> nlink::Result<()> {
 
     with_timeout(async {
         let ns = TestNamespace::new("nft-diag-diff")?;
-        let nft = nft_in_ns(&ns)?;
+        let nft = ns.connection_for::<Nftables>()?;
         let cfg = NftablesConfig::new(); // empty config
         let diff = cfg.diff(&nft).await?;
         assert!(

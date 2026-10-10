@@ -2,55 +2,15 @@
 //! checked on traffic: a pair matches, its parts on their own do not.
 
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::time::Duration;
 
 use nlink::netlink::nftables::config::NftablesConfig;
 use nlink::netlink::nftables::types::{
     Chain, ChainType, Family, Hook, PacketField, Priority, Rule, Set, SetElement, SetKeyType,
 };
-use nlink::netlink::{Connection, Nftables, Route, namespace};
+use nlink::netlink::{Connection, Nftables};
 
-use crate::common::TestNamespace;
-
-async fn with_timeout<F>(body: F) -> nlink::Result<()>
-where
-    F: std::future::Future<Output = nlink::Result<()>>,
-{
-    match tokio::time::timeout(Duration::from_secs(30), body).await {
-        Ok(result) => result,
-        Err(_elapsed) => Err(nlink::Error::Timeout),
-    }
-}
-
-fn nft_in_ns(ns: &TestNamespace) -> nlink::Result<Connection<Nftables>> {
-    namespace::connection_for(ns.name())
-}
-
-async fn lo_up(ns: &TestNamespace) -> nlink::Result<()> {
-    let route: Connection<Route> = namespace::connection_for(ns.name())?;
-    let lo = route
-        .get_link_by_name("lo")
-        .await?
-        .expect("every netns has a loopback device");
-    route.set_link_up_by_index(lo.ifindex()).await
-}
-
-/// Send one UDP datagram from inside `ns` to each of `targets`.
-fn send_udp(ns: &TestNamespace, targets: &[&str]) {
-    let name = ns.name().to_string();
-    let targets: Vec<std::net::SocketAddr> = targets.iter().map(|t| t.parse().unwrap()).collect();
-    std::thread::spawn(move || {
-        let _ns = namespace::enter(&name).expect("enter test netns");
-        let v4 = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind v4");
-        let v6 = std::net::UdpSocket::bind("[::1]:0").expect("bind v6");
-        for target in targets {
-            let socket = if target.is_ipv6() { &v6 } else { &v4 };
-            let _ = socket.send_to(b"nlink", target);
-        }
-    })
-    .join()
-    .expect("UDP thread panicked");
-}
+use crate::common::traffic::{lo_up, send_udp};
+use crate::common::{TestNamespace, with_timeout};
 
 /// `ip t` with an output chain and `set` holding `elements`.
 async fn output_chain(conn: &Connection<Nftables>, set: &Set, elements: &[SetElement]) -> nlink::Result<()> {
@@ -94,7 +54,7 @@ async fn a_hash_set_of_address_and_port_matches_the_pair_not_its_parts() -> nlin
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-cc-hash")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         lo_up(&ns).await?;
@@ -109,6 +69,7 @@ async fn a_hash_set_of_address_and_port_matches_the_pair_not_its_parts() -> nlin
         send_udp(
             &ns,
             &["127.0.0.1:9", "127.0.0.1:10", "127.0.0.2:10", "127.0.0.2:9"],
+            1,
         );
         assert_eq!(counters(&conn, Family::Ip).await?, [2, 2]);
         Ok(())
@@ -125,7 +86,7 @@ async fn a_net_and_port_range_matches_inside_both_ranges_only() -> nlink::Result
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-cc-pipapo")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         lo_up(&ns).await?;
@@ -142,18 +103,16 @@ async fn a_net_and_port_range_matches_inside_both_ranges_only() -> nlink::Result
                 .counter(),
         )
         .await?;
-        send_udp(
-            &ns,
-            &[
-                "127.0.0.2:1000",
-                "127.0.0.3:2000",
-                "127.0.0.2:999",
-                "127.0.0.2:2001",
-                "127.0.0.4:1500",
-                "127.0.0.9:53",
-                "127.0.0.9:54",
-            ],
-        );
+        let targets = [
+            "127.0.0.2:1000",
+            "127.0.0.3:2000",
+            "127.0.0.2:999",
+            "127.0.0.2:2001",
+            "127.0.0.4:1500",
+            "127.0.0.9:53",
+            "127.0.0.9:54",
+        ];
+        send_udp(&ns, &targets, 1);
         assert_eq!(counters(&conn, Family::Ip).await?, [3]);
 
         // Read back as written: one ranged element, one single pair.
@@ -216,7 +175,7 @@ async fn declared_concatenations_converge_and_change_one_element_at_a_time() -> 
     nlink::require_modules!("nf_tables");
 
     let ns = TestNamespace::new("nft-cc-decl")?;
-    let conn = nft_in_ns(&ns)?;
+    let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
         lo_up(&ns).await?;
@@ -235,7 +194,7 @@ async fn declared_concatenations_converge_and_change_one_element_at_a_time() -> 
         let again = second.diff(&conn).await?;
         assert!(again.is_empty(), "second diff must be empty: {again}");
 
-        send_udp(&ns, &["[::1]:9", "[::1]:9", "[::1]:10", "127.0.0.1:9"]);
+        send_udp(&ns, &["[::1]:9", "[::1]:9", "[::1]:10", "127.0.0.1:9"], 1);
         let rules = conn.list_rules("t", Family::Inet).await?;
         let v6 = rules.iter().find(|r| r.key.as_deref() == Some("v6")).unwrap();
         assert_eq!(v6.counter().unwrap().0, 2);

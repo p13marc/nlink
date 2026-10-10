@@ -17,6 +17,7 @@ use nlink::netlink::tc::{NetemConfig, NetemLossModel};
 use nlink::netlink::{Connection, Route};
 use nlink::{Bytes, Percent, Rate, ReconcileReport};
 
+use crate::common::traffic::{send_tcp_syns, send_udp};
 use crate::common::TestNamespace;
 
 #[derive(Clone)]
@@ -282,50 +283,6 @@ async fn per_host_limiter_shapes_converge() -> nlink::Result<()> {
     assert_converges("rce-ph", cases).await
 }
 
-/// Send `count` UDP datagrams from inside `ns` to each of `targets`.
-fn send_udp(ns: &TestNamespace, targets: &[std::net::SocketAddr], count: usize) {
-    let name = ns.name().to_string();
-    let targets = targets.to_vec();
-    std::thread::spawn(move || {
-        let _ns = nlink::netlink::namespace::enter(&name).expect("enter test netns");
-        for target in &targets {
-            let any = if target.is_ipv4() {
-                "0.0.0.0:0"
-            } else {
-                "[::]:0"
-            };
-            let socket = std::net::UdpSocket::bind(any).expect("bind");
-            for _ in 0..count {
-                socket.send_to(b"nlink", target).expect("send");
-            }
-        }
-    })
-    .join()
-    .expect("UDP thread panicked");
-}
-
-/// Send `count` TCP SYNs from inside `ns` to each of `targets`: one per
-/// connection attempt. The SYN goes out inside `connect(2)`; the attempt
-/// is then abandoned before the first retransmission (1 s), and closing a
-/// socket in `SYN_SENT` sends nothing.
-fn send_tcp_syns(ns: &TestNamespace, targets: &[std::net::SocketAddr], count: usize) {
-    let name = ns.name().to_string();
-    let targets = targets.to_vec();
-    std::thread::spawn(move || {
-        let _ns = nlink::netlink::namespace::enter(&name).expect("enter test netns");
-        for target in &targets {
-            for _ in 0..count {
-                match std::net::TcpStream::connect_timeout(target, Duration::from_millis(1)) {
-                    Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
-                    other => panic!("SYN to {target}: expected a timeout, got {other:?}"),
-                }
-            }
-        }
-    })
-    .join()
-    .expect("TCP thread panicked");
-}
-
 /// A `PerHostLimiter` port range classifies the ports in the range, and
 /// only those. `reconcile()` installed no filter for a range at all and
 /// `apply()` none for a range wider than 10 ports — and for a narrower
@@ -374,7 +331,8 @@ async fn per_host_port_range_classifies_only_the_range() -> nlink::Result<()> {
             }
 
             let targets: Vec<_> = inside.iter().chain(&outside).map(|p| at(*p)).collect();
-            send_udp(&ns, &targets, PER_PORT);
+            let sent = send_udp(&ns, &targets, PER_PORT);
+            assert_eq!(sent, targets.len() * PER_PORT, "every datagram must go out");
 
             let classes = conn.get_classes_by_name("d0").await?;
             let count = |minor: u16| {
@@ -470,8 +428,9 @@ async fn per_host_port_rules_classify_both_families() -> nlink::Result<()> {
             let targets: Vec<_> = [at(&port_rule), at(&range_rule), at(&outside)].concat();
 
             let before = packets().await?;
-            send_udp(&ns, &targets, PER_PORT);
-            send_tcp_syns(&ns, &targets, PER_PORT);
+            let sent = send_udp(&ns, &targets, PER_PORT);
+            assert_eq!(sent, targets.len() * PER_PORT, "every datagram must go out");
+            send_tcp_syns(&ns, &targets, PER_PORT, Duration::from_millis(1));
             let after = packets().await?;
 
             // Each port gets PER_PORT datagrams and PER_PORT SYNs.
