@@ -62,6 +62,7 @@ use super::{
     Connection,
     error::{Error, Result},
     link::IfbLink,
+    messages::TcMessage,
     protocol::Route,
     tc::{FqCodelConfig, HtbClassConfig, HtbQdiscConfig, IngressConfig},
     tc_handle::{FilterPriority, TcHandle},
@@ -260,10 +261,11 @@ impl RateLimiter {
     /// [`ReconcileOptions::with_fallback_to_apply`]`(true)` to trigger
     /// a destructive rebuild via [`apply()`](Self::apply) instead.
     ///
-    /// Known approximation: the ingress redirect filter is checked
-    /// for **presence** at the ingress hook, not for its mirred
-    /// target — re-pointing a hand-modified redirect requires a
-    /// `remove()` + `reconcile()`.
+    /// The ingress redirect is checked for what it does: a matchall with a
+    /// mirred **egress** redirect to this limiter's IFB. Anything else that
+    /// redirects to the IFB — the u32 *ingress* redirect releases before
+    /// 0.31 installed, which dropped every packet (#458) — is deleted and
+    /// replaced.
     #[tracing::instrument(level = "info", skip_all, fields(dev = %self.dev))]
     pub async fn reconcile(&self, conn: &Connection<Route>) -> Result<ReconcileReport> {
         self.reconcile_with_options(conn, ReconcileOptions::new())
@@ -361,14 +363,21 @@ impl RateLimiter {
                 report.changes_made += 1;
             }
 
-            // Redirect filter at the ingress hook (presence check).
-            let has_redirect = has_ingress_hook
-                && !conn
-                    .get_filters_by_parent_index(ifindex, TcHandle::INGRESS)
-                    .await?
-                    .is_empty();
-            if !has_redirect {
+            // The redirect at the ingress hook: the matchall *egress*
+            // redirect to this IFB. Presence alone was checked, so an
+            // ingress-direction redirect — which every release before 0.31
+            // installed, and which drops everything (#458) — read as
+            // converged.
+            let redirect = match ifb_ifindex {
+                Some(ifb) if has_ingress_hook => ifb_redirect_state(conn, ifindex, ifb).await?,
+                _ => IfbRedirect::Replace(Vec::new()),
+            };
+            if let IfbRedirect::Replace(wrong) = redirect {
                 if !opts.dry_run {
+                    for (protocol, priority) in wrong {
+                        conn.del_filter_by_index(ifindex, TcHandle::INGRESS, protocol, priority)
+                            .await?;
+                    }
                     self.add_ingress_redirect(conn, &ifb_name).await?;
                 }
                 report.changes_made += 1;
@@ -743,106 +752,138 @@ impl RateLimiter {
         Ok(())
     }
 
-    /// Add ingress redirect filter using u32 filter with mirred action.
+    /// Add the filter that sends every packet arriving on the device to
+    /// the IFB: matchall + mirred **egress** redirect.
+    ///
+    /// Egress, because the packet has to be *transmitted* by the IFB to
+    /// pass its root HTB. An ingress redirect hands it to the IFB's receive
+    /// path instead (`netif_receive_skb` with `skb->dev = ifb`): it never
+    /// meets the HTB, and since the IFB is `IFF_NOARP` neither ARP nor
+    /// anything after it gets through — the ingress half of `RateLimiter`
+    /// blackholed the interface (#458).
     async fn add_ingress_redirect(&self, conn: &Connection<Route>, ifb_name: &str) -> Result<()> {
-        // Get IFB interface index
-        let ifb_link = conn
-            .get_link_by_name(ifb_name)
-            .await?
-            .ok_or_else(|| Error::InvalidMessage(format!("IFB device not found: {}", ifb_name)))?;
-        let ifb_ifindex = ifb_link.ifindex();
-
-        // Add a u32 filter with mirred redirect action
-        // We use the low-level API since matchall doesn't support arbitrary actions yet
-        self.add_u32_redirect_filter(conn, ifb_ifindex).await
-    }
-
-    /// Add u32 filter with mirred redirect action.
-    async fn add_u32_redirect_filter(
-        &self,
-        conn: &Connection<Route>,
-        ifb_ifindex: u32,
-    ) -> Result<()> {
-        use super::{
-            connection::create_request,
-            message::NlMsgType,
-            types::tc::{
-                TcMsg, TcaAttr,
-                action::{self, mirred},
-                filter::u32 as u32_mod,
-                tc_handle,
-            },
-        };
-
-        // Get interface index
-        let link = conn
+        let ifindex = conn
             .get_link_by_name(&self.dev)
             .await?
-            .ok_or_else(|| Error::InvalidMessage(format!("interface not found: {}", self.dev)))?;
-        let ifindex = link.ifindex();
-
-        // Build the message
-        let tcmsg = TcMsg::new()
-            .with_ifindex(ifindex as i32)
-            .with_parent(tc_handle::INGRESS)
-            .with_filter_info(0x0003, 1); // ETH_P_ALL, priority 1
-
-        // `create_request`, not `ack_request`: `tc_ctl_tfilter` answers
-        // a filter add that names no existing handle with
-        //
-        //   ENOENT "Need both RTM_NEWTFILTER and NLM_F_CREATE to
-        //           create a new filter"
-        //
-        // so without the flag this call never installed anything and
-        // `RateLimiter::ingress` failed on every interface.
-        let mut builder = create_request(NlMsgType::RTM_NEWTFILTER);
-        builder.append(&tcmsg);
-        builder.append_attr_str(TcaAttr::Kind as u16, "u32");
-
-        // Options
-        let opt_token = builder.nest_start(TcaAttr::Options as u16);
-
-        // Match all packets: `match u32 0 0 at 0`.
-        //
-        // Built from the typed structs rather than a byte array. The
-        // array this replaced was 28 bytes — a 12-byte header plus one
-        // key — but `struct tc_u32_sel`'s header is 16 (`offmask` is
-        // `__be16` after a 1-byte pad, then `off`, `offoff`, `hoff`,
-        // and a `__be32 hmask`). `u32_change` rejects anything shorter
-        // than `struct_size(sel, keys, sel->nkeys)`, so the ingress
-        // redirect filter never installed and `RateLimiter::ingress`
-        // silently shaped nothing.
-        let sel_token = builder.nest_start(u32_mod::TCA_U32_SEL);
-        let mut sel = u32_mod::TcU32Sel::new();
-        sel.set_terminal();
-        sel.add_key(u32_mod::TcU32Key::default());
-        builder.append_bytes(&sel.to_bytes());
-        builder.nest_end(sel_token);
-
-        // Add mirred action
-        let act_token = builder.nest_start(u32_mod::TCA_U32_ACT);
-
-        // Action 1: mirred redirect
-        let act1_token = builder.nest_start(1);
-        builder.append_attr_str(action::TCA_ACT_KIND, "mirred");
-
-        let mirred_opt_token = builder.nest_start(action::TCA_ACT_OPTIONS);
-        let mirred_parms = mirred::TcMirred::new(
-            mirred::TCA_INGRESS_REDIR,
-            ifb_ifindex,
-            action::TC_ACT_STOLEN,
-        );
-        builder.append_attr(mirred::TCA_MIRRED_PARMS, mirred_parms.as_bytes());
-        builder.nest_end(mirred_opt_token);
-
-        builder.nest_end(act1_token);
-        builder.nest_end(act_token);
-
-        builder.nest_end(opt_token);
-
-        conn.send_ack(builder).await?;
-        Ok(())
+            .ok_or_else(|| Error::InvalidMessage(format!("interface not found: {}", self.dev)))?
+            .ifindex();
+        let ifb_ifindex = conn
+            .get_link_by_name(ifb_name)
+            .await?
+            .ok_or_else(|| Error::InvalidMessage(format!("IFB device not found: {ifb_name}")))?
+            .ifindex();
+        add_ifb_redirect(conn, ifindex, ifb_ifindex).await
     }
+}
+
+/// The priority of the IFB redirect on a device's ingress hook: the first
+/// of the recipe band. It used to sit at 1, in the operator band.
+const INGRESS_REDIRECT_PRIORITY: FilterPriority = FilterPriority::recipe(0);
+
+/// `ETH_P_ALL`: the redirect takes every protocol.
+const ETH_P_ALL: u16 = 0x0003;
+
+/// Install the matchall egress redirect from `ifindex`'s ingress hook to
+/// `ifb_ifindex`.
+async fn add_ifb_redirect(conn: &Connection<Route>, ifindex: u32, ifb_ifindex: u32) -> Result<()> {
+    use super::action::{ActionList, MirredAction};
+    use super::filter::MatchallFilter;
+
+    let filter = MatchallFilter::new()
+        .actions(ActionList::new().with(MirredAction::redirect_by_index(ifb_ifindex)));
+    conn.add_filter_by_index_full(
+        ifindex,
+        TcHandle::INGRESS,
+        None,
+        ETH_P_ALL,
+        INGRESS_REDIRECT_PRIORITY.as_u16(),
+        filter,
+    )
+    .await
+}
+
+/// What the device's ingress hook holds by way of an IFB redirect.
+enum IfbRedirect {
+    /// The matchall egress redirect to the IFB, at its priority.
+    Correct,
+    /// Missing, or wrong: these `(protocol, priority)` filters send to the
+    /// IFB some other way (the u32 *ingress* redirect at priority 1 every
+    /// release before 0.31 installed) and have to go first — the kernel
+    /// refuses a different filter kind at the same priority and protocol.
+    Replace(Vec<(u16, u16)>),
+}
+
+/// Read the ingress hook of `ifindex` for the redirect to `ifb_ifindex`.
+async fn ifb_redirect_state(
+    conn: &Connection<Route>,
+    ifindex: u32,
+    ifb_ifindex: u32,
+) -> Result<IfbRedirect> {
+    use super::types::tc::action::mirred::TCA_EGRESS_REDIR;
+
+    let filters = conn
+        .get_filters_by_parent_index(ifindex, TcHandle::INGRESS)
+        .await?;
+    let mut wrong = Vec::new();
+    let mut correct = false;
+    for f in &filters {
+        let targets = mirred_targets(f);
+        if !targets.iter().any(|(_, target)| *target == ifb_ifindex) {
+            continue;
+        }
+        let right = f.kind() == Some("matchall")
+            && f.priority() == INGRESS_REDIRECT_PRIORITY.as_u16()
+            && targets == [(TCA_EGRESS_REDIR, ifb_ifindex)];
+        if right {
+            correct = true;
+        } else if !wrong.contains(&(f.protocol(), f.priority())) {
+            wrong.push((f.protocol(), f.priority()));
+        }
+    }
+    Ok(if correct && wrong.is_empty() {
+        IfbRedirect::Correct
+    } else {
+        IfbRedirect::Replace(wrong)
+    })
+}
+
+/// The `(eaction, ifindex)` of every mirred action of a matchall or u32
+/// filter.
+fn mirred_targets(filter: &TcMessage) -> Vec<(i32, u32)> {
+    use super::attr::AttrIter;
+    use super::types::tc::action::{TCA_ACT_KIND, TCA_ACT_OPTIONS, mirred};
+    use super::types::tc::filter::{matchall::TCA_MATCHALL_ACT, u32::TCA_U32_ACT};
+    use zerocopy::FromBytes;
+
+    let act_attr = match filter.kind() {
+        Some("matchall") => TCA_MATCHALL_ACT,
+        Some("u32") => TCA_U32_ACT,
+        _ => return Vec::new(),
+    };
+    let Some(options) = filter.raw_options() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (ty, acts) in AttrIter::new(options) {
+        if ty & 0x7FFF != act_attr {
+            continue;
+        }
+        for (_, act) in AttrIter::new(acts) {
+            let is_mirred = AttrIter::new(act)
+                .any(|(t, p)| t & 0x7FFF == TCA_ACT_KIND && p.starts_with(b"mirred"));
+            if !is_mirred {
+                continue;
+            }
+            let parms = AttrIter::new(act)
+                .filter(|(t, _)| t & 0x7FFF == TCA_ACT_OPTIONS)
+                .flat_map(|(_, opts)| AttrIter::new(opts))
+                .find(|(t, _)| t & 0x7FFF == mirred::TCA_MIRRED_PARMS)
+                .and_then(|(_, p)| mirred::TcMirred::read_from_prefix(p).ok())
+                .map(|(m, _)| (m.eaction, m.ifindex));
+            out.extend(parms);
+        }
+    }
+    out
 }
 
 // ============================================================================

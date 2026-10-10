@@ -19,6 +19,29 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`RateLimiter` ingress shaping dropped every ingress packet (#458).**
+  The redirect to the IFB was a mirred *ingress* redirect. That hands the
+  packet to the IFB's receive path, so it never reaches the IFB's
+  transmit and its root HTB. The IFB is `IFF_NOARP`, so ARP died there
+  and nothing got through: the interface was blackholed, live since
+  0.26.0. The filter was also a hand-rolled u32 at priority 1, in the
+  operator band, and `reconcile()` checked only that *some* filter
+  existed.
+
+  The redirect is now a matchall with `MirredAction::redirect_by_index`
+  (an egress redirect, `TC_ACT_STOLEN`) at the first recipe-band
+  priority. `reconcile()` reads each ingress filter's mirred parameters.
+  It deletes and replaces anything else that redirects to the IFB,
+  including the legacy u32 ingress redirect.
+  `MirredAction::ingress_redirect_by_index` now says it is not for IFB
+  shaping.
+
+  A root traffic test applies an ingress limiter across a namespace
+  pair. 20 of 20 datagrams arrive and the IFB's HTB counts them; before
+  the fix, 0 of 20 arrived. The test then installs the legacy u32 filter
+  with `tc` and checks that `reconcile()` restores delivery and that a
+  second reconcile changes nothing. CI now requires `cls_matchall`.
+
 - **`replace_qdisc` failed with `EINVAL` in three common cases, and
   `add_qdisc` quietly changed a live qdisc (#486).** All of these checks
   were made on Linux 6.12.

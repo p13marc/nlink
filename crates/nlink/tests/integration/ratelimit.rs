@@ -176,7 +176,13 @@ async fn test_rate_limiter_reconcile_idempotent() -> nlink::Result<()> {
 #[tokio::test]
 async fn test_ingress_rate_limiting() -> nlink::Result<()> {
     require_root!();
-    nlink::require_modules!("sch_htb", "cls_flower");
+    nlink::require_modules!(
+        "sch_htb",
+        "sch_ingress",
+        "cls_matchall",
+        "act_mirred",
+        "ifb"
+    );
 
     let ns = TestNamespace::new("rl_ingress")?;
     let conn = ns.connection()?;
@@ -216,7 +222,13 @@ async fn test_ingress_rate_limiting() -> nlink::Result<()> {
 #[tokio::test]
 async fn test_bidirectional_rate_limiting() -> nlink::Result<()> {
     require_root!();
-    nlink::require_modules!("sch_htb", "cls_flower");
+    nlink::require_modules!(
+        "sch_htb",
+        "sch_ingress",
+        "cls_matchall",
+        "act_mirred",
+        "ifb"
+    );
 
     let ns = TestNamespace::new("rl_bidir")?;
     let conn = ns.connection()?;
