@@ -1667,6 +1667,7 @@ pub mod filter {
         pub const TCA_U32_PCNT: u16 = 9;
         pub const TCA_U32_MARK: u16 = 10;
         pub const TCA_U32_FLAGS: u16 = 11;
+        pub const TCA_U32_PAD: u16 = 12;
 
         /// U32 selector flags.
         pub const TC_U32_TERMINAL: u8 = 1;
@@ -1879,6 +1880,8 @@ pub mod filter {
         pub const TCA_FLOWER_KEY_UDP_SRC: u16 = 20;
         pub const TCA_FLOWER_KEY_UDP_DST: u16 = 21;
         pub const TCA_FLOWER_FLAGS: u16 = 22;
+        /// How many devices offloaded the filter: a dump's, not a request's.
+        pub const TCA_FLOWER_IN_HW_COUNT: u16 = 86;
         pub const TCA_FLOWER_KEY_VLAN_ID: u16 = 23;
         pub const TCA_FLOWER_KEY_VLAN_PRIO: u16 = 24;
         pub const TCA_FLOWER_KEY_VLAN_ETH_TYPE: u16 = 25;
@@ -2989,6 +2992,7 @@ pub mod action {
         pub const TCA_CONNMARK_UNSPEC: u16 = 0;
         pub const TCA_CONNMARK_PARMS: u16 = 1;
         pub const TCA_CONNMARK_TM: u16 = 2;
+        pub const TCA_CONNMARK_PAD: u16 = 3;
 
         /// Connmark action parameters (struct tc_connmark).
         #[repr(C)]
@@ -3196,6 +3200,7 @@ pub mod action {
         pub const TCA_CSUM_UNSPEC: u16 = 0;
         pub const TCA_CSUM_PARMS: u16 = 1;
         pub const TCA_CSUM_TM: u16 = 2;
+        pub const TCA_CSUM_PAD: u16 = 3;
 
         /// Update flags for checksum recalculation.
         pub const TCA_CSUM_UPDATE_FLAG_IPV4HDR: u32 = 1;
@@ -3247,6 +3252,7 @@ pub mod action {
         pub const TCA_SAMPLE_RATE: u16 = 3;
         pub const TCA_SAMPLE_TRUNC_SIZE: u16 = 4;
         pub const TCA_SAMPLE_PSAMPLE_GROUP: u16 = 5;
+        pub const TCA_SAMPLE_PAD: u16 = 6;
 
         /// Sample action parameters (struct tc_sample - just tc_gen).
         #[repr(C)]

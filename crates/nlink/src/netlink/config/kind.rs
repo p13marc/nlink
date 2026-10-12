@@ -134,6 +134,12 @@ pub struct LinkRecreate {
     /// ([`Owned`]) or the [`RecreatePolicy`] lets go: for the caller to put
     /// back (#513).
     pub destroys: Vec<Blocker>,
+    /// The link's TC tree that the config does not declare, kept to be put
+    /// back after the recreate, with
+    /// [`PlanOptions::preserve_undeclared_tc`](super::PlanOptions::preserve_undeclared_tc)
+    /// (#645).
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub preserved_tc: Option<super::preserve::PreservedTc>,
 }
 
 /// How sure an offline prediction is (#513).
@@ -801,7 +807,11 @@ impl LinkRecreate {
 impl std::fmt::Display for LinkRecreate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.blocked_by.is_empty() {
-            write!(f, "-/+ link {} (recreate: {})", self.name, self.reason)
+            write!(f, "-/+ link {} (recreate: {})", self.name, self.reason)?;
+            match &self.preserved_tc {
+                Some(tc) => write!(f, ", keeping its TC tree: {tc}"),
+                None => Ok(()),
+            }
         } else {
             write!(
                 f,
@@ -2388,6 +2398,7 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
             .into_iter()
             .map(|reason| Blocker::Unsupported { reason })
             .collect();
+        let mut preserved: HashMap<String, super::preserve::PreservedTc> = HashMap::new();
         for (l, lower) in &closure {
             let name = name_of(l.ifindex());
             // A veth's (or vxcan's) peer in another namespace is not in the
@@ -2458,6 +2469,13 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
                 .chain(previous.iter().flat_map(|p| p.tc.iter()))
                 .filter(|t| t.dev == name)
                 .collect();
+            // With `preserve_undeclared_tc`, what can be replayed is kept
+            // rather than refusing the recreate (#645).
+            let preserving = opts.preserve_undeclared_tc && !remove;
+            let mut kept = super::preserve::PreservedTc {
+                dev: name.to_string(),
+                ..Default::default()
+            };
             for q in qdiscs.iter().filter(|q| q.ifindex() == l.ifindex()) {
                 // A qdisc with handle 0: is the kernel's default for the
                 // device, recreated with it.
@@ -2476,6 +2494,11 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
                     if trees.iter().any(|t| t.owns_leaf(q.parent())) {
                         continue;
                     }
+                    if let Some(o) = preserving.then(|| super::preserve::TcObject::qdisc(q)).flatten()
+                    {
+                        kept.qdiscs.push(o);
+                        continue;
+                    }
                     blocked_by.push(Blocker::Qdisc {
                         dev: name.to_string(),
                         qdisc: q.kind().unwrap_or("?").to_string(),
@@ -2488,7 +2511,12 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
                     .iter()
                     .any(|d| d.dev == name && d.effective_parent() == parent)
                     || (remove && previously_declared_qdisc(name, parent));
-                if !is_declared {
+                let kept_qdisc = (!is_declared && preserving)
+                    .then(|| super::preserve::TcObject::qdisc(q))
+                    .flatten();
+                if let Some(o) = kept_qdisc {
+                    kept.qdiscs.push(o);
+                } else if !is_declared {
                     blocked_by.push(Blocker::Qdisc {
                         dev: name.to_string(),
                         qdisc: q.kind().unwrap_or("?").to_string(),
@@ -2506,6 +2534,13 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
                     && matches!(c.kind(), Some("htb" | "hfsc" | "drr" | "qfq" | "cbq"))
                     && !trees.iter().any(|t| t.owns_class(c.handle()))
             }) {
+                if preserving {
+                    // HFSC's root class comes back with its qdisc.
+                    if c.handle().minor() != 0 {
+                        kept.classes.push(super::preserve::TcObject::from_live(c));
+                    }
+                    continue;
+                }
                 blocked_by.push(Blocker::Class {
                     dev: name.to_string(),
                     qdisc: c.kind().unwrap_or("?").to_string(),
@@ -2515,12 +2550,24 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
             for f in extras.filters.iter().filter(|f| {
                 f.ifindex() == l.ifindex() && !trees.iter().any(|t| t.owns_filter(f.parent()))
             }) {
+                if preserving && super::preserve::replayable_filter(f) {
+                    if !super::preserve::automatic_u32_table(f) {
+                        for target in super::preserve::mirred_targets(f) {
+                            kept.targets.insert(target, name_of(target).to_string());
+                        }
+                        kept.filters.push(super::preserve::TcObject::from_live(f));
+                    }
+                    continue;
+                }
                 blocked_by.push(Blocker::Filter {
                     dev: name.to_string(),
                     filter: f.kind().unwrap_or("?").to_string(),
                     priority: f.priority().as_u16(),
                     parent: f.parent(),
                 });
+            }
+            if !kept.is_empty() {
+                preserved.insert(name.to_string(), kept);
             }
             // The link's FDB entries, and — for a bridge — every entry in
             // its database, whichever port it is on.
@@ -2683,6 +2730,7 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
                 blocked_by,
                 resets: Vec::new(),
                 destroys: Vec::new(),
+                preserved_tc: None,
             });
             continue;
         }
@@ -2719,6 +2767,7 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
                 blocked_by: Vec::new(),
                 resets,
                 destroys: destroys.take().unwrap_or_default(),
+                preserved_tc: preserved.remove(name),
             });
         }
         for (master, port) in &ports {
@@ -3616,6 +3665,7 @@ mod tests {
             }],
             resets: Vec::new(),
             destroys: Vec::new(),
+            preserved_tc: None,
         };
         assert!(r.is_refused());
         let shown = r.to_string();

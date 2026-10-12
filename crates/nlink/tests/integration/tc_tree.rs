@@ -554,6 +554,100 @@ async fn a_tree_read_back_from_json_applies() -> nlink::Result<()> {
     Ok(())
 }
 
+/// `tc <args>` in `ns`, as text with what differs between two installs of
+/// the same thing (action indexes and references) taken out.
+fn tc_shown(ns: &TestNamespace, args: &[&str]) -> Result<String, String> {
+    let out = ns.exec("tc", args).map_err(|e| e.to_string())?;
+    Ok(out
+        .lines()
+        .map(|l| {
+            let mut words: Vec<&str> = l.split_whitespace().collect();
+            while let Some(i) = words.iter().position(|w| matches!(*w, "index" | "ref" | "bind")) {
+                words.drain(i..(i + 2).min(words.len()));
+            }
+            words.join(" ")
+        })
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// #645: with `preserve_undeclared_tc`, a link recreated for a kind change
+/// keeps the TC tree no config declares — HTB classes, fq_codel and netem
+/// leaves, flower and u32 filters, a clsact with mirred (one to the
+/// recreated link itself, whose ifindex changes) and ct actions — where
+/// the recreate used to be refused, or, allowed, to destroy it.
+#[tokio::test]
+async fn an_undeclared_tc_tree_is_kept_across_a_recreate() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!(
+        "dummy", "8021q", "ifb", "sch_htb", "sch_fq_codel", "sch_netem", "sch_ingress",
+        "cls_flower", "cls_u32", "cls_matchall", "act_mirred", "act_gact", "act_ct"
+    );
+
+    let vlan = |id: u16| {
+        NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .link("v0", move |l| l.vlan("d0", id).up())
+            .link("nlkifb9", |l| l.ifb().up())
+    };
+    let ns = TestNamespace::new("tt-keep")?;
+    let conn = ns.connection()?;
+    let applied = vlan(10).apply(&conn).await?;
+    assert!(applied.is_success(), "{:?}", applied.errors);
+    let tc = |args: &str| {
+        let args: Vec<&str> = args.split_whitespace().collect();
+        ns.exec("tc", &args).map(|_| ())
+    };
+    tc("qdisc add dev v0 root handle 1: htb default 20")?;
+    tc("class add dev v0 parent 1: classid 1:1 htb rate 100mbit")?;
+    tc("class add dev v0 parent 1:1 classid 1:10 htb rate 60mbit ceil 100mbit")?;
+    tc("class add dev v0 parent 1:1 classid 1:20 htb rate 40mbit")?;
+    tc("qdisc add dev v0 parent 1:10 handle 10: fq_codel")?;
+    tc("qdisc add dev v0 parent 1:20 handle 20: netem delay 10ms")?;
+    tc("filter add dev v0 parent 1: prio 1 protocol ip flower ip_proto tcp dst_port 22 classid 1:10 \
+        action mirred egress mirror dev nlkifb9 action gact pipe")?;
+    tc("filter add dev v0 parent 1: prio 2 protocol ip u32 match ip dst 10.0.0.0/8 classid 1:20")?;
+    tc("qdisc add dev v0 clsact")?;
+    tc("filter add dev v0 ingress prio 3 matchall action mirred egress mirror dev v0")?;
+    tc("filter add dev v0 ingress prio 4 protocol ip flower ip_proto udp action ct pipe")?;
+    let shown = || -> Result<Vec<String>, String> {
+        [
+            "qdisc show dev v0",
+            "class show dev v0",
+            "filter show dev v0 parent 1:",
+            "filter show dev v0 ingress",
+        ]
+        .iter()
+        .map(|a| tc_shown(&ns, &a.split_whitespace().collect::<Vec<_>>()))
+        .collect()
+    };
+    let before = shown().map_err(nlink::Error::invalid_message)?;
+    let first = conn.get_link_by_name("v0").await?.expect("v0").ifindex();
+
+    // Without the option, the tree refuses the recreate.
+    let refused = vlan(20).apply(&conn).await.expect_err("the recreate went ahead over a tree");
+    assert!(refused.is_not_supported(), "{refused}");
+
+    let kept = vlan(20)
+        .apply_with_options(&conn, ApplyOptions::default().with_preserve_undeclared_tc(true))
+        .await?;
+    assert!(kept.is_success(), "{:?}", kept.errors);
+    let summary = kept.summary_text();
+    assert!(
+        summary.contains("Restored 4 qdiscs, 3 classes and 4 filters on v0"),
+        "{summary}"
+    );
+    let v0 = conn.get_link_by_name("v0").await?.expect("v0").ifindex();
+    assert_ne!(v0, first, "v0 was not recreated");
+    let after = shown().map_err(nlink::Error::invalid_message)?;
+    assert_eq!(after, before, "the tree came back different");
+    assert!(after[3].contains("to device v0"), "{}", after[3]);
+    let diff = vlan(20).diff(&conn).await?;
+    assert!(diff.is_empty(), "{diff}");
+    Ok(())
+}
+
 /// A VLAN whose id changes is deleted and created again, which takes its
 /// classes and filters with it. Those were blockers, so the recreate was
 /// refused; declared in its tree, the apply puts them back (#514).

@@ -2682,6 +2682,26 @@ All notable changes to this project will be documented in this file.
   - A `PerPeerImpairer` made with `new_by_index` can't be declared, since a
     declaration names its device.
 
+- **A recreate can keep the TC tree the config doesn't declare (#645).** With
+  `PlanOptions::preserve_undeclared_tc(true)` (or
+  `ApplyOptions::with_preserve_undeclared_tc`), the recreate goes ahead where
+  it used to be refused. This applies when a link's kind change recreates it
+  and it carries undeclared qdiscs, classes or filters. The diff keeps a
+  snapshot in `LinkRecreate::preserved_tc` (`PreservedTc`, `TcObject`), and
+  `Step::RestoreTc` puts it back after the declared qdiscs:
+  - **Qdiscs** go back through their typed declaration. HTB's own dump isn't
+    a request it accepts.
+  - **Classes and filters** are replayed from their dumps, parent first,
+    without what only a dump has: status flags, offload counts, an action's
+    index, statistics and timestamps.
+  - **A mirred action's target** is looked up again by name, including a
+    mirror back to the recreated link itself.
+  - **What can't be replayed still refuses the recreate.** That covers a
+    qdisc of a kind that doesn't read back, and a BPF filter or action,
+    whose dump has a program id but no fd.
+  - **The undo:** a restore is listed in `ApplyResult::irreversible()`, as
+    the recreate is (#745).
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
