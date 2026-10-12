@@ -2381,6 +2381,11 @@ async fn del_route(conn: &Connection<Route>, route: &DeclaredRoute) -> Result<bo
             if let Some(table) = route.table {
                 config = config.table(table);
             }
+            // The nexthop object picks the route out where several share a
+            // destination.
+            if let Some(id) = route.attrs.nhid {
+                config = config.nexthop_group(id);
+            }
             conn.del_route_if_exists(config).await
         }
         IpAddr::V6(dst) => {
@@ -2399,6 +2404,11 @@ async fn del_route(conn: &Connection<Route>, route: &DeclaredRoute) -> Result<bo
             }
             if let Some(table) = route.table {
                 config = config.table(table);
+            }
+            // The nexthop object picks the route out where several share a
+            // destination.
+            if let Some(id) = route.attrs.nhid {
+                config = config.nexthop_group(id);
             }
             conn.del_route_if_exists(config).await
         }
