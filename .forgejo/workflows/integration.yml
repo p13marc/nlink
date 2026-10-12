@@ -87,7 +87,7 @@ jobs:
                    nft_ct nft_log nft_masq nft_nat nft_redir sch_cake nft_fib_inet nft_connlimit nfnetlink_log \
                    cls_bpf act_bpf sch_hfsc sch_drr sch_qfq act_gate act_ct nf_log_syslog \
                    nft_queue nfnetlink_queue nft_dup_ipv4 nft_dup_netdev nft_fwd_netdev nft_numgen nft_hash \
-                   nft_tproxy nft_socket nft_synproxy; do
+                   nft_tproxy nft_socket nft_synproxy nf_conntrack_ftp nf_conntrack_tftp; do
             if [ -d "/sys/module/$m" ] || grep -qE "(^|/)$m\.ko" $idx 2>/dev/null; then
               continue
             fi
@@ -124,7 +124,7 @@ jobs:
             nft_ct,nft_log,nft_masq,nft_nat,nft_redir,sch_cake,nft_fib_inet,nft_connlimit,nfnetlink_log,
             cls_bpf,act_bpf,sch_hfsc,sch_drr,sch_qfq,act_gate,act_ct,nf_log_syslog,
             nft_queue,nfnetlink_queue,nft_dup_ipv4,nft_dup_netdev,nft_fwd_netdev,nft_numgen,nft_hash,
-            nft_tproxy,nft_socket,nft_synproxy
+            nft_tproxy,nft_socket,nft_synproxy,nf_conntrack_ftp,nf_conntrack_tftp
           # NLINK_TEST_STRICT_HOST_ROOT is deliberately NOT set. This
           # lane's containers are rootless: uid 0 here is the runner's
           # unprivileged user wearing a mapping, and six tests need root

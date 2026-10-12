@@ -1,7 +1,7 @@
-//! Named stateful objects — counters, quotas and limits a table holds by
-//! name and rules share (`counter name "web"`, `quota name "q"`), and that
-//! object maps pick per packet. ipset's per-element `counters` become a map
-//! of counter objects.
+//! Named stateful objects — counters, quotas, limits and conntrack helpers a
+//! table holds by name and rules share (`counter name "web"`, `quota name
+//! "q"`, `ct helper set "ftp-std"`), and that object maps pick per packet.
+//! ipset's per-element `counters` become a map of counter objects.
 
 use super::expr::{LimitExpr, QuotaExpr};
 use super::types::Family;
@@ -21,6 +21,8 @@ pub enum ObjectType {
     Counter = 1,
     /// `NFT_OBJECT_QUOTA`.
     Quota = 2,
+    /// `NFT_OBJECT_CT_HELPER`.
+    CtHelper = 3,
     /// `NFT_OBJECT_LIMIT`.
     Limit = 4,
 }
@@ -30,6 +32,7 @@ impl ObjectType {
         match v {
             1 => Some(Self::Counter),
             2 => Some(Self::Quota),
+            3 => Some(Self::CtHelper),
             4 => Some(Self::Limit),
             _ => None,
         }
@@ -48,6 +51,8 @@ pub enum ObjectConfig {
     Quota(QuotaExpr),
     /// A packet-rate limit — see [`LimitExpr`].
     Limit(LimitExpr),
+    /// A conntrack helper — see [`CtHelperObject`] (#703).
+    CtHelper(CtHelperObject),
 }
 
 impl ObjectConfig {
@@ -57,8 +62,51 @@ impl ObjectConfig {
             Self::Counter => ObjectType::Counter,
             Self::Quota(_) => ObjectType::Quota,
             Self::Limit(_) => ObjectType::Limit,
+            Self::CtHelper(_) => ObjectType::CtHelper,
         }
     }
+}
+
+/// A conntrack helper object (#703): `ct helper <name> { type "<helper>"
+/// protocol <proto>; [l3proto ip|ip6;] }`, which a rule assigns with
+/// [`Rule::set_ct_helper`](super::Rule::set_ct_helper). The helper module
+/// (`nf_conntrack_ftp`, …) must be loadable.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CtHelperObject {
+    /// The helper: `ftp`, `tftp`, `sip`, ….
+    pub helper: String,
+    /// Its layer-4 protocol: 6 (TCP) or 17 (UDP).
+    pub protocol: u8,
+    /// Its layer-3 family, `NFPROTO_IPV4` or `NFPROTO_IPV6`; `None`, the
+    /// table's (both, in an inet table).
+    pub family: Option<u8>,
+}
+
+impl CtHelperObject {
+    /// The helper `helper` for `protocol`.
+    pub fn new(helper: impl Into<String>, protocol: u8) -> Self {
+        Self {
+            helper: helper.into(),
+            protocol,
+            family: None,
+        }
+    }
+
+    /// For one layer-3 family only (`l3proto ip`).
+    pub fn family(mut self, nfproto: u8) -> Self {
+        self.family = Some(nfproto);
+        self
+    }
+}
+
+/// The `NFPROTO_*` a helper object in a `family` table defaults to, and
+/// echoes: the table's own, `NFPROTO_INET` in an inet table, where it serves
+/// both.
+fn table_nfproto(family: Family) -> u8 {
+    family as u8
 }
 
 /// A named stateful object, to create with
@@ -110,6 +158,11 @@ impl Object {
     /// A named limit (`limit name`).
     pub fn limit(table: &str, name: &str, limit: LimitExpr) -> Self {
         Self::new(table, name, ObjectConfig::Limit(limit))
+    }
+
+    /// A named conntrack helper (`ct helper`).
+    pub fn ct_helper(table: &str, name: &str, helper: CtHelperObject) -> Self {
+        Self::new(table, name, ObjectConfig::CtHelper(helper))
     }
 
     /// Set the address family (default `inet`).
@@ -164,6 +217,7 @@ impl ObjectInfo {
             ObjectState::Counter { .. } => Some(ObjectType::Counter),
             ObjectState::Quota { .. } => Some(ObjectType::Quota),
             ObjectState::Limit(_) => Some(ObjectType::Limit),
+            ObjectState::CtHelper(_) => Some(ObjectType::CtHelper),
             ObjectState::Other { .. } => None,
         }
     }
@@ -195,6 +249,8 @@ pub enum ObjectState {
     },
     /// A packet-rate limit.
     Limit(LimitExpr),
+    /// A conntrack helper.
+    CtHelper(CtHelperObject),
     /// A kind nlink does not model (or a byte-rate limit): its
     /// `NFT_OBJECT_*` type and raw `NFTA_OBJ_DATA`.
     #[non_exhaustive]
@@ -218,19 +274,28 @@ impl ObjectState {
                 Some(ObjectConfig::Quota(quota))
             }
             Self::Limit(limit) => Some(ObjectConfig::Limit(limit.clone())),
+            Self::CtHelper(h) => Some(ObjectConfig::CtHelper(h.clone())),
             Self::Other { .. } => None,
         }
     }
 }
 
-/// Append `NFTA_OBJ_DATA` for `config`: what `nft_obj_init` reads, in the
-/// shape the matching expression has.
-pub(crate) fn append_object_data(builder: &mut MessageBuilder, config: &ObjectConfig) {
+/// Append `NFTA_OBJ_DATA` for `config` in a `family` table: what
+/// `nft_obj_init` reads, in the shape the matching expression has. A
+/// helper's family goes as the kernel echoes it, the table's when none is
+/// declared.
+pub(crate) fn append_object_data(builder: &mut MessageBuilder, config: &ObjectConfig, family: Family) {
     let data = builder.nest_start(NFTA_OBJ_DATA | 0x8000);
     match config {
         ObjectConfig::Counter => {}
         ObjectConfig::Quota(quota) => super::expr::write_quota_attrs(builder, quota, false),
         ObjectConfig::Limit(limit) => super::expr::write_limit_attrs(builder, limit),
+        ObjectConfig::CtHelper(h) => {
+            builder.append_attr_str(NFTA_CT_HELPER_NAME, &h.helper);
+            let nfproto = h.family.unwrap_or_else(|| table_nfproto(family));
+            builder.append_attr_u16_be(NFTA_CT_HELPER_L3PROTO, u16::from(nfproto));
+            builder.append_attr(NFTA_CT_HELPER_L4PROTO, &[h.protocol]);
+        }
     }
     builder.nest_end(data);
 }
@@ -261,7 +326,7 @@ pub(crate) fn parse_object(data: &[u8], family: Family) -> Option<ObjectInfo> {
         }
     }
     let object_type = object_type?;
-    let state = parse_state(object_type, payload).unwrap_or_else(|| ObjectState::Other {
+    let state = parse_state(object_type, payload, family).unwrap_or_else(|| ObjectState::Other {
         object_type,
         data: payload.to_vec(),
     });
@@ -277,7 +342,7 @@ pub(crate) fn parse_object(data: &[u8], family: Family) -> Option<ObjectInfo> {
     })
 }
 
-fn parse_state(object_type: u32, data: &[u8]) -> Option<ObjectState> {
+fn parse_state(object_type: u32, data: &[u8], family: Family) -> Option<ObjectState> {
     let attrs: Vec<(u16, &[u8])> = AttrIter::new(data).map(|(a, v)| (a & 0x7FFF, v)).collect();
     let u64_of = |id| {
         attrs
@@ -306,6 +371,17 @@ fn parse_state(object_type: u32, data: &[u8]) -> Option<ObjectState> {
             })
         }
         ObjectType::Limit => super::expr::parse_limit_attrs(data).map(ObjectState::Limit),
+        ObjectType::CtHelper => {
+            let attr = |id| attrs.iter().find(|(a, _)| *a == id).map(|(_, v)| *v);
+            let l3 = attr(NFTA_CT_HELPER_L3PROTO).and_then(|v| get::u16_be(v).ok())?;
+            let l3 = u8::try_from(l3).ok()?;
+            Some(ObjectState::CtHelper(CtHelperObject {
+                helper: get::string(attr(NFTA_CT_HELPER_NAME)?).ok()?.to_string(),
+                protocol: *attr(NFTA_CT_HELPER_L4PROTO)?.first()?,
+                // The table's own reads as none, as it is declared.
+                family: (l3 != table_nfproto(family)).then_some(l3),
+            }))
+        }
     }
 }
 
@@ -315,8 +391,12 @@ mod tests {
     use crate::netlink::nftables::types::LimitUnit;
 
     fn data_of(config: &ObjectConfig) -> Vec<u8> {
+        data_in(config, Family::Inet)
+    }
+
+    fn data_in(config: &ObjectConfig, family: Family) -> Vec<u8> {
         let mut b = MessageBuilder::new(0, 0);
-        append_object_data(&mut b, config);
+        append_object_data(&mut b, config, family);
         // Header (16) + the NFTA_OBJ_DATA nest header (4).
         b.as_bytes()[20..].to_vec()
     }
@@ -324,11 +404,11 @@ mod tests {
     #[test]
     fn object_data_reads_back_as_its_configuration() {
         let quota = ObjectConfig::Quota(QuotaExpr::new(1_000_000).over());
-        let state = parse_state(ObjectType::Quota as u32, &data_of(&quota)).unwrap();
+        let state = parse_state(ObjectType::Quota as u32, &data_of(&quota), Family::Inet).unwrap();
         assert_eq!(state.config(), Some(quota));
 
         let limit = ObjectConfig::Limit(LimitExpr::packets(10, LimitUnit::Minute).burst(3));
-        let state = parse_state(ObjectType::Limit as u32, &data_of(&limit)).unwrap();
+        let state = parse_state(ObjectType::Limit as u32, &data_of(&limit), Family::Inet).unwrap();
         assert_eq!(state.config(), Some(limit));
 
         // A counter's request carries no data; the dump has its totals.
@@ -354,7 +434,7 @@ mod tests {
             b.append_attr_u64_be(NFTA_LIMIT_UNIT, 1);
             b.append_attr_u32_be(NFTA_LIMIT_BURST, 1500);
             b.append_attr_u32_be(NFTA_LIMIT_TYPE, kind);
-            parse_state(ObjectType::Limit as u32, &b.as_bytes()[16..])
+            parse_state(ObjectType::Limit as u32, &b.as_bytes()[16..], Family::Inet)
         };
         assert_eq!(
             limit(1), // NFT_LIMIT_PKT_BYTES
@@ -363,6 +443,24 @@ mod tests {
             ))
         );
         assert_eq!(limit(7), None);
-        assert_eq!(parse_state(3, &[]), None); // ct helper
+        assert_eq!(parse_state(7, &[], Family::Inet), None); // ct timeout
+    }
+
+    /// A helper always sends its family, as the kernel echoes it, and reads
+    /// the table's back as none, as it is declared (#703).
+    #[test]
+    fn a_ct_helper_reads_back_as_declared() {
+        for (family, helper, l3) in [
+            (Family::Ip, CtHelperObject::new("ftp", 6), 2),
+            (Family::Inet, CtHelperObject::new("tftp", 17), 1),
+            (Family::Inet, CtHelperObject::new("ftp", 6).family(10), 10),
+        ] {
+            let config = ObjectConfig::CtHelper(helper);
+            let data = data_in(&config, family);
+            let attrs: Vec<(u16, &[u8])> = AttrIter::new(&data).collect();
+            assert_eq!(attrs[1], (NFTA_CT_HELPER_L3PROTO, &[0, l3][..]), "{config:?}");
+            let state = parse_state(ObjectType::CtHelper as u32, &data, family).unwrap();
+            assert_eq!(state.config(), Some(config));
+        }
     }
 }

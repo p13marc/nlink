@@ -2768,6 +2768,14 @@ All notable changes to this project will be documented in this file.
   Each is written as nft writes it, and decoded: `RuleExpr::Tproxy`,
   `RuleExpr::Socket`, `RuleExpr::Synproxy`. `SocketKey` is new.
 
+
+- **Conntrack helper objects (#703).** `ObjectConfig::CtHelper(CtHelperObject)`
+  (`Object::ct_helper`) declares `ct helper <name> { type "ftp" protocol tcp;
+  [l3proto ip;] }`, and `Rule::set_ct_helper(name)` assigns it to a
+  connection. Both are written as nft writes them and decode typed
+  (`ObjectState::CtHelper`); a declared helper converges, and a changed one is
+  recreated with the rules that use it.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

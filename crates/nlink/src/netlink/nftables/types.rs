@@ -3146,6 +3146,15 @@ impl Rule {
         self.objref(super::object::ObjectType::Limit, name)
     }
 
+    /// `ct helper set "<name>"`: assign the named conntrack helper object
+    /// ([`CtHelperObject`](super::CtHelperObject)) to the packet's
+    /// connection (#703). The kernel attaches it only while the connection
+    /// is unconfirmed, on its first packet, so the rule goes in a
+    /// prerouting or output chain.
+    pub fn set_ct_helper(self, name: &str) -> Self {
+        self.objref(super::object::ObjectType::CtHelper, name)
+    }
+
     /// `counter name <field> map @<map>` (and the same for quotas and
     /// limits): use the object the object map holds for `field` — one
     /// counter per address, ipset's per-element `counters`. A packet whose
