@@ -25,6 +25,8 @@ pub enum ObjectType {
     CtHelper = 3,
     /// `NFT_OBJECT_LIMIT`.
     Limit = 4,
+    /// `NFT_OBJECT_SECMARK`.
+    Secmark = 8,
 }
 
 impl ObjectType {
@@ -34,6 +36,7 @@ impl ObjectType {
             2 => Some(Self::Quota),
             3 => Some(Self::CtHelper),
             4 => Some(Self::Limit),
+            8 => Some(Self::Secmark),
             _ => None,
         }
     }
@@ -53,6 +56,12 @@ pub enum ObjectConfig {
     Limit(LimitExpr),
     /// A conntrack helper — see [`CtHelperObject`] (#703).
     CtHelper(CtHelperObject),
+    /// A security mark, by its LSM security context (#703): `secmark
+    /// <name> { "system_u:object_r:ssh_server_packet_t:s0" }` under
+    /// SELinux, a label such as `"unconfined"` under AppArmor. Given with
+    /// [`Rule::set_secmark`](super::Rule::set_secmark); the kernel refuses
+    /// a context its LSM does not know.
+    Secmark(String),
 }
 
 impl ObjectConfig {
@@ -63,6 +72,7 @@ impl ObjectConfig {
             Self::Quota(_) => ObjectType::Quota,
             Self::Limit(_) => ObjectType::Limit,
             Self::CtHelper(_) => ObjectType::CtHelper,
+            Self::Secmark(_) => ObjectType::Secmark,
         }
     }
 }
@@ -218,6 +228,7 @@ impl ObjectInfo {
             ObjectState::Quota { .. } => Some(ObjectType::Quota),
             ObjectState::Limit(_) => Some(ObjectType::Limit),
             ObjectState::CtHelper(_) => Some(ObjectType::CtHelper),
+            ObjectState::Secmark(_) => Some(ObjectType::Secmark),
             ObjectState::Other { .. } => None,
         }
     }
@@ -251,6 +262,8 @@ pub enum ObjectState {
     Limit(LimitExpr),
     /// A conntrack helper.
     CtHelper(CtHelperObject),
+    /// A security mark's context.
+    Secmark(String),
     /// A kind nlink does not model (or a byte-rate limit): its
     /// `NFT_OBJECT_*` type and raw `NFTA_OBJ_DATA`.
     #[non_exhaustive]
@@ -275,6 +288,7 @@ impl ObjectState {
             }
             Self::Limit(limit) => Some(ObjectConfig::Limit(limit.clone())),
             Self::CtHelper(h) => Some(ObjectConfig::CtHelper(h.clone())),
+            Self::Secmark(context) => Some(ObjectConfig::Secmark(context.clone())),
             Self::Other { .. } => None,
         }
     }
@@ -296,6 +310,7 @@ pub(crate) fn append_object_data(builder: &mut MessageBuilder, config: &ObjectCo
             builder.append_attr_u16_be(NFTA_CT_HELPER_L3PROTO, u16::from(nfproto));
             builder.append_attr(NFTA_CT_HELPER_L4PROTO, &[h.protocol]);
         }
+        ObjectConfig::Secmark(context) => builder.append_attr_str(NFTA_SECMARK_CTX, context),
     }
     builder.nest_end(data);
 }
@@ -382,6 +397,10 @@ fn parse_state(object_type: u32, data: &[u8], family: Family) -> Option<ObjectSt
                 family: (l3 != table_nfproto(family)).then_some(l3),
             }))
         }
+        ObjectType::Secmark => {
+            let context = attrs.iter().find(|(a, _)| *a == NFTA_SECMARK_CTX)?.1;
+            Some(ObjectState::Secmark(get::string(context).ok()?.to_string()))
+        }
     }
 }
 
@@ -444,6 +463,14 @@ mod tests {
         );
         assert_eq!(limit(7), None);
         assert_eq!(parse_state(7, &[], Family::Inet), None); // ct timeout
+    }
+
+    /// A secmark's context reads back as written (#703).
+    #[test]
+    fn a_secmark_reads_back_its_context() {
+        let config = ObjectConfig::Secmark("system_u:object_r:ssh_server_packet_t:s0".into());
+        let state = parse_state(ObjectType::Secmark as u32, &data_of(&config), Family::Inet).unwrap();
+        assert_eq!(state.config(), Some(config));
     }
 
     /// A helper always sends its family, as the kernel echoes it, and reads

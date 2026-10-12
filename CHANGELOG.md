@@ -2801,6 +2801,17 @@ All notable changes to this project will be documented in this file.
   policy changed. The ipset recipe maps `counters` and per-element comments
   to them.
 
+
+- **`osf` and secmark objects (#703).**
+  - `Rule::match_osf(name, OsfTtl, version)` matches the operating system a
+    TCP SYN's fingerprint names: `osf [ttl loose|skip] [version] name
+    "Linux"`.
+  - `ObjectConfig::Secmark(context)` is a secmark object, and
+    `Rule::set_secmark(name)` gives a packet its mark.
+
+  Both are written as nft writes them and decode typed: `RuleExpr::Osf` and
+  `ObjectState::Secmark`. `OsfTtl` is new and audited.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
