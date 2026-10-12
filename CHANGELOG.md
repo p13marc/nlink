@@ -898,6 +898,13 @@ All notable changes to this project will be documented in this file.
   whose quantum, mpu or overhead drifted matched its declaration. A
   quantum left unset is the kernel's choice, and is still not compared.
 
+- **A police action's conform verdict, peakrate and average rate, and a
+  gact action's random verdict, are compared (#791).** A declared tree
+  compared a police by its rate, burst, mtu and exceed verdict, and a gact
+  by its verdict. A filter whose action drifted in the rest matched its
+  declaration. Every other action kind is still compared by its kind
+  alone; #791 stays open for that.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

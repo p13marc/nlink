@@ -614,8 +614,12 @@ impl<F: FilterConfig + Clone + 'static> FilterConfigBoxed for F {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ActionSummary {
     Mirred { eaction: i32, ifindex: u32, action: i32 },
-    Gact { action: i32 },
-    Police { rate: u64, burst: u32, mtu: u32, action: i32 },
+    /// Its verdict, and a random or deterministic one with its
+    /// probability (`TCA_GACT_PROB`: type, value, verdict), #791.
+    Gact { action: i32, prob: Option<(u16, u16, i32)> },
+    /// Its rate, burst and mtu, its exceed and conform verdicts, peakrate
+    /// and average rate (#791).
+    Police { rate: u64, burst: u32, mtu: u32, action: i32, conform: u32, peakrate: u32, avrate: u32 },
     Other(String),
 }
 
@@ -673,18 +677,29 @@ fn split_filter(kind: &str, options: &[u8]) -> (BTreeMap<u16, Vec<u8>>, Vec<Acti
                     }),
                 "gact" => find(gact::TCA_GACT_PARMS)
                     .and_then(|p| gact::TcGact::read_from_prefix(p).ok())
-                    .map(|(g, _)| ActionSummary::Gact { action: g.action }),
+                    .map(|(g, _)| ActionSummary::Gact {
+                        action: g.action,
+                        prob: find(gact::TCA_GACT_PROB)
+                            .and_then(|p| gact::TcGactP::read_from_prefix(p).ok())
+                            .map(|(p, _)| (p.ptype, p.pval, p.paction))
+                            .filter(|p| p.0 != 0),
+                    }),
                 "police" => find(police::TCA_POLICE_TBF)
                     .and_then(|p| police::TcPolice::read_from_prefix(p).ok())
                     .map(|(p, _)| {
                         let rate64 = find(police::TCA_POLICE_RATE64)
                             .and_then(|b| b.get(..8))
                             .map(|b| u64::from_ne_bytes(b.try_into().unwrap()));
+                        let u32_of = |id| find(id).and_then(|b| b.get(..4)).map(|b| u32::from_ne_bytes(b.try_into().unwrap()));
                         ActionSummary::Police {
                             rate: rate64.unwrap_or(u64::from(p.rate.rate)),
                             burst: p.burst,
                             mtu: p.mtu,
                             action: p.action,
+                            // Absent is 0: the kernel dumps each only when set.
+                            conform: u32_of(police::TCA_POLICE_RESULT).unwrap_or(0),
+                            peakrate: p.peakrate.rate,
+                            avrate: u32_of(police::TCA_POLICE_AVRATE).unwrap_or(0),
                         }
                     }),
                 _ => None,
