@@ -458,14 +458,25 @@ pub enum FilterSpec {
 }
 
 impl PartialEq for FilterSpec {
-    /// Two specs are equal when they encode the same request; a redirect
-    /// compares by its target's name.
+    /// Two specs are equal when they encode the same request; a redirect,
+    /// and an action that names its target, compare by the target's name.
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::RedirectTo(a), Self::RedirectTo(b)) => a == b,
             (Self::RedirectTo(_), _) | (_, Self::RedirectTo(_)) => false,
             (a, b) => {
-                a.kind() == b.kind() && a.options_bytes(&HashMap::new()) == b.options_bytes(&HashMap::new())
+                // Each name both name stands for the same made-up index,
+                // so the bytes differ where the names do.
+                let mut names: Vec<&str> = a.device_names();
+                names.extend(b.device_names());
+                names.sort_unstable();
+                names.dedup();
+                let stand_in: HashMap<String, u32> = names
+                    .iter()
+                    .zip(1..)
+                    .map(|(n, i)| (n.to_string(), i))
+                    .collect();
+                a.kind() == b.kind() && a.options_bytes(&stand_in) == b.options_bytes(&stand_in)
             }
         }
     }
@@ -493,14 +504,34 @@ impl FilterSpec {
         }
     }
 
-    /// The config to install, with a redirect's target resolved through
-    /// `ifindexes`; `None` when the target does not exist (yet).
+    /// The devices it names: a redirect's target, the targets of
+    /// [`MirredAction::to_dev`] actions.
+    pub(crate) fn device_names(&self) -> Vec<&str> {
+        match self {
+            Self::Flower(f) => f.device_names(),
+            Self::Matchall(f) => f.device_names(),
+            Self::Fw(f) => f.device_names(),
+            Self::U32(f) => f.device_names(),
+            Self::RedirectTo(dev) => vec![dev.as_str()],
+        }
+    }
+
+    /// The config to install, with the devices it names resolved through
+    /// `ifindexes`; `None` when one does not exist (yet).
     fn resolve(&self, ifindexes: &HashMap<String, u32>) -> Option<Box<dyn FilterConfigBoxed>> {
+        fn resolved<F: FilterConfig + Clone + 'static>(
+            f: &F,
+            ifindexes: &HashMap<String, u32>,
+        ) -> Option<Box<dyn FilterConfigBoxed>> {
+            let mut f = f.clone();
+            f.resolve_devices(ifindexes).ok()?;
+            Some(Box::new(f))
+        }
         Some(match self {
-            Self::Flower(f) => Box::new(f.clone()),
-            Self::Matchall(f) => Box::new(f.clone()),
-            Self::Fw(f) => Box::new(f.clone()),
-            Self::U32(f) => Box::new(f.clone()),
+            Self::Flower(f) => resolved(f, ifindexes)?,
+            Self::Matchall(f) => resolved(f, ifindexes)?,
+            Self::Fw(f) => resolved(f, ifindexes)?,
+            Self::U32(f) => resolved(f, ifindexes)?,
             Self::RedirectTo(dev) => {
                 let target = *ifindexes.get(dev)?;
                 Box::new(
@@ -1154,10 +1185,8 @@ async fn apply_tree(
 
     for f in &diff.filters_to_set {
         let cfg = f.spec.resolve(names).ok_or_else(|| {
-            let FilterSpec::RedirectTo(dev) = &f.spec else {
-                unreachable!("only a redirect resolves to nothing")
-            };
-            conn.interface_not_found(dev)
+            let missing = f.spec.device_names().into_iter().find(|d| !names.contains_key(*d));
+            conn.interface_not_found(missing.unwrap_or_default())
         })?;
         // A filter of the same name that differs goes first: the kernel
         // refuses another kind at a priority and protocol, and a replace
@@ -1470,6 +1499,33 @@ mod tests {
             .qdisc("d0", |q| q.ingress())
             .tc("d0", |t| t.redirect_ingress_to("ifb0"));
         assert_eq!(cfg.tc_trees()[0].filters()[0].parent, TcHandle::INGRESS);
+    }
+
+    /// #645: a filter whose mirred names its target compares by the name,
+    /// and matches the kernel's filter through the target's current index.
+    #[test]
+    fn a_mirred_by_name_compares_by_name_and_matches_by_index() {
+        let to = |dev: &str| {
+            FilterSpec::from(MatchallFilter::new().actions(
+                ActionList::new().with(MirredAction::redirect_to_egress(0).to_dev(dev)),
+            ))
+        };
+        assert_eq!(to("ifb0"), to("ifb0"));
+        assert_ne!(to("ifb0"), to("ifb1"));
+        assert_eq!(to("ifb0").device_names(), ["ifb0"]);
+
+        let t = tree(|t| t.filter(h(1, 0), FilterPriority::new(1), EthProto::ALL, match to("ifb0") {
+            FilterSpec::Matchall(m) => m,
+            _ => unreachable!(),
+        }));
+        let f = &t.filters[0];
+        let by_index = MatchallFilter::new()
+            .actions(ActionList::new().with(MirredAction::redirect_to_egress(7)));
+        let live = live_filter(&by_index, "matchall", h(1, 0), 1, EthProto::ALL);
+        assert!(f.matches(&live, &HashMap::from([("ifb0".to_string(), 7)])));
+        // Recreated with another index, or gone: not this filter any more.
+        assert!(!f.matches(&live, &HashMap::from([("ifb0".to_string(), 8)])));
+        assert!(!f.matches(&live, &HashMap::new()));
     }
 
     #[test]

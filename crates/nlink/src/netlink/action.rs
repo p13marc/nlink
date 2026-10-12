@@ -34,7 +34,7 @@
 //! # }
 //! ```
 
-use std::net::Ipv4Addr;
+use std::{collections::HashMap, net::Ipv4Addr};
 
 use super::{
     Connection,
@@ -63,6 +63,20 @@ pub trait ActionConfig: Send + Sync {
 
     /// Write the action options to a message builder.
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()>;
+
+    /// The devices the action names rather than indexes
+    /// ([`MirredAction::to_dev`]), for the connection that installs it to
+    /// resolve in its own namespace (#645). None by default.
+    fn device_names(&self) -> Vec<&str> {
+        Vec::new()
+    }
+
+    /// Take the ifindex of each name [`device_names`](Self::device_names)
+    /// gave from `ifindexes`; an error for one it does not have.
+    fn resolve_devices(&mut self, ifindexes: &HashMap<String, u32>) -> Result<()> {
+        let _ = ifindexes;
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -323,6 +337,9 @@ pub struct MirredAction {
     eaction: i32,
     /// Target interface index.
     ifindex: u32,
+    /// The target by name, resolved into `ifindex` by the connection that
+    /// installs the action (#645).
+    dev: Option<String>,
     /// Action result after mirred.
     action: i32,
 }
@@ -341,8 +358,43 @@ impl MirredAction {
         Self {
             eaction,
             ifindex,
+            dev: None,
             action,
         }
+    }
+
+    /// Send to the device named `dev` instead of the ifindex the
+    /// constructor took (#645).
+    ///
+    /// The name is resolved by the connection that installs the filter —
+    /// [`Connection::add_filter`] and its variants, a declared tree's
+    /// apply — in that connection's namespace, and again at every install,
+    /// so a target that was deleted and created again is found. A filter
+    /// whose target does not exist is refused as not found. Writing the
+    /// action without a connection ([`ActionConfig::write_options`] on its
+    /// own) is an error until it is resolved.
+    ///
+    /// ```no_run
+    /// # async fn example() -> nlink::Result<()> {
+    /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// use nlink::TcHandle;
+    /// use nlink::netlink::{action::{ActionList, MirredAction}, filter::MatchallFilter};
+    ///
+    /// let to_ifb = MirredAction::redirect_to_egress(0).to_dev("ifb0");
+    /// let filter = MatchallFilter::new().actions(ActionList::new().with(to_ifb));
+    /// conn.add_filter("eth0", TcHandle::CLSACT_INGRESS, filter).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn to_dev(mut self, dev: impl Into<String>) -> Self {
+        self.dev = Some(dev.into());
+        self.ifindex = 0;
+        self
+    }
+
+    /// The target's name, when [`to_dev`](Self::to_dev) gave one.
+    pub fn target_dev(&self) -> Option<&str> {
+        self.dev.as_deref()
     }
 
     /// Redirect to `ifindex`'s **transmit** path: the packet leaves
@@ -428,10 +480,11 @@ impl MirredAction {
     /// - Direction: `egress` (default) / `ingress`.
     /// - Operation: `redirect` (default) / `mirror`.
     /// - Target interface (one of):
-    ///   - `dev <ifname>` — sysfs lookup via `nlink::util::get_ifindex`.
-    ///     Reads from the host namespace; **inside a foreign netns**
-    ///     prefer the `ifindex` form.
-    ///   - `ifindex <n>` — namespace-safe direct ifindex.
+    ///   - `dev <ifname>` — by name, [`to_dev`](Self::to_dev): resolved by
+    ///     the connection that installs the filter, in its namespace
+    ///     (#645). It used to be looked up through sysfs, in the calling
+    ///     process's namespace, as the action was parsed.
+    ///   - `ifindex <n>` — a direct ifindex.
     ///
     /// `dev` and `ifindex` are mutually exclusive; the parser
     /// rejects both being set.
@@ -439,6 +492,7 @@ impl MirredAction {
         let mut direction_ingress = false;
         let mut op_mirror = false;
         let mut ifindex: Option<u32> = None;
+        let mut dev: Option<&str> = None;
 
         let mut i = 0;
         while i < params.len() {
@@ -462,20 +516,17 @@ impl MirredAction {
                 }
                 "dev" => {
                     let s = action_need_value(params, i, "mirred", key)?;
-                    if ifindex.is_some() {
+                    if ifindex.is_some() || dev.is_some() {
                         return Err(Error::invalid_message(
                             "mirred: `dev` and `ifindex` are mutually exclusive".to_string(),
                         ));
                     }
-                    // Not found is not a parse error (#718).
-                    let idx = crate::util::get_ifindex(s)
-                        .map_err(|_| Error::interface_not_found(s).with_context("mirred"))?;
-                    ifindex = Some(idx);
+                    dev = Some(s);
                     i += 2;
                 }
                 "ifindex" => {
                     let s = action_need_value(params, i, "mirred", key)?;
-                    if ifindex.is_some() {
+                    if ifindex.is_some() || dev.is_some() {
                         return Err(Error::invalid_message(
                             "mirred: `dev` and `ifindex` are mutually exclusive".to_string(),
                         ));
@@ -491,17 +542,22 @@ impl MirredAction {
             }
         }
 
-        let idx = ifindex.ok_or_else(|| {
-            Error::invalid_message(
+        if ifindex.is_none() && dev.is_none() {
+            return Err(Error::invalid_message(
                 "mirred: target interface required (use `dev <ifname>` or `ifindex <n>`)"
                     .to_string(),
-            )
-        })?;
-        Ok(match (direction_ingress, op_mirror) {
+            ));
+        }
+        let idx = ifindex.unwrap_or(0);
+        let action = match (direction_ingress, op_mirror) {
             (false, false) => Self::redirect_to_egress(idx),
             (false, true) => Self::mirror_to_egress(idx),
             (true, false) => Self::redirect_to_ingress(idx),
             (true, true) => Self::mirror_to_ingress(idx),
+        };
+        Ok(match dev {
+            Some(dev) => action.to_dev(dev),
+            None => action,
         })
     }
 
@@ -517,8 +573,27 @@ impl ActionConfig for MirredAction {
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
+        if let (Some(dev), 0) = (&self.dev, self.ifindex) {
+            return Err(Error::invalid_message(format!(
+                "mirred: the target `{dev}` is resolved by the connection that installs the \
+                 action; install it through one, or resolve it (`resolve_devices`) first"
+            )));
+        }
         let parms = mirred::TcMirred::new(self.eaction, self.ifindex, self.action);
         builder.append_attr(mirred::TCA_MIRRED_PARMS, parms.as_bytes());
+        Ok(())
+    }
+
+    fn device_names(&self) -> Vec<&str> {
+        self.dev.as_deref().into_iter().collect()
+    }
+
+    fn resolve_devices(&mut self, ifindexes: &HashMap<String, u32>) -> Result<()> {
+        if let Some(dev) = &self.dev {
+            self.ifindex = *ifindexes
+                .get(dev)
+                .ok_or_else(|| Error::interface_not_found(dev).with_context("mirred"))?;
+        }
         Ok(())
     }
 }
@@ -4409,6 +4484,15 @@ pub trait ActionConfigDyn: Send + Sync + std::fmt::Debug {
     fn kind(&self) -> &'static str;
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()>;
     fn clone_box(&self) -> Box<dyn ActionConfigDyn>;
+    /// [`ActionConfig::device_names`].
+    fn device_names(&self) -> Vec<&str> {
+        Vec::new()
+    }
+    /// [`ActionConfig::resolve_devices`].
+    fn resolve_devices(&mut self, ifindexes: &HashMap<String, u32>) -> Result<()> {
+        let _ = ifindexes;
+        Ok(())
+    }
 }
 
 impl<T: ActionConfig + Clone + std::fmt::Debug + 'static> ActionConfigDyn for T {
@@ -4418,6 +4502,14 @@ impl<T: ActionConfig + Clone + std::fmt::Debug + 'static> ActionConfigDyn for T 
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         ActionConfig::write_options(self, builder)
+    }
+
+    fn device_names(&self) -> Vec<&str> {
+        ActionConfig::device_names(self)
+    }
+
+    fn resolve_devices(&mut self, ifindexes: &HashMap<String, u32>) -> Result<()> {
+        ActionConfig::resolve_devices(self, ifindexes)
     }
 
     fn clone_box(&self) -> Box<dyn ActionConfigDyn> {
@@ -4451,6 +4543,19 @@ impl ActionList {
     /// Get the number of actions.
     pub fn len(&self) -> usize {
         self.actions.len()
+    }
+
+    /// The devices its actions name rather than index (#645).
+    pub fn device_names(&self) -> Vec<&str> {
+        self.actions.iter().flat_map(|a| a.device_names()).collect()
+    }
+
+    /// Resolve the names [`device_names`](Self::device_names) gave, from
+    /// `ifindexes`.
+    pub fn resolve_devices(&mut self, ifindexes: &HashMap<String, u32>) -> Result<()> {
+        self.actions
+            .iter_mut()
+            .try_for_each(|a| a.resolve_devices(ifindexes))
     }
 
     /// Write the action list to a message builder.
@@ -4887,7 +4992,9 @@ impl Connection<Route> {
     /// Sends `RTM_NEWACTION` with `NLM_F_CREATE`. Wire shape:
     /// `tcamsg + TCA_ACT_TAB { [1] { TCA_ACT_KIND + TCA_ACT_OPTIONS { ... } } }`.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_action", kind = %action.kind()))]
-    pub async fn add_action<A: ActionConfig>(&self, action: A) -> Result<()> {
+    pub async fn add_action<A: ActionConfig>(&self, mut action: A) -> Result<()> {
+        let names = self.ifindexes_of(&action.device_names()).await?;
+        action.resolve_devices(&names)?;
         let mut b = MessageBuilder::new(
             NlMsgType::RTM_NEWACTION,
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE,
@@ -6649,14 +6756,47 @@ mod tests {
         assert!(err.errno().is_some(), "{err:?}");
     }
 
-    /// #718: a mirred `dev` that is not there is not found, not a parse
-    /// error.
+    /// #645: a mirred `dev` is kept by name, for the connection that
+    /// installs the action to resolve in its namespace, not looked up in
+    /// the caller's. Unresolved, it does not write; resolved, it writes the
+    /// ifindex; a name the namespace does not have is not found (#718).
     #[test]
-    fn mirred_parse_params_missing_dev_is_not_found() {
-        let err = MirredAction::parse_params(&["egress", "redirect", "dev", "nlink-nope0"])
-            .unwrap_err();
+    fn mirred_dev_is_resolved_by_the_installer() {
+        let mut m = MirredAction::parse_params(&["egress", "redirect", "dev", "ifb0"]).unwrap();
+        assert_eq!(m.target_dev(), Some("ifb0"));
+        assert_eq!(ActionConfig::device_names(&m), ["ifb0"]);
+        let mut b = MessageBuilder::new(0, 0);
+        let err = ActionConfig::write_options(&m, &mut b).unwrap_err();
+        assert!(err.to_string().contains("resolved by the connection"), "{err}");
+
+        let err = ActionConfig::resolve_devices(&mut m, &HashMap::new()).unwrap_err();
         assert!(err.is_not_found(), "{err:?}");
         assert_eq!(err.context(), ["mirred"], "{err:?}");
+
+        ActionConfig::resolve_devices(&mut m, &HashMap::from([("ifb0".to_string(), 7)])).unwrap();
+        let want = MirredAction::redirect_to_egress(7);
+        let bytes = |a: &MirredAction| {
+            let mut b = MessageBuilder::new(0, 0);
+            let start = b.len();
+            ActionConfig::write_options(a, &mut b).unwrap();
+            b.as_bytes()[start..].to_vec()
+        };
+        assert_eq!(bytes(&m), bytes(&want));
+
+        // In a list, and through a filter.
+        let list = ActionList::new()
+            .with(GactAction::drop())
+            .with(MirredAction::mirror_to_ingress(0).to_dev("veth1"));
+        assert_eq!(list.device_names(), ["veth1"]);
+        let mut filter = crate::netlink::filter::MatchallFilter::new().actions(list);
+        assert_eq!(crate::netlink::filter::FilterConfig::device_names(&filter), ["veth1"]);
+        crate::netlink::filter::FilterConfig::resolve_devices(
+            &mut filter,
+            &HashMap::from([("veth1".to_string(), 9)]),
+        )
+        .unwrap();
+        let mut b = MessageBuilder::new(0, 0);
+        crate::netlink::filter::FilterConfig::write_options(&filter, &mut b).unwrap();
     }
 
     #[test]

@@ -38,7 +38,10 @@
 //! # }
 //! ```
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+};
 
 use super::{
     Connection,
@@ -132,6 +135,41 @@ pub trait FilterConfig: Send + Sync {
     fn priority(&self) -> Option<FilterPriority> {
         None
     }
+
+    /// The devices the filter names rather than indexes — a
+    /// [`MirredAction::to_dev`](super::action::MirredAction::to_dev)
+    /// target, a [`RouteFilter::from_if`] — which the connection that
+    /// installs it resolves in its own namespace (#645). None by default.
+    fn device_names(&self) -> Vec<&str> {
+        Vec::new()
+    }
+
+    /// Take the ifindex of each name [`device_names`](Self::device_names)
+    /// gave from `ifindexes`; an error for one it does not have.
+    fn resolve_devices(&mut self, ifindexes: &HashMap<String, u32>) -> Result<()> {
+        let _ = ifindexes;
+        Ok(())
+    }
+}
+
+/// [`FilterConfig::device_names`] and [`FilterConfig::resolve_devices`]
+/// for a filter that names devices only in its `actions`.
+macro_rules! action_devices {
+    () => {
+        fn device_names(&self) -> Vec<&str> {
+            self.actions
+                .as_ref()
+                .map(ActionList::device_names)
+                .unwrap_or_default()
+        }
+
+        fn resolve_devices(&mut self, ifindexes: &HashMap<String, u32>) -> Result<()> {
+            match &mut self.actions {
+                Some(actions) => actions.resolve_devices(ifindexes),
+                None => Ok(()),
+            }
+        }
+    };
 }
 
 /// The ethertype `add_filter` falls back to when a [`FilterConfig`] leaves
@@ -1928,6 +1966,8 @@ fn ipv6_mask(prefix_len: u8) -> Ipv6Addr {
 }
 
 impl FilterConfig for FlowerFilter {
+    action_devices!();
+
     fn kind(&self) -> &'static str {
         "flower"
     }
@@ -2442,6 +2482,8 @@ impl MatchallFilter {
 }
 
 impl FilterConfig for MatchallFilter {
+    action_devices!();
+
     fn kind(&self) -> &'static str {
         "matchall"
     }
@@ -3750,6 +3792,8 @@ impl CgroupFilter {
 }
 
 impl FilterConfig for CgroupFilter {
+    action_devices!();
+
     fn kind(&self) -> &'static str {
         "cgroup"
     }
@@ -3848,8 +3892,9 @@ impl RouteFilter {
 
     /// Match traffic arriving from a specific interface by name.
     ///
-    /// Note: The interface name will be resolved when the filter is added.
-    /// For namespace operations, prefer `from_if_index()` with a pre-resolved index.
+    /// The connection that installs the filter resolves the name, in its
+    /// own namespace (#645). Until 0.32 nothing did, and a filter with a
+    /// name here could not be installed at all.
     pub fn from_if(mut self, dev: impl Into<String>) -> Self {
         self.from_if = Some(InterfaceRef::Name(dev.into()));
         self
@@ -3970,6 +4015,28 @@ impl RouteFilter {
 }
 
 impl FilterConfig for RouteFilter {
+    fn device_names(&self) -> Vec<&str> {
+        let mut names = match &self.from_if {
+            Some(InterfaceRef::Name(name)) => vec![name.as_str()],
+            _ => Vec::new(),
+        };
+        names.extend(self.actions.as_ref().map(ActionList::device_names).unwrap_or_default());
+        names
+    }
+
+    fn resolve_devices(&mut self, ifindexes: &HashMap<String, u32>) -> Result<()> {
+        if let Some(InterfaceRef::Name(name)) = &self.from_if {
+            let ifindex = *ifindexes
+                .get(name)
+                .ok_or_else(|| Error::interface_not_found(name).with_context("route filter"))?;
+            self.from_if = Some(InterfaceRef::Index(ifindex));
+        }
+        match &mut self.actions {
+            Some(actions) => actions.resolve_devices(ifindexes),
+            None => Ok(()),
+        }
+    }
+
     fn kind(&self) -> &'static str {
         "route"
     }
@@ -4006,8 +4073,8 @@ impl FilterConfig for RouteFilter {
                 InterfaceRef::Index(idx) => *idx,
                 InterfaceRef::Name(name) => {
                     return Err(Error::invalid_message(format!(
-                        "RouteFilter from_if interface '{}' must be resolved to index before use. \
-                         Use from_if_index() or resolve the name via Connection::get_link_by_name()",
+                        "RouteFilter from_if interface '{}' is resolved by the connection that \
+                         installs the filter; install it through one, or use from_if_index()",
                         name
                     )));
                 }
@@ -4240,6 +4307,8 @@ impl RsvpFilter {
 }
 
 impl FilterConfig for RsvpFilter {
+    action_devices!();
+
     fn kind(&self) -> &'static str {
         if self.is_v6() { "rsvp6" } else { "rsvp" }
     }
@@ -4678,6 +4747,8 @@ impl FlowFilter {
 }
 
 impl FilterConfig for FlowFilter {
+    action_devices!();
+
     fn kind(&self) -> &'static str {
         "flow"
     }
@@ -4858,6 +4929,8 @@ impl Connection<Route> {
         mut config: impl FilterConfig,
     ) -> Result<()> {
         config.set_protocol(protocol);
+        let names = self.ifindexes_of(&config.device_names()).await?;
+        config.resolve_devices(&names)?;
         let parent_handle = parent.as_raw();
         let filter_handle = handle.map(|h| h.as_raw()).unwrap_or(0);
 
@@ -4986,6 +5059,8 @@ impl Connection<Route> {
         mut config: impl FilterConfig,
     ) -> Result<()> {
         config.set_protocol(protocol);
+        let names = self.ifindexes_of(&config.device_names()).await?;
+        config.resolve_devices(&names)?;
         let parent_handle = parent.as_raw();
         let filter_handle = handle.map(|h| h.as_raw()).unwrap_or(0);
 
@@ -5095,6 +5170,8 @@ impl Connection<Route> {
         mut config: impl FilterConfig,
     ) -> Result<()> {
         config.set_protocol(protocol);
+        let names = self.ifindexes_of(&config.device_names()).await?;
+        config.resolve_devices(&names)?;
         let parent_handle = parent.as_raw();
         let filter_handle = handle.map(|h| h.as_raw()).unwrap_or(0);
 
