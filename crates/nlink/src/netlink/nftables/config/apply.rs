@@ -271,6 +271,11 @@ impl NftablesDiff {
         //    that reference them). Flagged tables route through
         //    Transaction::add_table_with_flags so they stay
         //    inside the atomic batch.
+        // A table recreated for its comment goes first, with everything in
+        // it; what is declared in it comes back below (#703).
+        for (family, name, _) in &self.tables_to_recreate {
+            tx = tx.del_table(name, *family);
+        }
         for table in &self.tables_to_add {
             tx = tx.add_table_with_comment(table.name(), table.family(), table.flags(), table.comment());
         }

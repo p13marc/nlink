@@ -4070,6 +4070,7 @@ mod tests {
                 "tables-to-add",
                 "tables-to-delete",
                 "tables-to-modify",
+                "tables-to-recreate",
             ]
         );
     }
