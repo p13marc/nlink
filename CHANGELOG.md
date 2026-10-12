@@ -754,6 +754,19 @@ All notable changes to this project will be documented in this file.
   conntrack entry says, was refused too. The old form without `addr` still
   reads. `CtAction::nat()` is new.
 
+- **ethtool getters read the device they name (#754).** `ethtool_get` sent a
+  dump, which ethtool answers for every device in the namespace, and nlink
+  kept the first answer. So `get_link_state`, `get_link_info`,
+  `get_link_modes`, `get_features`, `get_rings`, `get_channels`,
+  `get_coalesce` and their siblings returned `lo`'s values, whatever device
+  they were asked about. They now send a request for the named device.
+- **`set_features` works (#754).** `ETHTOOL_MSG_FEATURES_SET` answers with a
+  reply message unless asked not to, and nlink expected only an ACK, so every
+  call failed. Set requests now carry `ETHTOOL_FLAG_OMIT_REPLY`.
+- **`get_features` reads which features are on (#754).** The kernel lists a
+  feature set's set bits without a value flag, and nlink read each of them as
+  off.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

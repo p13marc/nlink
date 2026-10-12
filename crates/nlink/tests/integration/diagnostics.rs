@@ -444,6 +444,42 @@ async fn a_genl_lookup_by_index_resolves_in_its_own_namespace() -> nlink::Result
     Ok(())
 }
 
+/// Three ethtool bugs, each silent until a test read a value back:
+/// - every getter sent a dump, which ethtool answers for every device, and
+///   kept the first: `lo`'s features, rings and link state, whatever the
+///   name;
+/// - `set_features` failed on every device: FEATURES_SET answers with a
+///   reply message unless asked not to, and the request expected only its
+///   ACK;
+/// - `get_features` read every listed feature as off: the kernel lists a
+///   feature bitset's set bits without a value flag.
+///
+/// `lo` has `loopback` and the veth does not; the veth's tx checksumming
+/// goes off and on again, read back each time.
+#[tokio::test]
+async fn ethtool_reads_and_sets_the_named_devices_features() -> nlink::Result<()> {
+    use nlink::netlink::{Connection, Ethtool, link::VethLink};
+    require_root!();
+    nlink::require_module!("veth");
+
+    let ns = TestNamespace::new("ns-ethfeat")?;
+    let conn = ns.connection()?;
+    conn.add_link(VethLink::new("ve0", "ve1")).await?;
+    let ethtool: Connection<Ethtool> = nlink::Connection::new_in_async(ns.name()).await?;
+    assert!(ethtool.get_features("lo").await?.active.is_set("loopback"));
+    assert!(!ethtool.get_features("ve0").await?.active.is_set("loopback"), "lo's features");
+
+    let feature = "tx-checksum-ip-generic";
+    for on in [false, true] {
+        ethtool
+            .set_features("ve0", |f| if on { f.enable(feature) } else { f.disable(feature) })
+            .await?;
+        let active = ethtool.get_features("ve0").await?.active;
+        assert_eq!(active.is_set(feature), on, "{feature} should be {}", if on { "on" } else { "off" });
+    }
+    Ok(())
+}
+
 /// `Diagnostics::watch()` subscribed on a new connection in the process's
 /// namespace, so `Diagnostics::new(lab_conn).watch()` watched the host. And
 /// it named a removed address's interface through the host's sysfs.
