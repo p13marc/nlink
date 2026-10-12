@@ -437,6 +437,36 @@ pub const NF_LOG_MACDECODE: u32 = 0x20;
 /// `NF_LOG_MASK`: the flags a `log` takes.
 pub const NF_LOG_MASK: u32 = 0x2f;
 
+// Queue — `enum nft_queue_attributes`.
+/// `NFTA_QUEUE_NUM` — the first queue (be16).
+pub const NFTA_QUEUE_NUM: u16 = 1;
+/// `NFTA_QUEUE_TOTAL` — how many queues from it (be16).
+pub const NFTA_QUEUE_TOTAL: u16 = 2;
+/// `NFTA_QUEUE_FLAGS` — `NFT_QUEUE_FLAG_*` (be16).
+pub const NFTA_QUEUE_FLAGS: u16 = 3;
+/// `NFTA_QUEUE_SREG_QNUM` — the register holding the queue number.
+pub const NFTA_QUEUE_SREG_QNUM: u16 = 4;
+/// `NFT_QUEUE_FLAG_BYPASS` — accept the packet when no program listens.
+pub const NFT_QUEUE_FLAG_BYPASS: u16 = 0x01;
+/// `NFT_QUEUE_FLAG_CPU_FANOUT` — pick the queue by CPU, not by hash.
+pub const NFT_QUEUE_FLAG_CPU_FANOUT: u16 = 0x02;
+/// `NFT_QUEUE_FLAG_MASK`.
+pub const NFT_QUEUE_FLAG_MASK: u16 = 0x03;
+
+// Dup — `enum nft_dup_attributes`.
+/// `NFTA_DUP_SREG_ADDR` — the register holding the gateway address.
+pub const NFTA_DUP_SREG_ADDR: u16 = 1;
+/// `NFTA_DUP_SREG_DEV` — the register holding the output ifindex.
+pub const NFTA_DUP_SREG_DEV: u16 = 2;
+
+// Fwd — `enum nft_fwd_attributes`.
+/// `NFTA_FWD_SREG_DEV` — the register holding the output ifindex.
+pub const NFTA_FWD_SREG_DEV: u16 = 1;
+/// `NFTA_FWD_SREG_ADDR` — the register holding the next hop.
+pub const NFTA_FWD_SREG_ADDR: u16 = 2;
+/// `NFTA_FWD_NFPROTO` — the next hop's family (`NFPROTO_IPV4`/`_IPV6`).
+pub const NFTA_FWD_NFPROTO: u16 = 3;
+
 // Connlimit — `enum nft_connlimit_attributes`.
 /// `NFTA_CONNLIMIT_COUNT` — the connection count.
 pub const NFTA_CONNLIMIT_COUNT: u16 = 1;

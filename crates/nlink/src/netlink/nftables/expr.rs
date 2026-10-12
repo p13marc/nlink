@@ -111,6 +111,21 @@ pub enum Expr {
     },
     /// Log the packet — see [`LogExpr`].
     Log(LogExpr),
+    /// Send the packet to a userspace queue — see [`QueueExpr`] (#703).
+    Queue(QueueExpr),
+    /// Send a copy of the packet out: to the gateway in `sreg_addr`, out of
+    /// the device in `sreg_dev` (#703). See [`Rule::dup_to`].
+    Dup {
+        sreg_addr: Option<Register>,
+        sreg_dev: Option<Register>,
+    },
+    /// Send the packet out of the device in `sreg_dev` (netdev family), to
+    /// the next hop in `sreg_addr` of family `nfproto` (#703). See
+    /// [`Rule::fwd_to`].
+    Fwd {
+        sreg_dev: Register,
+        sreg_addr: Option<(Register, u8)>,
+    },
     /// Connection tracking.
     Ct { dreg: Register, key: CtKey },
     /// Write a register into the packet's conntrack entry
@@ -686,6 +701,79 @@ impl From<LogExpr> for Expr {
     }
 }
 
+/// `queue`: hand the packet to a userspace program on an `nfqueue` (#703).
+///
+/// A range of queues is load-balanced by a hash of the flow, or by CPU
+/// with [`QueueFlags::FANOUT`]; without a listener the packet is dropped,
+/// unless [`QueueFlags::BYPASS`]. [`register`](Self::register) takes the
+/// queue number from a register a `hash` or `numgen` wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct QueueExpr {
+    /// The first queue.
+    pub num: u16,
+    /// How many queues from `num`, at least 1.
+    pub total: u16,
+    /// The register with the queue number, instead of `num`/`total`.
+    pub sreg: Option<Register>,
+    /// `bypass`, `fanout`.
+    pub flags: QueueFlags,
+}
+
+impl QueueExpr {
+    /// `queue num <num>`.
+    pub fn num(num: u16) -> Self {
+        Self {
+            num,
+            total: 1,
+            sreg: None,
+            flags: QueueFlags::empty(),
+        }
+    }
+
+    /// `queue num <first>-<last>`; an inverted range is taken as given.
+    pub fn range(first: u16, last: u16) -> Self {
+        Self {
+            num: first.min(last),
+            total: first.abs_diff(last) + 1,
+            ..Self::num(0)
+        }
+    }
+
+    /// `queue to <register>`: the queue number from a register.
+    pub fn register(sreg: Register) -> Self {
+        Self {
+            num: 0,
+            total: 0,
+            sreg: Some(sreg),
+            flags: QueueFlags::empty(),
+        }
+    }
+
+    /// Set the flags.
+    pub fn flags(mut self, flags: QueueFlags) -> Self {
+        self.flags = flags;
+        self
+    }
+}
+
+impl From<QueueExpr> for Expr {
+    fn from(e: QueueExpr) -> Self {
+        Expr::Queue(e)
+    }
+}
+
+bitflags::bitflags! {
+    /// A `queue`'s flags (`NFT_QUEUE_FLAG_*`).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+    pub struct QueueFlags: u16 {
+        /// `bypass`: accept the packet when no program listens.
+        const BYPASS = super::NFT_QUEUE_FLAG_BYPASS;
+        /// `fanout`: pick the queue by CPU.
+        const FANOUT = super::NFT_QUEUE_FLAG_CPU_FANOUT;
+    }
+}
+
 /// `masquerade`. No options are modelled yet.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1068,6 +1156,47 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             // declared `reject with tcp reset` was replaced on every apply.
             if *reject_type != NFT_REJECT_TCP_RST {
                 builder.append_attr(NFTA_REJECT_ICMP_CODE, &[*icmp_code]);
+            }
+            builder.nest_end(data);
+        }
+        // What `nft_queue_dump`/`nft_queue_sreg_dump` echo: a range always
+        // with its total and flags, a register with its flags.
+        Expr::Queue(QueueExpr {
+            num,
+            total,
+            sreg,
+            flags,
+        }) => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "queue");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            match sreg {
+                Some(sreg) => builder.append_attr_u32_be(NFTA_QUEUE_SREG_QNUM, sreg.wire()),
+                None => {
+                    builder.append_attr_u16_be(NFTA_QUEUE_NUM, *num);
+                    builder.append_attr_u16_be(NFTA_QUEUE_TOTAL, (*total).max(1));
+                }
+            }
+            builder.append_attr_u16_be(NFTA_QUEUE_FLAGS, flags.bits());
+            builder.nest_end(data);
+        }
+        Expr::Dup { sreg_addr, sreg_dev } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "dup");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            if let Some(r) = sreg_addr {
+                builder.append_attr_u32_be(NFTA_DUP_SREG_ADDR, r.wire());
+            }
+            if let Some(r) = sreg_dev {
+                builder.append_attr_u32_be(NFTA_DUP_SREG_DEV, r.wire());
+            }
+            builder.nest_end(data);
+        }
+        Expr::Fwd { sreg_dev, sreg_addr } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "fwd");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_u32_be(NFTA_FWD_SREG_DEV, sreg_dev.wire());
+            if let Some((r, family)) = sreg_addr {
+                builder.append_attr_u32_be(NFTA_FWD_SREG_ADDR, r.wire());
+                builder.append_attr_u32_be(NFTA_FWD_NFPROTO, u32::from(*family));
             }
             builder.nest_end(data);
         }
@@ -1684,10 +1813,27 @@ pub enum RuleExpr {
     },
     /// `limit` — a packet- or byte-rate limit.
     Limit(LimitExpr),
-    /// `log` — to syslog at the default level, or to an `nflog` group. One
-    /// with a level, flags, snaplen or queue threshold decodes as
-    /// [`Unknown`](Self::Unknown).
+    /// `log` — to syslog or to an `nflog` group, with its options.
     Log(LogExpr),
+    /// `queue`.
+    Queue(QueueExpr),
+    /// `dup`: the registers with its gateway and its output device.
+    #[non_exhaustive]
+    Dup {
+        /// The register with the gateway address.
+        sreg_addr: Option<Register>,
+        /// The register with the output ifindex.
+        sreg_dev: Option<Register>,
+    },
+    /// `fwd`: the register with the output device, and the one with the
+    /// next hop and its family.
+    #[non_exhaustive]
+    Fwd {
+        /// The register with the output ifindex.
+        sreg_dev: Register,
+        /// The register with the next hop, and its `NFPROTO_*` family.
+        sreg_addr: Option<(Register, u8)>,
+    },
     /// `reject`.
     #[non_exhaustive]
     Reject {
@@ -1801,6 +1947,12 @@ fn parse_expr(name: &str, data: &[u8]) -> RuleExpr {
         }),
         "notrack" if data.is_empty() => Some(RuleExpr::Notrack),
         "log" => parse_log(data),
+        "queue" => parse_queue(data),
+        "dup" => Some(RuleExpr::Dup {
+            sreg_addr: reg_attr(data, NFTA_DUP_SREG_ADDR),
+            sreg_dev: reg_attr(data, NFTA_DUP_SREG_DEV),
+        }),
+        "fwd" => parse_fwd(data),
         "reject" => parse_reject(data),
         "masq" => parse_masq(data),
         "nat" => parse_nat(data),
@@ -1839,6 +1991,44 @@ bitflags::bitflags! {
 }
 
 /// The value of attribute `id` among `data`'s, as a big-endian u32.
+/// A register attribute.
+fn reg_attr(data: &[u8], id: u16) -> Option<Register> {
+    Register::from_u32(u32_attr(data, id)?)
+}
+
+/// A `fwd`: its device register, and its next hop's with the family.
+fn parse_fwd(data: &[u8]) -> Option<RuleExpr> {
+    let sreg_addr = match (reg_attr(data, NFTA_FWD_SREG_ADDR), u32_attr(data, NFTA_FWD_NFPROTO)) {
+        (Some(r), Some(p)) => Some((r, u8::try_from(p).ok()?)),
+        (None, None) => None,
+        _ => return None,
+    };
+    Some(RuleExpr::Fwd {
+        sreg_dev: reg_attr(data, NFTA_FWD_SREG_DEV)?,
+        sreg_addr,
+    })
+}
+
+/// A `queue`: its range, or its register; its flags.
+fn parse_queue(data: &[u8]) -> Option<RuleExpr> {
+    let u16_attr = |id| {
+        AttrIter::new(data)
+            .find(|(attr, _)| attr & 0x7FFF == id)
+            .and_then(|(_, p)| get::u16_be(p).ok())
+    };
+    let flags = QueueFlags::from_bits(u16_attr(NFTA_QUEUE_FLAGS).unwrap_or(0))?;
+    let mut q = match reg_attr(data, NFTA_QUEUE_SREG_QNUM) {
+        Some(sreg) => QueueExpr::register(sreg),
+        None => QueueExpr {
+            num: u16_attr(NFTA_QUEUE_NUM)?,
+            total: u16_attr(NFTA_QUEUE_TOTAL).unwrap_or(1),
+            ..QueueExpr::num(0)
+        },
+    };
+    q.flags = flags;
+    Some(RuleExpr::Queue(q))
+}
+
 fn u32_attr(data: &[u8], id: u16) -> Option<u32> {
     AttrIter::new(data)
         .find(|(attr, _)| attr & 0x7FFF == id)
@@ -3548,6 +3738,48 @@ mod decode_tests {
         let start = b.len();
         b.append_attr_u32_be(NFTA_LOG_FLAGS, 0x10);
         assert!(parse_log(&b.as_bytes()[start..]).is_none());
+    }
+
+    /// #703: `queue`, `dup` and `fwd` as the kernel echoes them, and read
+    /// back.
+    #[test]
+    fn queue_dup_and_fwd_round_trip() {
+        let single = QueueExpr::num(3).flags(QueueFlags::BYPASS);
+        let attrs = data_attrs(&[single.clone().into()]);
+        assert_eq!(attrs[&NFTA_QUEUE_TOTAL], 1u16.to_be_bytes(), "a total is always echoed");
+        let range = QueueExpr::range(1, 4).flags(QueueFlags::BYPASS | QueueFlags::FANOUT);
+        assert_eq!((range.num, range.total), (1, 4));
+        let by_reg = QueueExpr::register(Register::R1);
+        let dup = Expr::Dup {
+            sreg_addr: Some(Register::R0),
+            sreg_dev: Some(Register::R1),
+        };
+        let fwd = Expr::Fwd {
+            sreg_dev: Register::R0,
+            sreg_addr: Some((Register::R1, 2)),
+        };
+        assert_eq!(
+            parse_expressions(&encode(&[
+                single.clone().into(),
+                range.clone().into(),
+                by_reg.clone().into(),
+                dup,
+                fwd,
+            ])),
+            [
+                RuleExpr::Queue(single),
+                RuleExpr::Queue(range),
+                RuleExpr::Queue(by_reg),
+                RuleExpr::Dup {
+                    sreg_addr: Some(Register::R0),
+                    sreg_dev: Some(Register::R1),
+                },
+                RuleExpr::Fwd {
+                    sreg_dev: Register::R0,
+                    sreg_addr: Some((Register::R1, 2)),
+                },
+            ]
+        );
     }
 
     #[test]

@@ -2274,6 +2274,83 @@ impl Rule {
 
     /// Push `meta <key> == <value>` (a 1-byte metadata load + Eq compare
     /// in `R0`) — the shared shape of the nfproto/l4proto matcher guards.
+    /// Send a copy of the packet (#703): `dup to <addr> [device <dev>]` in
+    /// an `ip`/`ip6` chain, routed to `addr` as its gateway, out of the
+    /// device with ifindex `dev` when one is given. The copy leaves as it
+    /// is; the original goes on.
+    pub fn dup_to(mut self, addr: std::net::IpAddr, dev: Option<u32>) -> Self {
+        let octets = match addr {
+            std::net::IpAddr::V4(a) => a.octets().to_vec(),
+            std::net::IpAddr::V6(a) => a.octets().to_vec(),
+        };
+        self.exprs.push(Expr::Immediate {
+            dreg: Register::R0,
+            data: octets,
+        });
+        if let Some(dev) = dev {
+            self.exprs.push(Expr::Immediate {
+                dreg: Register::R1,
+                data: dev.to_ne_bytes().to_vec(),
+            });
+        }
+        self.exprs.push(Expr::Dup {
+            sreg_addr: Some(Register::R0),
+            sreg_dev: dev.map(|_| Register::R1),
+        });
+        self
+    }
+
+    /// Send a copy of the packet out of the device with ifindex `dev`
+    /// (#703): `dup to <dev>`, in a `netdev` chain.
+    pub fn dup_to_device(mut self, dev: u32) -> Self {
+        self.exprs.push(Expr::Immediate {
+            dreg: Register::R0,
+            data: dev.to_ne_bytes().to_vec(),
+        });
+        self.exprs.push(Expr::Dup {
+            sreg_addr: None,
+            sreg_dev: Some(Register::R0),
+        });
+        self
+    }
+
+    /// Send the packet out of the device with ifindex `dev` (#703): `fwd
+    /// to <dev>`, in a `netdev` chain. The packet is gone from this path.
+    pub fn fwd_to(mut self, dev: u32) -> Self {
+        self.exprs.push(Expr::Immediate {
+            dreg: Register::R0,
+            data: dev.to_ne_bytes().to_vec(),
+        });
+        self.exprs.push(Expr::Fwd {
+            sreg_dev: Register::R0,
+            sreg_addr: None,
+        });
+        self
+    }
+
+    /// Send the packet out of the device with ifindex `dev` to the next hop
+    /// `addr`, resolving its link-layer address (#703): `fwd ip to <addr>
+    /// device <dev>`, in a `netdev` chain.
+    pub fn fwd_ip_to(mut self, addr: std::net::IpAddr, dev: u32) -> Self {
+        let (octets, family) = match addr {
+            std::net::IpAddr::V4(a) => (a.octets().to_vec(), NFPROTO_IPV4),
+            std::net::IpAddr::V6(a) => (a.octets().to_vec(), NFPROTO_IPV6),
+        };
+        self.exprs.push(Expr::Immediate {
+            dreg: Register::R0,
+            data: dev.to_ne_bytes().to_vec(),
+        });
+        self.exprs.push(Expr::Immediate {
+            dreg: Register::R1,
+            data: octets,
+        });
+        self.exprs.push(Expr::Fwd {
+            sreg_dev: Register::R0,
+            sreg_addr: Some((Register::R1, family)),
+        });
+        self
+    }
+
     /// Write a header field (#703): `ip dscp set cs1`, `tcp dport set
     /// 8080`, `ip saddr set 10.0.0.9`, … — as nft writes it, behind the
     /// guard nft puts before it (`meta nfproto`, `meta l4proto`), with the
