@@ -3122,3 +3122,126 @@ impl Drop for BpfPin {
         let _ = std::fs::remove_file(&self.path);
     }
 }
+
+/// The actions on each filter at `dev`'s clsact ingress, by priority,
+/// without what tells two installs of one action apart (index,
+/// references, position).
+fn filter_actions(ns: &TestNamespace, dev: &str) -> Result<Vec<(u64, serde_json::Value)>> {
+    let out = ns.exec("tc", &["-j", "filter", "show", "dev", dev, "ingress"])?;
+    let listed: serde_json::Value = serde_json::from_str(&out)
+        .map_err(|e| nlink::Error::invalid_message(format!("{e}: {out}")))?;
+    let mut by_prio = Vec::new();
+    for f in listed.as_array().into_iter().flatten() {
+        let Some(actions) = f["options"]["actions"].as_array() else {
+            continue;
+        };
+        let mut actions = actions.clone();
+        for a in &mut actions {
+            if let Some(o) = a.as_object_mut() {
+                for volatile in ["order", "index", "ref", "bind", "not_in_hw", "used_hw_stats"] {
+                    o.remove(volatile);
+                }
+            }
+        }
+        by_prio.push((f["pref"].as_u64().unwrap_or(0), serde_json::Value::Array(actions)));
+    }
+    Ok(by_prio)
+}
+
+/// One tc(8) action line installed by `tc` and by nlink's `parse_params`,
+/// each on a matchall at `d0`'s clsact ingress, makes the same action: the
+/// kernel lists the two alike. On filters rather than standalone: a
+/// standalone action needs CAP_NET_ADMIN in the initial user namespace.
+async fn same_as_tc(
+    ns: &TestNamespace,
+    kind: &str,
+    line: &str,
+    install: impl AsyncFnOnce(nlink::netlink::action::ActionList) -> Result<()>,
+    parse: impl FnOnce(&[&str]) -> Result<nlink::netlink::action::ActionList>,
+) -> Result<()> {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let mut args = vec!["filter", "add", "dev", "d0", "ingress", "prio", "1", "matchall", "action", kind];
+    args.extend(&words);
+    ns.exec("tc", &args)?;
+    install(parse(&words)?).await?;
+    let listed = filter_actions(ns, "d0")?;
+    assert_eq!(listed.len(), 2, "{kind} {line}: {listed:?}");
+    assert_eq!(listed[0].1, listed[1].1, "{kind} {line}: tc's, then nlink's");
+    ns.exec("tc", &["filter", "del", "dev", "d0", "ingress"])?;
+    Ok(())
+}
+
+/// A namespace with `d0` up and a clsact on it, and a way to put a
+/// matchall carrying `actions` at prio 2 on its ingress.
+async fn clsact_d0(prefix: &str) -> Result<(TestNamespace, Connection<Route>, u32)> {
+    let ns = TestNamespace::new(prefix)?;
+    let conn = ns.connection()?;
+    conn.add_link(DummyLink::new("d0")).await?;
+    conn.set_link_up("d0").await?;
+    ns.exec("tc", &["qdisc", "add", "dev", "d0", "clsact"])?;
+    let d0 = conn.get_link_by_name("d0").await?.expect("d0").ifindex();
+    Ok((ns, conn, d0))
+}
+
+async fn matchall_at_prio_2(
+    conn: &Connection<Route>,
+    d0: u32,
+    actions: nlink::netlink::action::ActionList,
+) -> Result<()> {
+    conn.add_filter_by_index_full(
+        d0,
+        TcHandle::CLSACT_INGRESS,
+        None,
+        nlink::EthProto::ALL,
+        nlink::FilterPriority::new(2),
+        MatchallFilter::new().actions(actions),
+    )
+    .await
+}
+
+/// #751: a gate's bare times are nanoseconds and a ct `nat` is spelled
+/// with `addr`, as tc(8) reads them. nlink read a bare gate time as
+/// microseconds, and refused the `addr` keyword.
+#[tokio::test]
+async fn gate_and_ct_lines_read_as_tc_reads_them() -> Result<()> {
+    use nlink::netlink::action::{ActionList, CtAction, GateAction};
+    require_root!();
+    nlink::require_modules!("dummy", "sch_ingress", "cls_matchall", "act_gate", "act_ct");
+
+    let (ns, conn, d0) = clsact_d0("tc-acts").await?;
+    for line in ["base-time 1000 sched-entry open 2000", "base-time 1ms cycle-time 3ms sched-entry close 3ms"] {
+        same_as_tc(&ns, "gate", line, async |a| matchall_at_prio_2(&conn, d0, a).await, |w| {
+            Ok(ActionList::new().with(GateAction::parse_params(w)?))
+        })
+        .await?;
+    }
+    // tc(8) wants a word after the NAT arguments: a verdict.
+    for line in ["commit nat src addr 10.0.0.1-10.0.0.9 pipe", "commit nat dst addr 192.0.2.7 pipe", "nat pipe"] {
+        same_as_tc(&ns, "ct", line, async |a| matchall_at_prio_2(&conn, d0, a).await, |w| {
+            Ok(ActionList::new().with(CtAction::parse_params(w)?))
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+/// #751: `conform-exceed` is exceed first, as tc-police(8) reads it.
+/// nlink read it conform first, so `drop/pipe` dropped the traffic that
+/// conformed. The police rate table needs root in the initial user
+/// namespace.
+#[tokio::test]
+async fn police_conform_exceed_reads_as_tc_reads_it() -> Result<()> {
+    use nlink::netlink::action::{ActionList, PoliceAction};
+    require_root!();
+    nlink::require_host_root!();
+    nlink::require_modules!("dummy", "sch_ingress", "cls_matchall", "act_police");
+
+    let (ns, conn, d0) = clsact_d0("tc-police").await?;
+    for line in ["rate 1mbit burst 32k conform-exceed drop/pipe", "rate 2mbit burst 64k conform-exceed reclassify"] {
+        same_as_tc(&ns, "police", line, async |a| matchall_at_prio_2(&conn, d0, a).await, |w| {
+            Ok(ActionList::new().with(PoliceAction::parse_params(w)?))
+        })
+        .await?;
+    }
+    Ok(())
+}
