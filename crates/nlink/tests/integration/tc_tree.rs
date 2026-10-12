@@ -4,6 +4,7 @@
 
 use std::net::SocketAddr;
 
+use nlink::netlink::action::{ActionList, MirredAction};
 use nlink::netlink::config::{ApplyOptions, NetworkConfig, QdiscBuilder};
 use nlink::netlink::filter::{FlowerFilter, MatchallFilter};
 use nlink::netlink::tc::{
@@ -429,6 +430,76 @@ async fn an_ifb_redirect_shapes_what_a_device_receives() -> nlink::Result<()> {
         Ok(())
     })
     .await
+}
+
+/// A mirred action that names its target (#645): resolved in the
+/// namespace, and again after the target is deleted and created with
+/// another ifindex, which leaves the kernel's action pointing at nothing.
+/// Through `parse_params`, a `dev` only the namespace has is found there;
+/// it used to be looked up in the host's.
+#[tokio::test]
+async fn a_mirred_by_name_follows_its_target() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "ifb", "sch_ingress", "cls_flower", "cls_matchall", "act_mirred");
+
+    let ns = TestNamespace::new("tt-mirred")?;
+    let conn = ns.connection()?;
+    let to_ifb = || {
+        FlowerFilter::new()
+            .ip_proto_udp()
+            .dst_port(53)
+            .actions(ActionList::new().with(MirredAction::mirror_to_egress(0).to_dev("nlkifb7")))
+    };
+    let cfg = NetworkConfig::new()
+        .link("d0", |l| l.dummy().up())
+        .link("nlkifb7", |l| l.ifb().up())
+        .qdisc("d0", |q| q.ingress())
+        .tc("d0", |t| t.filter(TcHandle::INGRESS, FilterPriority::new(10), EthProto::IP, to_ifb()));
+    let shown = |ns: &TestNamespace| tc_text(ns, "filter", "d0", &["parent", "ffff:"]);
+    let ifindex = async |name: &str| -> nlink::Result<u32> {
+        Ok(conn.get_link_by_name(name).await?.expect(name).ifindex())
+    };
+
+    let mut first = 0;
+    for round in ["installed", "after the target came back"] {
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{round}: {:?}", applied.errors);
+        let diff = cfg.diff(&conn).await?;
+        assert!(diff.is_empty(), "{round}: does not converge:\n{diff}");
+        let text = shown(&ns).map_err(nlink::Error::invalid_message)?;
+        assert!(text.contains("to device nlkifb7"), "{round}: {text}");
+        if round == "installed" {
+            first = ifindex("nlkifb7").await?;
+            conn.del_link("nlkifb7").await?;
+            let diff = cfg.diff(&conn).await?;
+            assert!(
+                diff.to_string().contains("+ filter flower at ingress prio 10"),
+                "the target is gone, and the filter's diff does not see it:\n{diff}"
+            );
+        }
+    }
+    assert_ne!(ifindex("nlkifb7").await?, first, "the IFB came back with its old ifindex");
+
+    // Imperatively, through parse_params: a device only this namespace has.
+    let mirred = MirredAction::parse_params(&["egress", "mirror", "dev", "nlkifb7"])?;
+    let d0 = ifindex("d0").await?;
+    let at = |prio| (d0, TcHandle::INGRESS, None, EthProto::IP, FilterPriority::new(prio));
+    let (i, p, h, e, f) = at(20);
+    conn.add_filter_by_index_full(i, p, h, e, f, MatchallFilter::new().actions(ActionList::new().with(mirred)))
+        .await?;
+    let text = shown(&ns).map_err(nlink::Error::invalid_message)?;
+    assert!(
+        text.lines().any(|l| l.contains("pref 20")) && text.matches("to device nlkifb7").count() == 2,
+        "{text}"
+    );
+    let (i, p, h, e, f) = at(30);
+    let nowhere = ActionList::new().with(MirredAction::redirect_to_egress(0).to_dev("nlk-nope0"));
+    let err = conn
+        .add_filter_by_index_full(i, p, h, e, f, MatchallFilter::new().actions(nowhere))
+        .await
+        .expect_err("a target the namespace does not have");
+    assert!(err.is_not_found(), "{err}");
+    Ok(())
 }
 
 /// A VLAN whose id changes is deleted and created again, which takes its

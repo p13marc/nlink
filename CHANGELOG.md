@@ -718,6 +718,14 @@ All notable changes to this project will be documented in this file.
   `serde` or `schemars` by themselves. CI now checks both features on their
   own, and the integration lane builds with `serde`.
 
+- **A mirred `dev <name>` is looked up in the right namespace (#645).**
+  `MirredAction::parse_params` used to read `/sys/class/net` in the calling
+  process's namespace. For a connection in another namespace, that found the
+  wrong device or none at all. The name is now resolved by the connection
+  that installs the action.
+- **`RouteFilter::from_if(name)` can be installed (#645).** Nothing resolved
+  the name, so every install failed.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
@@ -2593,6 +2601,17 @@ All notable changes to this project will be documented in this file.
     `QdiscConfig`.
   - An undo puts a replaced HFSC, DRR or QFQ root back, since
     `QdiscSpec::from_live` reads them.
+
+- **A mirred action can name its target (#645).** `MirredAction::to_dev(name)`
+  sends to the device by name. The connection that installs the filter or
+  action resolves the name in its own namespace, at every install. So a
+  declared tree's filter finds its target again after the target is deleted
+  and created with another ifindex. Before, that worked only for
+  `TcBuilder::redirect_ingress_to`.
+  - `ActionConfig` and `FilterConfig` gain `device_names()` and
+    `resolve_devices()`, with defaults. Flower, matchall, cgroup, route,
+    rsvp and flow filters pass them through to their actions.
+  - A route filter also resolves its `from_if`.
 
 ## [0.31.0] - 2026-10-11
 

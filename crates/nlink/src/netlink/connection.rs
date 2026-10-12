@@ -1946,6 +1946,27 @@ impl Connection<Route> {
         }
     }
 
+    /// The ifindex of each of `names` in this connection's namespace: the
+    /// devices a filter or action names rather than indexes (#645). One
+    /// that does not exist is [`ErrorDetail::NotFound`](crate::ErrorDetail::NotFound).
+    pub(crate) async fn ifindexes_of(
+        &self,
+        names: &[&str],
+    ) -> Result<std::collections::HashMap<String, u32>> {
+        let mut out = std::collections::HashMap::new();
+        for name in names {
+            if out.contains_key(*name) {
+                continue;
+            }
+            let link = self
+                .get_link_by_name(*name)
+                .await?
+                .ok_or_else(|| self.interface_not_found(*name))?;
+            out.insert(name.to_string(), link.ifindex());
+        }
+        Ok(out)
+    }
+
     /// Get a network interface by index.
     ///
     /// Returns `None` if the interface doesn't exist.
