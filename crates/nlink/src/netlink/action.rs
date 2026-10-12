@@ -34,7 +34,10 @@
 //! # }
 //! ```
 
-use std::{collections::HashMap, net::Ipv4Addr};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, Ipv4Addr},
+};
 
 use super::{
     Connection,
@@ -76,6 +79,86 @@ pub trait ActionConfig: Send + Sync {
     fn resolve_devices(&mut self, ifindexes: &HashMap<String, u32>) -> Result<()> {
         let _ = ifindexes;
         Ok(())
+    }
+
+    /// The action as the tokens its `parse_params` reads, its inverse:
+    /// parsed back, they install the same action. The document form of a
+    /// declared TC tree is written with it (#645). An error for a kind
+    /// without one, which is the default, and for a value the grammar
+    /// cannot say.
+    fn to_params(&self) -> Result<Vec<String>> {
+        Err(Error::not_supported(format!(
+            "{}: the action has no token form",
+            self.kind()
+        )))
+    }
+}
+
+/// The token a verdict is written as: what `parse_params` reads for it
+/// (`pass`, `drop`, `pipe`, `reclassify`, `stolen`, `continue`). `None`
+/// for one the grammars have no word for (a goto, `queued`, …).
+pub(crate) fn verdict_token(action: i32) -> Option<&'static str> {
+    Some(match action {
+        action::TC_ACT_OK => "pass",
+        action::TC_ACT_SHOT => "drop",
+        action::TC_ACT_PIPE => "pipe",
+        action::TC_ACT_RECLASSIFY => "reclassify",
+        action::TC_ACT_STOLEN => "stolen",
+        action::TC_ACT_UNSPEC => "continue",
+        _ => return None,
+    })
+}
+
+/// [`verdict_token`], or an error naming `kind`.
+fn verdict_param(kind: &str, action: i32) -> Result<String> {
+    verdict_token(action).map(str::to_string).ok_or_else(|| {
+        Error::not_supported(format!("{kind}: verdict {action:#x} has no token"))
+    })
+}
+
+/// Whether `tok` is a verdict keyword, as [`parse_gact_verdict`] reads
+/// one: the bare verdict most grammars end with, as tc(8)'s `CONTROL`.
+fn is_verdict(tok: &str) -> bool {
+    matches!(
+        tok,
+        "pass" | "ok" | "drop" | "shot" | "pipe" | "reclassify" | "stolen" | "continue"
+    )
+}
+
+/// Push `action`'s bare verdict token onto `out`, unless it is the
+/// `default` the grammar gives without one.
+fn push_verdict(out: &mut Vec<String>, kind: &str, action: i32, default: i32) -> Result<()> {
+    if action != default {
+        out.push(verdict_param(kind, action)?);
+    }
+    Ok(())
+}
+
+/// A keyword and its value, as two tokens.
+fn kv(key: &str, value: impl std::fmt::Display) -> [String; 2] {
+    [key.to_string(), value.to_string()]
+}
+
+/// A rate in bytes per second as a `<tc-rate>` token, checked to read
+/// back as itself (the parse goes through a float).
+fn rate_param(kind: &str, field: &str, bytes_per_sec: u64) -> Result<String> {
+    let s = crate::util::Rate::bytes_per_sec(bytes_per_sec).to_string();
+    match crate::util::Rate::parse(&s) {
+        Ok(r) if r.as_bytes_per_sec() == bytes_per_sec => Ok(s),
+        _ => Err(Error::not_supported(format!(
+            "{kind}: {field} of {bytes_per_sec} bytes/s has no exact token"
+        ))),
+    }
+}
+
+/// A byte count as a tc-style size token, checked to read back as itself.
+fn size_param(kind: &str, field: &str, bytes: u64) -> Result<String> {
+    let s = crate::util::Bytes::new(bytes).to_string();
+    match crate::util::parse::get_size(&s) {
+        Ok(n) if n == bytes => Ok(s),
+        _ => Err(Error::not_supported(format!(
+            "{kind}: {field} of {bytes} bytes has no exact token"
+        ))),
     }
 }
 
@@ -290,6 +373,46 @@ impl ActionConfig for GactAction {
         "gact"
     }
 
+    fn to_params(&self) -> Result<Vec<String>> {
+        use super::types::tc::action::{is_goto_chain, tc_act_chain};
+        let mut out = if is_goto_chain(self.action) {
+            vec!["goto_chain".to_string(), tc_act_chain(self.action).to_string()]
+        } else {
+            vec![verdict_param("gact", self.action)?]
+        };
+        let kind = match self.prob_type {
+            gact::PGACT_NONE => return Ok(out),
+            gact::PGACT_DETERM => "determ",
+            gact::PGACT_NETRAND => "netrand",
+            other => {
+                return Err(Error::not_supported(format!(
+                    "gact: random kind {other} has no token"
+                )));
+            }
+        };
+        // `random netrand` takes a percentage and stores it scaled to
+        // 0..=65535; write the one that scales to this value.
+        let value = if self.prob_type == gact::PGACT_NETRAND {
+            (0..=100u32)
+                .find(|p| (p * 65535 / 100) as u16 == self.prob_val)
+                .ok_or_else(|| {
+                    Error::not_supported(format!(
+                        "gact: random probability {}/65535 is no whole percentage",
+                        self.prob_val
+                    ))
+                })?
+        } else {
+            u32::from(self.prob_val)
+        };
+        out.extend([
+            "random".to_string(),
+            kind.to_string(),
+            verdict_param("gact", self.prob_action)?,
+            value.to_string(),
+        ]);
+        Ok(out)
+    }
+
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         let parms = gact::TcGact::new(self.action);
         builder.append_attr(gact::TCA_GACT_PARMS, parms.as_bytes());
@@ -486,6 +609,10 @@ impl MirredAction {
     ///     process's namespace, as the action was parsed.
     ///   - `ifindex <n>` — a direct ifindex.
     ///
+    /// - A verdict for after the action (`pass`, `drop`, `pipe`,
+    ///   `reclassify`, `stolen`, `continue`); without one, a redirect
+    ///   steals the packet and a mirror pipes it on.
+    ///
     /// `dev` and `ifindex` are mutually exclusive; the parser
     /// rejects both being set.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
@@ -493,6 +620,7 @@ impl MirredAction {
         let mut op_mirror = false;
         let mut ifindex: Option<u32> = None;
         let mut dev: Option<&str> = None;
+        let mut verdict: Option<i32> = None;
 
         let mut i = 0;
         while i < params.len() {
@@ -512,6 +640,11 @@ impl MirredAction {
                 }
                 "mirror" => {
                     op_mirror = true;
+                    i += 1;
+                }
+                "pass" | "ok" | "drop" | "shot" | "pipe" | "reclassify" | "stolen"
+                | "continue" => {
+                    verdict = Some(parse_gact_verdict(key)?);
                     i += 1;
                 }
                 "dev" => {
@@ -536,7 +669,7 @@ impl MirredAction {
                 }
                 other => {
                     return Err(Error::invalid_message(format!(
-                        "mirred: unknown token `{other}` (recognised: egress/ingress, redirect/mirror, dev <ifname>, ifindex <n>)"
+                        "mirred: unknown token `{other}` (recognised: egress/ingress, redirect/mirror, dev <ifname>, ifindex <n>, a verdict)"
                     )));
                 }
             }
@@ -554,6 +687,10 @@ impl MirredAction {
             (false, true) => Self::mirror_to_egress(idx),
             (true, false) => Self::redirect_to_ingress(idx),
             (true, true) => Self::mirror_to_ingress(idx),
+        };
+        let action = match verdict {
+            Some(v) => action.action(v),
+            None => action,
         };
         Ok(match dev {
             Some(dev) => action.to_dev(dev),
@@ -586,6 +723,30 @@ impl ActionConfig for MirredAction {
 
     fn device_names(&self) -> Vec<&str> {
         self.dev.as_deref().into_iter().collect()
+    }
+
+    fn to_params(&self) -> Result<Vec<String>> {
+        let (direction, op) = match self.eaction {
+            mirred::TCA_EGRESS_REDIR => ("egress", "redirect"),
+            mirred::TCA_EGRESS_MIRROR => ("egress", "mirror"),
+            mirred::TCA_INGRESS_REDIR => ("ingress", "redirect"),
+            mirred::TCA_INGRESS_MIRROR => ("ingress", "mirror"),
+            other => {
+                return Err(Error::not_supported(format!(
+                    "mirred: eaction {other} has no token"
+                )));
+            }
+        };
+        let mut out = vec![direction.to_string(), op.to_string()];
+        match &self.dev {
+            Some(dev) => out.extend(["dev".to_string(), dev.clone()]),
+            None => out.extend(["ifindex".to_string(), self.ifindex.to_string()]),
+        }
+        // The verdict when it is not the one the constructor gives.
+        if self.action != Self::new_with_ifindex(self.eaction, 0).action {
+            out.push(verdict_param("mirred", self.action)?);
+        }
+        Ok(out)
     }
 
     fn resolve_devices(&mut self, ifindexes: &HashMap<String, u32>) -> Result<()> {
@@ -881,6 +1042,31 @@ impl ActionConfig for PoliceAction {
         "police"
     }
 
+    fn to_params(&self) -> Result<Vec<String>> {
+        let default = Self::new();
+        let mut out = Vec::new();
+        out.extend(kv("rate", rate_param("police", "rate", self.rate)?));
+        out.extend(kv("burst", size_param("police", "burst", self.burst.into())?));
+        if let Some(rate) = self.peakrate {
+            out.extend(kv("peakrate", rate_param("police", "peakrate", rate)?));
+        }
+        if self.mtu != default.mtu {
+            out.extend(kv("mtu", size_param("police", "mtu", self.mtu.into())?));
+        }
+        if let Some(rate) = self.avrate {
+            out.extend(kv("avrate", rate_param("police", "avrate", rate.into())?));
+        }
+        // Each on its own: tc(8)'s `conform-exceed` pair is written exceed
+        // first, and the two spellings must not be confused.
+        if self.conform_action != default.conform_action {
+            out.extend(kv("conform", verdict_param("police", self.conform_action)?));
+        }
+        if self.exceed_action != default.exceed_action {
+            out.extend(kv("exceed", verdict_param("police", self.exceed_action)?));
+        }
+        Ok(out)
+    }
+
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         use super::{psched, types::tc::qdisc::TcRateSpec};
 
@@ -1052,6 +1238,8 @@ impl VlanAction {
     /// - `priority <p>` — set the VLAN PCP bits (0–7).
     /// - `protocol 802.1ad` — push/modify with QinQ (default
     ///   802.1q).
+    /// - A verdict (`pass`, `drop`, `pipe`, `reclassify`, `stolen`,
+    ///   `continue`); `pipe` without one.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         // Parse the operation first (it determines the entry-point
         // constructor that supplies vlan_id), then walk for modifiers.
@@ -1059,11 +1247,16 @@ impl VlanAction {
         let mut vlan_id: Option<u16> = None;
         let mut priority: Option<u8> = None;
         let mut qinq = false;
+        let mut verdict: Option<i32> = None;
 
         let mut i = 0;
         while i < params.len() {
             let key = params[i];
             match key {
+                v if is_verdict(v) => {
+                    verdict = Some(parse_gact_verdict(v)?);
+                    i += 1;
+                }
                 "pop" => {
                     op = Some("pop");
                     i += 1;
@@ -1118,7 +1311,7 @@ impl VlanAction {
                 }
                 other => {
                     return Err(Error::invalid_message(format!(
-                        "vlan: unknown token `{other}` (recognised: pop, push <id>, modify <id>, priority <p>, protocol 802.1q|802.1ad)"
+                        "vlan: unknown token `{other}` (recognised: pop, push <id>, modify <id>, priority <p>, protocol 802.1q|802.1ad, a verdict)"
                     )));
                 }
             }
@@ -1146,6 +1339,9 @@ impl VlanAction {
         if qinq {
             act = act.qinq();
         }
+        if let Some(v) = verdict {
+            act = act.action(v);
+        }
         Ok(act)
     }
 
@@ -1158,6 +1354,53 @@ impl VlanAction {
 impl ActionConfig for VlanAction {
     fn kind(&self) -> &'static str {
         "vlan"
+    }
+
+    fn to_params(&self) -> Result<Vec<String>> {
+        let op = match self.v_action {
+            vlan::TCA_VLAN_ACT_POP => "pop",
+            vlan::TCA_VLAN_ACT_PUSH => "push",
+            vlan::TCA_VLAN_ACT_MODIFY => "modify",
+            other => {
+                return Err(Error::not_supported(format!(
+                    "vlan: operation {other} has no token"
+                )));
+            }
+        };
+        let mut out = vec![op.to_string()];
+        // A pop has no ID; push and modify take theirs as their value.
+        if let Some(id) = self.vlan_id {
+            if op == "pop" {
+                return Err(Error::not_supported(
+                    "vlan: a pop's VLAN ID has no token".to_string(),
+                ));
+            }
+            if id > 4095 {
+                return Err(Error::invalid_message(format!(
+                    "vlan: VLAN ID `{id}` out of range (0–4095)"
+                )));
+            }
+            out.push(id.to_string());
+        }
+        if let Some(prio) = self.vlan_prio {
+            if prio > 7 {
+                return Err(Error::invalid_message(format!(
+                    "vlan: priority `{prio}` out of range (0–7)"
+                )));
+            }
+            out.extend(kv("priority", prio));
+        }
+        match self.vlan_proto {
+            vlan::ETH_P_8021Q => {}
+            vlan::ETH_P_8021AD => out.extend(kv("protocol", "802.1ad")),
+            other => {
+                return Err(Error::not_supported(format!(
+                    "vlan: protocol {other:#06x} has no token"
+                )));
+            }
+        }
+        push_verdict(&mut out, "vlan", self.action, action::TC_ACT_PIPE)?;
+        Ok(out)
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -1292,9 +1535,10 @@ impl MplsAction {
     /// Operation (one required): `pop`, `push`, `modify`, `dec_ttl`.
     /// Modifiers: `label <n>`, `tc <0-7>`, `ttl <0-255>`, `bos <0|1>`,
     /// `protocol <ethertype>` (decimal, `0x`-hex, or one of `ipv4`,
-    /// `ipv6`, `mpls_uc`, `mpls_mc`). Strict: unknown tokens, missing
-    /// values, and unparseable values all error; `push` requires a
-    /// `label`.
+    /// `ipv6`, `mpls_uc`, `mpls_mc`), and a verdict (`pass`, `drop`,
+    /// `pipe`, `reclassify`, `stolen`, `continue`; `pipe` without one).
+    /// Strict: unknown tokens, missing values, and unparseable values
+    /// all error; `push` requires a `label`.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut op: Option<i32> = None;
         let mut label = None;
@@ -1302,11 +1546,16 @@ impl MplsAction {
         let mut ttl = None;
         let mut bos = None;
         let mut proto = None;
+        let mut verdict = action::TC_ACT_PIPE;
 
         let mut i = 0;
         while i < params.len() {
             let key = params[i];
             match key {
+                v if is_verdict(v) => {
+                    verdict = parse_gact_verdict(v)?;
+                    i += 1;
+                }
                 "pop" => {
                     op = Some(mpls::TCA_MPLS_ACT_POP);
                     i += 1;
@@ -1374,7 +1623,7 @@ impl MplsAction {
                 }
                 other => {
                     return Err(Error::invalid_message(format!(
-                        "mpls: unknown token `{other}` (recognised: pop, push, modify, dec_ttl, label <n>, tc <n>, ttl <n>, bos <n>, protocol <ethertype>)"
+                        "mpls: unknown token `{other}` (recognised: pop, push, modify, dec_ttl, label <n>, tc <n>, ttl <n>, bos <n>, protocol <ethertype>, a verdict)"
                     )));
                 }
             }
@@ -1398,7 +1647,7 @@ impl MplsAction {
             ttl,
             bos,
             proto,
-            action: action::TC_ACT_PIPE,
+            action: verdict,
         })
     }
 }
@@ -1406,6 +1655,47 @@ impl MplsAction {
 impl ActionConfig for MplsAction {
     fn kind(&self) -> &'static str {
         "mpls"
+    }
+
+    fn to_params(&self) -> Result<Vec<String>> {
+        let op = match self.m_action {
+            mpls::TCA_MPLS_ACT_POP => "pop",
+            mpls::TCA_MPLS_ACT_PUSH => "push",
+            mpls::TCA_MPLS_ACT_MODIFY => "modify",
+            mpls::TCA_MPLS_ACT_DEC_TTL => "dec_ttl",
+            other => {
+                return Err(Error::not_supported(format!(
+                    "mpls: operation {other} has no token"
+                )));
+            }
+        };
+        // The ranges `parse_params` reads; the setters take wider types.
+        let in_range = |field: &str, value: u32, max: u32| {
+            if value > max {
+                return Err(Error::invalid_message(format!(
+                    "mpls: {field} `{value}` out of range (0–{max})"
+                )));
+            }
+            Ok(kv(field, value))
+        };
+        let mut out = vec![op.to_string()];
+        if let Some(label) = self.label {
+            out.extend(in_range("label", label, 0xF_FFFF)?);
+        }
+        if let Some(tc) = self.tc {
+            out.extend(in_range("tc", tc.into(), 7)?);
+        }
+        if let Some(ttl) = self.ttl {
+            out.extend(kv("ttl", ttl));
+        }
+        if let Some(bos) = self.bos {
+            out.extend(in_range("bos", bos.into(), 1)?);
+        }
+        if let Some(proto) = self.proto {
+            out.extend(kv("protocol", crate::EthProto::new(proto)));
+        }
+        push_verdict(&mut out, "mpls", self.action, action::TC_ACT_PIPE)?;
+        Ok(out)
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -1503,9 +1793,10 @@ impl SkbmodAction {
     /// Parse a `tc(8)`-style `skbmod` token slice into a typed action.
     ///
     /// Recognised tokens: `set smac <MAC>`, `set dmac <MAC>`,
-    /// `set etype <ethertype>`, `swap mac`. At least one operation is
-    /// required. Strict: unknown tokens, missing values, and
-    /// unparseable values all error.
+    /// `set etype <ethertype>`, `swap mac`, and a verdict (`pass`,
+    /// `drop`, `pipe`, `reclassify`, `stolen`, `continue`; `pipe` without
+    /// one). At least one operation is required. Strict: unknown tokens,
+    /// missing values, and unparseable values all error.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut a = Self::new();
         let mut any = false;
@@ -1513,6 +1804,10 @@ impl SkbmodAction {
         while i < params.len() {
             let key = params[i];
             match key {
+                v if is_verdict(v) => {
+                    a.action = parse_gact_verdict(v)?;
+                    i += 1;
+                }
                 "set" => {
                     let what = action_need_value(params, i, "skbmod", "set")?;
                     let val = params.get(i + 2).copied().ok_or_else(|| {
@@ -1554,7 +1849,7 @@ impl SkbmodAction {
                 }
                 other => {
                     return Err(Error::invalid_message(format!(
-                        "skbmod: unknown token `{other}` (recognised: set smac|dmac|etype <v>, swap mac)"
+                        "skbmod: unknown token `{other}` (recognised: set smac|dmac|etype <v>, swap mac, a verdict)"
                     )));
                 }
             }
@@ -1572,6 +1867,35 @@ impl SkbmodAction {
 impl ActionConfig for SkbmodAction {
     fn kind(&self) -> &'static str {
         "skbmod"
+    }
+
+    fn to_params(&self) -> Result<Vec<String>> {
+        use crate::util::addr::format_mac;
+        let mut out = Vec::new();
+        if let Some(mac) = self.dmac {
+            out.extend(["set".to_string(), "dmac".to_string(), format_mac(&mac)]);
+        }
+        if let Some(mac) = self.smac {
+            out.extend(["set".to_string(), "smac".to_string(), format_mac(&mac)]);
+        }
+        if let Some(etype) = self.etype {
+            out.extend([
+                "set".to_string(),
+                "etype".to_string(),
+                crate::EthProto::new(etype).to_string(),
+            ]);
+        }
+        if self.swap_mac {
+            out.extend(kv("swap", "mac"));
+        }
+        if out.is_empty() {
+            return Err(Error::invalid_message(
+                "skbmod: at least one operation required (set smac|dmac|etype, swap mac)"
+                    .to_string(),
+            ));
+        }
+        push_verdict(&mut out, "skbmod", self.action, action::TC_ACT_PIPE)?;
+        Ok(out)
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -1696,6 +2020,8 @@ impl SkbeditAction {
     /// - `mark <u32>` — set the skb mark.
     /// - `mask <u32>` — combine with `mark` for masked update.
     /// - `queue_mapping <u16>` — set the queue mapping index.
+    /// - A verdict (`pass`, `drop`, `pipe`, `reclassify`, `stolen`,
+    ///   `continue`); `pipe` without one.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut act = Self::new();
         let mut mark: Option<u32> = None;
@@ -1704,6 +2030,10 @@ impl SkbeditAction {
         while i < params.len() {
             let key = params[i];
             match key {
+                v if is_verdict(v) => {
+                    act = act.action(parse_gact_verdict(v)?);
+                    i += 1;
+                }
                 "priority" => {
                     let s = action_need_value(params, i, "skbedit", key)?;
                     act = act.priority(action_parse_u32("skbedit", "priority", s)?);
@@ -1732,7 +2062,7 @@ impl SkbeditAction {
                 }
                 other => {
                     return Err(Error::invalid_message(format!(
-                        "skbedit: unknown token `{other}` (recognised: priority, mark, mask, queue_mapping)"
+                        "skbedit: unknown token `{other}` (recognised: priority, mark, mask, queue_mapping, a verdict)"
                     )));
                 }
             }
@@ -1761,6 +2091,32 @@ impl SkbeditAction {
 impl ActionConfig for SkbeditAction {
     fn kind(&self) -> &'static str {
         "skbedit"
+    }
+
+    fn to_params(&self) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        if let Some(prio) = self.priority {
+            out.extend(kv("priority", prio));
+        }
+        match (self.mark, self.mark_mask) {
+            (Some(mark), mask) => {
+                out.extend(kv("mark", mark));
+                if let Some(mask) = mask {
+                    out.extend(kv("mask", mask));
+                }
+            }
+            (None, None) => {}
+            (None, Some(_)) => {
+                return Err(Error::not_supported(
+                    "skbedit: a mask without a mark has no token".to_string(),
+                ));
+            }
+        }
+        if let Some(queue) = self.queue_mapping {
+            out.extend(kv("queue_mapping", queue));
+        }
+        push_verdict(&mut out, "skbedit", self.action, action::TC_ACT_PIPE)?;
+        Ok(out)
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -1879,7 +2235,7 @@ impl NatAction {
     ///
     /// # Recognised tokens (positional, mirrors `tc(8)`)
     ///
-    /// `<ingress|egress> <oldaddr[/prefix]> <newaddr>`
+    /// `<ingress|egress> <oldaddr[/prefix]> <newaddr> [<verdict>]`
     ///
     /// - `ingress` → DNAT (matches incoming destination, rewrites
     ///   to the new address).
@@ -1887,6 +2243,8 @@ impl NatAction {
     ///   new address).
     /// - Old address may carry a prefix (`10.0.0.0/24`) for
     ///   network-based NAT; bare addresses default to /32.
+    /// - An optional verdict (`pass`, `drop`, `pipe`, `reclassify`,
+    ///   `stolen`, `continue`); `pass` without one.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         if params.len() < 3 {
             return Err(Error::invalid_message(
@@ -1896,12 +2254,18 @@ impl NatAction {
         let direction = params[0];
         let old_with_prefix = params[1];
         let new_addr_s = params[2];
-        if params.len() > 3 {
-            return Err(Error::invalid_message(format!(
-                "nat: unexpected token `{}` after `{} {} {}` (only the 3 positional args are supported)",
-                params[3], direction, old_with_prefix, new_addr_s
-            )));
-        }
+        let verdict = match params.get(3).copied() {
+            Some(v) if is_verdict(v) && params.len() == 4 => Some(parse_gact_verdict(v)?),
+            None => None,
+            Some(v) => {
+                // The token that is not a verdict, or the one after it.
+                let extra = if is_verdict(v) { params[4] } else { v };
+                return Err(Error::invalid_message(format!(
+                    "nat: unexpected token `{extra}` after `{direction} {old_with_prefix} \
+                     {new_addr_s}` (only the 3 positional args and a verdict are supported)"
+                )));
+            }
+        };
 
         let (old_addr_s, prefix) = match old_with_prefix.split_once('/') {
             Some((a, p)) => {
@@ -1938,6 +2302,9 @@ impl NatAction {
         if prefix != 32 {
             act = act.prefix(prefix);
         }
+        if let Some(v) = verdict {
+            act = act.action(v);
+        }
         Ok(act)
     }
 
@@ -1961,6 +2328,17 @@ impl NatAction {
 impl ActionConfig for NatAction {
     fn kind(&self) -> &'static str {
         "nat"
+    }
+
+    fn to_params(&self) -> Result<Vec<String>> {
+        let old = match self.prefix_len {
+            32 => self.old_addr.to_string(),
+            prefix => format!("{}/{prefix}", self.old_addr),
+        };
+        let direction = if self.egress { "egress" } else { "ingress" };
+        let mut out = vec![direction.to_string(), old, self.new_addr.to_string()];
+        push_verdict(&mut out, "nat", self.action, action::TC_ACT_OK)?;
+        Ok(out)
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -2179,6 +2557,9 @@ impl TunnelKeyAction {
     /// - `tos <0–255>` / `ttl <0–255>` — outer IP TOS / TTL.
     /// - `no_csum` — disable UDP checksum (flag, no value).
     /// - `no_frag` — disable fragmentation (flag, no value).
+    ///
+    /// Either operation takes a verdict (`pass`, `drop`, `pipe`,
+    /// `reclassify`, `stolen`, `continue`); `pipe` without one.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         // Determine operation first (set vs release).
         let mut op: Option<&str> = None;
@@ -2208,6 +2589,10 @@ impl TunnelKeyAction {
             let key = params[i];
             match key {
                 "set" | "release" => i += 1,
+                v if is_verdict(v) => {
+                    act = act.action(parse_gact_verdict(v)?);
+                    i += 1;
+                }
                 "src" => {
                     let s = action_need_value(params, i, "tunnel_key", key)?;
                     let addr: Ipv4Addr = s.parse().map_err(|_| {
@@ -2339,7 +2724,7 @@ impl TunnelKeyAction {
                 }
                 other => {
                     return Err(Error::invalid_message(format!(
-                        "tunnel_key: unknown token `{other}` (recognised: set/release, src/dst[6] <addr>, id <vni>, dst_port <port>, tos/ttl <0-255>, no_csum, no_frag)"
+                        "tunnel_key: unknown token `{other}` (recognised: set/release, src/dst[6] <addr>, id <vni>, dst_port <port>, tos/ttl <0-255>, no_csum, no_frag, a verdict)"
                     )));
                 }
             }
@@ -2356,6 +2741,59 @@ impl TunnelKeyAction {
 impl ActionConfig for TunnelKeyAction {
     fn kind(&self) -> &'static str {
         "tunnel_key"
+    }
+
+    fn to_params(&self) -> Result<Vec<String>> {
+        let op = match self.t_action {
+            tunnel_key::TCA_TUNNEL_KEY_ACT_SET => "set",
+            tunnel_key::TCA_TUNNEL_KEY_ACT_RELEASE => "release",
+            other => {
+                return Err(Error::not_supported(format!(
+                    "tunnel_key: operation {other} has no token"
+                )));
+            }
+        };
+        let mut fields = Vec::new();
+        if let Some(addr) = self.src_ipv4 {
+            fields.extend(kv("src", addr));
+        }
+        if let Some(addr) = self.src_ipv6 {
+            fields.extend(kv("src6", addr));
+        }
+        if let Some(addr) = self.dst_ipv4 {
+            fields.extend(kv("dst", addr));
+        }
+        if let Some(addr) = self.dst_ipv6 {
+            fields.extend(kv("dst6", addr));
+        }
+        if let Some(id) = self.key_id {
+            fields.extend(kv("id", id));
+        }
+        if let Some(port) = self.dst_port {
+            fields.extend(kv("dst_port", port));
+        }
+        if let Some(tos) = self.tos {
+            fields.extend(kv("tos", tos));
+        }
+        if let Some(ttl) = self.ttl {
+            fields.extend(kv("ttl", ttl));
+        }
+        if self.no_csum {
+            fields.push("no_csum".to_string());
+        }
+        if self.no_frag {
+            fields.push("no_frag".to_string());
+        }
+        // A release sends none of them, and its grammar refuses them.
+        if let (Some(field), "release") = (fields.first(), op) {
+            return Err(Error::invalid_message(format!(
+                "tunnel_key: `{field}` is only valid with `set`"
+            )));
+        }
+        let mut out = vec![op.to_string()];
+        out.extend(fields);
+        push_verdict(&mut out, "tunnel_key", self.action, action::TC_ACT_PIPE)?;
+        Ok(out)
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -2481,12 +2919,18 @@ impl ConnmarkAction {
     /// # Recognised tokens
     ///
     /// - `zone <u16>` — conntrack zone (default 0).
+    /// - A verdict (`pass`, `drop`, `pipe`, `reclassify`, `stolen`,
+    ///   `continue`); `pipe` without one.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut act = Self::new();
         let mut i = 0;
         while i < params.len() {
             let key = params[i];
             match key {
+                v if is_verdict(v) => {
+                    act = act.action(parse_gact_verdict(v)?);
+                    i += 1;
+                }
                 "zone" => {
                     let s = action_need_value(params, i, "connmark", key)?;
                     let z = action_parse_u32("connmark", "zone", s)?;
@@ -2500,7 +2944,7 @@ impl ConnmarkAction {
                 }
                 other => {
                     return Err(Error::invalid_message(format!(
-                        "connmark: unknown token `{other}` (recognised: zone <0–65535>)"
+                        "connmark: unknown token `{other}` (recognised: zone <0–65535>, a verdict)"
                     )));
                 }
             }
@@ -2523,6 +2967,15 @@ impl Default for ConnmarkAction {
 impl ActionConfig for ConnmarkAction {
     fn kind(&self) -> &'static str {
         "connmark"
+    }
+
+    fn to_params(&self) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        if self.zone != 0 {
+            out.extend(kv("zone", self.zone));
+        }
+        push_verdict(&mut out, "connmark", self.action, action::TC_ACT_PIPE)?;
+        Ok(out)
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -2614,6 +3067,8 @@ impl CtinfoAction {
     /// - `cpmark [<mask>]` — restore the connection mark. A bare
     ///   `cpmark` uses the full `0xffffffff` mask.
     /// - `zone <0–65535>` — conntrack zone.
+    /// - A verdict (`pass`, `drop`, `pipe`, `reclassify`, `stolen`,
+    ///   `continue`); `pipe` without one.
     ///
     /// Strict: unknown tokens, missing values, and unparseable values
     /// all error. At least one of `dscp`/`cpmark` is required.
@@ -2624,6 +3079,10 @@ impl CtinfoAction {
         while i < params.len() {
             let key = params[i];
             match key {
+                v if is_verdict(v) => {
+                    a.action = parse_gact_verdict(v)?;
+                    i += 1;
+                }
                 "dscp" => {
                     let s = action_need_value(params, i, "ctinfo", "dscp")?;
                     let (mask_s, state_s) = match s.split_once('/') {
@@ -2668,7 +3127,7 @@ impl CtinfoAction {
                 }
                 other => {
                     return Err(Error::invalid_message(format!(
-                        "ctinfo: unknown token `{other}` (recognised: dscp <mask>[/<statemask>], cpmark [<mask>], zone <0–65535>)"
+                        "ctinfo: unknown token `{other}` (recognised: dscp <mask>[/<statemask>], cpmark [<mask>], zone <0–65535>, a verdict)"
                     )));
                 }
             }
@@ -2685,6 +3144,34 @@ impl CtinfoAction {
 impl ActionConfig for CtinfoAction {
     fn kind(&self) -> &'static str {
         "ctinfo"
+    }
+
+    fn to_params(&self) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        match (self.dscp_mask, self.dscp_statemask) {
+            (Some(mask), Some(statemask)) => {
+                out.extend(kv("dscp", format!("{mask:#x}/{statemask:#x}")));
+            }
+            (None, None) => {}
+            _ => {
+                return Err(Error::not_supported(
+                    "ctinfo: a DSCP mask without its statemask has no token".to_string(),
+                ));
+            }
+        }
+        if let Some(mask) = self.cpmark_mask {
+            out.extend(kv("cpmark", format!("{mask:#x}")));
+        }
+        if out.is_empty() {
+            return Err(Error::invalid_message(
+                "ctinfo: at least one of `dscp`/`cpmark` is required".to_string(),
+            ));
+        }
+        if let Some(zone) = self.zone {
+            out.extend(kv("zone", zone));
+        }
+        push_verdict(&mut out, "ctinfo", self.action, action::TC_ACT_PIPE)?;
+        Ok(out)
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -2857,9 +3344,12 @@ impl IfeAction {
     ///
     /// - `encode` / `decode` — mode (required, must come first).
     /// - `allow <meta>` — carry the skb's value for `mark`/`prio`/`tcindex`.
-    /// - `use <meta> <value>` — override with an explicit value.
+    /// - `use <meta> <value>` — override with an explicit value (a `u16`
+    ///   for `tcindex`).
     /// - `dst <MAC>` / `src <MAC>` — IFE header MACs.
     /// - `type <ethertype>` — IFE ethertype (name or `0x`-hex/decimal).
+    /// - A verdict (`pass`, `drop`, `pipe`, `reclassify`, `stolen`,
+    ///   `continue`); `pipe` without one.
     ///
     /// Strict: unknown tokens, missing values, and unparseable values
     /// all error.
@@ -2877,6 +3367,10 @@ impl IfeAction {
         while i < params.len() {
             let key = params[i];
             match key {
+                v if is_verdict(v) => {
+                    a.action = parse_gact_verdict(v)?;
+                    i += 1;
+                }
                 "allow" => {
                     let s = action_need_value(params, i, "ife", "allow")?;
                     a = a.allow(Self::meta_from_str("ife", s)?);
@@ -2889,6 +3383,12 @@ impl IfeAction {
                         Error::invalid_message(format!("ife: `use {what}` requires a value"))
                     })?;
                     let val = action_parse_u32("ife", "use value", val_s)?;
+                    // tcindex is sent as a u16; a wider value was cut.
+                    if meta == IfeMeta::TcIndex && val > u32::from(u16::MAX) {
+                        return Err(Error::invalid_message(format!(
+                            "ife: tcindex value `{val}` out of range (0–65535)"
+                        )));
+                    }
                     a = a.use_value(meta, val);
                     i += 3;
                 }
@@ -2913,7 +3413,7 @@ impl IfeAction {
                 }
                 other => {
                     return Err(Error::invalid_message(format!(
-                        "ife: unknown token `{other}` (recognised: encode|decode, allow <meta>, use <meta> <val>, dst/src <MAC>, type <ethertype>)"
+                        "ife: unknown token `{other}` (recognised: encode|decode, allow <meta>, use <meta> <val>, dst/src <MAC>, type <ethertype>, a verdict)"
                     )));
                 }
             }
@@ -2925,6 +3425,39 @@ impl IfeAction {
 impl ActionConfig for IfeAction {
     fn kind(&self) -> &'static str {
         "ife"
+    }
+
+    fn to_params(&self) -> Result<Vec<String>> {
+        use crate::util::addr::format_mac;
+        let mode = if self.encode { "encode" } else { "decode" };
+        let mut out = vec![mode.to_string()];
+        if let Some(mac) = self.dmac {
+            out.extend(kv("dst", format_mac(&mac)));
+        }
+        if let Some(mac) = self.smac {
+            out.extend(kv("src", format_mac(&mac)));
+        }
+        if let Some(etype) = self.etype {
+            out.extend(kv("type", crate::EthProto::new(etype)));
+        }
+        for entry in &self.metadata {
+            let meta = match entry.kind {
+                IfeMeta::Mark => "mark",
+                IfeMeta::Prio => "prio",
+                IfeMeta::TcIndex => "tcindex",
+            };
+            match entry.value {
+                None => out.extend(kv("allow", meta)),
+                Some(v) if entry.kind == IfeMeta::TcIndex && v > u32::from(u16::MAX) => {
+                    return Err(Error::invalid_message(format!(
+                        "ife: tcindex value `{v}` out of range (0–65535)"
+                    )));
+                }
+                Some(v) => out.extend(["use".to_string(), meta.to_string(), v.to_string()]),
+            }
+        }
+        push_verdict(&mut out, "ife", self.action, action::TC_ACT_PIPE)?;
+        Ok(out)
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -3106,23 +3639,46 @@ impl GateAction {
         })
     }
 
+    /// The `clockid` token for `id`: tc(8)'s name, or the number.
+    fn clockid_token(id: i32) -> String {
+        match id {
+            0 => "CLOCK_REALTIME".to_string(),
+            1 => "CLOCK_MONOTONIC".to_string(),
+            7 => "CLOCK_BOOTTIME".to_string(),
+            11 => "CLOCK_TAI".to_string(),
+            other => other.to_string(),
+        }
+    }
+
     fn is_keyword(tok: &str) -> bool {
         matches!(
             tok,
-            "priority"
-                | "base-time"
-                | "cycle-time"
-                | "cycle-time-ext"
-                | "clockid"
-                | "sched-entry"
-                | "pass"
-                | "ok"
-                | "drop"
-                | "shot"
-                | "continue"
-                | "pipe"
-                | "reclassify"
-        )
+            "priority" | "base-time" | "cycle-time" | "cycle-time-ext" | "clockid" | "sched-entry"
+        ) || is_verdict(tok)
+    }
+
+    /// A time in nanoseconds as a tc(8) time string. A whole number of
+    /// nanoseconds (`<n>ns`) is read exactly: the time parser goes through
+    /// a float, which holds no more than 2^53 ns (104 days), and an
+    /// absolute `base-time` is past that.
+    fn time_ns(key: &str, s: &str) -> Result<u64> {
+        let invalid = || {
+            Error::invalid_message(format!("gate: invalid {key} `{s}` (expected a tc-style time)"))
+        };
+        if let Some(n) = s.strip_suffix("ns")
+            && !n.is_empty()
+            && n.bytes().all(|b| b.is_ascii_digit())
+        {
+            return n.parse::<u64>().map_err(|_| invalid());
+        }
+        crate::util::parse::get_time(s)
+            .map(|d| d.as_nanos() as u64)
+            .map_err(|_| invalid())
+    }
+
+    /// `ns` as a time [`time_ns`](Self::time_ns) reads back exactly.
+    fn time_token(ns: u64) -> String {
+        crate::util::parse::format_time(std::time::Duration::from_nanos(ns))
     }
 
     /// Parse a `tc(8)`-style `gate` token slice into a typed action.
@@ -3131,11 +3687,14 @@ impl GateAction {
     ///
     /// - `priority <int>`
     /// - `base-time <time>` / `cycle-time <time>` / `cycle-time-ext <time>`
-    ///   (`tc(8)` time strings, e.g. `1ms`, `200us`).
+    ///   (`tc(8)` time strings, e.g. `1ms`, `200us`; a whole number of
+    ///   nanoseconds, `<n>ns`, is read exactly).
     /// - `clockid <id>` (`TAI`/`REALTIME`/`MONOTONIC`/`BOOTTIME` or a number).
     /// - `sched-entry open|close <interval> [<ipv> [<max-octets>]]` —
     ///   repeatable; the optional `ipv`/`max-octets` are consumed
     ///   greedily up to the next keyword.
+    /// - A verdict (`pass`, `drop`, `pipe`, `reclassify`, `stolen`,
+    ///   `continue`); `pipe` without one.
     ///
     /// Strict: unknown tokens, missing values, and unparseable values
     /// all error.
@@ -3143,19 +3702,13 @@ impl GateAction {
         let mut a = Self::new();
         let mut i = 0;
 
-        let parse_ns = |key: &str, s: &str| -> Result<u64> {
-            crate::util::parse::get_time(s)
-                .map(|d| d.as_nanos() as u64)
-                .map_err(|_| {
-                    Error::invalid_message(format!(
-                        "gate: invalid {key} `{s}` (expected a tc-style time)"
-                    ))
-                })
-        };
-
         while i < params.len() {
             let key = params[i];
             match key {
+                v if is_verdict(v) => {
+                    a.action = parse_gact_verdict(v)?;
+                    i += 1;
+                }
                 "priority" => {
                     let s = action_need_value(params, i, "gate", "priority")?;
                     a.priority = Some(s.parse::<i32>().map_err(|_| {
@@ -3165,17 +3718,17 @@ impl GateAction {
                 }
                 "base-time" => {
                     let s = action_need_value(params, i, "gate", "base-time")?;
-                    a.base_time = Some(parse_ns("base-time", s)?);
+                    a.base_time = Some(Self::time_ns("base-time", s)?);
                     i += 2;
                 }
                 "cycle-time" => {
                     let s = action_need_value(params, i, "gate", "cycle-time")?;
-                    a.cycle_time = Some(parse_ns("cycle-time", s)?);
+                    a.cycle_time = Some(Self::time_ns("cycle-time", s)?);
                     i += 2;
                 }
                 "cycle-time-ext" => {
                     let s = action_need_value(params, i, "gate", "cycle-time-ext")?;
-                    a.cycle_time_ext = Some(parse_ns("cycle-time-ext", s)?);
+                    a.cycle_time_ext = Some(Self::time_ns("cycle-time-ext", s)?);
                     i += 2;
                 }
                 "clockid" => {
@@ -3199,7 +3752,7 @@ impl GateAction {
                             "gate: `sched-entry` requires an interval".to_string(),
                         )
                     })?;
-                    let interval_ns = parse_ns("sched-entry interval", interval_s)?;
+                    let interval_ns = Self::time_ns("sched-entry interval", interval_s)?;
                     let interval_ns: u32 = interval_ns.try_into().map_err(|_| {
                         Error::invalid_message(format!(
                             "gate: sched-entry interval `{interval_s}` exceeds u32 nanoseconds"
@@ -3237,7 +3790,7 @@ impl GateAction {
                 }
                 other => {
                     return Err(Error::invalid_message(format!(
-                        "gate: unknown token `{other}` (recognised: priority, base-time, cycle-time, cycle-time-ext, clockid, sched-entry open|close <interval> [ipv [max-octets]])"
+                        "gate: unknown token `{other}` (recognised: priority, base-time, cycle-time, cycle-time-ext, clockid, sched-entry open|close <interval> [ipv [max-octets]], a verdict)"
                     )));
                 }
             }
@@ -3249,6 +3802,46 @@ impl GateAction {
 impl ActionConfig for GateAction {
     fn kind(&self) -> &'static str {
         "gate"
+    }
+
+    fn to_params(&self) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        if let Some(prio) = self.priority {
+            out.extend(kv("priority", prio));
+        }
+        for (key, t) in [
+            ("base-time", self.base_time),
+            ("cycle-time", self.cycle_time),
+            ("cycle-time-ext", self.cycle_time_ext),
+        ] {
+            if let Some(t) = t {
+                out.extend(kv(key, Self::time_token(t)));
+            }
+        }
+        if let Some(id) = self.clockid {
+            out.extend(kv("clockid", Self::clockid_token(id)));
+        }
+        for e in &self.entries {
+            let state = if e.open { "open" } else { "close" };
+            out.extend([
+                "sched-entry".to_string(),
+                state.to_string(),
+                Self::time_token(e.interval_ns.into()),
+            ]);
+            // Positional: a max-octets is the value after an ipv.
+            match (e.ipv, e.max_octets) {
+                (None, None) => {}
+                (Some(ipv), None) => out.push(ipv.to_string()),
+                (Some(ipv), Some(octets)) => out.extend([ipv.to_string(), octets.to_string()]),
+                (None, Some(_)) => {
+                    return Err(Error::not_supported(
+                        "gate: a sched-entry's max-octets without an ipv has no token".to_string(),
+                    ));
+                }
+            }
+        }
+        push_verdict(&mut out, "gate", self.action, action::TC_ACT_PIPE)?;
+        Ok(out)
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -3397,7 +3990,9 @@ impl CsumAction {
     /// One or more checksum-kind keywords, accumulated as flags:
     /// `iph` (IPv4 header), `icmp`, `igmp`, `tcp`, `udp`,
     /// `udplite`, `sctp`. Order is irrelevant; duplicates are a
-    /// no-op (bitmask OR).
+    /// no-op (bitmask OR). A verdict (`pass`, `drop`, `pipe`,
+    /// `reclassify`, `stolen`, `continue`) may be given; `pass` without
+    /// one.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut act = Self::new();
         for &t in params {
@@ -3409,15 +4004,27 @@ impl CsumAction {
                 "udp" => act.udp(),
                 "udplite" => act.udplite(),
                 "sctp" => act.sctp(),
+                v if is_verdict(v) => act.action(parse_gact_verdict(v)?),
                 other => {
                     return Err(Error::invalid_message(format!(
-                        "csum: unknown checksum kind `{other}` (recognised: iph/icmp/igmp/tcp/udp/udplite/sctp)"
+                        "csum: unknown checksum kind `{other}` (recognised: iph/icmp/igmp/tcp/udp/udplite/sctp, a verdict)"
                     )));
                 }
             };
         }
         Ok(act)
     }
+
+    /// Each checksum flag and the token `parse_params` reads for it.
+    const FLAG_TOKENS: [(u32, &'static str); 7] = [
+        (csum::TCA_CSUM_UPDATE_FLAG_IPV4HDR, "iph"),
+        (csum::TCA_CSUM_UPDATE_FLAG_ICMP, "icmp"),
+        (csum::TCA_CSUM_UPDATE_FLAG_IGMP, "igmp"),
+        (csum::TCA_CSUM_UPDATE_FLAG_TCP, "tcp"),
+        (csum::TCA_CSUM_UPDATE_FLAG_UDP, "udp"),
+        (csum::TCA_CSUM_UPDATE_FLAG_UDPLITE, "udplite"),
+        (csum::TCA_CSUM_UPDATE_FLAG_SCTP, "sctp"),
+    ];
 
     /// Build the action configuration.
     pub fn build(self) -> Self {
@@ -3434,6 +4041,24 @@ impl Default for CsumAction {
 impl ActionConfig for CsumAction {
     fn kind(&self) -> &'static str {
         "csum"
+    }
+
+    fn to_params(&self) -> Result<Vec<String>> {
+        let unknown = Self::FLAG_TOKENS
+            .iter()
+            .fold(self.update_flags, |flags, (flag, _)| flags & !flag);
+        if unknown != 0 {
+            return Err(Error::not_supported(format!(
+                "csum: update flags {unknown:#x} have no token"
+            )));
+        }
+        let mut out: Vec<String> = Self::FLAG_TOKENS
+            .iter()
+            .filter(|(flag, _)| self.update_flags & flag != 0)
+            .map(|(_, token)| token.to_string())
+            .collect();
+        push_verdict(&mut out, "csum", self.action, action::TC_ACT_OK)?;
+        Ok(out)
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -3513,14 +4138,21 @@ impl SampleAction {
     ///
     /// Optional:
     /// - `trunc <bytes>` — truncate sampled packets to N bytes.
+    /// - A verdict (`pass`, `drop`, `pipe`, `reclassify`, `stolen`,
+    ///   `continue`); `pipe` without one.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut rate: Option<u32> = None;
         let mut group: Option<u32> = None;
         let mut trunc: Option<u32> = None;
+        let mut verdict: Option<i32> = None;
         let mut i = 0;
         while i < params.len() {
             let key = params[i];
             match key {
+                v if is_verdict(v) => {
+                    verdict = Some(parse_gact_verdict(v)?);
+                    i += 1;
+                }
                 "rate" => {
                     let s = action_need_value(params, i, "sample", key)?;
                     rate = Some(action_parse_u32("sample", "rate", s)?);
@@ -3538,7 +4170,7 @@ impl SampleAction {
                 }
                 other => {
                     return Err(Error::invalid_message(format!(
-                        "sample: unknown token `{other}` (recognised: rate <N>, group <G>, trunc <bytes>)"
+                        "sample: unknown token `{other}` (recognised: rate <N>, group <G>, trunc <bytes>, a verdict)"
                     )));
                 }
             }
@@ -3550,6 +4182,9 @@ impl SampleAction {
         let mut act = Self::new(rate, group);
         if let Some(t) = trunc {
             act = act.trunc(t);
+        }
+        if let Some(v) = verdict {
+            act = act.action(v);
         }
         Ok(act)
     }
@@ -3563,6 +4198,17 @@ impl SampleAction {
 impl ActionConfig for SampleAction {
     fn kind(&self) -> &'static str {
         "sample"
+    }
+
+    fn to_params(&self) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        out.extend(kv("rate", self.rate));
+        out.extend(kv("group", self.group));
+        if let Some(trunc) = self.trunc_size {
+            out.extend(kv("trunc", trunc));
+        }
+        push_verdict(&mut out, "sample", self.action, action::TC_ACT_PIPE)?;
+        Ok(out)
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -3811,10 +4457,19 @@ impl CtAction {
     /// - `mark <m> <mask>` — mark + mask (two values; mask
     ///   defaults to `0xffffffff` if omitted via the typed
     ///   builder, but `parse_params` requires both for clarity).
+    /// - `label <hex>[/<hex>]` — the 128-bit conntrack label and its
+    ///   mask as tc(8) writes them: up to 32 hex digits each, first byte
+    ///   first, the rest zero; the mask is all ones without one.
     /// - `nat src <addr>` / `nat dst <addr>` — single-address
-    ///   SNAT / DNAT.
-    /// - `nat src <min>-<max>` / `nat dst <min>-<max>` — IPv4
-    ///   address-range NAT.
+    ///   SNAT / DNAT, IPv4 or IPv6.
+    /// - `nat src <min>-<max>` / `nat dst <min>-<max>` — address-range
+    ///   NAT, both ends of one family.
+    /// - `port <port>[-<port>]` — the NAT port range.
+    /// - `helper <family>-<proto>-<name>` — a conntrack helper, as tc(8)
+    ///   writes one (`ipv4-tcp-ftp`); the family is `ipv4`, `ipv6` or a
+    ///   number, the protocol `tcp`, `udp` or a number.
+    /// - A verdict (`pass`, `drop`, `pipe`, `reclassify`, `stolen`,
+    ///   `continue`); `pipe` without one.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         // First pass: pick the entry-point constructor (commit /
         // clear / restore-default).
@@ -3834,6 +4489,10 @@ impl CtAction {
             let key = params[i];
             match key {
                 "commit" | "clear" => i += 1, // already consumed above
+                v if is_verdict(v) => {
+                    act = act.action(parse_gact_verdict(v)?);
+                    i += 1;
+                }
                 "force" => {
                     act = act.force();
                     i += 1;
@@ -3872,21 +4531,85 @@ impl CtAction {
                             "ct: `nat {dir}` requires an address or `<min>-<max>` range"
                         ))
                     })?;
-                    let (min, max) = parse_ipv4_range_or_single(range_s)?;
-                    act = match dir {
-                        "src" => act.nat_src(min, max),
-                        "dst" => act.nat_dst(min, max),
+                    let src = match dir {
+                        "src" => true,
+                        "dst" => false,
                         other => {
                             return Err(Error::invalid_message(format!(
                                 "ct: `nat` direction must be `src` or `dst` (got `{other}`)"
                             )));
                         }
                     };
+                    act = match parse_ip_range_or_single(range_s)? {
+                        (IpAddr::V4(min), IpAddr::V4(max)) if src => act.nat_src(min, max),
+                        (IpAddr::V4(min), IpAddr::V4(max)) => act.nat_dst(min, max),
+                        (IpAddr::V6(min), IpAddr::V6(max)) if src => act.nat_src6(min, max),
+                        (IpAddr::V6(min), IpAddr::V6(max)) => act.nat_dst6(min, max),
+                        _ => {
+                            return Err(Error::invalid_message(format!(
+                                "ct: NAT range `{range_s}` mixes IPv4 and IPv6"
+                            )));
+                        }
+                    };
                     i += 3;
+                }
+                "port" => {
+                    let s = action_need_value(params, i, "ct", key)?;
+                    let (min_s, max_s) = s.split_once('-').unwrap_or((s, s));
+                    let port = |p: &str| {
+                        p.parse::<u16>().map_err(|_| {
+                            Error::invalid_message(format!(
+                                "ct: invalid NAT port `{p}` (expected 0–65535)"
+                            ))
+                        })
+                    };
+                    act = act.nat_port_range(port(min_s)?, port(max_s)?);
+                    i += 2;
+                }
+                "label" => {
+                    let s = action_need_value(params, i, "ct", key)?;
+                    let (label, mask) = match s.split_once('/') {
+                        Some((label, mask)) => {
+                            (ct_label("label", label)?, ct_label("label mask", mask)?)
+                        }
+                        None => (ct_label("label", s)?, [0xff; 16]),
+                    };
+                    act = act.labels(label, mask);
+                    i += 2;
+                }
+                "helper" => {
+                    let s = action_need_value(params, i, "ct", key)?;
+                    let invalid = || {
+                        Error::invalid_message(format!(
+                            "ct: invalid helper `{s}` (expected <family>-<proto>-<name>, such \
+                             as ipv4-tcp-ftp)"
+                        ))
+                    };
+                    let mut parts = s.splitn(3, '-');
+                    let (Some(family), Some(proto), Some(name)) =
+                        (parts.next(), parts.next(), parts.next())
+                    else {
+                        return Err(invalid());
+                    };
+                    let family = match family {
+                        "ipv4" => libc::AF_INET as u8,
+                        "ipv6" => libc::AF_INET6 as u8,
+                        n => n.parse::<u8>().map_err(|_| invalid())?,
+                    };
+                    let proto = match proto {
+                        "tcp" => libc::IPPROTO_TCP as u8,
+                        "udp" => libc::IPPROTO_UDP as u8,
+                        n => n.parse::<u8>().map_err(|_| invalid())?,
+                    };
+                    if name.is_empty() {
+                        return Err(invalid());
+                    }
+                    act = act.helper(name, family, proto);
+                    i += 2;
                 }
                 other => {
                     return Err(Error::invalid_message(format!(
-                        "ct: unknown token `{other}` (recognised: commit, clear, force, zone, mark <v> <m>, nat src|dst <addr>|<min>-<max>)"
+                        "ct: unknown token `{other}` (recognised: commit, clear, force, zone, mark <v> <m>, label <hex>[/<hex>], nat src|dst <addr>|<min>-<max>, port <p>[-<p>], helper <family>-<proto>-<name>, a verdict)"
                     )));
                 }
             }
@@ -3903,6 +4626,111 @@ impl CtAction {
 impl ActionConfig for CtAction {
     fn kind(&self) -> &'static str {
         "ct"
+    }
+
+    fn to_params(&self) -> Result<Vec<String>> {
+        use ct::{
+            TCA_CT_ACT_CLEAR as CLEAR, TCA_CT_ACT_COMMIT as COMMIT, TCA_CT_ACT_FORCE as FORCE,
+            TCA_CT_ACT_NAT as NAT, TCA_CT_ACT_NAT_DST as NAT_DST, TCA_CT_ACT_NAT_SRC as NAT_SRC,
+        };
+        let flags = self.ct_action;
+        let no_token = |what: &str| Error::not_supported(format!("ct: {what} has no token"));
+        if flags & !(COMMIT | FORCE | CLEAR | NAT | NAT_SRC | NAT_DST) != 0
+            || flags & (COMMIT | CLEAR) == COMMIT | CLEAR
+        {
+            return Err(no_token(&format!("action flags {flags:#x}")));
+        }
+        let mut out = Vec::new();
+        for (flag, token) in [(COMMIT, "commit"), (CLEAR, "clear"), (FORCE, "force")] {
+            if flags & flag != 0 {
+                out.push(token.to_string());
+            }
+        }
+        if let Some(zone) = self.zone {
+            out.extend(kv("zone", zone));
+        }
+        match (self.mark, self.mark_mask) {
+            (Some(mark), Some(mask)) => {
+                out.extend(["mark".to_string(), mark.to_string(), mask.to_string()]);
+            }
+            (None, None) => {}
+            _ => return Err(no_token("a mark without its mask")),
+        }
+        match (&self.labels, &self.labels_mask) {
+            (Some(label), Some(mask)) => out.extend(kv(
+                "label",
+                format!("{}/{}", ct_label_token(label), ct_label_token(mask)),
+            )),
+            (None, None) => {}
+            _ => return Err(no_token("a label without its mask")),
+        }
+
+        // NAT: `nat <dir> <range>` for each direction and family set. Each
+        // sets its direction's flag and its family's range, so together
+        // they give back these flags and ranges.
+        fn range<A: std::fmt::Display + PartialEq>(
+            min: Option<A>,
+            max: Option<A>,
+        ) -> Result<Option<String>> {
+            match (min, max) {
+                (Some(min), Some(max)) if min == max => Ok(Some(min.to_string())),
+                (Some(min), Some(max)) => Ok(Some(format!("{min}-{max}"))),
+                (None, None) => Ok(None),
+                _ => Err(Error::not_supported(
+                    "ct: one end of a NAT range has no token".to_string(),
+                )),
+            }
+        }
+        let ranges: Vec<String> = [
+            range(self.nat_ipv4_min, self.nat_ipv4_max)?,
+            range(self.nat_ipv6_min, self.nat_ipv6_max)?,
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let dirs: Vec<&str> = [(NAT_SRC, "src"), (NAT_DST, "dst")]
+            .into_iter()
+            .filter(|(flag, _)| flags & flag != 0)
+            .map(|(_, dir)| dir)
+            .collect();
+        if flags & NAT != 0 || !dirs.is_empty() || !ranges.is_empty() {
+            if flags & NAT == 0 || dirs.is_empty() || ranges.is_empty() {
+                return Err(no_token("NAT without a direction and an address"));
+            }
+            for dir in &dirs {
+                for range in &ranges {
+                    out.extend(["nat".to_string(), dir.to_string(), range.clone()]);
+                }
+            }
+        }
+        if let Some(ports) = range(self.nat_port_min, self.nat_port_max)? {
+            out.extend(kv("port", ports));
+        }
+
+        match (&self.helper_name, self.helper_family, self.helper_proto) {
+            (Some(name), Some(family), Some(proto)) => {
+                if name.is_empty() {
+                    return Err(Error::invalid_message(
+                        "ct: a helper needs a name".to_string(),
+                    ));
+                }
+                let family = match family {
+                    f if f == libc::AF_INET as u8 => "ipv4".to_string(),
+                    f if f == libc::AF_INET6 as u8 => "ipv6".to_string(),
+                    f => f.to_string(),
+                };
+                let proto = match proto {
+                    p if p == libc::IPPROTO_TCP as u8 => "tcp".to_string(),
+                    p if p == libc::IPPROTO_UDP as u8 => "udp".to_string(),
+                    p => p.to_string(),
+                };
+                out.extend(kv("helper", format!("{family}-{proto}-{name}")));
+            }
+            (None, None, None) => {}
+            _ => return Err(no_token("a partial helper")),
+        }
+        push_verdict(&mut out, "ct", self.action, action::TC_ACT_PIPE)?;
+        Ok(out)
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -4026,7 +4854,7 @@ pub struct PeditAction {
 }
 
 /// A single packet edit key.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct PeditKey {
     /// Header type.
     htype: u16,
@@ -4392,6 +5220,68 @@ impl PeditAction {
         Ok((a, idx))
     }
 
+    /// The `munge` spec (the tokens after `munge`) for the edit at the
+    /// front of `keys`, and how many keys it stands for: a field when its
+    /// setter writes exactly these keys, else a raw `offset` edit.
+    fn munge_tokens(keys: &[PeditKey]) -> Result<(Vec<String>, usize)> {
+        use crate::util::addr::format_mac;
+        let key = &keys[0];
+        let addr = Ipv4Addr::from(key.val);
+        let (hi8, hi16, lo16) = ((key.val >> 24) as u8, (key.val >> 16) as u16, key.val as u16);
+        let tos = (key.val >> 16) as u8;
+        let mut fields = vec![
+            ("ip", "src", addr.to_string(), Self::new().set_ipv4_src(addr)),
+            ("ip", "dst", addr.to_string(), Self::new().set_ipv4_dst(addr)),
+            ("ip", "ttl", hi8.to_string(), Self::new().set_ipv4_ttl(hi8)),
+            ("ip", "tos", tos.to_string(), Self::new().set_ipv4_tos(tos)),
+            ("tcp", "sport", hi16.to_string(), Self::new().set_tcp_sport(hi16)),
+            ("tcp", "dport", lo16.to_string(), Self::new().set_tcp_dport(lo16)),
+            ("udp", "sport", hi16.to_string(), Self::new().set_udp_sport(hi16)),
+            ("udp", "dport", lo16.to_string(), Self::new().set_udp_dport(lo16)),
+        ];
+        // A MAC is two keys: four bytes, then two in the next word's top.
+        if let Some(next) = keys.get(1) {
+            let (a, b) = (key.val.to_be_bytes(), next.val.to_be_bytes());
+            let mac = [a[0], a[1], a[2], a[3], b[0], b[1]];
+            fields.push(("eth", "src", format_mac(&mac), Self::new().set_eth_src(mac)));
+            fields.push(("eth", "dst", format_mac(&mac), Self::new().set_eth_dst(mac)));
+        }
+        for (layer, field, value, edit) in fields {
+            if keys.starts_with(&edit.keys) {
+                let tokens = vec![layer.to_string(), field.to_string(), "set".to_string(), value];
+                return Ok((tokens, edit.keys.len()));
+            }
+        }
+
+        // `munge offset` edits the network header; another header type is
+        // a field above or nothing the grammar can say.
+        if key.htype != pedit::TCA_PEDIT_KEY_EX_HDR_TYPE_NETWORK {
+            return Err(Error::not_supported(format!(
+                "pedit: a raw edit at offset {} of header type {} has no token",
+                key.off, key.htype
+            )));
+        }
+        let op = match key.cmd {
+            pedit::TCA_PEDIT_KEY_EX_CMD_SET => "set",
+            pedit::TCA_PEDIT_KEY_EX_CMD_ADD => "add",
+            other => {
+                return Err(Error::not_supported(format!(
+                    "pedit: edit command {other} has no token"
+                )));
+            }
+        };
+        let mut tokens = vec![
+            "offset".to_string(),
+            key.off.to_string(),
+            op.to_string(),
+            format!("{:#x}", key.val),
+        ];
+        if key.mask != 0 {
+            tokens.extend(kv("retain", format!("{:#x}", key.mask)));
+        }
+        Ok((tokens, 1))
+    }
+
     /// Build the action configuration.
     pub fn build(self) -> Self {
         self
@@ -4401,6 +5291,24 @@ impl PeditAction {
 impl ActionConfig for PeditAction {
     fn kind(&self) -> &'static str {
         "pedit"
+    }
+
+    fn to_params(&self) -> Result<Vec<String>> {
+        if self.keys.is_empty() {
+            return Err(Error::invalid_message(
+                "pedit: requires at least one `munge <field> set <value>` spec".to_string(),
+            ));
+        }
+        let mut out = Vec::new();
+        let mut keys = &self.keys[..];
+        while !keys.is_empty() {
+            let (tokens, used) = Self::munge_tokens(keys)?;
+            out.push("munge".to_string());
+            out.extend(tokens);
+            keys = &keys[used..];
+        }
+        push_verdict(&mut out, "pedit", self.action, action::TC_ACT_PIPE)?;
+        Ok(out)
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -4493,6 +5401,13 @@ pub trait ActionConfigDyn: Send + Sync + std::fmt::Debug {
         let _ = ifindexes;
         Ok(())
     }
+    /// [`ActionConfig::to_params`].
+    fn to_params(&self) -> Result<Vec<String>> {
+        Err(Error::not_supported(format!(
+            "{}: the action has no token form",
+            self.kind()
+        )))
+    }
 }
 
 impl<T: ActionConfig + Clone + std::fmt::Debug + 'static> ActionConfigDyn for T {
@@ -4510,6 +5425,10 @@ impl<T: ActionConfig + Clone + std::fmt::Debug + 'static> ActionConfigDyn for T 
 
     fn resolve_devices(&mut self, ifindexes: &HashMap<String, u32>) -> Result<()> {
         ActionConfig::resolve_devices(self, ifindexes)
+    }
+
+    fn to_params(&self) -> Result<Vec<String>> {
+        ActionConfig::to_params(self)
     }
 
     fn clone_box(&self) -> Box<dyn ActionConfigDyn> {
@@ -4535,6 +5454,13 @@ impl ActionList {
         self
     }
 
+    /// Add an action already boxed: one read from a document (#645).
+    #[cfg_attr(not(feature = "serde"), allow(dead_code))]
+    pub(crate) fn with_boxed(mut self, action: Box<dyn ActionConfigDyn>) -> Self {
+        self.actions.push(action);
+        self
+    }
+
     /// Check if the list is empty.
     pub fn is_empty(&self) -> bool {
         self.actions.is_empty()
@@ -4543,6 +5469,15 @@ impl ActionList {
     /// Get the number of actions.
     pub fn len(&self) -> usize {
         self.actions.len()
+    }
+
+    /// Each action as its kind and [`ActionConfig::to_params`] tokens.
+    #[cfg_attr(not(feature = "serde"), allow(dead_code))]
+    pub(crate) fn to_params(&self) -> Result<Vec<(&'static str, Vec<String>)>> {
+        self.actions
+            .iter()
+            .map(|a| Ok((a.kind(), a.to_params()?)))
+            .collect()
     }
 
     /// The devices its actions name rather than index (#645).
@@ -4583,6 +5518,68 @@ impl ActionList {
     pub fn build(self) -> Self {
         self
     }
+}
+
+/// The kinds [`action_from_params`] reads: every action with a
+/// [`ActionConfig::to_params`] writer.
+const PARAMS_KINDS: [&str; 19] = [
+    "gact",
+    "mirred",
+    "police",
+    "vlan",
+    "mpls",
+    "skbmod",
+    "skbedit",
+    "nat",
+    "tunnel_key",
+    "connmark",
+    "ctinfo",
+    "ife",
+    "gate",
+    "csum",
+    "sample",
+    "ct",
+    "pedit",
+    "bpf",
+    "simple",
+];
+
+/// An action read from its kind and [`ActionConfig::to_params`] tokens:
+/// the kinds that have a token form (#645).
+#[cfg_attr(not(feature = "serde"), allow(dead_code))]
+pub(crate) fn action_from_params(kind: &str, params: &[&str]) -> Result<Box<dyn ActionConfigDyn>> {
+    fn boxed<A: ActionConfig + Clone + std::fmt::Debug + 'static>(
+        action: A,
+    ) -> Box<dyn ActionConfigDyn> {
+        Box::new(action)
+    }
+    Ok(match kind {
+        "gact" => boxed(GactAction::parse_params(params)?),
+        "mirred" => boxed(MirredAction::parse_params(params)?),
+        "police" => boxed(PoliceAction::parse_params(params)?),
+        "vlan" => boxed(VlanAction::parse_params(params)?),
+        "mpls" => boxed(MplsAction::parse_params(params)?),
+        "skbmod" => boxed(SkbmodAction::parse_params(params)?),
+        "skbedit" => boxed(SkbeditAction::parse_params(params)?),
+        "nat" => boxed(NatAction::parse_params(params)?),
+        "tunnel_key" => boxed(TunnelKeyAction::parse_params(params)?),
+        "connmark" => boxed(ConnmarkAction::parse_params(params)?),
+        "ctinfo" => boxed(CtinfoAction::parse_params(params)?),
+        "ife" => boxed(IfeAction::parse_params(params)?),
+        "gate" => boxed(GateAction::parse_params(params)?),
+        "csum" => boxed(CsumAction::parse_params(params)?),
+        "sample" => boxed(SampleAction::parse_params(params)?),
+        "ct" => boxed(CtAction::parse_params(params)?),
+        "pedit" => boxed(PeditAction::parse_params(params)?),
+        "bpf" => boxed(BpfAction::parse_params(params)?),
+        "simple" => boxed(SimpleAction::parse_params(params)?),
+        other => {
+            return Err(Error::invalid_message(format!(
+                "action `{other}` has no document form (kinds: {})",
+                PARAMS_KINDS.join(", ")
+            )));
+        }
+    })
 }
 
 // ============================================================================
@@ -4629,6 +5626,9 @@ impl ActionList {
 pub struct BpfAction {
     /// BPF program file descriptor.
     fd: super::bpf_fd::ProgFd,
+    /// The pin `fd` was opened from ([`from_pinned`](Self::from_pinned)),
+    /// which is how the action is written as tokens (#645).
+    pinned: Option<std::path::PathBuf>,
     /// Optional human-readable program name.
     name: Option<String>,
     /// Verdict for this action (TC_ACT_*).
@@ -4656,6 +5656,7 @@ impl BpfAction {
     fn with_fd(fd: super::bpf_fd::ProgFd) -> Self {
         Self {
             fd,
+            pinned: None,
             name: None,
             action: action::TC_ACT_PIPE,
         }
@@ -4666,9 +5667,14 @@ impl BpfAction {
     /// The program must be pinned via `bpf_obj_pin()` or
     /// `bpftool prog pin id <id> /sys/fs/bpf/<name>`. It is opened with
     /// `bpf(BPF_OBJ_GET)` — bpffs refuses `open(2)` on a pin (#710) — and
-    /// the fd is closed with the last clone of the action.
+    /// the fd is closed with the last clone of the action. The path is
+    /// kept: it is what [`ActionConfig::to_params`] writes.
     pub fn from_pinned(path: impl AsRef<std::path::Path>) -> Result<Self> {
-        Ok(Self::with_fd(super::bpf_fd::ProgFd::open_pinned(path.as_ref())?))
+        let path = path.as_ref();
+        Ok(Self {
+            pinned: Some(path.to_path_buf()),
+            ..Self::with_fd(super::bpf_fd::ProgFd::open_pinned(path)?)
+        })
     }
 
     /// Set the program's human-readable name.
@@ -4793,6 +5799,33 @@ impl BpfAction {
 impl ActionConfig for BpfAction {
     fn kind(&self) -> &'static str {
         "bpf"
+    }
+
+    /// `pinned <path>`, for a program opened from its pin. A program
+    /// given by file descriptor has no token form: a descriptor names
+    /// nothing outside the process that holds it.
+    fn to_params(&self) -> Result<Vec<String>> {
+        let Some(path) = &self.pinned else {
+            return Err(Error::not_supported(
+                "bpf: a program given by file descriptor has no token (one opened with \
+                 `from_pinned` is written as its path)"
+                    .to_string(),
+            ));
+        };
+        let path = path.to_str().ok_or_else(|| {
+            Error::not_supported(format!(
+                "bpf: the pinned path `{}` is not UTF-8",
+                path.display()
+            ))
+        })?;
+        let mut out = kv("pinned", path).to_vec();
+        if let Some(name) = &self.name {
+            out.extend(kv("name", name));
+        }
+        if self.action != action::TC_ACT_PIPE {
+            out.extend(kv("verdict", verdict_param("bpf", self.action)?));
+        }
+        Ok(out)
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -4940,6 +5973,14 @@ impl SimpleAction {
 impl ActionConfig for SimpleAction {
     fn kind(&self) -> &'static str {
         "simple"
+    }
+
+    fn to_params(&self) -> Result<Vec<String>> {
+        let mut out = kv("sdata", &self.sdata).to_vec();
+        if self.action != action::TC_ACT_PIPE {
+            out.extend(kv("verdict", verdict_param("simple", self.action)?));
+        }
+        Ok(out)
     }
 
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
@@ -5187,24 +6228,55 @@ fn parse_ethertype(kind: &str, s: &str) -> Result<u16> {
         })
 }
 
-/// Parse an IPv4 address or `<min>-<max>` range. Single addresses
+/// Parse an IP address or `<min>-<max>` range. Single addresses
 /// expand to `(addr, addr)` so callers can always pass a pair to
 /// the typed builder. Used by `CtAction::parse_params`.
-fn parse_ipv4_range_or_single(s: &str) -> Result<(Ipv4Addr, Ipv4Addr)> {
+fn parse_ip_range_or_single(s: &str) -> Result<(IpAddr, IpAddr)> {
     if let Some((min_s, max_s)) = s.split_once('-') {
-        let min: Ipv4Addr = min_s.parse().map_err(|_| {
+        let min: IpAddr = min_s.parse().map_err(|_| {
             Error::invalid_message(format!("ct: invalid min address `{min_s}` in range"))
         })?;
-        let max: Ipv4Addr = max_s.parse().map_err(|_| {
+        let max: IpAddr = max_s.parse().map_err(|_| {
             Error::invalid_message(format!("ct: invalid max address `{max_s}` in range"))
         })?;
         Ok((min, max))
     } else {
-        let addr: Ipv4Addr = s
+        let addr: IpAddr = s
             .parse()
             .map_err(|_| Error::invalid_message(format!("ct: invalid address `{s}`")))?;
         Ok((addr, addr))
     }
+}
+
+/// A ct label or its mask as tc(8) writes one: up to 32 hex digits, an
+/// even number of them, first byte first; the bytes it does not give are
+/// zero.
+fn ct_label(what: &str, s: &str) -> Result<[u8; 16]> {
+    let invalid = || {
+        Error::invalid_message(format!(
+            "ct: invalid {what} `{s}` (expected up to 32 hex digits, an even number)"
+        ))
+    };
+    if s.is_empty()
+        || s.len() > 32
+        || !s.len().is_multiple_of(2)
+        || !s.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Err(invalid());
+    }
+    let mut out = [0u8; 16];
+    for (byte, i) in out.iter_mut().zip((0..s.len()).step_by(2)) {
+        *byte = s
+            .get(i..i + 2)
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+            .ok_or_else(invalid)?;
+    }
+    Ok(out)
+}
+
+/// A ct label as [`ct_label`] reads it back: all 32 hex digits.
+fn ct_label_token(label: &[u8; 16]) -> String {
+    label.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Parse a pedit integer value — decimal or `0x`-prefixed hex.
@@ -7067,5 +8139,618 @@ mod tests {
     fn pedit_parse_rejects_unknown_leading_token() {
         let err = PeditAction::parse_params(&["frobnicate"]).unwrap_err();
         assert!(err.to_string().contains("unexpected token"), "{err}");
+    }
+}
+
+/// `to_params` is `parse_params`' inverse (#645): the tokens an action
+/// writes parse back to one that writes the same request, and the same
+/// tokens.
+#[cfg(test)]
+mod params_tests {
+    use super::*;
+    use crate::netlink::parse_params::ParseParams;
+
+    fn bytes(a: &dyn ActionConfigDyn) -> Vec<u8> {
+        let mut b = MessageBuilder::new(0, 0);
+        let start = b.len();
+        a.write_options(&mut b).unwrap_or_else(|e| panic!("{a:?}: {e}"));
+        b.as_bytes()[start..].to_vec()
+    }
+
+    /// The tokens `a` writes; that they read back as `a` is asserted.
+    fn round_trips<A>(a: A) -> Vec<String>
+    where
+        A: ActionConfig + ParseParams + Clone + std::fmt::Debug + 'static,
+    {
+        let tokens = ActionConfig::to_params(&a).unwrap_or_else(|e| panic!("{a:?}: {e}"));
+        let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+        let back = A::parse_params(&refs).unwrap_or_else(|e| panic!("{tokens:?}: {e}"));
+        assert_eq!(ActionConfig::to_params(&back).unwrap(), tokens, "{a:?}");
+        // A name stands for the same index on both sides.
+        let names: HashMap<String, u32> = ActionConfig::device_names(&a)
+            .into_iter()
+            .zip(1..)
+            .map(|(n, i)| (n.to_string(), i))
+            .collect();
+        let (mut a, mut back) = (a, back);
+        ActionConfig::resolve_devices(&mut a, &names).unwrap();
+        ActionConfig::resolve_devices(&mut back, &names).unwrap();
+        assert_eq!(bytes(&back), bytes(&a), "{tokens:?}");
+        tokens
+    }
+
+    #[test]
+    fn gact_round_trips() {
+        assert_eq!(round_trips(GactAction::drop()), ["drop"]);
+        for a in [
+            GactAction::pass(),
+            GactAction::pipe(),
+            GactAction::reclassify(),
+            GactAction::stolen(),
+            GactAction::new(action::TC_ACT_UNSPEC),
+            GactAction::goto_chain(7),
+            GactAction::pass().random_drop(25),
+            GactAction::pass().random(100, action::TC_ACT_PIPE),
+            GactAction::drop().deterministic(10, action::TC_ACT_OK),
+        ] {
+            round_trips(a);
+        }
+        assert_eq!(
+            round_trips(GactAction::pass().random_drop(25)),
+            ["pass", "random", "netrand", "drop", "25"]
+        );
+        // A probability no percentage scales to has no token.
+        let mut odd = GactAction::pass().random_drop(25);
+        odd.prob_val += 1;
+        assert!(ActionConfig::to_params(&odd).is_err());
+        assert!(ActionConfig::to_params(&GactAction::new(action::TC_ACT_TRAP)).is_err());
+    }
+
+    /// A goto is its opcode, not one bit of it: `continue` (-1) has every
+    /// bit, and was read as a goto to chain 16777215. Chains take 28 bits.
+    #[test]
+    fn a_goto_is_its_opcode() {
+        use crate::netlink::types::tc::action::{is_goto_chain, tc_act_chain, tc_act_goto_chain};
+        assert!(!is_goto_chain(action::TC_ACT_UNSPEC));
+        assert!(!is_goto_chain(action::TC_ACT_JUMP | 1));
+        assert!(is_goto_chain(tc_act_goto_chain(7)));
+        assert_eq!(tc_act_chain(tc_act_goto_chain(1 << 24)), 1 << 24);
+    }
+
+    #[test]
+    fn mirred_round_trips() {
+        assert_eq!(
+            round_trips(MirredAction::redirect_to_egress(0).to_dev("ifb0")),
+            ["egress", "redirect", "dev", "ifb0"]
+        );
+        assert_eq!(
+            round_trips(MirredAction::mirror_to_ingress(7)),
+            ["ingress", "mirror", "ifindex", "7"]
+        );
+        round_trips(MirredAction::redirect_to_ingress(3).to_dev("veth1"));
+        // A verdict other than the constructor's is written.
+        assert_eq!(
+            round_trips(MirredAction::mirror_to_egress(0).to_dev("d0").action(action::TC_ACT_SHOT)),
+            ["egress", "mirror", "dev", "d0", "drop"]
+        );
+        round_trips(MirredAction::redirect_to_egress(5).pipe());
+    }
+
+    /// An action kind without a token form says so.
+    #[test]
+    fn a_kind_without_tokens_says_so() {
+        #[derive(Debug, Clone)]
+        struct Opaque;
+        impl ActionConfig for Opaque {
+            fn kind(&self) -> &'static str {
+                "opaque"
+            }
+            fn write_options(&self, _: &mut MessageBuilder) -> Result<()> {
+                Ok(())
+            }
+        }
+        let err = ActionList::new().with(Opaque).to_params().unwrap_err();
+        assert!(err.to_string().contains("opaque: the action has no token form"), "{err}");
+    }
+
+    #[test]
+    fn police_round_trips() {
+        use crate::util::{Bytes, Rate};
+        let p = || PoliceAction::new().rate(Rate::mbit(8)).burst(Bytes::kib(32));
+        assert_eq!(round_trips(p()), ["rate", "8mbit", "burst", "32kib"]);
+        for a in [
+            PoliceAction::new(),
+            p().peakrate(Rate::mbit(16)).mtu(Bytes::new(9000)),
+            p().avrate(Rate::kbit(500)),
+            // Past u32 bytes/s: the 64-bit rate attributes.
+            p().rate(Rate::gbit(100)).peakrate(Rate::gbit(400)),
+            p().rate(Rate::bytes_per_sec(12_345)).burst(Bytes::new(1500)),
+            p().conform(action::TC_ACT_UNSPEC).exceed(action::TC_ACT_STOLEN),
+        ] {
+            round_trips(a);
+        }
+        // `conform` and `exceed` each by name, never as tc(8)'s
+        // exceed-first `conform-exceed` pair.
+        assert_eq!(
+            round_trips(p().conform_pipe().exceed_reclassify()),
+            ["rate", "8mbit", "burst", "32kib", "conform", "pipe", "exceed", "reclassify"]
+        );
+        assert!(ActionConfig::to_params(&p().exceed(action::tc_act_goto_chain(1))).is_err());
+    }
+
+    #[test]
+    fn vlan_round_trips() {
+        assert_eq!(
+            round_trips(VlanAction::push(100).priority(3).qinq()),
+            ["push", "100", "priority", "3", "protocol", "802.1ad"]
+        );
+        for a in [
+            VlanAction::pop(),
+            VlanAction::pop().qinq(),
+            VlanAction::modify(4095),
+            VlanAction::push(0).action(action::TC_ACT_OK),
+            VlanAction::modify(7).priority(0).action(action::TC_ACT_UNSPEC),
+        ] {
+            round_trips(a);
+        }
+        assert_eq!(round_trips(VlanAction::pop().action(action::TC_ACT_SHOT)), ["pop", "drop"]);
+        // What `parse_params` refuses, the writer does too.
+        assert!(ActionConfig::to_params(&VlanAction::push(5000)).is_err());
+        assert!(ActionConfig::to_params(&VlanAction::pop().priority(8)).is_err());
+        let goto = VlanAction::pop().action(action::tc_act_goto_chain(2));
+        assert!(ActionConfig::to_params(&goto).is_err());
+    }
+
+    #[test]
+    fn mpls_round_trips() {
+        assert_eq!(
+            round_trips(MplsAction::push(100).tc(3).ttl(64).bos(1).protocol(0x8847)),
+            ["push", "label", "100", "tc", "3", "ttl", "64", "bos", "1", "protocol", "mpls_uc"]
+        );
+        for a in [
+            MplsAction::pop(0x0800),
+            MplsAction::pop(0x1234),
+            MplsAction::modify().label(0xF_FFFF),
+            MplsAction::dec_ttl(),
+            MplsAction::dec_ttl().action(action::TC_ACT_SHOT),
+        ] {
+            round_trips(a);
+        }
+        assert!(ActionConfig::to_params(&MplsAction::push(0x10_0000)).is_err());
+        assert!(ActionConfig::to_params(&MplsAction::modify().tc(8)).is_err());
+        assert!(ActionConfig::to_params(&MplsAction::modify().bos(2)).is_err());
+    }
+
+    #[test]
+    fn skbmod_round_trips() {
+        let mac = [0x02, 0, 0, 0, 0, 0x01];
+        assert_eq!(
+            round_trips(SkbmodAction::new().set_dmac(mac)),
+            ["set", "dmac", "02:00:00:00:00:01"]
+        );
+        for a in [
+            SkbmodAction::new().set_smac(mac).set_etype(0x88b5),
+            SkbmodAction::new().set_etype(0x0800).swap_mac(),
+            SkbmodAction::new().swap_mac().action(action::TC_ACT_OK),
+        ] {
+            round_trips(a);
+        }
+        // Nothing to do is not an action the grammar can say.
+        assert!(ActionConfig::to_params(&SkbmodAction::new()).is_err());
+    }
+
+    #[test]
+    fn skbedit_round_trips() {
+        assert_eq!(round_trips(SkbeditAction::new().priority(7)), ["priority", "7"]);
+        for a in [
+            SkbeditAction::new(),
+            SkbeditAction::new().mark(100),
+            SkbeditAction::new().mark_with_mask(0x10, 0xff).queue_mapping(3),
+            SkbeditAction::new().priority(0x1_0010).action(action::TC_ACT_OK),
+        ] {
+            round_trips(a);
+        }
+        assert_eq!(
+            round_trips(SkbeditAction::new().mark_with_mask(1, 255).action(action::TC_ACT_SHOT)),
+            ["mark", "1", "mask", "255", "drop"]
+        );
+    }
+
+    #[test]
+    fn nat_round_trips() {
+        let (net, to) = (Ipv4Addr::new(10, 0, 0, 0), Ipv4Addr::new(192, 168, 1, 1));
+        assert_eq!(
+            round_trips(NatAction::snat(net, to).prefix(8)),
+            ["egress", "10.0.0.0/8", "192.168.1.1"]
+        );
+        for a in [
+            NatAction::dnat(to, net),
+            NatAction::snat(net, to).prefix(0),
+            NatAction::dnat(to, net).action(action::TC_ACT_UNSPEC),
+        ] {
+            round_trips(a);
+        }
+        assert_eq!(
+            round_trips(NatAction::dnat(to, net).pipe()),
+            ["ingress", "192.168.1.1", "10.0.0.0", "pipe"]
+        );
+        // A verdict, and nothing else, may follow the addresses.
+        let tokens = ["egress", "10.0.0.1", "10.0.0.2", "pipe", "drop"];
+        assert!(NatAction::parse_params(&tokens).is_err());
+        assert!(NatAction::parse_params(&tokens[..4]).is_ok());
+        assert!(NatAction::parse_params(&["egress", "10.0.0.1", "10.0.0.2", "wat"]).is_err());
+    }
+
+    #[test]
+    fn tunnel_key_round_trips() {
+        let v6: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+        assert_eq!(
+            round_trips(
+                TunnelKeyAction::set()
+                    .src(Ipv4Addr::new(192, 168, 1, 1))
+                    .dst(Ipv4Addr::new(192, 168, 1, 2))
+                    .key_id(100)
+                    .dst_port(4789)
+            ),
+            ["set", "src", "192.168.1.1", "dst", "192.168.1.2", "id", "100", "dst_port", "4789"]
+        );
+        for a in [
+            TunnelKeyAction::release(),
+            TunnelKeyAction::set(),
+            TunnelKeyAction::set().src6(v6).dst6(v6).tos(4).ttl(64).no_csum().no_frag(),
+            TunnelKeyAction::release().action(action::TC_ACT_SHOT),
+        ] {
+            round_trips(a);
+        }
+        // A release sends no metadata, and its grammar takes none.
+        assert!(ActionConfig::to_params(&TunnelKeyAction::release().key_id(1)).is_err());
+    }
+
+    #[test]
+    fn connmark_round_trips() {
+        assert_eq!(round_trips(ConnmarkAction::with_zone(1)), ["zone", "1"]);
+        assert!(round_trips(ConnmarkAction::new()).is_empty());
+        assert_eq!(round_trips(ConnmarkAction::new().action(action::TC_ACT_OK)), ["pass"]);
+    }
+
+    #[test]
+    fn ctinfo_round_trips() {
+        assert_eq!(
+            round_trips(CtinfoAction::new().dscp(0xfc, 0x1).cpmark(0xffff_ffff).zone(2)),
+            ["dscp", "0xfc/0x1", "cpmark", "0xffffffff", "zone", "2"]
+        );
+        for a in [
+            CtinfoAction::new().cpmark(0xff),
+            CtinfoAction::new().dscp(0xfc, 0),
+            CtinfoAction::new().cpmark(1).action(action::TC_ACT_SHOT),
+        ] {
+            round_trips(a);
+        }
+        // Neither restore is not an action the grammar can say.
+        assert!(ActionConfig::to_params(&CtinfoAction::new().zone(1)).is_err());
+    }
+
+    #[test]
+    fn ife_round_trips() {
+        let mac = [0x02, 0, 0, 0, 0, 0x01];
+        assert_eq!(
+            round_trips(
+                IfeAction::encode()
+                    .allow(IfeMeta::Mark)
+                    .use_value(IfeMeta::Prio, 7)
+                    .dst(mac)
+                    .etype(0xed3e)
+            ),
+            [
+                "encode",
+                "dst",
+                "02:00:00:00:00:01",
+                "type",
+                "0xed3e",
+                "allow",
+                "mark",
+                "use",
+                "prio",
+                "7"
+            ]
+        );
+        for a in [
+            IfeAction::decode(),
+            IfeAction::encode()
+                .src(mac)
+                .use_value(IfeMeta::TcIndex, 65535)
+                .allow(IfeMeta::TcIndex),
+            IfeAction::decode().action(action::TC_ACT_SHOT),
+        ] {
+            round_trips(a);
+        }
+        // tcindex is a u16 on the wire: a wider value used to be cut to it.
+        let wide = IfeAction::encode().use_value(IfeMeta::TcIndex, 70_000);
+        assert!(ActionConfig::to_params(&wide).is_err());
+        assert!(IfeAction::parse_params(&["encode", "use", "tcindex", "70000"]).is_err());
+    }
+
+    #[test]
+    fn gate_round_trips() {
+        use std::time::Duration;
+        let ms = Duration::from_millis;
+        assert_eq!(
+            round_trips(
+                GateAction::new()
+                    .priority(0)
+                    .cycle_time(ms(2))
+                    .sched_entry(true, ms(1), None, None)
+                    .sched_entry(false, ms(1), None, None)
+            ),
+            [
+                "priority",
+                "0",
+                "cycle-time",
+                "2ms",
+                "sched-entry",
+                "open",
+                "1ms",
+                "sched-entry",
+                "close",
+                "1ms"
+            ]
+        );
+        // An absolute base time is past the nanoseconds a float holds.
+        let base = Duration::from_nanos(1_528_743_495_910_289_987);
+        assert_eq!(
+            round_trips(GateAction::new().base_time(base).clockid(11)),
+            ["base-time", "1528743495910289987ns", "clockid", "CLOCK_TAI"]
+        );
+        for a in [
+            GateAction::new(),
+            GateAction::new().cycle_time_ext(Duration::from_nanos(1500)).clockid(5).priority(-1),
+            GateAction::new()
+                .sched_entry(false, Duration::from_micros(300), Some(-1), Some(1500))
+                .sched_entry(true, Duration::from_micros(200), Some(3), None)
+                .action(action::TC_ACT_STOLEN),
+        ] {
+            round_trips(a);
+        }
+        // Positional: a max-octets is the value after an ipv.
+        let entry = GateAction::new().sched_entry(true, ms(1), None, Some(10));
+        assert!(ActionConfig::to_params(&entry).is_err());
+    }
+
+    #[test]
+    fn csum_round_trips() {
+        assert_eq!(round_trips(CsumAction::new().iph().tcp()), ["iph", "tcp"]);
+        for a in [
+            CsumAction::new(),
+            CsumAction::new().iph().icmp().igmp().tcp().udp().udplite().sctp(),
+            CsumAction::new().udp().action(action::TC_ACT_PIPE),
+        ] {
+            round_trips(a);
+        }
+        let mut odd = CsumAction::new().tcp();
+        odd.update_flags |= 0x80;
+        assert!(ActionConfig::to_params(&odd).is_err());
+    }
+
+    #[test]
+    fn sample_round_trips() {
+        assert_eq!(round_trips(SampleAction::new(100, 5)), ["rate", "100", "group", "5"]);
+        round_trips(SampleAction::new(100, 5).trunc(128));
+        assert_eq!(
+            round_trips(SampleAction::new(1, 2).action(action::TC_ACT_SHOT)),
+            ["rate", "1", "group", "2", "drop"]
+        );
+    }
+
+    #[test]
+    fn ct_round_trips() {
+        let v4 = |s: &str| s.parse::<Ipv4Addr>().unwrap();
+        let v6 = |s: &str| s.parse::<std::net::Ipv6Addr>().unwrap();
+        let (inet, inet6) = (libc::AF_INET as u8, libc::AF_INET6 as u8);
+        let (tcp, udp) = (libc::IPPROTO_TCP as u8, libc::IPPROTO_UDP as u8);
+        assert_eq!(
+            round_trips(CtAction::commit().zone(1).mark(0x100, 0xffff_ffff)),
+            ["commit", "zone", "1", "mark", "256", "4294967295"]
+        );
+        assert_eq!(
+            round_trips(
+                CtAction::commit()
+                    .nat_src(v4("10.0.0.1"), v4("10.0.0.10"))
+                    .nat_port_range(1024, 65535)
+            ),
+            ["commit", "nat", "src", "10.0.0.1-10.0.0.10", "port", "1024-65535"]
+        );
+        let mut label = [0u8; 16];
+        (label[0], label[15]) = (0x12, 0x01);
+        assert_eq!(
+            round_trips(CtAction::commit().labels(label, [0xff; 16]).helper("ftp", inet, tcp)),
+            [
+                "commit",
+                "label",
+                "12000000000000000000000000000001/ffffffffffffffffffffffffffffffff",
+                "helper",
+                "ipv4-tcp-ftp"
+            ]
+        );
+        for a in [
+            CtAction::new(),
+            CtAction::clear(),
+            CtAction::new().force(),
+            CtAction::commit().force().zone(3),
+            CtAction::commit().nat_dst_single(v4("192.168.1.1")),
+            CtAction::commit().nat_src6(v6("2001:db8::1"), v6("2001:db8::10")),
+            CtAction::commit()
+                .nat_dst6(v6("2001:db8::1"), v6("2001:db8::1"))
+                .nat_port_range(80, 80),
+            // Two families, or two directions: each clause sets its own.
+            CtAction::commit()
+                .nat_src_single(v4("10.0.0.1"))
+                .nat_src6(v6("::1"), v6("::2")),
+            CtAction::commit()
+                .nat_src_single(v4("10.0.0.1"))
+                .nat_dst_single(v4("10.0.0.2")),
+            CtAction::new().nat_port_range(1, 2),
+            CtAction::commit().labels(label, [0x0f; 16]),
+            CtAction::commit().helper("sip-x", inet6, udp),
+            CtAction::commit().helper("x", 3, 132),
+            CtAction::new().action(action::TC_ACT_SHOT),
+        ] {
+            round_trips(a);
+        }
+        // tc(8)'s short label: the bytes it gives, then zeros; a full mask.
+        let short = CtAction::parse_params(&["label", "12"]).unwrap();
+        let mut want = [0u8; 16];
+        want[0] = 0x12;
+        assert_eq!(bytes(&short), bytes(&CtAction::new().labels(want, [0xff; 16])));
+        let bad: [&[&str]; 8] = [
+            &["label", "1"],
+            &["label", "+1"],
+            &["label", "12/0x"],
+            &["helper", "ipv4-tcp-"],
+            &["helper", "ipv4-ftp"],
+            &["helper", "inet-tcp-ftp"],
+            &["port", "1-x"],
+            &["nat", "src", "10.0.0.1-::1"],
+        ];
+        for bad in bad {
+            assert!(CtAction::parse_params(bad).is_err(), "{bad:?}");
+        }
+        assert!(ActionConfig::to_params(&CtAction::commit().helper("", inet, tcp)).is_err());
+    }
+
+    #[test]
+    fn pedit_round_trips() {
+        let network = pedit::TCA_PEDIT_KEY_EX_HDR_TYPE_NETWORK;
+        assert_eq!(
+            round_trips(
+                PeditAction::new()
+                    .set_ipv4_src(Ipv4Addr::new(10, 0, 0, 1))
+                    .set_tcp_dport(8080)
+            ),
+            ["munge", "ip", "src", "set", "10.0.0.1", "munge", "tcp", "dport", "set", "8080"]
+        );
+        assert_eq!(
+            round_trips(PeditAction::new().add_raw(network, 8, 0xff00_0000, 0x00ff_ffff)),
+            ["munge", "offset", "8", "add", "0xff000000", "retain", "0xffffff"]
+        );
+        for a in [
+            PeditAction::new()
+                .set_ipv4_dst(Ipv4Addr::new(10, 0, 0, 2))
+                .set_ipv4_ttl(63)
+                .set_ipv4_tos(0x10),
+            PeditAction::new().set_tcp_sport(1).set_udp_sport(2).set_udp_dport(3),
+            PeditAction::new()
+                .set_eth_src([2, 0, 0, 0, 0, 1])
+                .set_eth_dst([2, 0, 0, 0, 0, 2]),
+            PeditAction::new().set_raw(network, 12, 0x0a00_0001, 0),
+            PeditAction::new()
+                .set_ipv4_src(Ipv4Addr::new(10, 0, 0, 1))
+                .action(action::TC_ACT_SHOT),
+        ] {
+            round_trips(a);
+        }
+        assert!(ActionConfig::to_params(&PeditAction::new()).is_err());
+        // `munge offset` edits the network header; a raw edit of another
+        // that no field's setter writes has no token.
+        let tcp = pedit::TCA_PEDIT_KEY_EX_HDR_TYPE_TCP;
+        assert!(ActionConfig::to_params(&PeditAction::new().set_raw(tcp, 4, 1, 0)).is_err());
+    }
+
+    #[test]
+    fn simple_round_trips() {
+        assert_eq!(round_trips(SimpleAction::new("matched-port-80")), ["sdata", "matched-port-80"]);
+        for a in [
+            SimpleAction::new("two words"),
+            SimpleAction::new("x").ok(),
+            SimpleAction::new("").verdict(action::TC_ACT_UNSPEC),
+        ] {
+            round_trips(a);
+        }
+        assert_eq!(
+            round_trips(SimpleAction::new("y").drop()),
+            ["sdata", "y", "verdict", "drop"]
+        );
+    }
+
+    /// A program opened from its pin is written as the path; one given by
+    /// descriptor has no token.
+    #[test]
+    fn bpf_pinned_is_written_as_its_path() {
+        let mut a = BpfAction::with_raw_fd(7).name("trace").drop();
+        a.pinned = Some("/sys/fs/bpf/nlink-test-absent".into());
+        let tokens = ActionConfig::to_params(&a).unwrap();
+        assert_eq!(
+            tokens,
+            ["pinned", "/sys/fs/bpf/nlink-test-absent", "name", "trace", "verdict", "drop"]
+        );
+        // Read back, the pin is opened again, and this one does not exist.
+        let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+        let err = BpfAction::parse_params(&refs).unwrap_err();
+        assert!(err.errno().is_some(), "{err:?}");
+        // With the descriptor in its place, the rest reads back to the
+        // same request.
+        let mut refs = refs;
+        (refs[0], refs[1]) = ("fd", "7");
+        assert_eq!(bytes(&BpfAction::parse_params(&refs).unwrap()), bytes(&a));
+
+        assert!(ActionConfig::to_params(&BpfAction::with_raw_fd(7)).is_err());
+        assert!(ActionConfig::to_params(&BpfAction::from_fd(std::io::stdin())).is_err());
+    }
+
+    /// Every kind with a writer reads back through `action_from_params`,
+    /// from its kind and tokens, to the same request.
+    #[test]
+    fn an_action_reads_back_from_its_kind_and_tokens() {
+        use crate::util::{Bytes, Rate};
+        let mac = [0x02, 0, 0, 0, 0, 0x01];
+        let net = Ipv4Addr::new(10, 0, 0, 0);
+        let actions: Vec<Box<dyn ActionConfigDyn>> = vec![
+            Box::new(GactAction::pass().random_drop(25)),
+            Box::new(MirredAction::mirror_to_ingress(7).action(action::TC_ACT_SHOT)),
+            Box::new(PoliceAction::new().rate(Rate::mbit(8)).burst(Bytes::kib(32))),
+            Box::new(VlanAction::push(100).qinq()),
+            Box::new(MplsAction::pop(0x0800)),
+            Box::new(SkbmodAction::new().swap_mac()),
+            Box::new(SkbeditAction::new().mark_with_mask(1, 0xff)),
+            Box::new(NatAction::snat(net, Ipv4Addr::new(192, 0, 2, 1)).prefix(24)),
+            Box::new(TunnelKeyAction::set().key_id(42)),
+            Box::new(ConnmarkAction::with_zone(4)),
+            Box::new(CtinfoAction::new().cpmark(0xff)),
+            Box::new(IfeAction::encode().allow(IfeMeta::Mark).dst(mac)),
+            Box::new(GateAction::new().sched_entry(
+                true,
+                std::time::Duration::from_millis(1),
+                None,
+                None,
+            )),
+            Box::new(CsumAction::new().iph().udp()),
+            Box::new(SampleAction::new(10, 1)),
+            Box::new(CtAction::commit().zone(2)),
+            Box::new(PeditAction::new().set_tcp_dport(80)),
+            Box::new(SimpleAction::new("hit")),
+        ];
+        // bpf opens its pin as it is read, and the test has none: below.
+        let mut kinds: Vec<&str> = actions.iter().map(|a| a.kind()).chain(["bpf"]).collect();
+        kinds.sort_unstable();
+        let mut all = PARAMS_KINDS.to_vec();
+        all.sort_unstable();
+        assert_eq!(kinds, all, "one of each kind with a writer");
+
+        for a in &actions {
+            let tokens = a.to_params().unwrap_or_else(|e| panic!("{a:?}: {e}"));
+            let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+            let back = action_from_params(a.kind(), &refs)
+                .unwrap_or_else(|e| panic!("{}: {tokens:?}: {e}", a.kind()));
+            assert_eq!(back.kind(), a.kind());
+            assert_eq!(bytes(&*back), bytes(&**a), "{tokens:?}");
+        }
+        let err = action_from_params("bpf", &["pinned", "/sys/fs/bpf/nlink-test-absent"])
+            .unwrap_err();
+        assert!(err.to_string().contains("bpf: open pinned program"), "{err}");
+        let err = action_from_params("connmark2", &[]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("action `connmark2` has no document form (kinds: gact, mirred, police"),
+            "{err}"
+        );
     }
 }

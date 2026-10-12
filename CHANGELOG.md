@@ -726,6 +726,16 @@ All notable changes to this project will be documented in this file.
 - **`RouteFilter::from_if(name)` can be installed (#645).** Nothing resolved
   the name, so every install failed.
 
+- **`is_goto_chain(TC_ACT_UNSPEC)` is false (#645).** The goto test checked a
+  single bit, and `continue` (-1) has every bit set, so it read as a goto to
+  chain 16777215. It now compares the opcode nibble, as the kernel's
+  `TC_ACT_EXT_CMP` does. `tc_act_goto_chain` and `tc_act_chain` keep 28 bits of
+  chain (`TC_ACT_EXT_VAL_MASK`), where they used to cut it to 24.
+- **A gate's `base-time` in whole nanoseconds is read exactly (#645).** Before,
+  an absolute time lost precision through a float.
+- **An ife `use tcindex` over 65535 is refused (#645).** It used to be truncated
+  to 16 bits.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
@@ -2612,6 +2622,34 @@ All notable changes to this project will be documented in this file.
     `resolve_devices()`, with defaults. Flower, matchall, cgroup, route,
     rsvp and flow filters pass them through to their actions.
   - A route filter also resolves its `from_if`.
+
+- **TC trees in JSON and YAML (#645).** `NetworkConfig.tc`, `ConfigDiff.tc` and
+  a plan's `Step::TcTree` serialize and read back. Each class, filter and action
+  is written as its kind plus the tc(8) words its `parse_params` reads:
+  `{"kind": "flower", "params": "ip_proto tcp dst_port 22 classid 1:10",
+  "actions": [{"kind": "mirred", "params": "egress mirror dev ifb0"}]}`. The IFB
+  redirect is written `{"redirect-to": "ifb0"}`. Handles and protocols are
+  written as tc(8) writes them.
+  - **`to_params` writers.** `to_params()` is the inverse of `parse_params`:
+    parsed back, its tokens give the same request. It's new on
+    `FlowerFilter`, `MatchallFilter`, `FwFilter`, `U32Filter`,
+    `HtbClassConfig`, `HfscClassConfig`, `DrrClassConfig` and
+    `QfqClassConfig`. `ActionConfig` gains it as a provided method, and all 19
+    action kinds implement it.
+  - **Values a grammar can't express** are an error, not dropped. Examples:
+    a bpf action held by file descriptor, a goto verdict on an action other
+    than gact.
+  - **Grammars that grew so every builder value has a word:**
+    - HFSC curves take `[m1 <rate> d <time>] m2 <rate>`, and `sc` for real-time
+      and link-sharing together. Before, they took only `rt|ls|ul rate <rate>`.
+    - u32 takes `match mark VAL MASK` and `at nexthdr+N`.
+    - flower takes `chain` and `goto_chain`.
+    - mirred, and the vlan, mpls, skbmod, skbedit, tunnel_key, connmark, ctinfo,
+      ife, gate, csum, sample, ct and nat actions, take a verdict (`pipe`,
+      `drop`, …).
+    - ct takes `label`, `port`, `helper <family>-<proto>-<name>` and IPv6 NAT
+      addresses.
+    - A bpf action opened with `from_pinned` is written `pinned <path>`.
 
 ## [0.31.0] - 2026-10-11
 

@@ -186,19 +186,17 @@ pub enum Step {
     /// Add a declared qdisc.
     AddQdisc(DeclaredQdisc),
     /// Diff a declared TC tree again, against the device as the steps
-    /// before left it, and apply the difference (#514). Not read back from
-    /// a serialized plan yet: its tree has no serialized form (#645).
-    #[cfg_attr(feature = "serde", serde(skip_deserializing))]
+    /// before left it, and apply the difference (#514).
     TcTree {
         /// The device.
         dev: String,
         /// What the diff found, one line each; the apply diffs again.
         planned: Vec<String>,
-        #[cfg_attr(feature = "serde", serde(skip))]
-        #[cfg_attr(feature = "schemars", schemars(skip))]
+        /// The tree.
         tree: Box<DeclaredTc>,
-        #[cfg_attr(feature = "serde", serde(skip))]
-        #[cfg_attr(feature = "schemars", schemars(skip))]
+        /// The tree the previous config declared on the device, whose
+        /// classes and filters this one no longer declares go.
+        #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
         previous: Option<Box<DeclaredTc>>,
     },
 }
@@ -878,16 +876,34 @@ mod tests {
         );
         assert_eq!(back.steps[1].reason(), plan.steps[1].reason());
 
-        // A TC tree step has no serialized tree yet (#645): refused, not
-        // read back empty.
+        // A TC tree step reads back with its tree and the previous one
+        // (#645).
+        let declared = |rate| {
+            crate::netlink::config::NetworkConfig::new()
+                .tc("d0", |t| {
+                    t.class(
+                        crate::TcHandle::major_only(1),
+                        crate::TcHandle::new(1, 1),
+                        crate::netlink::tc::HtbClassConfig::new(crate::util::Rate::mbit(rate)),
+                    )
+                })
+                .tc_trees()[0]
+                .clone()
+        };
         let tree = Plan::new(vec![Step::TcTree {
             dev: "d0".into(),
-            planned: vec![],
-            tree: Box::default(),
-            previous: None,
+            planned: vec!["~ class htb 1:1 on d0".into()],
+            tree: Box::new(declared(20)),
+            previous: Some(Box::new(declared(10))),
         }]);
         let json = serde_json::to_string(&tree).unwrap();
-        assert!(serde_json::from_str::<Plan>(&json).is_err(), "{json}");
+        let back: Plan = serde_json::from_str(&json).unwrap();
+        assert_eq!(serde_json::to_string(&back).unwrap(), json);
+        let Step::TcTree { tree, previous, .. } = &back.steps[0] else {
+            panic!("{back:?}")
+        };
+        assert_eq!(**tree, declared(20));
+        assert_eq!(previous.as_deref(), Some(&declared(10)));
     }
 
     /// A neighbour set over another is undone by setting the other back;

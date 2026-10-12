@@ -441,10 +441,8 @@ pub struct ConfigDiff {
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) owner: Option<String>,
     /// The declared TC trees that differ from the kernel's, one per device
-    /// (#514). Not serialized yet: a filter's actions have no document
-    /// form.
-    #[cfg_attr(feature = "serde", serde(skip))]
-    #[cfg_attr(feature = "schemars", schemars(skip))]
+    /// (#514).
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
     pub tc: Vec<super::tc_tree::TcTreeDiff>,
     /// Every declared tree, with the one the previous config declared on
     /// its device, which the apply diffs again after the qdisc step: a
@@ -4022,6 +4020,7 @@ mod tests {
                 "routes-to-remove",
                 "rules-to-add",
                 "rules-to-remove",
+                "tc",
                 "veth-peers-to-modify",
                 "vrf-strict-mode",
             ]
