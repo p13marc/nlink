@@ -177,6 +177,9 @@ RtKey = NFT_RT
 ByteorderOp = NFT_BYTEORDER
 LogLevel = NFT_LOGLEVEL
 PayloadCsum = NFT_PAYLOAD_CSUM
+NumgenKind = NFT_NG
+    Incremental -> INCREMENTAL
+HashKind = NFT_HASH
 
 # -------------------------------------------------------------------- ethtool
 EthtoolCmd = ETHTOOL_MSG

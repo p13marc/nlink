@@ -453,6 +453,33 @@ pub const NFT_QUEUE_FLAG_CPU_FANOUT: u16 = 0x02;
 /// `NFT_QUEUE_FLAG_MASK`.
 pub const NFT_QUEUE_FLAG_MASK: u16 = 0x03;
 
+// Numgen — `enum nft_ng_attributes`.
+/// `NFTA_NG_DREG`.
+pub const NFTA_NG_DREG: u16 = 1;
+/// `NFTA_NG_MODULUS`.
+pub const NFTA_NG_MODULUS: u16 = 2;
+/// `NFTA_NG_TYPE` — `enum nft_ng_types`.
+pub const NFTA_NG_TYPE: u16 = 3;
+/// `NFTA_NG_OFFSET`.
+pub const NFTA_NG_OFFSET: u16 = 4;
+
+// Hash — `enum nft_hash_attributes`.
+/// `NFTA_HASH_SREG`.
+pub const NFTA_HASH_SREG: u16 = 1;
+/// `NFTA_HASH_DREG`.
+pub const NFTA_HASH_DREG: u16 = 2;
+/// `NFTA_HASH_LEN`.
+pub const NFTA_HASH_LEN: u16 = 3;
+/// `NFTA_HASH_MODULUS`.
+pub const NFTA_HASH_MODULUS: u16 = 4;
+/// `NFTA_HASH_SEED` — without one, the kernel picks a seed and does not
+/// report it.
+pub const NFTA_HASH_SEED: u16 = 5;
+/// `NFTA_HASH_OFFSET`.
+pub const NFTA_HASH_OFFSET: u16 = 6;
+/// `NFTA_HASH_TYPE` — `enum nft_hash_types`.
+pub const NFTA_HASH_TYPE: u16 = 7;
+
 // Dup — `enum nft_dup_attributes`.
 /// `NFTA_DUP_SREG_ADDR` — the register holding the gateway address.
 pub const NFTA_DUP_SREG_ADDR: u16 = 1;

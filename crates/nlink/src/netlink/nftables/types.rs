@@ -1109,6 +1109,41 @@ impl PayloadCsum {
     }
 }
 
+/// A value a rule computes into its first register (#703): a `numgen`,
+/// a `jhash` of packet fields or a `symhash`. See [`Rule::generate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Generated {
+    /// `numgen inc|random mod <modulus> [offset <offset>]`.
+    Numgen {
+        /// Counting up, or at random.
+        kind: super::expr::NumgenKind,
+        /// Modulo this.
+        modulus: u32,
+        /// Plus this.
+        offset: u32,
+    },
+    /// `jhash <field> [. <field> …] mod <modulus> [seed <seed>] [offset
+    /// <offset>]`.
+    Jhash {
+        /// The fields hashed, behind their guards.
+        fields: Vec<PacketField>,
+        /// Modulo this.
+        modulus: u32,
+        /// The seed; `None`, the kernel's.
+        seed: Option<u32>,
+        /// Plus this.
+        offset: u32,
+    },
+    /// `symhash mod <modulus> [offset <offset>]`.
+    Symhash {
+        /// Modulo this.
+        modulus: u32,
+        /// Plus this.
+        offset: u32,
+    },
+}
+
 /// A header field a rule writes, with its value (#703): what nft's
 /// `<field> set <value>` statements write, through
 /// [`Rule::set_header`].
@@ -2274,6 +2309,86 @@ impl Rule {
 
     /// Push `meta <key> == <value>` (a 1-byte metadata load + Eq compare
     /// in `R0`) — the shared shape of the nfproto/l4proto matcher guards.
+    /// Compute a value into the first register (#703) — a `numgen`, a
+    /// `jhash` of fields, a `symhash` — for the statement after it to
+    /// use: [`set_meta_from`](Self::set_meta_from),
+    /// [`set_ct_from`](Self::set_ct_from), or a
+    /// [`QueueExpr::register`](super::expr::QueueExpr::register).
+    ///
+    /// ```
+    /// use nlink::netlink::nftables::{Generated, MetaKey, NumgenKind, Rule};
+    ///
+    /// // meta mark set numgen inc mod 2
+    /// let r = Rule::new("t", "c")
+    ///     .generate(Generated::Numgen { kind: NumgenKind::Incremental, modulus: 2, offset: 0 })
+    ///     .set_meta_from(MetaKey::Mark);
+    /// # let _ = r;
+    /// ```
+    pub fn generate(mut self, generated: Generated) -> Self {
+        let dreg = Register::R0;
+        let expr = match generated {
+            Generated::Numgen {
+                kind,
+                modulus,
+                offset,
+            } => Expr::Numgen {
+                dreg,
+                kind,
+                modulus,
+                offset,
+            },
+            Generated::Jhash {
+                fields,
+                modulus,
+                seed,
+                offset,
+            } => {
+                // Each field in a 32-bit word of its own, from R0.
+                self.push_concat_load(&fields);
+                Expr::Hash {
+                    dreg,
+                    kind: super::expr::HashKind::Jenkins,
+                    sreg: Some(Register::R0),
+                    len: 4 * u32::try_from(fields.len()).unwrap_or(u32::MAX),
+                    modulus,
+                    seed,
+                    offset,
+                }
+            }
+            Generated::Symhash { modulus, offset } => Expr::Hash {
+                dreg,
+                kind: super::expr::HashKind::Sym,
+                sreg: None,
+                len: 0,
+                modulus,
+                seed: None,
+                offset,
+            },
+        };
+        self.exprs.push(expr);
+        self
+    }
+
+    /// Write the first register into packet metadata: `meta <key> set`
+    /// what [`generate`](Self::generate) computed.
+    pub fn set_meta_from(mut self, key: MetaKey) -> Self {
+        self.exprs.push(Expr::MetaSet {
+            key,
+            sreg: Register::R0,
+        });
+        self
+    }
+
+    /// Write the first register into the conntrack entry: `ct <key> set`
+    /// what [`generate`](Self::generate) computed.
+    pub fn set_ct_from(mut self, key: CtKey) -> Self {
+        self.exprs.push(Expr::CtSet {
+            key,
+            sreg: Register::R0,
+        });
+        self
+    }
+
     /// Send a copy of the packet (#703): `dup to <addr> [device <dev>]` in
     /// an `ip`/`ip6` chain, routed to `addr` as its gateway, out of the
     /// device with ifindex `dev` when one is given. The copy leaves as it

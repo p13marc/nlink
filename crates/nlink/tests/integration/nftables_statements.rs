@@ -1580,3 +1580,110 @@ async fn queue_dup_and_fwd_act_on_traffic() -> nlink::Result<()> {
     assert!(after >= before + 3, "x0 sent {} of the 3", after - before);
     Ok(())
 }
+
+/// #703: `numgen`, `jhash` and `symhash` as nft writes them: nft installs
+/// six statements in one chain, nlink in another, and `nft` lists them
+/// alike.
+#[tokio::test]
+async fn numgen_and_hash_read_and_write_as_nft_does() -> nlink::Result<()> {
+    use nlink::netlink::nftables::{Generated, NumgenKind, PacketField};
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "nft_numgen", "nft_hash", "nft_ct");
+
+    let ns = TestNamespace::new("nft-ngh")?;
+    let lines = [
+        "meta mark set numgen inc mod 2",
+        "meta mark set numgen random mod 10 offset 5",
+        "meta mark set jhash ip saddr mod 4 seed 0xdead offset 2",
+        "meta mark set jhash ip saddr . tcp dport mod 8",
+        "meta mark set symhash mod 2",
+        "ct mark set numgen inc mod 3 offset 100",
+    ];
+    // An inet table, where nft guards each address with `meta nfproto` as
+    // nlink does in every family; nft 1.0.6 cannot list a guarded hash
+    // input in an ip table, where nft writes none.
+    let mut script = String::from("table inet t {\n chain a { type filter hook output priority 0;\n");
+    for l in lines {
+        script.push_str(&format!("  {l}\n"));
+    }
+    script.push_str(" }\n chain b { type filter hook output priority 0; }\n}\n");
+    let file = std::env::temp_dir().join(format!("nlink-ngh-{}.nft", std::process::id()));
+    std::fs::write(&file, &script).map_err(nlink::Error::from)?;
+    let installed = ns.exec("nft", &["-f", file.to_str().unwrap()]);
+    let _ = std::fs::remove_file(&file);
+    installed?;
+
+    let nft = ns.connection_for::<Nftables>()?;
+    let mark = |g| Rule::new("t", "b").family(Family::Inet).generate(g).set_meta_from(MetaKey::Mark);
+    for rule in [
+        mark(Generated::Numgen { kind: NumgenKind::Incremental, modulus: 2, offset: 0 }),
+        mark(Generated::Numgen { kind: NumgenKind::Random, modulus: 10, offset: 5 }),
+        mark(Generated::Jhash { fields: vec![PacketField::Ip4Saddr], modulus: 4, seed: Some(0xdead), offset: 2 }),
+        mark(Generated::Jhash {
+            fields: vec![PacketField::Ip4Saddr, PacketField::TcpDport],
+            modulus: 8,
+            seed: None,
+            offset: 0,
+        }),
+        mark(Generated::Symhash { modulus: 2, offset: 0 }),
+        Rule::new("t", "b")
+            .family(Family::Inet)
+            .generate(Generated::Numgen { kind: NumgenKind::Incremental, modulus: 3, offset: 100 })
+            .set_ct_from(nlink::netlink::nftables::CtKey::Mark),
+    ] {
+        nft.add_rule(rule).await?;
+    }
+    assert_eq!(
+        listed_rules(&ns, "inet", "t", "b")?,
+        listed_rules(&ns, "inet", "t", "a")?,
+        "nlink's chain b, nft's chain a"
+    );
+    let unknown = nft
+        .list_rules("t", Family::Inet)
+        .await?
+        .iter()
+        .flat_map(|r| r.expressions())
+        .filter(|e| matches!(e, RuleExpr::Unknown { .. }))
+        .count();
+    assert_eq!(unknown, 0, "every numgen and hash decodes typed");
+    Ok(())
+}
+
+/// #703: a `numgen inc mod 2` mark alternates, and a `jhash … mod 1 offset
+/// 7` mark is 7 for every packet: counters on each mark see it.
+#[tokio::test]
+async fn numgen_and_hash_marks_packets() -> nlink::Result<()> {
+    use nlink::netlink::nftables::{Generated, NumgenKind, PacketField};
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "nft_numgen", "nft_hash", "dummy");
+
+    let ns = TestNamespace::new("nft-nghtr")?;
+    lo_up(&ns).await?;
+    let _route = add_dummy(&ns).await?;
+    let cfg = NftablesConfig::new().table("t", Family::Ip, |t| {
+        t.chain("out", |c| c.hook(Hook::Output).priority(Priority::Mangle).chain_type(ChainType::Filter))
+            .rule_keyed("out", "gen", |r| {
+                r.match_udp_dport(7990)
+                    .generate(Generated::Numgen { kind: NumgenKind::Incremental, modulus: 2, offset: 0 })
+                    .set_meta_from(MetaKey::Mark)
+            })
+            .rule_keyed("out", "hash", |r| {
+                r.match_udp_dport(7991)
+                    .generate(Generated::Jhash { fields: vec![PacketField::Ip4Saddr], modulus: 1, seed: None, offset: 7 })
+                    .set_meta_from(MetaKey::Mark)
+            })
+            .rule_keyed("out", "m0", |r| r.match_udp_dport(7990).match_mark(0).counter())
+            .rule_keyed("out", "m1", |r| r.match_udp_dport(7990).match_mark(1).counter())
+            .rule_keyed("out", "m7", |r| r.match_udp_dport(7991).match_mark(7).counter())
+    });
+    let nft = ns.connection_for::<Nftables>()?;
+    cfg.diff(&nft).await?.apply(&nft).await?;
+    assert!(cfg.diff(&nft).await?.is_empty(), "the declared generators do not converge");
+    let to = |port| std::net::SocketAddr::from((Ipv4Addr::new(10, 98, 0, 2), port));
+    send_udp(&ns, &[to(7990)], 4);
+    send_udp(&ns, &[to(7991)], 3);
+    let count = |nth| rule_packets(&nft, "t", Family::Ip, "out", nth);
+    assert_eq!((count(2).await?, count(3).await?), (2, 2), "inc mod 2 alternates");
+    assert_eq!(count(4).await?, 3, "jhash mod 1 offset 7 is 7");
+    Ok(())
+}

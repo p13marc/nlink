@@ -2746,6 +2746,17 @@ All notable changes to this project will be documented in this file.
   Each is written as nft writes it, and decoded: `RuleExpr::Queue`,
   `RuleExpr::Dup`, `RuleExpr::Fwd`.
 
+- **`numgen`, `jhash` and `symhash` (#703).** `Rule::generate(Generated)`
+  computes a value into the first register, written as nft writes it:
+  - `numgen inc|random mod N [offset O]`;
+  - `jhash <fields> mod N [seed S] [offset O]`;
+  - `symhash mod N [offset O]`.
+
+  `Rule::set_meta_from(MetaKey)` and `Rule::set_ct_from(CtKey)` store the
+  value, and a `QueueExpr::register` queue can take it. The expressions decode
+  as `RuleExpr::Numgen` and `RuleExpr::Hash`. `NumgenKind` and `HashKind` are
+  new.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

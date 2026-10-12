@@ -113,6 +113,26 @@ pub enum Expr {
     Log(LogExpr),
     /// Send the packet to a userspace queue — see [`QueueExpr`] (#703).
     Queue(QueueExpr),
+    /// A number into `dreg`: counting up, or at random, modulo `modulus`,
+    /// plus `offset` (#703). See [`Rule::generate`].
+    Numgen {
+        dreg: Register,
+        kind: NumgenKind,
+        modulus: u32,
+        offset: u32,
+    },
+    /// A hash into `dreg`, modulo `modulus`, plus `offset` (#703): Jenkins
+    /// over `len` bytes from `sreg` with `seed` (the kernel's own when
+    /// `None`), or the flow's symmetric hash. See [`Rule::generate`].
+    Hash {
+        dreg: Register,
+        kind: HashKind,
+        sreg: Option<Register>,
+        len: u32,
+        modulus: u32,
+        seed: Option<u32>,
+        offset: u32,
+    },
     /// Send a copy of the packet out: to the gateway in `sreg_addr`, out of
     /// the device in `sreg_dev` (#703). See [`Rule::dup_to`].
     Dup {
@@ -701,6 +721,28 @@ impl From<LogExpr> for Expr {
     }
 }
 
+/// How a `numgen` counts (`enum nft_ng_types`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u32)]
+#[non_exhaustive]
+pub enum NumgenKind {
+    /// `inc`: 0, 1, 2, … for each packet.
+    Incremental = 0,
+    /// `random`.
+    Random = 1,
+}
+
+/// Which hash a `hash` takes (`enum nft_hash_types`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u32)]
+#[non_exhaustive]
+pub enum HashKind {
+    /// `jhash`: Jenkins, over fields the rule loads.
+    Jenkins = 0,
+    /// `symhash`: the flow's hash, the same both ways.
+    Sym = 1,
+}
+
 /// `queue`: hand the packet to a userspace program on an `nfqueue` (#703).
 ///
 /// A range of queues is load-balanced by a hash of the flow, or by CPU
@@ -1177,6 +1219,52 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
                 }
             }
             builder.append_attr_u16_be(NFTA_QUEUE_FLAGS, flags.bits());
+            builder.nest_end(data);
+        }
+        // What `nft_ng_dump` echoes: all four, always.
+        Expr::Numgen {
+            dreg,
+            kind,
+            modulus,
+            offset,
+        } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "numgen");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_u32_be(NFTA_NG_DREG, dreg.wire());
+            builder.append_attr_u32_be(NFTA_NG_MODULUS, *modulus);
+            builder.append_attr_u32_be(NFTA_NG_TYPE, *kind as u32);
+            builder.append_attr_u32_be(NFTA_NG_OFFSET, *offset);
+            builder.nest_end(data);
+        }
+        // What `nft_jhash_dump`/`nft_symhash_dump` echo: a seed only when
+        // the request sent one (without, the kernel picks one and keeps it
+        // to itself), an offset only when it is not 0.
+        Expr::Hash {
+            dreg,
+            kind,
+            sreg,
+            len,
+            modulus,
+            seed,
+            offset,
+        } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "hash");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            if let Some(sreg) = sreg {
+                builder.append_attr_u32_be(NFTA_HASH_SREG, sreg.wire());
+            }
+            builder.append_attr_u32_be(NFTA_HASH_DREG, dreg.wire());
+            if *kind == HashKind::Jenkins {
+                builder.append_attr_u32_be(NFTA_HASH_LEN, *len);
+            }
+            builder.append_attr_u32_be(NFTA_HASH_MODULUS, *modulus);
+            if let Some(seed) = seed {
+                builder.append_attr_u32_be(NFTA_HASH_SEED, *seed);
+            }
+            if *offset != 0 {
+                builder.append_attr_u32_be(NFTA_HASH_OFFSET, *offset);
+            }
+            builder.append_attr_u32_be(NFTA_HASH_TYPE, *kind as u32);
             builder.nest_end(data);
         }
         Expr::Dup { sreg_addr, sreg_dev } => {
@@ -1817,6 +1905,36 @@ pub enum RuleExpr {
     Log(LogExpr),
     /// `queue`.
     Queue(QueueExpr),
+    /// `numgen`.
+    #[non_exhaustive]
+    Numgen {
+        /// Destination register.
+        dreg: Register,
+        /// Counting up, or at random.
+        kind: NumgenKind,
+        /// Modulo this.
+        modulus: u32,
+        /// Plus this.
+        offset: u32,
+    },
+    /// `jhash` or `symhash`.
+    #[non_exhaustive]
+    Hash {
+        /// Destination register.
+        dreg: Register,
+        /// Jenkins or symmetric.
+        kind: HashKind,
+        /// Jenkins: the register the hashed bytes start at.
+        sreg: Option<Register>,
+        /// Jenkins: how many bytes.
+        len: u32,
+        /// Modulo this.
+        modulus: u32,
+        /// Jenkins: the seed, when one was given.
+        seed: Option<u32>,
+        /// Plus this.
+        offset: u32,
+    },
     /// `dup`: the registers with its gateway and its output device.
     #[non_exhaustive]
     Dup {
@@ -1948,6 +2066,8 @@ fn parse_expr(name: &str, data: &[u8]) -> RuleExpr {
         "notrack" if data.is_empty() => Some(RuleExpr::Notrack),
         "log" => parse_log(data),
         "queue" => parse_queue(data),
+        "numgen" => parse_numgen(data),
+        "hash" => parse_hash(data),
         "dup" => Some(RuleExpr::Dup {
             sreg_addr: reg_attr(data, NFTA_DUP_SREG_ADDR),
             sreg_dev: reg_attr(data, NFTA_DUP_SREG_DEV),
@@ -1994,6 +2114,38 @@ bitflags::bitflags! {
 /// A register attribute.
 fn reg_attr(data: &[u8], id: u16) -> Option<Register> {
     Register::from_u32(u32_attr(data, id)?)
+}
+
+/// A `numgen`.
+fn parse_numgen(data: &[u8]) -> Option<RuleExpr> {
+    Some(RuleExpr::Numgen {
+        dreg: reg_attr(data, NFTA_NG_DREG)?,
+        kind: match u32_attr(data, NFTA_NG_TYPE)? {
+            0 => NumgenKind::Incremental,
+            1 => NumgenKind::Random,
+            _ => return None,
+        },
+        modulus: u32_attr(data, NFTA_NG_MODULUS)?,
+        offset: u32_attr(data, NFTA_NG_OFFSET).unwrap_or(0),
+    })
+}
+
+/// A `hash`.
+fn parse_hash(data: &[u8]) -> Option<RuleExpr> {
+    let kind = match u32_attr(data, NFTA_HASH_TYPE).unwrap_or(0) {
+        0 => HashKind::Jenkins,
+        1 => HashKind::Sym,
+        _ => return None,
+    };
+    Some(RuleExpr::Hash {
+        dreg: reg_attr(data, NFTA_HASH_DREG)?,
+        kind,
+        sreg: reg_attr(data, NFTA_HASH_SREG),
+        len: u32_attr(data, NFTA_HASH_LEN).unwrap_or(0),
+        modulus: u32_attr(data, NFTA_HASH_MODULUS)?,
+        seed: u32_attr(data, NFTA_HASH_SEED),
+        offset: u32_attr(data, NFTA_HASH_OFFSET).unwrap_or(0),
+    })
 }
 
 /// A `fwd`: its device register, and its next hop's with the family.
@@ -3738,6 +3890,70 @@ mod decode_tests {
         let start = b.len();
         b.append_attr_u32_be(NFTA_LOG_FLAGS, 0x10);
         assert!(parse_log(&b.as_bytes()[start..]).is_none());
+    }
+
+    /// #703: `numgen` and `hash` as the kernel echoes them — a jhash's seed
+    /// only when given, an offset only when not 0 — and read back.
+    #[test]
+    fn numgen_and_hash_round_trip() {
+        let numgen = Expr::Numgen {
+            dreg: Register::R0,
+            kind: NumgenKind::Random,
+            modulus: 10,
+            offset: 5,
+        };
+        let jhash = |seed, offset| Expr::Hash {
+            dreg: Register::R0,
+            kind: HashKind::Jenkins,
+            sreg: Some(Register::R1),
+            len: 8,
+            modulus: 4,
+            seed,
+            offset,
+        };
+        let sym = Expr::Hash {
+            dreg: Register::R0,
+            kind: HashKind::Sym,
+            sreg: None,
+            len: 0,
+            modulus: 2,
+            seed: None,
+            offset: 0,
+        };
+        let attrs = data_attrs(&[jhash(None, 0)]);
+        assert!(!attrs.contains_key(&NFTA_HASH_SEED) && !attrs.contains_key(&NFTA_HASH_OFFSET));
+        let attrs = data_attrs(std::slice::from_ref(&sym));
+        assert!(!attrs.contains_key(&NFTA_HASH_LEN) && !attrs.contains_key(&NFTA_HASH_SREG));
+        let back = parse_expressions(&encode(&[numgen, jhash(Some(0xdead), 2), sym]));
+        assert_eq!(
+            back,
+            [
+                RuleExpr::Numgen {
+                    dreg: Register::R0,
+                    kind: NumgenKind::Random,
+                    modulus: 10,
+                    offset: 5,
+                },
+                RuleExpr::Hash {
+                    dreg: Register::R0,
+                    kind: HashKind::Jenkins,
+                    sreg: Some(Register::R1),
+                    len: 8,
+                    modulus: 4,
+                    seed: Some(0xdead),
+                    offset: 2,
+                },
+                RuleExpr::Hash {
+                    dreg: Register::R0,
+                    kind: HashKind::Sym,
+                    sreg: None,
+                    len: 0,
+                    modulus: 2,
+                    seed: None,
+                    offset: 0,
+                },
+            ]
+        );
     }
 
     /// #703: `queue`, `dup` and `fwd` as the kernel echoes them, and read
