@@ -113,6 +113,23 @@ pub enum Expr {
     Log(LogExpr),
     /// Send the packet to a userspace queue — see [`QueueExpr`] (#703).
     Queue(QueueExpr),
+    /// Hand the packet to a local socket at the address and port in the
+    /// registers, keeping its destination (#703). See [`Rule::tproxy`].
+    Tproxy {
+        /// `NFPROTO_IPV4`, `NFPROTO_IPV6`, or 0 (an inet table, either).
+        family: u8,
+        sreg_addr: Option<Register>,
+        sreg_port: Option<Register>,
+    },
+    /// Load something about the packet's local socket (#703). See
+    /// [`Rule::match_socket`].
+    Socket {
+        dreg: Register,
+        key: SocketKey,
+    },
+    /// Answer a SYN for the server with a SYN cookie (#703) — see
+    /// [`SynproxyExpr`].
+    Synproxy(SynproxyExpr),
     /// A number into `dreg`: counting up, or at random, modulo `modulus`,
     /// plus `offset` (#703). See [`Rule::generate`].
     Numgen {
@@ -721,6 +738,93 @@ impl From<LogExpr> for Expr {
     }
 }
 
+/// What a `socket` expression loads (`enum nft_socket_keys`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u32)]
+#[non_exhaustive]
+pub enum SocketKey {
+    /// `socket transparent`: the socket has `IP_TRANSPARENT` (1 byte).
+    Transparent = 0,
+    /// `socket mark`: the socket's mark (4 bytes).
+    Mark = 1,
+    /// `socket wildcard`: the socket is bound to the wildcard address
+    /// (1 byte).
+    Wildcard = 2,
+    /// `socket cgroupv2 level N`: the socket's cgroup at a level.
+    Cgroupv2 = 3,
+}
+
+/// `synproxy`: answer a SYN for a server with a SYN cookie, and open the
+/// connection to it once the client's ACK proves the address (#703).
+/// Allowed in `input` and `forward` filter chains; the SYN must come
+/// untracked (`notrack` in a raw chain) or `ct state invalid`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SynproxyExpr {
+    /// The MSS the cookie announces.
+    pub mss: Option<u16>,
+    /// The window scale it announces.
+    pub wscale: Option<u8>,
+    /// Announce timestamps.
+    pub timestamp: bool,
+    /// Announce selective acknowledgement.
+    pub sack_perm: bool,
+}
+
+impl SynproxyExpr {
+    /// `synproxy`, with nothing announced.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `mss <mss>`.
+    pub fn mss(mut self, mss: u16) -> Self {
+        self.mss = Some(mss);
+        self
+    }
+
+    /// `wscale <scale>`.
+    pub fn wscale(mut self, scale: u8) -> Self {
+        self.wscale = Some(scale);
+        self
+    }
+
+    /// `timestamp`.
+    pub fn timestamp(mut self) -> Self {
+        self.timestamp = true;
+        self
+    }
+
+    /// `sack-perm`.
+    pub fn sack_perm(mut self) -> Self {
+        self.sack_perm = true;
+        self
+    }
+
+    fn flags(&self) -> u32 {
+        let mut f = 0;
+        if self.mss.is_some() {
+            f |= NF_SYNPROXY_OPT_MSS;
+        }
+        if self.wscale.is_some() {
+            f |= NF_SYNPROXY_OPT_WSCALE;
+        }
+        if self.sack_perm {
+            f |= NF_SYNPROXY_OPT_SACK_PERM;
+        }
+        if self.timestamp {
+            f |= NF_SYNPROXY_OPT_TIMESTAMP;
+        }
+        f
+    }
+}
+
+impl From<SynproxyExpr> for Expr {
+    fn from(e: SynproxyExpr) -> Self {
+        Expr::Synproxy(e)
+    }
+}
+
 /// How a `numgen` counts (`enum nft_ng_types`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u32)]
@@ -1265,6 +1369,39 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
                 builder.append_attr_u32_be(NFTA_HASH_OFFSET, *offset);
             }
             builder.append_attr_u32_be(NFTA_HASH_TYPE, *kind as u32);
+            builder.nest_end(data);
+        }
+        // What `nft_tproxy_dump` echoes: the family, and each register set.
+        Expr::Tproxy {
+            family,
+            sreg_addr,
+            sreg_port,
+        } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "tproxy");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_u32_be(NFTA_TPROXY_FAMILY, u32::from(*family));
+            if let Some(r) = sreg_addr {
+                builder.append_attr_u32_be(NFTA_TPROXY_REG_ADDR, r.wire());
+            }
+            if let Some(r) = sreg_port {
+                builder.append_attr_u32_be(NFTA_TPROXY_REG_PORT, r.wire());
+            }
+            builder.nest_end(data);
+        }
+        Expr::Socket { dreg, key } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "socket");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_u32_be(NFTA_SOCKET_KEY, *key as u32);
+            builder.append_attr_u32_be(NFTA_SOCKET_DREG, dreg.wire());
+            builder.nest_end(data);
+        }
+        // What `nft_synproxy_dump` echoes: all three, always.
+        Expr::Synproxy(s) => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "synproxy");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_u16_be(NFTA_SYNPROXY_MSS, s.mss.unwrap_or(0));
+            builder.append_attr(NFTA_SYNPROXY_WSCALE, &[s.wscale.unwrap_or(0)]);
+            builder.append_attr_u32_be(NFTA_SYNPROXY_FLAGS, s.flags());
             builder.nest_end(data);
         }
         Expr::Dup { sreg_addr, sreg_dev } => {
@@ -1905,6 +2042,26 @@ pub enum RuleExpr {
     Log(LogExpr),
     /// `queue`.
     Queue(QueueExpr),
+    /// `tproxy`.
+    #[non_exhaustive]
+    Tproxy {
+        /// `NFPROTO_IPV4`, `NFPROTO_IPV6`, or 0.
+        family: u8,
+        /// The register with the address, if any.
+        sreg_addr: Option<Register>,
+        /// The register with the port, if any.
+        sreg_port: Option<Register>,
+    },
+    /// `socket <key>` load.
+    #[non_exhaustive]
+    Socket {
+        /// Destination register.
+        dreg: Register,
+        /// What is loaded.
+        key: SocketKey,
+    },
+    /// `synproxy`.
+    Synproxy(SynproxyExpr),
     /// `numgen`.
     #[non_exhaustive]
     Numgen {
@@ -2066,6 +2223,15 @@ fn parse_expr(name: &str, data: &[u8]) -> RuleExpr {
         "notrack" if data.is_empty() => Some(RuleExpr::Notrack),
         "log" => parse_log(data),
         "queue" => parse_queue(data),
+        "tproxy" => u32_attr(data, NFTA_TPROXY_FAMILY)
+            .and_then(|f| u8::try_from(f).ok())
+            .map(|family| RuleExpr::Tproxy {
+                family,
+                sreg_addr: reg_attr(data, NFTA_TPROXY_REG_ADDR),
+                sreg_port: reg_attr(data, NFTA_TPROXY_REG_PORT),
+            }),
+        "socket" => parse_socket(data),
+        "synproxy" => parse_synproxy(data),
         "numgen" => parse_numgen(data),
         "hash" => parse_hash(data),
         "dup" => Some(RuleExpr::Dup {
@@ -2114,6 +2280,42 @@ bitflags::bitflags! {
 /// A register attribute.
 fn reg_attr(data: &[u8], id: u16) -> Option<Register> {
     Register::from_u32(u32_attr(data, id)?)
+}
+
+/// A `socket` load; a `cgroupv2` one stays Unknown (its level and the
+/// cgroup id it compares are not modelled).
+fn parse_socket(data: &[u8]) -> Option<RuleExpr> {
+    let key = match u32_attr(data, NFTA_SOCKET_KEY)? {
+        0 => SocketKey::Transparent,
+        1 => SocketKey::Mark,
+        2 => SocketKey::Wildcard,
+        _ => return None,
+    };
+    Some(RuleExpr::Socket {
+        dreg: reg_attr(data, NFTA_SOCKET_DREG)?,
+        key,
+    })
+}
+
+/// A `synproxy`: its announced options, by its flags.
+fn parse_synproxy(data: &[u8]) -> Option<RuleExpr> {
+    let flags = u32_attr(data, NFTA_SYNPROXY_FLAGS).unwrap_or(0);
+    let known = NF_SYNPROXY_OPT_MSS
+        | NF_SYNPROXY_OPT_WSCALE
+        | NF_SYNPROXY_OPT_SACK_PERM
+        | NF_SYNPROXY_OPT_TIMESTAMP;
+    if flags & !known != 0 {
+        return None;
+    }
+    let attr = |id| AttrIter::new(data).find(|(t, _)| t & 0x7FFF == id).map(|(_, p)| p);
+    let mss = attr(NFTA_SYNPROXY_MSS).and_then(|p| get::u16_be(p).ok());
+    let wscale = attr(NFTA_SYNPROXY_WSCALE).and_then(|p| p.first().copied());
+    Some(RuleExpr::Synproxy(SynproxyExpr {
+        mss: (flags & NF_SYNPROXY_OPT_MSS != 0).then_some(mss?),
+        wscale: (flags & NF_SYNPROXY_OPT_WSCALE != 0).then_some(wscale?),
+        timestamp: flags & NF_SYNPROXY_OPT_TIMESTAMP != 0,
+        sack_perm: flags & NF_SYNPROXY_OPT_SACK_PERM != 0,
+    }))
 }
 
 /// A `numgen`.
@@ -3890,6 +4092,55 @@ mod decode_tests {
         let start = b.len();
         b.append_attr_u32_be(NFTA_LOG_FLAGS, 0x10);
         assert!(parse_log(&b.as_bytes()[start..]).is_none());
+    }
+
+    /// #703: `tproxy`, `socket` and `synproxy` as the kernel echoes them,
+    /// and read back.
+    #[test]
+    fn tproxy_socket_and_synproxy_round_trip() {
+        let full = SynproxyExpr::new().mss(1460).wscale(7).timestamp().sack_perm();
+        let attrs = data_attrs(&[full.clone().into()]);
+        assert_eq!(attrs[&NFTA_SYNPROXY_FLAGS], 0x0fu32.to_be_bytes());
+        let mss_only = SynproxyExpr::new().mss(1400);
+        let exprs = [
+            Expr::Tproxy {
+                family: 2,
+                sreg_addr: Some(Register::R0),
+                sreg_port: Some(Register::R1),
+            },
+            Expr::Tproxy {
+                family: 0,
+                sreg_addr: None,
+                sreg_port: Some(Register::R0),
+            },
+            Expr::Socket {
+                dreg: Register::R0,
+                key: SocketKey::Mark,
+            },
+            full.clone().into(),
+            mss_only.clone().into(),
+        ];
+        assert_eq!(
+            parse_expressions(&encode(&exprs)),
+            [
+                RuleExpr::Tproxy {
+                    family: 2,
+                    sreg_addr: Some(Register::R0),
+                    sreg_port: Some(Register::R1),
+                },
+                RuleExpr::Tproxy {
+                    family: 0,
+                    sreg_addr: None,
+                    sreg_port: Some(Register::R0),
+                },
+                RuleExpr::Socket {
+                    dreg: Register::R0,
+                    key: SocketKey::Mark,
+                },
+                RuleExpr::Synproxy(full),
+                RuleExpr::Synproxy(mss_only),
+            ]
+        );
     }
 
     /// #703: `numgen` and `hash` as the kernel echoes them — a jhash's seed

@@ -480,6 +480,39 @@ pub const NFTA_HASH_OFFSET: u16 = 6;
 /// `NFTA_HASH_TYPE` — `enum nft_hash_types`.
 pub const NFTA_HASH_TYPE: u16 = 7;
 
+// Tproxy — `enum nft_tproxy_attributes`.
+/// `NFTA_TPROXY_FAMILY` — `NFPROTO_IPV4`, `NFPROTO_IPV6`, or 0 in an inet
+/// table for either.
+pub const NFTA_TPROXY_FAMILY: u16 = 1;
+/// `NFTA_TPROXY_REG_ADDR`.
+pub const NFTA_TPROXY_REG_ADDR: u16 = 2;
+/// `NFTA_TPROXY_REG_PORT`.
+pub const NFTA_TPROXY_REG_PORT: u16 = 3;
+
+// Socket — `enum nft_socket_attributes`.
+/// `NFTA_SOCKET_KEY` — `enum nft_socket_keys`.
+pub const NFTA_SOCKET_KEY: u16 = 1;
+/// `NFTA_SOCKET_DREG`.
+pub const NFTA_SOCKET_DREG: u16 = 2;
+/// `NFTA_SOCKET_LEVEL` — a `cgroupv2` key's ancestor level.
+pub const NFTA_SOCKET_LEVEL: u16 = 3;
+
+// Synproxy — `enum nft_synproxy_attributes`.
+/// `NFTA_SYNPROXY_MSS` (be16).
+pub const NFTA_SYNPROXY_MSS: u16 = 1;
+/// `NFTA_SYNPROXY_WSCALE` (u8).
+pub const NFTA_SYNPROXY_WSCALE: u16 = 2;
+/// `NFTA_SYNPROXY_FLAGS` — `NF_SYNPROXY_OPT_*` (be32).
+pub const NFTA_SYNPROXY_FLAGS: u16 = 3;
+/// `NF_SYNPROXY_OPT_MSS` (`linux/netfilter/nf_synproxy.h`).
+pub const NF_SYNPROXY_OPT_MSS: u32 = 0x01;
+/// `NF_SYNPROXY_OPT_WSCALE`.
+pub const NF_SYNPROXY_OPT_WSCALE: u32 = 0x02;
+/// `NF_SYNPROXY_OPT_SACK_PERM`.
+pub const NF_SYNPROXY_OPT_SACK_PERM: u32 = 0x04;
+/// `NF_SYNPROXY_OPT_TIMESTAMP`.
+pub const NF_SYNPROXY_OPT_TIMESTAMP: u32 = 0x08;
+
 // Dup — `enum nft_dup_attributes`.
 /// `NFTA_DUP_SREG_ADDR` — the register holding the gateway address.
 pub const NFTA_DUP_SREG_ADDR: u16 = 1;
