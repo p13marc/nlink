@@ -224,3 +224,66 @@ async fn a_rejected_batch_reports_the_kernel_error_not_a_timeout() -> nlink::Res
 
     Ok(())
 }
+
+/// #703: each `destroy_*` delete removes what is there, and takes what is
+/// already gone as deleted, where the `del_*` of it fails the batch with
+/// ENOENT: a table with a chain, a rule, a set, a counter and a flowtable,
+/// destroyed one by one, then destroyed again.
+#[tokio::test]
+async fn destroy_deletes_what_is_there_and_takes_the_gone_as_deleted() -> nlink::Result<()> {
+    use nlink::netlink::nftables::connection::kernel_has_destroy;
+    use nlink::netlink::nftables::types::Set;
+    use nlink::netlink::nftables::{Flowtable, Object, ObjectType};
+    require_root!();
+    nlink::require_modules!("nf_tables", "nf_flow_table");
+    assert!(kernel_has_destroy(), "NFT_MSG_DESTROY* needs kernel 6.3+");
+
+    let ns = TestNamespace::new("nft-destroy")?;
+    let conn = ns.connection_for::<Nftables>()?;
+    with_timeout(async {
+        conn.add_table("t", Family::Inet).await?;
+        conn.add_chain(
+            Chain::new("t", "in")?
+                .family(Family::Inet)
+                .hook(Hook::Input)
+                .priority(Priority::Filter)
+                .chain_type(ChainType::Filter),
+        )
+        .await?;
+        conn.add_rule(Rule::new("t", "in").family(Family::Inet).accept()).await?;
+        conn.add_set(Set::new("t", "s").family(Family::Inet)).await?;
+        conn.add_object(&Object::counter("t", "c").family(Family::Inet)).await?;
+        conn.add_flowtable(&Flowtable::new(Family::Inet, "t", "ft")).await?;
+        let handle = conn.list_rules("t", Family::Inet).await?[0].handle;
+
+        let destroy = || {
+            conn.transaction()
+                .destroy_rule("t", "in", Family::Inet, handle)
+                .destroy_chain("t", "in", Family::Inet)
+                .destroy_set("t", "s", Family::Inet)
+                .destroy_object("t", "c", ObjectType::Counter, Family::Inet)
+                .destroy_flowtable(Family::Inet, "t", "ft")
+        };
+        destroy().commit(&conn).await?;
+        assert!(conn.list_rules("t", Family::Inet).await?.is_empty());
+        assert!(conn.list_chains_in("t", Family::Inet).await?.is_empty());
+        assert!(conn.list_sets_in("t", Family::Inet).await?.is_empty());
+        assert!(conn.list_objects_in("t", Family::Inet).await?.is_empty());
+        assert!(conn.list_flowtables_in("t", Family::Inet).await?.is_empty());
+
+        // All gone: destroying them again commits, deleting them does not.
+        destroy().commit(&conn).await?;
+        let deleted = conn
+            .transaction()
+            .del_set("t", "s", Family::Inet)
+            .commit(&conn)
+            .await;
+        assert!(deleted.is_err_and(|e| e.is_not_found()), "a DELSET of a gone set is ENOENT");
+
+        conn.transaction().destroy_table("t", Family::Inet).commit(&conn).await?;
+        assert!(conn.list_tables_in(Family::Inet).await?.iter().all(|t| t.name != "t"));
+        conn.transaction().destroy_table("t", Family::Inet).commit(&conn).await?;
+        Ok(())
+    })
+    .await
+}

@@ -94,9 +94,22 @@ pub const NFT_MSG_DELSET: u8 = 11;
 pub const NFT_MSG_NEWSETELEM: u8 = 12;
 pub const NFT_MSG_GETSETELEM: u8 = 13;
 pub const NFT_MSG_DELSETELEM: u8 = 14;
+/// Delete a table, and take one that is already gone as deleted
+/// (`NFT_MSG_DESTROYTABLE`, kernel 6.3+, as the rest of the family).
+pub const NFT_MSG_DESTROYTABLE: u8 = 26;
+/// `NFT_MSG_DESTROYCHAIN`.
+pub const NFT_MSG_DESTROYCHAIN: u8 = 27;
+/// `NFT_MSG_DESTROYRULE`.
+pub const NFT_MSG_DESTROYRULE: u8 = 28;
+/// `NFT_MSG_DESTROYSET`.
+pub const NFT_MSG_DESTROYSET: u8 = 29;
 /// Delete set elements, and take one that is already gone as deleted
 /// (`NFT_MSG_DESTROYSETELEM`, kernel 6.3+).
 pub const NFT_MSG_DESTROYSETELEM: u8 = 30;
+/// `NFT_MSG_DESTROYOBJ`.
+pub const NFT_MSG_DESTROYOBJ: u8 = 31;
+/// `NFT_MSG_DESTROYFLOWTABLE`.
+pub const NFT_MSG_DESTROYFLOWTABLE: u8 = 32;
 pub const NFT_MSG_NEWGEN: u8 = 15;
 pub const NFT_MSG_GETGEN: u8 = 16;
 pub const NFT_MSG_NEWOBJ: u8 = 18;
@@ -782,7 +795,13 @@ mod table_flag_tests {
         assert_eq!(NFT_MSG_NEWFLOWTABLE, 22);
         assert_eq!(NFT_MSG_GETFLOWTABLE, 23);
         assert_eq!(NFT_MSG_DELFLOWTABLE, 24);
+        assert_eq!(NFT_MSG_DESTROYTABLE, 26);
+        assert_eq!(NFT_MSG_DESTROYCHAIN, 27);
+        assert_eq!(NFT_MSG_DESTROYRULE, 28);
+        assert_eq!(NFT_MSG_DESTROYSET, 29);
         assert_eq!(NFT_MSG_DESTROYSETELEM, 30);
+        assert_eq!(NFT_MSG_DESTROYOBJ, 31);
+        assert_eq!(NFT_MSG_DESTROYFLOWTABLE, 32);
         assert_eq!(NFT_FLOWTABLE_HW_OFFLOAD, 0x1);
         assert_eq!(NFT_FLOWTABLE_COUNTER, 0x2);
         assert_eq!(NF_NETDEV_INGRESS, 0);
