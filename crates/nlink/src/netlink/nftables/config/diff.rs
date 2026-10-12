@@ -558,6 +558,11 @@ pub struct NftablesDiff {
     /// which the diff will not do. The apply fails on the first, with
     /// [`ErrorDetail::NotSupported`](crate::ErrorDetail::NotSupported) (#479).
     pub tables_refused: Vec<(Family, String, String)>,
+    /// Tables deleted and created again, with everything declared in them —
+    /// `(family, name, why)`: a changed comment, with
+    /// [`NftDiffOptions::recreate_on_comment_change`] (#703). Each is also
+    /// in [`Self::tables_to_add`].
+    pub tables_to_recreate: Vec<(Family, String, String)>,
     /// Chains to create — (owning table, owning family, chain).
     pub chains_to_add: Vec<(String, Family, DeclaredChain)>,
     /// Chains whose policy drifted — (owning table, owning family, chain).
@@ -680,6 +685,7 @@ impl NftablesDiff {
             && self.tables_to_modify.is_empty()
             && self.tables_to_delete.is_empty()
             && self.tables_refused.is_empty()
+            && self.tables_to_recreate.is_empty()
             && self.chains_to_add.is_empty()
             && self.chains_to_modify.is_empty()
             && self.chains_to_delete.is_empty()
@@ -707,6 +713,7 @@ impl NftablesDiff {
             + self.tables_to_modify.len()
             + self.tables_to_delete.len()
             + self.tables_refused.len()
+            + self.tables_to_recreate.len()
             + self.chains_to_add.len()
             + self.chains_to_modify.len()
             + self.chains_to_delete.len()
@@ -752,6 +759,9 @@ impl NftablesDiff {
         }
         for (fam, name, why) in &self.tables_refused {
             lines.push(format!("! table {fam:?} {name} (refused: {why})"));
+        }
+        for (fam, name, why) in &self.tables_to_recreate {
+            lines.push(format!("~ table {fam:?} {name} (recreate: {why})"));
         }
         for (tbl, fam, c) in &self.chains_to_add {
             lines.push(format!("+ chain {fam:?} {tbl}/{}", c.name()));
@@ -929,8 +939,12 @@ fn placement_suffix(placement: RulePlacement) -> String {
 /// doesn't mention a policy won't fight a policy set out-of-band. The hook is
 /// the exception: a chain declared without one is a regular chain, and a
 /// base chain of that name is not it (#478).
-fn chain_change(declared: &DeclaredChain, current: &ChainInfo) -> ChainChange {
+fn chain_change(declared: &DeclaredChain, current: &ChainInfo, comments: bool) -> ChainChange {
     let mut why = Vec::new();
+    // The kernel keeps a chain's comment as it was created (#703).
+    if comments && current.comment.as_deref() != declared.comment() {
+        why.push(format!("comment {:?} -> {:?}", current.comment, declared.comment()));
+    }
     match (declared.hook(), current.hook) {
         (None, Some(_)) => why.push("base chain -> regular chain".to_string()),
         (Some(_), None) => why.push("regular chain -> base chain".to_string()),
@@ -1427,6 +1441,18 @@ pub struct NftDiffOptions {
     /// order stays). Off, installed rules stay wherever they are and only
     /// new rules are placed.
     pub enforce_rule_order: bool,
+    /// Apply a changed comment on a table, chain or set by creating it
+    /// again (#703). Default `false`.
+    ///
+    /// The kernel keeps a comment as it was created and never updates it,
+    /// so without this the diff does not compare comments. With it, a
+    /// changed one recreates what carries it, with all that is in it: an
+    /// owned table and everything declared in it (in one batch, so nothing
+    /// is unfiltered in between, but counters and dynamic set elements
+    /// start again), a chain and its rules, a set and its declared
+    /// elements. A shared table keeps its comment; declared objects carry
+    /// none.
+    pub recreate_on_comment_change: bool,
 }
 
 impl Default for NftDiffOptions {
@@ -1434,6 +1460,7 @@ impl Default for NftDiffOptions {
         Self {
             purge_tables: false,
             enforce_rule_order: true,
+            recreate_on_comment_change: false,
         }
     }
 }
@@ -1450,6 +1477,13 @@ impl NftDiffOptions {
     /// — it is destructive and unscoped.
     pub fn purge_tables(mut self, on: bool) -> Self {
         self.purge_tables = on;
+        self
+    }
+
+    /// Recreate a table, chain or set whose declared comment changed. See
+    /// [`Self::recreate_on_comment_change`].
+    pub fn recreate_on_comment_change(mut self, on: bool) -> Self {
+        self.recreate_on_comment_change = on;
         self
     }
 }
@@ -1561,6 +1595,21 @@ impl NftablesConfig {
                 .find(|t| t.family == declared.family() && t.name == declared.name())
             {
                 None => diff.tables_to_add.push(declared.clone()),
+                // The kernel keeps a table's comment as it was created: with
+                // the option, an owned table is created again (#703). A
+                // shared one holds what others put there, and keeps its.
+                Some(current)
+                    if options.recreate_on_comment_change
+                        && declared.mode() == super::TableMode::Owned
+                        && current.comment.as_deref() != declared.comment() =>
+                {
+                    diff.tables_to_recreate.push((
+                        declared.family(),
+                        declared.name().to_string(),
+                        format!("comment {:?} -> {:?}", current.comment, declared.comment()),
+                    ));
+                    diff.tables_to_add.push(declared.clone());
+                }
                 Some(current) if current.flags != declared.flags() => {
                     // Only dormant changes on a live table:
                     // `nf_tables_updtable` refuses an owner or persist
@@ -1728,7 +1777,7 @@ impl NftablesConfig {
                     // (#200). Same silence for a changed hook or priority —
                     // which, sent as an update, the kernel refuses, so those
                     // recreate the chain (#478).
-                    Some(current) => match chain_change(c, current) {
+                    Some(current) => match chain_change(c, current, options.recreate_on_comment_change) {
                         ChainChange::None => {}
                         ChainChange::Update => diff.chains_to_modify.push((
                             declared.name().to_string(),
@@ -1907,7 +1956,9 @@ impl NftablesConfig {
             for s in declared.sets() {
                 let current_set = current_sets.iter().find(|c| c.name == s.name());
                 if let Some(current) = current_set
-                    && set_has_drifted(s, current)
+                    && (set_has_drifted(s, current)
+                        || (options.recreate_on_comment_change
+                            && current.comment.as_deref() != s.comment.as_deref()))
                 {
                     recreated.insert(s.name());
                     // Recreate: delete first, then add with the
@@ -2264,6 +2315,7 @@ mod tests {
     /// base chain declared as a regular one, is a recreate (#478).
     #[test]
     fn chain_changes_the_kernel_cannot_update_are_recreates() {
+        let chain_change_ = |d: &DeclaredChain, c: &ChainInfo| chain_change(d, c, false);
         use crate::netlink::nftables::{ChainType, Hook, Policy, Priority};
 
         let declared =
@@ -2293,24 +2345,24 @@ mod tests {
                 .priority(Priority::Filter)
                 .chain_type(ChainType::Filter)
         }
-        assert_eq!(chain_change(&declared(base), &live), ChainChange::None);
+        assert_eq!(chain_change_(&declared(base), &live), ChainChange::None);
         assert_eq!(
-            chain_change(&declared(|c| base(c).policy(Policy::Drop)), &live),
+            chain_change_(&declared(|c| base(c).policy(Policy::Drop)), &live),
             ChainChange::Update
         );
         assert_eq!(
-            chain_change(
+            chain_change_(
                 &declared(|c| base(c).priority(Priority::Custom(-10))),
                 &live
             ),
             ChainChange::Recreate("priority 0 -> -10".into())
         );
         assert_eq!(
-            chain_change(&declared(|c| base(c).hook(Hook::Forward)), &live),
+            chain_change_(&declared(|c| base(c).hook(Hook::Forward)), &live),
             ChainChange::Recreate("hook 1 -> 2".into())
         );
         assert_eq!(
-            chain_change(&declared(|c| c), &live),
+            chain_change_(&declared(|c| c), &live),
             ChainChange::Recreate("base chain -> regular chain".into())
         );
         let regular = ChainInfo {
@@ -2320,9 +2372,9 @@ mod tests {
             policy: None,
             ..live.clone()
         };
-        assert_eq!(chain_change(&declared(|c| c), &regular), ChainChange::None);
+        assert_eq!(chain_change_(&declared(|c| c), &regular), ChainChange::None);
         assert_eq!(
-            chain_change(&declared(base), &regular),
+            chain_change_(&declared(base), &regular),
             ChainChange::Recreate("regular chain -> base chain".into())
         );
     }

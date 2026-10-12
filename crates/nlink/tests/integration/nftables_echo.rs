@@ -784,3 +784,84 @@ async fn comments_on_every_object_are_written_and_read() -> nlink::Result<()> {
     })
     .await
 }
+
+/// #703: the kernel keeps a comment as it was created. With
+/// `recreate_on_comment_change`, a changed comment on a chain, a set or a
+/// table is applied by creating it again — with its rules, its elements,
+/// everything declared in the table — and the next diff is empty. Without
+/// the option the diff does not compare comments, as before.
+#[tokio::test]
+async fn a_changed_comment_is_applied_by_recreating_with_the_option() -> nlink::Result<()> {
+    use nlink::netlink::nftables::config::NftDiffOptions;
+    use nlink::netlink::nftables::types::PacketField;
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let ns = TestNamespace::new("nft-echo-recomment")?;
+    let conn = ns.connection_for::<Nftables>()?;
+    let cfg = |table: &str, chain: &str, set: &str| {
+        let (table, chain, set) = (table.to_string(), chain.to_string(), set.to_string());
+        NftablesConfig::new().table("c", Family::Inet, move |t| {
+            t.comment(table)
+                .chain("input", move |c| {
+                    c.hook(Hook::Input)
+                        .priority(Priority::Filter)
+                        .chain_type(ChainType::Filter)
+                        .comment(chain)
+                })
+                .set("blocked", move |s| {
+                    s.key_type(SetKeyType::Ipv4Addr)
+                        .comment(set)
+                        .ipv4(Ipv4Addr::new(10, 0, 0, 1))
+                })
+                .rule_keyed("input", "drop", |r| {
+                    r.match_in_set(PacketField::Ip4Saddr, "blocked").drop()
+                })
+        })
+    };
+    let on = NftDiffOptions::default().recreate_on_comment_change(true);
+    with_timeout(async {
+        let first = cfg("t1", "c1", "s1");
+        first.diff(&conn).await?.apply(&conn).await?;
+        assert!(first.diff_with_options(&conn, &on).await?.is_empty());
+
+        // Without the option, a changed comment is not seen.
+        let chain = cfg("t1", "c2", "s1");
+        assert!(chain.diff(&conn).await?.is_empty());
+
+        let diff = chain.diff_with_options(&conn, &on).await?;
+        assert_eq!(diff.chains_to_recreate.len(), 1, "{diff}");
+        // The chain, and its rule put back.
+        assert_eq!(diff.change_count(), 2, "{diff}");
+        diff.apply(&conn).await?;
+        let again = chain.diff_with_options(&conn, &on).await?;
+        assert!(again.is_empty(), "second diff must be empty: {again}");
+
+        let set = cfg("t1", "c2", "s2");
+        let diff = set.diff_with_options(&conn, &on).await?;
+        assert_eq!(diff.sets_to_delete.len(), 1, "{diff}");
+        diff.apply(&conn).await?;
+        let again = set.diff_with_options(&conn, &on).await?;
+        assert!(again.is_empty(), "second diff must be empty: {again}");
+
+        let table = cfg("t2", "c2", "s2");
+        let diff = table.diff_with_options(&conn, &on).await?;
+        assert_eq!(diff.tables_to_recreate.len(), 1, "{diff}");
+        diff.apply(&conn).await?;
+        let again = table.diff_with_options(&conn, &on).await?;
+        assert!(again.is_empty(), "second diff must be empty: {again}");
+
+        let listed = ns.exec("nft", &["list", "table", "inet", "c"])?;
+        for want in [
+            "comment \"t2\"",
+            "comment \"c2\"",
+            "comment \"s2\"",
+            "elements = { 10.0.0.1 }",
+            "ip saddr @blocked drop",
+        ] {
+            assert!(listed.contains(want), "nft does not list {want:?}:\n{listed}");
+        }
+        Ok(())
+    })
+    .await
+}

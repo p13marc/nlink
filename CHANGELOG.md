@@ -2834,6 +2834,19 @@ All notable changes to this project will be documented in this file.
   kernel 6.3+; `connection::kernel_has_destroy()` tells). They join
   `destroy_set_elements`.
 
+
+- **Opt-in comment updates (#703).** The kernel keeps a table's, chain's or
+  set's comment as it was created, so the declarative diff has not compared
+  them. With `NftDiffOptions::recreate_on_comment_change(true)`, a changed one
+  recreates what carries it, in the same batch:
+  - an owned table, with everything declared in it (the new
+    `NftablesDiff::tables_to_recreate`);
+  - a chain, with its rules;
+  - a set, with its declared elements.
+
+  A shared table keeps its comment, and declared objects carry none. Off by
+  default: counters and dynamic elements start again.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
