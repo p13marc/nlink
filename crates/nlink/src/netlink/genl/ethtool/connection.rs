@@ -20,11 +20,10 @@ use crate::{
         attr::{AttrIter, NLA_F_NESTED},
         builder::MessageBuilder,
         connection::Connection,
-        dump_frame::{Classification, classify},
         error::{Error, Result},
         genl::{GENL_HDRLEN, GenlMsgHdr},
         interface_ref::InterfaceRef,
-        message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError},
+        message::{MessageIter, NLM_F_ACK, NLM_F_REQUEST, NlMsgError},
         protocol::{AsyncProtocolInit, Ethtool},
         socket::NetlinkSocket,
     },
@@ -1847,65 +1846,19 @@ impl Connection<Ethtool> {
         Ok(stats)
     }
 
-    /// Custom STATS_GET request — the stats message uses header attr
-    /// id 2 (not the usual 1) and needs a `Groups` bitset selecting
-    /// which standardized groups to return.
+    /// STATS_GET for one device: its header is attribute 2, not the usual
+    /// 1, and a `Groups` bitset selects the standardized groups. A `doit`:
+    /// sent as a dump, ethtool answered for every device and the first,
+    /// `lo`, was kept, whatever the name (#773).
     async fn ethtool_stats_get(&self, ifname: &str) -> Result<Vec<u8>> {
-        let family_id = self.state().family_id;
-
-        let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
-        let genl_hdr = GenlMsgHdr::new(EthtoolCmd::StatsGet as u8, ETHTOOL_GENL_VERSION);
-        builder.append(&genl_hdr);
-
-        // Header nest (note: STATS header is attr id 2).
-        let header = builder.nest_start(EthtoolStatsAttr::Header as u16 | NLA_F_NESTED);
-        builder.append_attr_str(EthtoolHeaderAttr::DevName as u16, ifname);
-        builder.nest_end(header);
-
-        // Groups bitset (compact, no-mask): select the 4 standardized
-        // groups (bits 0..=3 set => 0x0F).
-        let groups = builder.nest_start(EthtoolStatsAttr::Groups as u16 | NLA_F_NESTED);
-        builder.append_attr(EthtoolBitsetAttr::Nomask as u16, &[]);
-        builder.append_attr_u32(EthtoolBitsetAttr::Size as u16, 4);
-        builder.append_attr(EthtoolBitsetAttr::Value as u16, &0x0fu32.to_ne_bytes());
-        builder.nest_end(groups);
-
-        let seq = self.socket().next_seq();
-        builder.set_seq(seq);
-        builder.set_pid(self.socket().pid());
-
-        // #134 — dual-mode recv (dump). Register/lock before send.
-        let mut session = self.recv_session_dump(seq).await?;
-        let msg = builder.finish();
-        self.socket().send(&msg).await?;
-
-        self.with_timeout(async {
-            let mut result_payload: Option<Vec<u8>> = None;
-            loop {
-                let data: Vec<u8> = session.recv_with_timeout(self).await?;
-                let mut done = false;
-                for msg_result in MessageIter::new(&data) {
-                    let (header, payload) = msg_result?;
-                    match classify(header, payload, seq) {
-                        Classification::SkipSeq | Classification::Ack => continue,
-                        Classification::Error(e) => return Err(e),
-                        Classification::Done(result) => {
-                            result?;
-                            done = true;
-                            break;
-                        }
-                        Classification::Data { payload } => {
-                            if result_payload.is_none() {
-                                result_payload = Some(payload.to_vec());
-                            }
-                        }
-                    }
-                }
-                if done {
-                    break;
-                }
-            }
-            result_payload.ok_or_else(|| Error::invalid_message("no stats response received"))
+        self.ethtool_doit(EthtoolCmd::StatsGet, EthtoolStatsAttr::Header as u16, ifname, |builder| {
+            // Groups bitset (compact, no-mask): the 4 standardized groups
+            // (bits 0..=3 set => 0x0F).
+            let groups = builder.nest_start(EthtoolStatsAttr::Groups as u16 | NLA_F_NESTED);
+            builder.append_attr(EthtoolBitsetAttr::Nomask as u16, &[]);
+            builder.append_attr_u32(EthtoolBitsetAttr::Size as u16, 4);
+            builder.append_attr(EthtoolBitsetAttr::Value as u16, &0x0fu32.to_ne_bytes());
+            builder.nest_end(groups);
         })
         .await
     }
@@ -1985,6 +1938,20 @@ impl Connection<Ethtool> {
         ifname: &str,
         build_attrs: impl FnOnce(&mut MessageBuilder),
     ) -> Result<Vec<u8>> {
+        // ETHTOOL_A_*_HEADER = 1, for every message but STATS.
+        self.ethtool_doit(cmd, 1, ifname, build_attrs).await
+    }
+
+    /// An ethtool GET for one device, as a `doit`, with its header in
+    /// attribute `header` (STATS keeps it in 2), and the single reply's
+    /// payload.
+    async fn ethtool_doit(
+        &self,
+        cmd: EthtoolCmd,
+        header: u16,
+        ifname: &str,
+        build_attrs: impl FnOnce(&mut MessageBuilder),
+    ) -> Result<Vec<u8>> {
         let family_id = self.state().family_id;
 
         // NLM_F_REQUEST only (no DUMP) — this is a do-it with parameters.
@@ -1992,7 +1959,7 @@ impl Connection<Ethtool> {
         let genl_hdr = GenlMsgHdr::new(cmd as u8, ETHTOOL_GENL_VERSION);
         builder.append(&genl_hdr);
 
-        let header_token = builder.nest_start(1 | NLA_F_NESTED); // ETHTOOL_A_*_HEADER = 1
+        let header_token = builder.nest_start(header | NLA_F_NESTED);
         builder.append_attr_str(EthtoolHeaderAttr::DevName as u16, ifname);
         builder.nest_end(header_token);
 
