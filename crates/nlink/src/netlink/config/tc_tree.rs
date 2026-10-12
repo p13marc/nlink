@@ -376,10 +376,25 @@ impl ClassSpec {
         };
         match self {
             Self::Htb(c) => {
+                // The quantum, mpu and overhead are dumped back too, and a
+                // drift in them used to go unseen (#789).
+                let parms = attrs
+                    .get(&crate::netlink::types::tc::qdisc::htb::TCA_HTB_PARMS)
+                    .and_then(|p| {
+                        <crate::netlink::types::tc::qdisc::htb::TcHtbOpt as zerocopy::FromBytes>::read_from_prefix(p)
+                            .ok()
+                    })
+                    .map(|(o, _)| o);
+                let (mpu, overhead) = c.mpu_and_overhead();
                 htb_class_matches(live, c)
                     && htb_class_options(live).is_some_and(|o| {
                         c.priority().is_none_or(|p| o.priority == p)
                             && c.cburst_as_dumped().is_none_or(|b| o.cburst == b)
+                    })
+                    && parms.is_some_and(|p| {
+                        c.quantum_declared().is_none_or(|q| p.quantum == q)
+                            && (p.rate.mpu, p.rate.overhead) == (mpu, overhead)
+                            && (p.ceil.mpu, p.ceil.overhead) == (mpu, overhead)
                     })
             }
             // The kernel keeps a curve in its own units, rounding up, and

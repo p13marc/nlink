@@ -8070,6 +8070,17 @@ impl HtbClassConfig {
         self.prio
     }
 
+    /// The declared quantum, if any; the kernel's (rate / r2q) otherwise,
+    /// and not compared (#789).
+    pub(crate) fn quantum_declared(&self) -> Option<u32> {
+        self.quantum
+    }
+
+    /// The mpu and overhead both rate specs carry (#789).
+    pub(crate) fn mpu_and_overhead(&self) -> (u16, u16) {
+        (self.mpu, self.overhead)
+    }
+
     /// The declared ceil burst as a dump reads it back (through the tick
     /// round trip at the ceil rate), if one is declared; the default the
     /// kernel derives is not compared.

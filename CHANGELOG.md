@@ -892,6 +892,12 @@ All notable changes to this project will be documented in this file.
   goes out as both keys, but the comparison read only the input key. So an
   erspan or ip6erspan whose output key differed matched its declaration.
 
+- **An HTB class's quantum, mpu and overhead are compared (#789).** A
+  declared class sends them, and the kernel dumps them back, but the
+  comparison looked at rate, ceil, bursts and priority only. So a class
+  whose quantum, mpu or overhead drifted matched its declaration. A
+  quantum left unset is the kernel's choice, and is still not compared.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

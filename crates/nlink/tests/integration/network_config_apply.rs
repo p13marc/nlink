@@ -1986,3 +1986,48 @@ async fn an_erspans_output_key_is_compared() -> Result<()> {
     })
     .await
 }
+
+/// An HTB class's quantum, mpu and overhead are compared (#789). A
+/// declared class sends them, and the comparison looked at rate, ceil,
+/// bursts and priority only: a class whose quantum or overhead drifted
+/// matched its declaration and was never put right.
+#[tokio::test]
+async fn an_htb_classs_quantum_and_overhead_are_compared() -> Result<()> {
+    use nlink::netlink::tc::HtbClassConfig;
+    use nlink::{Rate, TcHandle};
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "sch_htb");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("htb-quantum")?;
+        let conn = conn_in_ns(&ns)?;
+        let h = |m: u16, n: u16| TcHandle::new(m, n);
+        let cfg = |class: HtbClassConfig| {
+            NetworkConfig::new()
+                .link("d0", |l| l.dummy().up())
+                .qdisc("d0", |q| q.htb().default_class(0x10))
+                .tc("d0", move |t| t.class(h(1, 0), h(1, 0x10), class))
+        };
+        let declared = || HtbClassConfig::new(Rate::mbit(10)).quantum(1514).overhead(4).mpu(64);
+        let applied = cfg(declared()).apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        assert!(cfg(declared()).diff(&conn).await?.is_empty(), "the declared class converges");
+        for drift in ["quantum 3000", "overhead 40", "mpu 128"] {
+            let mut args = vec!["class", "change", "dev", "d0", "parent", "1:", "classid", "1:10", "htb", "rate", "10mbit"];
+            for (k, v) in [("quantum", "1514"), ("overhead", "4"), ("mpu", "64")] {
+                if !drift.starts_with(k) {
+                    args.extend([k, v]);
+                }
+            }
+            args.extend(drift.split_whitespace());
+            ns.exec("tc", &args)?;
+            let diff = cfg(declared()).diff(&conn).await?;
+            assert!(!diff.is_empty(), "{drift} compared equal to the declaration");
+            let applied = cfg(declared()).apply(&conn).await?;
+            assert!(applied.is_success(), "{applied:?}");
+            assert!(cfg(declared()).diff(&conn).await?.is_empty(), "{drift}: did not converge");
+        }
+        Ok(())
+    })
+    .await
+}
