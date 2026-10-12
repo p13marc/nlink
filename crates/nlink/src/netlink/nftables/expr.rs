@@ -26,6 +26,22 @@ pub enum Expr {
     },
     /// Load immediate value into a register.
     Immediate { dreg: Register, data: Vec<u8> },
+    /// Write a register into the packet (`ip dscp set`, `tcp dport set`)
+    /// and update the checksums the bytes are in (#703). See
+    /// [`Rule::set_header`].
+    PayloadSet {
+        sreg: Register,
+        base: PayloadBase,
+        offset: u32,
+        len: u32,
+        /// The checksum in the same header that the write updates.
+        csum: PayloadCsum,
+        /// Where that checksum is, from the start of the header.
+        csum_offset: u32,
+        /// The transport checksum covers the bytes through its
+        /// pseudo-header (an address), so it is updated too.
+        l4_pseudo_header: bool,
+    },
     /// Load an extension header / option field into a register
     /// (`tcp option maxseg size`). The rule stops matching when the
     /// header or option is absent.
@@ -882,6 +898,32 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             builder.append_attr_u32_be(NFTA_PAYLOAD_LEN, *len);
             builder.nest_end(data);
         }
+        Expr::PayloadSet {
+            sreg,
+            base,
+            offset,
+            len,
+            csum,
+            csum_offset,
+            l4_pseudo_header,
+        } => {
+            // Every attribute `nft_payload_set_dump` echoes.
+            builder.append_attr_str(NFTA_EXPR_NAME, "payload");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_u32_be(NFTA_PAYLOAD_SREG, sreg.wire());
+            builder.append_attr_u32_be(NFTA_PAYLOAD_BASE, *base as u32);
+            builder.append_attr_u32_be(NFTA_PAYLOAD_OFFSET, *offset);
+            builder.append_attr_u32_be(NFTA_PAYLOAD_LEN, *len);
+            builder.append_attr_u32_be(NFTA_PAYLOAD_CSUM_TYPE, *csum as u32);
+            builder.append_attr_u32_be(NFTA_PAYLOAD_CSUM_OFFSET, *csum_offset);
+            let flags = if *l4_pseudo_header {
+                NFT_PAYLOAD_L4CSUM_PSEUDOHDR
+            } else {
+                0
+            };
+            builder.append_attr_u32_be(NFTA_PAYLOAD_CSUM_FLAGS, flags);
+            builder.nest_end(data);
+        }
         Expr::Immediate { dreg, data } => {
             builder.append_attr_str(NFTA_EXPR_NAME, "immediate");
             let expr_data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
@@ -1476,6 +1518,25 @@ pub enum RuleExpr {
         offset: u32,
         /// Number of bytes loaded.
         len: u32,
+    },
+    /// `payload` write from a register, with the checksums it updates
+    /// (#703).
+    #[non_exhaustive]
+    PayloadSet {
+        /// Source register.
+        sreg: Register,
+        /// Which packet header the offset is relative to.
+        base: PayloadBase,
+        /// Byte offset within the base header.
+        offset: u32,
+        /// Number of bytes written.
+        len: u32,
+        /// The checksum in the same header that is updated.
+        csum: PayloadCsum,
+        /// Where that checksum is, from the start of the header.
+        csum_offset: u32,
+        /// Whether the transport checksum's pseudo-header changes too.
+        l4_pseudo_header: bool,
     },
     /// `ct` load into a data register (no direction).
     #[non_exhaustive]
@@ -2306,20 +2367,41 @@ fn parse_cmp(data: &[u8]) -> Option<RuleExpr> {
 
 fn parse_payload(data: &[u8]) -> Option<RuleExpr> {
     let mut dreg = None;
+    let mut sreg = None;
     let mut base = None;
     let mut offset = None;
     let mut len = None;
+    let mut csum = PayloadCsum::None;
+    let mut csum_offset = 0;
+    let mut csum_flags = 0;
     for (attr, payload) in AttrIter::new(data) {
         match attr {
             NFTA_PAYLOAD_DREG => dreg = Register::from_u32(get::u32_be(payload).ok()?),
+            NFTA_PAYLOAD_SREG => sreg = Register::from_u32(get::u32_be(payload).ok()?),
             NFTA_PAYLOAD_BASE => base = PayloadBase::from_u32(get::u32_be(payload).ok()?),
             NFTA_PAYLOAD_OFFSET => offset = Some(get::u32_be(payload).ok()?),
             NFTA_PAYLOAD_LEN => len = Some(get::u32_be(payload).ok()?),
+            NFTA_PAYLOAD_CSUM_TYPE => csum = PayloadCsum::from_u32(get::u32_be(payload).ok()?)?,
+            NFTA_PAYLOAD_CSUM_OFFSET => csum_offset = get::u32_be(payload).ok()?,
+            NFTA_PAYLOAD_CSUM_FLAGS => csum_flags = get::u32_be(payload).ok()?,
             _ => {}
         }
     }
-    // SREG-form payload (payload-set / checksum rewrite) has no DREG
-    // and decodes as Unknown.
+    // A write (#703); a flag nlink does not know stays Unknown.
+    if let Some(sreg) = sreg {
+        if csum_flags & !NFT_PAYLOAD_L4CSUM_PSEUDOHDR != 0 {
+            return None;
+        }
+        return Some(RuleExpr::PayloadSet {
+            sreg,
+            base: base?,
+            offset: offset?,
+            len: len?,
+            csum,
+            csum_offset,
+            l4_pseudo_header: csum_flags & NFT_PAYLOAD_L4CSUM_PSEUDOHDR != 0,
+        });
+    }
     Some(RuleExpr::Payload {
         dreg: dreg?,
         base: base?,

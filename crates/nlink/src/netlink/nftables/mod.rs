@@ -257,6 +257,17 @@ pub const NFTA_PAYLOAD_DREG: u16 = 1;
 pub const NFTA_PAYLOAD_BASE: u16 = 2;
 pub const NFTA_PAYLOAD_OFFSET: u16 = 3;
 pub const NFTA_PAYLOAD_LEN: u16 = 4;
+/// `NFTA_PAYLOAD_SREG` — the register a payload write takes its value from.
+pub const NFTA_PAYLOAD_SREG: u16 = 5;
+/// `NFTA_PAYLOAD_CSUM_TYPE` — the checksum a payload write updates.
+pub const NFTA_PAYLOAD_CSUM_TYPE: u16 = 6;
+/// `NFTA_PAYLOAD_CSUM_OFFSET` — where that checksum is in the header.
+pub const NFTA_PAYLOAD_CSUM_OFFSET: u16 = 7;
+/// `NFTA_PAYLOAD_CSUM_FLAGS` — `NFT_PAYLOAD_L4CSUM_PSEUDOHDR`.
+pub const NFTA_PAYLOAD_CSUM_FLAGS: u16 = 8;
+/// `NFT_PAYLOAD_L4CSUM_PSEUDOHDR` — the write changes the transport
+/// checksum's pseudo-header (an address), so that checksum is updated too.
+pub const NFT_PAYLOAD_L4CSUM_PSEUDOHDR: u32 = 1;
 
 // Immediate
 pub const NFTA_IMMEDIATE_DREG: u16 = 1;

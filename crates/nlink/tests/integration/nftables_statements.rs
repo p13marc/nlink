@@ -1370,3 +1370,88 @@ async fn a_log_snaplen_cuts_what_nflog_reads() -> nlink::Result<()> {
     assert_eq!(u16::from_be_bytes([packet.payload[22], packet.payload[23]]), 7991, "up to the ports");
     Ok(())
 }
+
+/// #703: header writes as nft writes them. nft installs eight `set`
+/// statements in one chain, nlink the same writes in another; `nft` lists
+/// the two alike, and nlink decodes nft's typed.
+#[tokio::test]
+async fn header_writes_read_and_write_as_nft_does() -> nlink::Result<()> {
+    use nlink::netlink::nftables::HeaderWrite;
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let ns = TestNamespace::new("nft-pset")?;
+    let pairs: [(&str, HeaderWrite); 8] = [
+        ("ip dscp set cs1", HeaderWrite::IpDscp(8)),
+        ("ip ttl set 64", HeaderWrite::IpTtl(64)),
+        ("ip saddr set 10.0.0.9", HeaderWrite::IpSaddr(Ipv4Addr::new(10, 0, 0, 9))),
+        ("ip6 dscp set af21", HeaderWrite::Ip6Dscp(18)),
+        ("ip6 hoplimit set 9", HeaderWrite::Ip6HopLimit(9)),
+        ("ip6 daddr set 2001:db8::1", HeaderWrite::Ip6Daddr("2001:db8::1".parse().unwrap())),
+        ("tcp dport set 8080", HeaderWrite::TcpDport(8080)),
+        ("udp sport set 53", HeaderWrite::UdpSport(53)),
+    ];
+    let mut script = String::from("table inet t {\n chain a { type filter hook output priority 0;\n");
+    for (line, _) in &pairs {
+        script.push_str(&format!("  {line}\n"));
+    }
+    script.push_str(" }\n chain b { type filter hook output priority 0; }\n}\n");
+    let file = std::env::temp_dir().join(format!("nlink-pset-{}.nft", std::process::id()));
+    std::fs::write(&file, &script).map_err(nlink::Error::from)?;
+    let installed = ns.exec("nft", &["-f", file.to_str().unwrap()]);
+    let _ = std::fs::remove_file(&file);
+    installed?;
+
+    let nft = ns.connection_for::<Nftables>()?;
+    let writes = nft
+        .list_rules("t", Family::Inet)
+        .await?
+        .iter()
+        .flat_map(|r| r.expressions())
+        .filter(|e| matches!(e, RuleExpr::PayloadSet { .. }))
+        .count();
+    assert_eq!(writes, pairs.len(), "nft's writes decode typed");
+    for (_, write) in pairs {
+        nft.add_rule(Rule::new("t", "b").family(Family::Inet).set_header(write)).await?;
+    }
+    assert_eq!(
+        listed_rules(&ns, "inet", "t", "b")?,
+        listed_rules(&ns, "inet", "t", "a")?,
+        "nlink's chain b, nft's chain a"
+    );
+    Ok(())
+}
+
+/// #703: a header write acts on the packet, checksums included. `a`
+/// sends with its checksums computed (no tx offload) and `b` checks them
+/// (no rx offload, which would mark them good unread); `b`'s prerouting
+/// moves datagrams for port 7992 to 7993, and they arrive there only if
+/// the write updated the UDP checksum for the new port.
+#[tokio::test]
+async fn a_port_write_moves_the_datagram() -> nlink::Result<()> {
+    use nlink::netlink::Ethtool;
+    use nlink::netlink::nftables::HeaderWrite;
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "veth");
+
+    let pair = crate::common::topo::NsPair::new("nftpset", 96).await?;
+    let ethtool = pair.a.connection_for_async::<Ethtool>().await?;
+    ethtool.set_features(pair.a_if, |f| f.disable("tx-checksum-ip-generic")).await?;
+    let ethtool = pair.b.connection_for_async::<Ethtool>().await?;
+    ethtool.set_features(pair.b_if, |f| f.disable("rx-checksum")).await?;
+
+    let b = NftablesConfig::new().table("w", Family::Inet, |t| {
+        t.chain("pre", |c| {
+            c.hook(Hook::Prerouting).priority(Priority::Filter).chain_type(ChainType::Filter)
+        })
+        .rule_keyed("pre", "move", |r| {
+            r.match_udp_dport(7992).set_header(HeaderWrite::UdpDport(7993))
+        })
+    });
+    let nft = pair.b.connection_for::<Nftables>()?;
+    b.diff(&nft).await?.apply(&nft).await?;
+    assert!(b.diff(&nft).await?.is_empty(), "the declared write does not converge");
+    assert_eq!(arrivals(&pair, 7992, 7993, 3)?.len(), 3, "rewritten to 7993");
+    assert_eq!(arrivals(&pair, 7992, 7992, 3)?.len(), 0, "nothing left for 7992");
+    Ok(())
+}

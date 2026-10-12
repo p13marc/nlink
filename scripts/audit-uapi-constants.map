@@ -176,6 +176,7 @@ RtKey = NFT_RT
     TcpMss -> TCPMSS
 ByteorderOp = NFT_BYTEORDER
 LogLevel = NFT_LOGLEVEL
+PayloadCsum = NFT_PAYLOAD_CSUM
 
 # -------------------------------------------------------------------- ethtool
 EthtoolCmd = ETHTOOL_MSG

@@ -1085,6 +1085,62 @@ pub enum PayloadBase {
     Transport = 2,
 }
 
+/// The checksum a payload write updates (`enum nft_payload_csum_types`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u32)]
+#[non_exhaustive]
+pub enum PayloadCsum {
+    /// None.
+    None = 0,
+    /// The Internet checksum at the expression's checksum offset.
+    Inet = 1,
+    /// SCTP's CRC32c.
+    Sctp = 2,
+}
+
+impl PayloadCsum {
+    pub(crate) fn from_u32(v: u32) -> Option<Self> {
+        Some(match v {
+            0 => Self::None,
+            1 => Self::Inet,
+            2 => Self::Sctp,
+            _ => return None,
+        })
+    }
+}
+
+/// A header field a rule writes, with its value (#703): what nft's
+/// `<field> set <value>` statements write, through
+/// [`Rule::set_header`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HeaderWrite {
+    /// `ip dscp set <0..63>`.
+    IpDscp(u8),
+    /// `ip ttl set <ttl>`.
+    IpTtl(u8),
+    /// `ip saddr set <addr>`.
+    IpSaddr(std::net::Ipv4Addr),
+    /// `ip daddr set <addr>`.
+    IpDaddr(std::net::Ipv4Addr),
+    /// `ip6 dscp set <0..63>`.
+    Ip6Dscp(u8),
+    /// `ip6 hoplimit set <hops>`.
+    Ip6HopLimit(u8),
+    /// `ip6 saddr set <addr>`.
+    Ip6Saddr(std::net::Ipv6Addr),
+    /// `ip6 daddr set <addr>`.
+    Ip6Daddr(std::net::Ipv6Addr),
+    /// `tcp sport set <port>`.
+    TcpSport(u16),
+    /// `tcp dport set <port>`.
+    TcpDport(u16),
+    /// `udp sport set <port>`.
+    UdpSport(u16),
+    /// `udp dport set <port>`.
+    UdpDport(u16),
+}
+
 impl PayloadBase {
     /// Reverse mapping for the expression decoder (#164).
     pub(crate) fn from_u32(v: u32) -> Option<Self> {
@@ -2218,6 +2274,104 @@ impl Rule {
 
     /// Push `meta <key> == <value>` (a 1-byte metadata load + Eq compare
     /// in `R0`) — the shared shape of the nfproto/l4proto matcher guards.
+    /// Write a header field (#703): `ip dscp set cs1`, `tcp dport set
+    /// 8080`, `ip saddr set 10.0.0.9`, … — as nft writes it, behind the
+    /// guard nft puts before it (`meta nfproto`, `meta l4proto`), with the
+    /// checksums the field is in updated: the IPv4 header's for its
+    /// fields, TCP's for a port, and a transport checksum's pseudo-header
+    /// for an address. A field narrower than the 16 bits a checksum update
+    /// takes (DSCP, TTL) is read, masked and written back whole.
+    pub fn set_header(mut self, write: HeaderWrite) -> Self {
+        use HeaderWrite as W;
+        use PayloadBase::{Network, Transport};
+        let (base, offset, len, csum, csum_offset, pseudo) = match write {
+            W::IpDscp(_) => (Network, 0, 2, PayloadCsum::Inet, 10, false),
+            W::IpTtl(_) => (Network, 8, 2, PayloadCsum::Inet, 10, false),
+            W::IpSaddr(_) => (Network, 12, 4, PayloadCsum::Inet, 10, true),
+            W::IpDaddr(_) => (Network, 16, 4, PayloadCsum::Inet, 10, true),
+            W::Ip6Dscp(_) => (Network, 0, 2, PayloadCsum::None, 0, false),
+            W::Ip6HopLimit(_) => (Network, 7, 1, PayloadCsum::None, 0, false),
+            W::Ip6Saddr(_) => (Network, 8, 16, PayloadCsum::None, 0, true),
+            W::Ip6Daddr(_) => (Network, 24, 16, PayloadCsum::None, 0, true),
+            W::TcpSport(_) => (Transport, 0, 2, PayloadCsum::Inet, 16, false),
+            W::TcpDport(_) => (Transport, 2, 2, PayloadCsum::Inet, 16, false),
+            W::UdpSport(_) => (Transport, 0, 2, PayloadCsum::None, 0, true),
+            W::UdpDport(_) => (Transport, 2, 2, PayloadCsum::None, 0, true),
+        };
+        match write {
+            W::IpDscp(_) | W::IpTtl(_) | W::IpSaddr(_) | W::IpDaddr(_) => {
+                self.push_meta_eq(MetaKey::NfProto, NFPROTO_IPV4)
+            }
+            W::Ip6Dscp(_) | W::Ip6HopLimit(_) | W::Ip6Saddr(_) | W::Ip6Daddr(_) => {
+                self.push_meta_eq(MetaKey::NfProto, NFPROTO_IPV6)
+            }
+            W::TcpSport(_) | W::TcpDport(_) => self.push_meta_eq(MetaKey::L4Proto, IPPROTO_TCP),
+            W::UdpSport(_) | W::UdpDport(_) => self.push_meta_eq(MetaKey::L4Proto, IPPROTO_UDP),
+        }
+        // Read-modify-write: the 16 bits around the field, what keeps them
+        // as `mask`, the field's new bits as `xor`.
+        let mut masked = |mask: [u8; 2], xor: [u8; 2]| {
+            self.exprs.push(Expr::Payload {
+                dreg: Register::R0,
+                base,
+                offset,
+                len,
+            });
+            self.exprs.push(Expr::Bitwise {
+                sreg: Register::R0,
+                dreg: Register::R0,
+                len,
+                mask: mask.to_vec(),
+                xor: xor.to_vec(),
+            });
+        };
+        let immediate = |data: Vec<u8>| {
+            Some(Expr::Immediate {
+                dreg: Register::R0,
+                data,
+            })
+        };
+        let dscp = |d: u8| (d <= 63).then_some(d);
+        let load = match write {
+            W::IpDscp(d) | W::Ip6Dscp(d) if dscp(d).is_none() => {
+                self.error.get_or_insert(format!("set_header: DSCP {d} is past 63"));
+                return self;
+            }
+            // DSCP is the top six bits of the TOS byte; ECN stays.
+            W::IpDscp(d) => {
+                masked([0xff, 0x03], [0, d << 2]);
+                None
+            }
+            W::IpTtl(t) => {
+                masked([0x00, 0xff], [t, 0]);
+                None
+            }
+            // The traffic class straddles the first two bytes, after the
+            // version: its DSCP is bits 4..10, its ECN 10..12.
+            W::Ip6Dscp(d) => {
+                masked([0xf0, 0x3f], [d >> 2, (d & 3) << 6]);
+                None
+            }
+            W::Ip6HopLimit(h) => immediate(vec![h]),
+            W::IpSaddr(a) | W::IpDaddr(a) => immediate(a.octets().to_vec()),
+            W::Ip6Saddr(a) | W::Ip6Daddr(a) => immediate(a.octets().to_vec()),
+            W::TcpSport(p) | W::TcpDport(p) | W::UdpSport(p) | W::UdpDport(p) => {
+                immediate(p.to_be_bytes().to_vec())
+            }
+        };
+        self.exprs.extend(load);
+        self.exprs.push(Expr::PayloadSet {
+            sreg: Register::R0,
+            base,
+            offset,
+            len,
+            csum,
+            csum_offset,
+            l4_pseudo_header: pseudo,
+        });
+        self
+    }
+
     fn push_meta_eq(&mut self, key: MetaKey, value: u8) {
         self.exprs.push(Expr::Meta {
             dreg: Register::R0,
@@ -5343,5 +5497,151 @@ mod tests {
         assert_eq!(prefix_to_mask(16, 68), sixty_eight);
         // Clamp: out-of-range prefix saturates to all-ones.
         assert_eq!(prefix_to_mask(16, 200), vec![0xff; 16]);
+    }
+}
+
+/// #703: each header write is what nft writes for the same statement
+/// (`nft --debug=netlink`, nft 1.1.3): the guard, the value or the
+/// read-modify-write, and the payload write with its checksums.
+#[cfg(test)]
+mod header_write_tests {
+    use super::*;
+    use crate::netlink::nftables::{RuleExpr, expr::Expr};
+
+    fn write(
+        base: PayloadBase,
+        offset: u32,
+        len: u32,
+        csum: PayloadCsum,
+        csum_offset: u32,
+        pseudo: bool,
+    ) -> Expr {
+        Expr::PayloadSet {
+            sreg: Register::R0,
+            base,
+            offset,
+            len,
+            csum,
+            csum_offset,
+            l4_pseudo_header: pseudo,
+        }
+    }
+
+    fn guard(key: MetaKey, value: u8) -> [Expr; 2] {
+        [
+            Expr::Meta {
+                dreg: Register::R0,
+                key,
+            },
+            Expr::Cmp {
+                sreg: Register::R0,
+                op: CmpOp::Eq,
+                data: vec![value],
+            },
+        ]
+    }
+
+    fn exprs(w: HeaderWrite) -> Vec<Expr> {
+        let r = Rule::new("t", "c").set_header(w);
+        assert!(r.error.is_none(), "{:?}", r.error);
+        r.exprs
+    }
+
+    #[test]
+    fn header_writes_are_what_nft_writes() {
+        use PayloadBase::{Network, Transport};
+        let imm = |data: &[u8]| Expr::Immediate {
+            dreg: Register::R0,
+            data: data.to_vec(),
+        };
+        let rmw = |base, offset, mask: [u8; 2], xor: [u8; 2]| {
+            [
+                Expr::Payload {
+                    dreg: Register::R0,
+                    base,
+                    offset,
+                    len: 2,
+                },
+                Expr::Bitwise {
+                    sreg: Register::R0,
+                    dreg: Register::R0,
+                    len: 2,
+                    mask: mask.to_vec(),
+                    xor: xor.to_vec(),
+                },
+            ]
+        };
+        let v4 = guard(MetaKey::NfProto, NFPROTO_IPV4);
+        let v6 = guard(MetaKey::NfProto, NFPROTO_IPV6);
+        let tcp = guard(MetaKey::L4Proto, IPPROTO_TCP);
+        let udp = guard(MetaKey::L4Proto, IPPROTO_UDP);
+        let cat = |parts: &[&[Expr]]| parts.concat();
+
+        // tcp dport set 8080: immediate 0x1f90, 2b @ th + 2, inet csum at 16.
+        assert_eq!(
+            exprs(HeaderWrite::TcpDport(8080)),
+            cat(&[&tcp, &[imm(&[0x1f, 0x90]), write(Transport, 2, 2, PayloadCsum::Inet, 16, false)]])
+        );
+        // udp sport set 53: no checksum type, the pseudo-header flag.
+        assert_eq!(
+            exprs(HeaderWrite::UdpSport(53)),
+            cat(&[&udp, &[imm(&[0, 53]), write(Transport, 0, 2, PayloadCsum::None, 0, true)]])
+        );
+        // ip ttl set 64: 2b @ nh + 8, & 0x00ff ^ 0x4000 (bytes), inet csum at 10.
+        assert_eq!(
+            exprs(HeaderWrite::IpTtl(64)),
+            cat(&[&v4, &rmw(Network, 8, [0x00, 0xff], [64, 0]), &[write(Network, 8, 2, PayloadCsum::Inet, 10, false)]])
+        );
+        // ip dscp set cs1 (8): 2b @ nh + 0, keep version/ihl and ECN.
+        assert_eq!(
+            exprs(HeaderWrite::IpDscp(8)),
+            cat(&[&v4, &rmw(Network, 0, [0xff, 0x03], [0x00, 0x20]), &[write(Network, 0, 2, PayloadCsum::Inet, 10, false)]])
+        );
+        // ip saddr set 10.0.0.9: the L4 pseudo-header changes too.
+        assert_eq!(
+            exprs(HeaderWrite::IpSaddr("10.0.0.9".parse().unwrap())),
+            cat(&[&v4, &[imm(&[10, 0, 0, 9]), write(Network, 12, 4, PayloadCsum::Inet, 10, true)]])
+        );
+        // ip6 dscp set af21 (18): bytes [f0 3f] kept, [04 80] set.
+        assert_eq!(
+            exprs(HeaderWrite::Ip6Dscp(18)),
+            cat(&[&v6, &rmw(Network, 0, [0xf0, 0x3f], [0x04, 0x80]), &[write(Network, 0, 2, PayloadCsum::None, 0, false)]])
+        );
+        assert_eq!(
+            exprs(HeaderWrite::Ip6HopLimit(9)),
+            cat(&[&v6, &[imm(&[9]), write(Network, 7, 1, PayloadCsum::None, 0, false)]])
+        );
+        let a: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+        assert_eq!(
+            exprs(HeaderWrite::Ip6Daddr(a)),
+            cat(&[&v6, &[imm(&a.octets()), write(Network, 24, 16, PayloadCsum::None, 0, true)]])
+        );
+
+        let r = Rule::new("t", "c").set_header(HeaderWrite::IpDscp(64));
+        assert_eq!(r.error.as_deref(), Some("set_header: DSCP 64 is past 63"));
+    }
+
+    #[test]
+    fn a_payload_write_reads_back() {
+        use crate::netlink::{builder::MessageBuilder, nftables::expr};
+        let exprs = Rule::new("t", "c").set_header(HeaderWrite::IpSaddr("10.0.0.9".parse().unwrap())).exprs;
+        let mut b = MessageBuilder::new(0, 0);
+        expr::write_expressions(&mut b, &exprs);
+        let back = expr::parse_expressions(&b.as_bytes()[20..]);
+        assert!(
+            back.iter().any(|e| matches!(
+                e,
+                RuleExpr::PayloadSet {
+                    base: PayloadBase::Network,
+                    offset: 12,
+                    len: 4,
+                    csum: PayloadCsum::Inet,
+                    csum_offset: 10,
+                    l4_pseudo_header: true,
+                    ..
+                }
+            )),
+            "{back:?}"
+        );
     }
 }
