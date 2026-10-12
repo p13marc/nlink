@@ -275,7 +275,13 @@ pub mod __rt {
             payload[0], payload[1], payload[2], payload[3],
         ]))
     }
+    /// A `u64`, or a YNL `uint` (`NLA_UINT`, kernel 6.6+), which
+    /// `nla_put_uint` writes as 4 bytes when the value fits (#763). A
+    /// fixed-width `u64` is always 8 bytes, so nothing parses differently.
     pub fn parse_u64_attr(payload: &[u8]) -> Result<u64> {
+        if let Ok(word) = <[u8; 4]>::try_from(payload) {
+            return Ok(u32::from_ne_bytes(word).into());
+        }
         if payload.len() < 8 {
             return Err(Error::from(crate::netlink::ErrorDetail::Truncated {
                 expected: 8,
@@ -683,15 +689,23 @@ mod tests {
         assert_eq!(parsed, original);
     }
 
+    /// A `uint` (`NLA_UINT`) comes as 4 bytes when it fits in 32 bits, and
+    /// as 8 when it does not; a `u64` field reads both (#763).
+    #[test]
+    fn a_u64_field_reads_a_four_byte_uint() {
+        assert_eq!(__rt::parse_u64_attr(&7u32.to_ne_bytes()).unwrap(), 7);
+        assert_eq!(__rt::parse_u64_attr(&(1u64 << 40).to_ne_bytes()).unwrap(), 1 << 40);
+    }
+
     #[test]
     fn parse_helpers_reject_truncated_payloads() {
         let short_u32: &[u8] = &[0, 1, 2];
         let err = __rt::parse_u32_attr(short_u32).unwrap_err();
         assert!(matches!(err.detail(), crate::netlink::ErrorDetail::Truncated { expected: 4, actual: 3 }));
 
-        let short_u64: &[u8] = &[0, 0, 0, 0];
+        let short_u64: &[u8] = &[0, 0, 0, 0, 0, 0];
         let err = __rt::parse_u64_attr(short_u64).unwrap_err();
-        assert!(matches!(err.detail(), crate::netlink::ErrorDetail::Truncated { expected: 8, actual: 4 }));
+        assert!(matches!(err.detail(), crate::netlink::ErrorDetail::Truncated { expected: 8, actual: 6 }));
 
         let empty: &[u8] = &[];
         let err = __rt::parse_u8_attr(empty).unwrap_err();

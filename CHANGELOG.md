@@ -783,6 +783,12 @@ All notable changes to this project will be documented in this file.
   guards before comparing, so rules an older nlink installed with them still
   diff empty.
 
+
+- **A `uint` attribute decodes when it fits in 32 bits (#763).** A YNL `uint`
+  (`NLA_UINT`) is 4 bytes on the wire while its value fits, and the derives'
+  `u64` fields required 8. So a net_shaper bandwidth or burst, or an ovpn
+  counter, under 2³² failed to decode with `Truncated`.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
