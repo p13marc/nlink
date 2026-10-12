@@ -2716,14 +2716,12 @@ fn diff_addresses(
     // (`IFA_LOCAL`, or `IFA_ADDRESS` when there is no other), its prefix,
     // and a point-to-point peer (`IFA_ADDRESS` when it differs) — which,
     // for IPv4, makes another address, not a change of this one (#516).
+    // Read back whole (#781): what a removal deletes is what its undo adds
+    // again, so it carries the label, metric, flags and lifetimes too. The
+    // matching below looks at the address, prefix and peer alone.
     let live: Vec<(DeclaredAddress, &AddressMessage)> = current
         .iter()
-        .filter_map(|a| {
-            let dev = ifindex_to_name.get(&a.ifindex())?;
-            let mut declared = DeclaredAddress::plain(dev, *a.primary_address()?, a.prefix_len());
-            declared.attrs.peer = a.peer().copied();
-            Some((declared, a))
-        })
+        .filter_map(|a| Some((address_from_live(ifindex_to_name.get(&a.ifindex())?, a)?, a)))
         .collect();
     let same = |a: &DeclaredAddress, b: &DeclaredAddress| {
         a.dev == b.dev
@@ -2810,6 +2808,30 @@ fn diff_addresses(
             diff.addresses_to_remove.push(have.clone());
         }
     }
+}
+
+/// A kernel address as the declaration that adds it again (#781): its peer,
+/// a label other than the device's name, its metric, the flags a
+/// declaration has, and its lifetimes when it has them, as they stand.
+pub(super) fn address_from_live(dev: &str, a: &AddressMessage) -> Option<DeclaredAddress> {
+    use crate::netlink::types::addr::ifa_flags as f;
+    let mut d = DeclaredAddress::plain(dev, *a.primary_address()?, a.prefix_len());
+    let flags = a.flags();
+    d.attrs.peer = a.peer().copied();
+    d.attrs.label = a.label().filter(|l| *l != dev).map(str::to_string);
+    d.attrs.metric = a.metric();
+    d.attrs.nodad = flags & f::NODAD != 0;
+    d.attrs.optimistic = flags & f::OPTIMISTIC != 0;
+    d.attrs.noprefixroute = flags & f::NOPREFIXROUTE != 0;
+    d.attrs.home = flags & f::HOMEADDRESS != 0;
+    d.attrs.mngtmpaddr = flags & f::MANAGETEMPADDR != 0;
+    if !a.is_permanent()
+        && let Some(c) = a.cache_info()
+    {
+        let secs = |s: u32| std::time::Duration::from_secs(u64::from(s));
+        d.attrs.lifetimes = Some((secs(c.valid), secs(c.preferred)));
+    }
+    Some(d)
 }
 
 /// How a live address differs from its declaration (#516).

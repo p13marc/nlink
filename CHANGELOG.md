@@ -840,6 +840,13 @@ All notable changes to this project will be documented in this file.
   never converged. And the read-back kept the encap, so undoing a replace
   of one sent the encap with the id, which the kernel refuses.
 
+- **An undo puts a removed address back as it was (#781).** The diff read
+  a live address back bare, address and peer only, and that is what the
+  undo of its removal added again. The label, metric, flags
+  (`noprefixroute`, `nodad`, `home`, `mngtmpaddr`) and lifetimes were
+  lost; without `noprefixroute`, the kernel added a prefix route that had
+  not been there. The read-back is whole now.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
