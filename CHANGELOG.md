@@ -2909,6 +2909,13 @@ All notable changes to this project will be documented in this file.
   hardware transmit modes and receive filters (`Tsinfo`, by the kernel's
   names), and its PTP clock's index.
 
+
+- **Per-CPU IPsec SAs (#166).** `XfrmSaBuilder::pcpu(cpu)` makes an SA the
+  one for a CPU (`XFRMA_SA_PCPU`, RFC 9611, kernel 6.13+), and
+  `SecurityAssociation::pcpu` reads it back. An older kernel ignores the
+  attribute, so check what reads back. The CI kernel is older, so this is
+  checked by unit test only.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

@@ -37,3 +37,7 @@ ETHTOOL_MSG_PHY_GET
 # Linux 6.11 / 6.13.
 ETH_SS_STATS_PHY
 ETH_SS_TS_FLAGS
+
+# --- xfrm ----------------------------------------------------------------
+# Per-CPU SAs (RFC 9611): the CPU an SA serves. Linux 6.13.
+XFRMA_SA_PCPU

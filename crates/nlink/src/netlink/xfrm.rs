@@ -95,6 +95,9 @@ const XFRMA_MARK: u16 = 21;
 // address-filter attr ID. Corrected to the kernel UAPI value 28.
 const XFRMA_OFFLOAD_DEV: u16 = 28;
 const XFRMA_IF_ID: u16 = 31;
+/// `XFRMA_SA_PCPU` — the CPU a per-CPU SA serves (u32, RFC 9611, kernel
+/// 6.13+, #166).
+const XFRMA_SA_PCPU: u16 = 35;
 
 // XFRM modes
 const XFRM_MODE_TRANSPORT: u8 = 0;
@@ -762,7 +765,11 @@ impl TrafficSelector {
 }
 
 /// A Security Association (SA).
+///
+/// `#[non_exhaustive]` since 0.32 (#166): the kernel keeps adding SA
+/// attributes worth reading back.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SecurityAssociation {
     /// Source address.
     pub src_addr: Option<IpAddr>,
@@ -794,6 +801,8 @@ pub struct SecurityAssociation {
     pub mark: Option<XfrmMark>,
     /// Interface ID.
     pub if_id: Option<u32>,
+    /// The CPU a per-CPU SA serves (`XFRMA_SA_PCPU`, kernel 6.13+).
+    pub pcpu: Option<u32>,
     /// Bytes processed.
     pub bytes: u64,
     /// Packets processed.
@@ -936,6 +945,7 @@ pub struct XfrmSaBuilder {
     encap: Option<XfrmEncapTmpl>,
     mark: Option<(u32, u32)>,
     if_id: Option<u32>,
+    pcpu: Option<u32>,
     offload: Option<XfrmUserOffload>,
 }
 
@@ -961,6 +971,7 @@ impl XfrmSaBuilder {
             encap: None,
             mark: None,
             if_id: None,
+            pcpu: None,
             offload: None,
         }
     }
@@ -1090,6 +1101,15 @@ impl XfrmSaBuilder {
         self
     }
 
+    /// Make it the per-CPU SA for `cpu` (`XFRMA_SA_PCPU`, RFC 9611, #166):
+    /// with one per CPU, each encrypts in parallel with its own sequence
+    /// numbers. Kernel 6.13+; an older kernel ignores the attribute, so
+    /// read the SA back and check [`SecurityAssociation::pcpu`].
+    pub fn pcpu(mut self, cpu: u32) -> Self {
+        self.pcpu = Some(cpu);
+        self
+    }
+
     /// Address family inferred from `src`/`dst` (must match).
     fn family(&self) -> u16 {
         family_for_pair(self.src, self.dst)
@@ -1161,6 +1181,9 @@ impl XfrmSaBuilder {
         }
         if let Some(id) = self.if_id {
             b.append_attr_u32(XFRMA_IF_ID, id);
+        }
+        if let Some(cpu) = self.pcpu {
+            b.append_attr_u32(XFRMA_SA_PCPU, cpu);
         }
         if let Some(off) = &self.offload {
             // XFRMA_OFFLOAD_DEV carries `struct xfrm_user_offload`
@@ -2029,6 +2052,7 @@ pub(crate) fn parse_sa_payload(msg_data: &[u8]) -> Option<SecurityAssociation> {
         encap: None,
         mark: None,
         if_id: None,
+        pcpu: None,
         bytes: info.curlft.bytes,
         packets: info.curlft.packets,
         replay_window: info.replay_window,
@@ -2068,6 +2092,14 @@ pub(crate) fn parse_sa_payload(msg_data: &[u8]) -> Option<SecurityAssociation> {
                     {
                         sa.mark = Some(*mark);
                     }
+                }
+                XFRMA_SA_PCPU if attr_data.len() >= 4 => {
+                    sa.pcpu = Some(u32::from_ne_bytes([
+                        attr_data[0],
+                        attr_data[1],
+                        attr_data[2],
+                        attr_data[3],
+                    ]));
                 }
                 XFRMA_IF_ID if attr_data.len() >= 4 => {
                     sa.if_id = Some(u32::from_ne_bytes([
@@ -2748,6 +2780,31 @@ mod tests {
         assert_eq!(encap.encap_sport, 4500u16.to_be());
         assert_eq!(encap.encap_dport, 4500u16.to_be());
         assert_eq!(encap.encap_type, 2, "dport=4500 → ESPINUDP (IKE)");
+    }
+
+    /// A per-CPU SA's CPU goes out as XFRMA_SA_PCPU (35) and reads back
+    /// (#166); an SA without one has none.
+    #[test]
+    fn xfrm_sa_pcpu_roundtrips() {
+        let sa = |pcpu: Option<u32>| {
+            let sa = XfrmSaBuilder::new(
+                "10.0.0.1".parse().unwrap(),
+                "10.0.0.2".parse().unwrap(),
+                0x1000,
+                IpsecProtocol::Esp,
+            )
+            .aead_aes_gcm(&[0u8; 20], 128);
+            match pcpu {
+                Some(cpu) => sa.pcpu(cpu),
+                None => sa,
+            }
+        };
+        let parsed = Connection::<Xfrm>::parse_sa_msg(&build_add_sa_frame(sa(Some(3))))
+            .expect("parse_sa must round-trip a per-CPU SA");
+        assert_eq!(parsed.pcpu, Some(3));
+        let plain = Connection::<Xfrm>::parse_sa_msg(&build_add_sa_frame(sa(None))).unwrap();
+        assert_eq!(plain.pcpu, None);
+        assert_eq!(XFRMA_SA_PCPU, 35);
     }
 
     #[test]
