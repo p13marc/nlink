@@ -2529,7 +2529,7 @@ fn topo_sort_links_to_add(links: &mut Vec<DeclaredLink>) {
     );
 }
 
-fn compute_link_changes(
+pub(super) fn compute_link_changes(
     declared: &DeclaredLink,
     existing: &LinkMessage,
     ifindex_to_name: &HashMap<u32, &str>,
@@ -3156,7 +3156,7 @@ fn diff_routes(
 
 /// A kernel route as the declaration that would install it; `None` for a
 /// type no declaration has (local, broadcast, …).
-fn declared_from_live(
+pub(super) fn declared_from_live(
     r: &RouteMessage,
     ifindex_to_name: &HashMap<u32, &str>,
 ) -> Option<DeclaredRoute> {

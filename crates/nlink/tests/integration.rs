@@ -60,6 +60,9 @@ mod config;
 #[path = "integration/network_config_apply.rs"]
 mod network_config_apply;
 
+#[path = "integration/config_undo.rs"]
+mod config_undo;
+
 #[path = "integration/ratelimit.rs"]
 mod ratelimit;
 

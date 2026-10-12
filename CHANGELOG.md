@@ -2961,6 +2961,33 @@ All notable changes to this project will be documented in this file.
   `scripts/audit-socket-io.sh` keeps every send and receive in
   `NetlinkSocket`, where the hook is.
 
+- **An undo puts back a deleted link (#745).** A link the apply deletes,
+  to recreate it or because the previous config declared it and this one
+  does not, used to be irreversible. The diff now reads back, as
+  declarations, what the deletion takes:
+  - the link, and the links the kernel deletes with it. Each is checked
+    against the comparison the diff runs, for every kind a declaration has:
+    its kind parameters, state, MTU, MAC, master, alias and other
+    attributes, a bridge's options, a bridge port's options and VLANs;
+  - the ports it releases, with their master, state and port options;
+  - the addresses, routes (with their protocol), nexthop objects,
+    permanent and proxy neighbours, FDB entries and TC trees on them;
+  - what a bond or VRF port loses on the way out: its IPv6 addresses, its
+    routes, the routes in the VRF's table among them, its neighbours and its
+    nexthops.
+
+  `LinkRecreate::restore` and `LinkRemoval::restore` carry it as a
+  `LinkRestore`. The inverse of `Step::DeleteForRecreate` and
+  `Step::RemoveLink` is the new `Step::RestoreLink`, and that of
+  `Step::RestoreTc` the new `Step::ClearTc`. What no declaration can put
+  back leaves the deletion without an inverse, and `unrestorable` says why:
+  a kind no declaration has, a pair whose peer is in another namespace, an
+  address with a lifetime, a route the kernel learned from a router
+  advertisement, a BPF filter, an FDB entry with a remote port or VNI.
+  A kind parameter no declaration has comes back as the kernel's default,
+  as on a recreate, and so does a MAC the kernel picked at random for a
+  bridge with no ports.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
