@@ -480,6 +480,35 @@ async fn ethtool_reads_and_sets_the_named_devices_features() -> nlink::Result<()
     Ok(())
 }
 
+/// #166: a veth's timestamping is the kernel's software-only default
+/// (`ethtool_op_get_ts_info`): transmit, receive and the system clock in
+/// software, no hardware modes or filters, no PTP clock. Where the ethtool
+/// CLI is installed, `ethtool -T` lists the same capabilities.
+#[tokio::test]
+async fn ethtool_reads_a_devices_timestamping() -> nlink::Result<()> {
+    use nlink::netlink::{Connection, Ethtool, link::VethLink};
+    require_root!();
+    nlink::require_module!("veth");
+
+    let ns = TestNamespace::new("ns-tsinfo")?;
+    let conn = ns.connection()?;
+    conn.add_link(VethLink::new("ve0", "ve1")).await?;
+    let ethtool: Connection<Ethtool> = nlink::Connection::new_in_async(ns.name()).await?;
+    let ts = ethtool.get_tsinfo("ve0").await?;
+    let mut caps = ts.timestamping.active_names();
+    caps.sort_unstable();
+    assert_eq!(caps, ["software-receive", "software-system-clock", "software-transmit"]);
+    assert!(ts.tx_types.active_names().is_empty(), "{:?}", ts.tx_types.active_names());
+    assert!(ts.rx_filters.active_names().is_empty(), "{:?}", ts.rx_filters.active_names());
+    assert_eq!(ts.phc_index, None);
+    if let Ok(cli) = ns.exec("ethtool", &["-T", "ve0"]) {
+        for cap in &caps {
+            assert!(cli.contains(cap), "ethtool -T lists {cap}:\n{cli}");
+        }
+    }
+    Ok(())
+}
+
 /// `Diagnostics::watch()` subscribed on a new connection in the process's
 /// namespace, so `Diagnostics::new(lab_conn).watch()` watched the host. And
 /// it named a removed address's interface through the host's sysfs.
