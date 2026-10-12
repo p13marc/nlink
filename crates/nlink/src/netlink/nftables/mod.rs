@@ -413,6 +413,18 @@ pub const NFTA_LOG_SNAPLEN: u16 = 3;
 pub const NFTA_LOG_QTHRESHOLD: u16 = 4;
 /// `NFTA_LOG_FLAGS` — what a syslog `log` adds: TCP sequence, options, ….
 pub const NFTA_LOG_FLAGS: u16 = 6;
+/// `NF_LOG_TCPSEQ` (`linux/netfilter/nf_log.h`).
+pub const NF_LOG_TCPSEQ: u32 = 0x01;
+/// `NF_LOG_TCPOPT`.
+pub const NF_LOG_TCPOPT: u32 = 0x02;
+/// `NF_LOG_IPOPT`.
+pub const NF_LOG_IPOPT: u32 = 0x04;
+/// `NF_LOG_UID`.
+pub const NF_LOG_UID: u32 = 0x08;
+/// `NF_LOG_MACDECODE`.
+pub const NF_LOG_MACDECODE: u32 = 0x20;
+/// `NF_LOG_MASK`: the flags a `log` takes.
+pub const NF_LOG_MASK: u32 = 0x2f;
 
 // Connlimit — `enum nft_connlimit_attributes`.
 /// `NFTA_CONNLIMIT_COUNT` — the connection count.

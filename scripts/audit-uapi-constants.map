@@ -175,6 +175,7 @@ IcmpxCode = NFT_REJECT_ICMPX
 RtKey = NFT_RT
     TcpMss -> TCPMSS
 ByteorderOp = NFT_BYTEORDER
+LogLevel = NFT_LOGLEVEL
 
 # -------------------------------------------------------------------- ethtool
 EthtoolCmd = ETHTOOL_MSG

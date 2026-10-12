@@ -1256,3 +1256,117 @@ async fn nflog_reads_what_a_log_group_rule_sends() -> nlink::Result<()> {
     assert_eq!(u16::from_be_bytes([ip[udp + 2], ip[udp + 3]]), 7990);
     Ok(())
 }
+
+/// The rule lines of `nft list chain <family> <table> <chain>`.
+fn listed_rules(ns: &TestNamespace, family: &str, table: &str, chain: &str) -> nlink::Result<Vec<String>> {
+    let out = ns.exec("nft", &["list", "chain", family, table, chain])?;
+    Ok(out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("table") && !l.starts_with("chain") && !l.starts_with("type") && *l != "}")
+        .map(str::to_string)
+        .collect())
+}
+
+/// #703: a `log`'s level, flags, snaplen and queue threshold, as nft
+/// writes them, decode typed, and nlink installs the same rules: `nft`
+/// lists the two chains alike.
+#[tokio::test]
+async fn log_options_read_and_write_as_nft_does() -> nlink::Result<()> {
+    use nlink::netlink::nftables::{LogExpr, LogFlags, LogLevel};
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "nft_log", "nf_log_syslog");
+
+    let ns = TestNamespace::new("nft-log")?;
+    let lines = [
+        "log prefix \"a \" level info flags tcp sequence,options",
+        "log level debug flags all",
+        "log flags skuid",
+        "log group 2 snaplen 64 queue-threshold 10",
+        "log group 3",
+    ];
+    let mut script = String::from("table inet t {\n chain a {\n");
+    for l in lines {
+        script.push_str(&format!("  {l}\n"));
+    }
+    script.push_str(" }\n chain b {\n }\n}\n");
+    let file = std::env::temp_dir().join(format!("nlink-log-{}.nft", std::process::id()));
+    std::fs::write(&file, &script).map_err(nlink::Error::from)?;
+    let installed = ns.exec("nft", &["-f", file.to_str().unwrap()]);
+    let _ = std::fs::remove_file(&file);
+    installed?;
+
+    let nft = ns.connection_for::<Nftables>()?;
+    let logs: Vec<LogExpr> = nft
+        .list_rules("t", Family::Inet)
+        .await?
+        .iter()
+        .flat_map(|r| r.expressions())
+        .filter_map(|e| match e {
+            RuleExpr::Log(l) => Some(l),
+            _ => None,
+        })
+        .collect();
+    let want = [
+        LogExpr::new()
+            .prefix("a ")
+            .level(LogLevel::Info)
+            .flags(LogFlags::TCP_SEQUENCE | LogFlags::TCP_OPTIONS),
+        LogExpr::new().level(LogLevel::Debug).flags(LogFlags::ALL),
+        LogExpr::new().flags(LogFlags::SKUID),
+        LogExpr::new().group(2).snaplen(64).queue_threshold(10),
+        LogExpr::new().group(3),
+    ];
+    assert_eq!(logs, want);
+
+    for log in want {
+        nft.add_rule(Rule::new("t", "b").family(Family::Inet).expr(log)).await?;
+    }
+    assert_eq!(
+        listed_rules(&ns, "inet", "t", "b")?,
+        listed_rules(&ns, "inet", "t", "a")?,
+        "nlink's chain b, nft's chain a"
+    );
+    Ok(())
+}
+
+/// #703: an nflog group's snaplen is what the listener gets: a 33-byte
+/// datagram logged with `snaplen 24` arrives cut to its IP header and
+/// ports.
+#[tokio::test]
+async fn a_log_snaplen_cuts_what_nflog_reads() -> nlink::Result<()> {
+    use nlink::netlink::Nflog;
+    use nlink::netlink::nftables::LogExpr;
+    use std::net::SocketAddr;
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "nft_log", "nfnetlink_log", "veth");
+
+    let pair = crate::common::topo::NsPair::new("nflogsl", 97).await?;
+    let b = NftablesConfig::new().table("f", Family::Inet, |t| {
+        t.chain("in", |c| {
+            c.hook(Hook::Input).priority(Priority::Filter).chain_type(ChainType::Filter)
+        })
+        .rule_keyed("in", "log", |r| {
+            r.match_udp_dport(7991).expr(LogExpr::new().group(6).prefix("cut: ").snaplen(24))
+        })
+    });
+    let nft = pair.b.connection_for::<Nftables>()?;
+    b.diff(&nft).await?.apply(&nft).await?;
+    assert!(b.diff(&nft).await?.is_empty(), "the declared snaplen does not converge");
+
+    let nflog = pair.b.connection_for::<Nflog>()?;
+    nflog.bind_group(6, 0xffff).await?;
+    let mut packets = nflog.events().await;
+    let delivered = crate::common::traffic::deliver_udp(&pair.a, &pair.b, SocketAddr::from((pair.b_addr, 7991)), 1);
+    assert_eq!(delivered, 1);
+    let packet = crate::common::events::expect_event(
+        &mut packets,
+        Duration::from_secs(5),
+        "the logged datagram",
+        |p: &nlink::netlink::nflog::NflogPacket| p.prefix.as_deref() == Some("cut: "),
+    )
+    .await?;
+    assert_eq!(packet.payload.len(), 24, "the snaplen");
+    assert_eq!(u16::from_be_bytes([packet.payload[22], packet.payload[23]]), 7991, "up to the ports");
+    Ok(())
+}

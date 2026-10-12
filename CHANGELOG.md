@@ -2702,6 +2702,16 @@ All notable changes to this project will be documented in this file.
   - **The undo:** a restore is listed in `ApplyResult::irreversible()`, as
     the recreate is (#745).
 
+- **`log` takes its options (#703).** `LogExpr` gains the following, and
+  decodes them:
+  - for a syslog `log`: `level(LogLevel)` (`emerg` … `debug`, `audit`) and
+    `flags(LogFlags)` (`tcp sequence`, `tcp options`, `ip options`, `skuid`,
+    `ether`, `all`);
+  - for an `nflog` group: `snaplen` and `queue_threshold`.
+
+  A `log` carrying any of these used to decode as `Unknown`. The default level
+  (`warn`) reads back as none.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

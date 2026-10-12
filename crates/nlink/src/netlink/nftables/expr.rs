@@ -516,13 +516,29 @@ impl From<LimitExpr> for Expr {
 /// group has no such limit. And the logger is the `nf_log_syslog` module:
 /// where it cannot be loaded, the rule — and the whole batch with it —
 /// fails with `ENOENT`.
+///
+/// A syslog `log` takes a [`level`](Self::level) and
+/// [`flags`](Self::flags); an `nflog` [`group`](Self::group) takes a
+/// [`snaplen`](Self::snaplen) and a
+/// [`queue_threshold`](Self::queue_threshold). The kernel refuses a `log`
+/// that mixes the two (#703).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct LogExpr {
     /// Prefix prepended to the log line.
     pub prefix: Option<String>,
-    /// `nflog` group; `None` logs to syslog at the kernel's default level.
+    /// `nflog` group; `None` logs to syslog.
     pub group: Option<u16>,
+    /// Syslog level; `None` is the kernel's, `warn`. A decoded `log` at
+    /// `warn` reads as `None`.
+    pub level: Option<LogLevel>,
+    /// What a syslog `log` adds to the line.
+    pub flags: LogFlags,
+    /// Bytes of the packet an `nflog` group copies; `None`, all of it.
+    pub snaplen: Option<u32>,
+    /// Packets an `nflog` group queues before it sends them; `None` (or
+    /// 0) sends each at once.
+    pub queue_threshold: Option<u16>,
 }
 
 impl LogExpr {
@@ -541,6 +557,110 @@ impl LogExpr {
     pub fn group(mut self, group: u16) -> Self {
         self.group = Some(group);
         self
+    }
+
+    /// The syslog level (`log level info`).
+    pub fn level(mut self, level: LogLevel) -> Self {
+        self.level = Some(level);
+        self
+    }
+
+    /// What a syslog `log` adds to the line (`log flags tcp sequence`).
+    pub fn flags(mut self, flags: LogFlags) -> Self {
+        self.flags = flags;
+        self
+    }
+
+    /// Bytes of the packet an `nflog` group copies (`log group 2 snaplen
+    /// 64`).
+    pub fn snaplen(mut self, bytes: u32) -> Self {
+        self.snaplen = Some(bytes);
+        self
+    }
+
+    /// Packets an `nflog` group queues before it sends them (`log group 2
+    /// queue-threshold 10`).
+    pub fn queue_threshold(mut self, packets: u16) -> Self {
+        self.queue_threshold = Some(packets);
+        self
+    }
+}
+
+/// A syslog `log`'s level (`enum nft_log_level`). `Audit` sends the
+/// packet to the audit subsystem instead of syslog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u32)]
+#[non_exhaustive]
+pub enum LogLevel {
+    /// `emerg`.
+    Emerg = 0,
+    /// `alert`.
+    Alert = 1,
+    /// `crit`.
+    Crit = 2,
+    /// `err`.
+    Err = 3,
+    /// `warn`, the kernel's default.
+    Warning = 4,
+    /// `notice`.
+    Notice = 5,
+    /// `info`.
+    Info = 6,
+    /// `debug`.
+    Debug = 7,
+    /// `audit`.
+    Audit = 8,
+}
+
+impl LogLevel {
+    fn from_u32(v: u32) -> Option<Self> {
+        Some(match v {
+            0 => Self::Emerg,
+            1 => Self::Alert,
+            2 => Self::Crit,
+            3 => Self::Err,
+            4 => Self::Warning,
+            5 => Self::Notice,
+            6 => Self::Info,
+            7 => Self::Debug,
+            8 => Self::Audit,
+            _ => return None,
+        })
+    }
+
+    /// nft's word for it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Emerg => "emerg",
+            Self::Alert => "alert",
+            Self::Crit => "crit",
+            Self::Err => "err",
+            Self::Warning => "warn",
+            Self::Notice => "notice",
+            Self::Info => "info",
+            Self::Debug => "debug",
+            Self::Audit => "audit",
+        }
+    }
+}
+
+bitflags::bitflags! {
+    /// What a syslog `log` adds to the line (`NF_LOG_*`,
+    /// `linux/netfilter/nf_log.h`).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+    pub struct LogFlags: u32 {
+        /// `tcp sequence`.
+        const TCP_SEQUENCE = super::NF_LOG_TCPSEQ;
+        /// `tcp options`.
+        const TCP_OPTIONS = super::NF_LOG_TCPOPT;
+        /// `ip options`.
+        const IP_OPTIONS = super::NF_LOG_IPOPT;
+        /// `skuid`: the uid of the local socket.
+        const SKUID = super::NF_LOG_UID;
+        /// `ether`: the MAC header.
+        const ETHER = super::NF_LOG_MACDECODE;
+        /// `all`.
+        const ALL = super::NF_LOG_MASK;
     }
 }
 
@@ -909,19 +1029,41 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             }
             builder.nest_end(data);
         }
-        Expr::Log(LogExpr { prefix, group }) => {
+        Expr::Log(LogExpr {
+            prefix,
+            group,
+            level,
+            flags,
+            snaplen,
+            queue_threshold,
+        }) => {
             builder.append_attr_str(NFTA_EXPR_NAME, "log");
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
             if let Some(prefix) = prefix {
                 builder.append_attr_str(NFTA_LOG_PREFIX, prefix);
             }
+            // What the kernel takes for each kind of log, and what
+            // `nft_log_dump` echoes: a group with its snaplen and threshold
+            // when set; a syslog log with its level always (WARNING when the
+            // request named none: send it, or the rule never matches its
+            // echo) and its flags when there are any.
             match group {
-                Some(group) => builder.append_attr_u16_be(NFTA_LOG_GROUP, *group),
-                // Without a group this is a syslog `log`, for which
-                // `nft_log_dump` always emits the level — WARNING when the
-                // request named none. Send it, or the declared rule never
-                // matches its echo.
-                None => builder.append_attr_u32_be(NFTA_LOG_LEVEL, NFT_LOGLEVEL_WARNING),
+                Some(group) => {
+                    builder.append_attr_u16_be(NFTA_LOG_GROUP, *group);
+                    if let Some(snaplen) = snaplen {
+                        builder.append_attr_u32_be(NFTA_LOG_SNAPLEN, *snaplen);
+                    }
+                    if let Some(q) = queue_threshold.filter(|q| *q != 0) {
+                        builder.append_attr_u16_be(NFTA_LOG_QTHRESHOLD, q);
+                    }
+                }
+                None => {
+                    let level = level.map_or(NFT_LOGLEVEL_WARNING, |l| l as u32);
+                    builder.append_attr_u32_be(NFTA_LOG_LEVEL, level);
+                    if !flags.is_empty() {
+                        builder.append_attr_u32_be(NFTA_LOG_FLAGS, flags.bits());
+                    }
+                }
             };
             builder.nest_end(data);
         }
@@ -1720,8 +1862,13 @@ fn parse_log(data: &[u8]) -> Option<RuleExpr> {
         match attr & 0x7FFF {
             NFTA_LOG_PREFIX => log.prefix = Some(get::string(payload).ok()?.to_string()),
             NFTA_LOG_GROUP => log.group = Some(get::u16_be(payload).ok()?),
+            // The kernel's default, which every syslog log echoes.
             NFTA_LOG_LEVEL if get::u32_be(payload).ok()? == NFT_LOGLEVEL_WARNING => {}
-            // A level, flags, snaplen or threshold LogExpr cannot carry.
+            NFTA_LOG_LEVEL => log.level = Some(LogLevel::from_u32(get::u32_be(payload).ok()?)?),
+            NFTA_LOG_FLAGS => log.flags = LogFlags::from_bits(get::u32_be(payload).ok()?)?,
+            NFTA_LOG_SNAPLEN => log.snaplen = Some(get::u32_be(payload).ok()?),
+            NFTA_LOG_QTHRESHOLD => log.queue_threshold = Some(get::u16_be(payload).ok()?),
+            // An attribute LogExpr cannot carry.
             _ => return None,
         }
     }
@@ -2759,8 +2906,8 @@ mod decode_tests {
     }
 
     /// What these decoders cannot carry demotes to `Unknown`, never to a
-    /// guess: a limit type nlink does not know, a log level, a reject with
-    /// no type.
+    /// guess: a limit type nlink does not know, a log level past `audit`,
+    /// a reject with no type.
     #[test]
     fn statements_beyond_the_types_stay_unknown() {
         let mut limit = MessageBuilder::new(0, 0);
@@ -2768,7 +2915,7 @@ mod decode_tests {
         limit.append_attr_u64_be(NFTA_LIMIT_UNIT, 1);
         limit.append_attr_u32_be(NFTA_LIMIT_TYPE, 7); // a type nlink does not know
         let mut log = MessageBuilder::new(0, 0);
-        log.append_attr_u32_be(NFTA_LOG_LEVEL, 7);
+        log.append_attr_u32_be(NFTA_LOG_LEVEL, 9);
         let reject = MessageBuilder::new(0, 0);
         for (name, b) in [("limit", limit), ("log", log), ("reject", reject)] {
             let data = b.finish()[16..].to_vec();
@@ -3272,6 +3419,53 @@ mod decode_tests {
         let group = data_attrs(&[LogExpr::new().group(5).into()]);
         assert!(!group.contains_key(&NFTA_LOG_LEVEL));
         assert_eq!(group[&NFTA_LOG_GROUP], 5u16.to_be_bytes());
+    }
+
+    /// #703: a log's level and flags (syslog) and its snaplen and queue
+    /// threshold (nflog) are written as the kernel echoes them and read
+    /// back; the default level reads as none.
+    #[test]
+    fn log_options_round_trip() {
+        let syslog = LogExpr::new()
+            .prefix("p")
+            .level(LogLevel::Info)
+            .flags(LogFlags::TCP_SEQUENCE | LogFlags::SKUID);
+        let attrs = data_attrs(&[syslog.clone().into()]);
+        assert_eq!(attrs[&NFTA_LOG_LEVEL], 6u32.to_be_bytes());
+        assert_eq!(attrs[&NFTA_LOG_FLAGS], 0x09u32.to_be_bytes());
+        let nflog = LogExpr::new().group(2).snaplen(64).queue_threshold(10);
+        let attrs = data_attrs(&[nflog.clone().into()]);
+        assert_eq!(attrs[&NFTA_LOG_SNAPLEN], 64u32.to_be_bytes());
+        assert_eq!(attrs[&NFTA_LOG_QTHRESHOLD], 10u16.to_be_bytes());
+        assert!(!attrs.contains_key(&NFTA_LOG_LEVEL));
+
+        let audit = LogExpr::new().level(LogLevel::Audit).flags(LogFlags::ALL);
+        let warn = LogExpr::new().level(LogLevel::Warning);
+        assert_eq!(
+            parse_expressions(&encode(&[
+                syslog.clone().into(),
+                nflog.clone().into(),
+                audit.clone().into(),
+                warn.into(),
+            ])),
+            [
+                RuleExpr::Log(syslog),
+                RuleExpr::Log(nflog),
+                RuleExpr::Log(audit),
+                // The kernel's default level is no level.
+                RuleExpr::Log(LogExpr::new()),
+            ]
+        );
+        // A level the kernel does not have, or a flag it would refuse,
+        // reads as unknown rather than as something else.
+        let mut b = MessageBuilder::new(0, 0);
+        let start = b.len();
+        b.append_attr_u32_be(NFTA_LOG_LEVEL, 9);
+        assert!(parse_log(&b.as_bytes()[start..]).is_none());
+        let mut b = MessageBuilder::new(0, 0);
+        let start = b.len();
+        b.append_attr_u32_be(NFTA_LOG_FLAGS, 0x10);
+        assert!(parse_log(&b.as_bytes()[start..]).is_none());
     }
 
     #[test]
