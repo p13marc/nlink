@@ -521,6 +521,27 @@ pub enum EthtoolRingsAttr {
 // Channels Attributes
 // =============================================================================
 
+/// Attributes of a device's timestamping capabilities
+/// (`ETHTOOL_MSG_TSINFO_GET`, #166).
+#[repr(u16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EthtoolTsinfoAttr {
+    Unspec = 0,
+    /// Request header (nested).
+    Header = 1,
+    /// `SOF_TIMESTAMPING_*` supported (bitset).
+    Timestamping = 2,
+    /// `HWTSTAMP_TX_*` modes (bitset).
+    TxTypes = 3,
+    /// `HWTSTAMP_FILTER_*` receive filters (bitset).
+    RxFilters = 4,
+    /// The PTP hardware clock's index (u32), when there is one.
+    PhcIndex = 5,
+    /// Hardware timestamping statistics (nested).
+    Stats = 6,
+}
+
 /// Attributes for channel counts.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

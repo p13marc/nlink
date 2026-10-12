@@ -504,6 +504,32 @@ impl RingsBuilder {
 }
 
 // =============================================================================
+// Timestamping
+// =============================================================================
+
+/// What timestamping a device can do (`ethtool -T`, #166): which
+/// `SO_TIMESTAMPING` flags a socket can ask of it, its hardware transmit
+/// modes and receive filters, and its PTP clock.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct Tsinfo {
+    /// Interface name.
+    pub ifname: Option<String>,
+    /// Interface index.
+    pub ifindex: Option<u32>,
+    /// The `SOF_TIMESTAMPING_*` capabilities, by the kernel's names:
+    /// `software-transmit`, `hardware-receive`, `software-system-clock`, ….
+    pub timestamping: EthtoolBitset,
+    /// The `HWTSTAMP_TX_*` modes: `off`, `on`, `onestep-sync`, ….
+    pub tx_types: EthtoolBitset,
+    /// The `HWTSTAMP_FILTER_*` receive filters: `none`, `all`,
+    /// `ptpv2-event`, ….
+    pub rx_filters: EthtoolBitset,
+    /// The index of its PTP hardware clock (`/dev/ptp<n>`), if it has one.
+    pub phc_index: Option<u32>,
+}
+
+// =============================================================================
 // Channels
 // =============================================================================
 

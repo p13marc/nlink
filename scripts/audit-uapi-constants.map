@@ -213,6 +213,7 @@ EthtoolModuleEepromAttr = ETHTOOL_A_MODULE_EEPROM
 EthtoolPauseAttr = ETHTOOL_A_PAUSE
     StatsRxSrc -> STATS_SRC
 EthtoolRingsAttr = ETHTOOL_A_RINGS
+EthtoolTsinfoAttr = ETHTOOL_A_TSINFO
 EthtoolRssAttr = ETHTOOL_A_RSS
 EthtoolStatsAttr = ETHTOOL_A_STATS
 EthtoolStatsGrpAttr = ETHTOOL_A_STATS_GRP

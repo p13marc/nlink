@@ -2903,6 +2903,12 @@ All notable changes to this project will be documented in this file.
   The commands and attribute sets are audited against `linux/netdev.h` and
   the vendored YNL spec.
 
+
+- **ethtool timestamping capabilities (#166).** `Connection<Ethtool>::get_tsinfo`
+  is `ethtool -T`: which `SO_TIMESTAMPING` flags a device supports, its
+  hardware transmit modes and receive filters (`Tsinfo`, by the kernel's
+  names), and its PTP clock's index.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

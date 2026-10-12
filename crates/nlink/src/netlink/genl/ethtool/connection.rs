@@ -9,7 +9,8 @@ use super::{
     EthtoolFecAttr, EthtoolHeaderAttr, EthtoolLinkinfoAttr, EthtoolLinkmodesAttr,
     EthtoolLinkstateAttr, EthtoolModuleEepromAttr, EthtoolPauseAttr, EthtoolRingsAttr,
     EthtoolRssAttr, EthtoolStatsAttr, EthtoolStatsGrpAttr, EthtoolStringAttr,
-    EthtoolStringSet, EthtoolStringsetAttr, EthtoolStrsetAttr, EthtoolWolAttr, WOL_MODE_NAMES,
+    EthtoolStringSet, EthtoolStringsetAttr, EthtoolStrsetAttr, EthtoolTsinfoAttr, EthtoolWolAttr,
+    WOL_MODE_NAMES,
     bitset::EthtoolBitset,
     stats_group, types::*,
 };
@@ -769,6 +770,40 @@ impl Connection<Ethtool> {
     ) -> Result<()> {
         let builder = configure(RingsBuilder::new());
         self.apply_rings(ifname, &builder).await
+    }
+
+    /// A device's timestamping capabilities (`ethtool -T`, #166): what
+    /// `SO_TIMESTAMPING` can ask of it, its hardware modes and filters, and
+    /// its PTP clock. Accepts an interface name or index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_tsinfo"))]
+    pub async fn get_tsinfo(&self, iface: impl Into<InterfaceRef>) -> Result<Tsinfo> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        let response = self.ethtool_get(EthtoolCmd::TsinfoGet, &ifname).await?;
+        let mut info = Tsinfo::default();
+        let Some(data) = response.get(GENL_HDRLEN..) else {
+            return Ok(info);
+        };
+        for (attr_type, payload) in AttrIter::new(data) {
+            match attr_type {
+                t if t == EthtoolTsinfoAttr::Header as u16 => {
+                    self.parse_header(payload, &mut info.ifname, &mut info.ifindex)?;
+                }
+                t if t == EthtoolTsinfoAttr::Timestamping as u16 => {
+                    info.timestamping = EthtoolBitset::parse(payload)?;
+                }
+                t if t == EthtoolTsinfoAttr::TxTypes as u16 => {
+                    info.tx_types = EthtoolBitset::parse(payload)?;
+                }
+                t if t == EthtoolTsinfoAttr::RxFilters as u16 => {
+                    info.rx_filters = EthtoolBitset::parse(payload)?;
+                }
+                t if t == EthtoolTsinfoAttr::PhcIndex as u16 && payload.len() >= 4 => {
+                    info.phc_index = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+                }
+                _ => {}
+            }
+        }
+        Ok(info)
     }
 
     fn parse_rings(&self, data: &[u8], rings: &mut Rings) -> Result<()> {
