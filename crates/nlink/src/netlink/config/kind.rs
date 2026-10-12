@@ -1303,6 +1303,12 @@ pub(super) fn compare(declared: &DeclaredLink, live: &LinkMessage, names: &HashM
                 .and_then(|f| f.get(..2))
                 .is_some_and(|f| u16::from_be_bytes([f[0], f[1]]) & GRE_KEY != 0);
             let have_key = keyed.then(|| data.u32_be(IKEY)).flatten();
+            let okeyed = data
+                .0
+                .get(&OFLAGS)
+                .and_then(|f| f.get(..2))
+                .is_some_and(|f| u16::from_be_bytes([f[0], f[1]]) & GRE_KEY != 0);
+            let have_okey = okeyed.then(|| data.u32_be(OKEY)).flatten();
             let show = |v: Option<String>| v.unwrap_or_else(|| "none".into());
             let mut changes = Vec::new();
             let mut note = |what: &str, have: String, want: String| {
@@ -1318,7 +1324,7 @@ pub(super) fn compare(declared: &DeclaredLink, live: &LinkMessage, names: &HashM
             if let Some(want) = p.encap_limit {
                 note("encaplimit", show(data.u8(ENCAP_LIMIT).map(|v| v.to_string())), want.to_string());
             }
-            note("key", show(have_key.map(|k| k.to_string())), show(p.key.map(|k| k.to_string())));
+            note("key", keys_text(have_key, have_okey), show(p.key.map(|k| k.to_string())));
             note("dev", show(have_dev.map(str::to_string)), show(p.underlay_dev.clone()));
             if !changes.is_empty() {
                 let mut attrs = Vec::new();
@@ -2884,6 +2890,7 @@ fn compare_vti6(
     const REMOTE: u16 = 5;
     let addr = |t| data.ipv6(t).filter(|a| !a.is_unspecified());
     let have_key = data.u32_be(IKEY).filter(|k| *k != 0);
+    let have_okey = data.u32_be(OKEY).filter(|k| *k != 0);
     let have_dev = data.u32(LINK).filter(|i| *i != 0).and_then(|i| names.get(&i).copied());
     let show = |v: Option<String>| v.unwrap_or_else(|| "none".into());
     let mut changes = Vec::new();
@@ -2894,7 +2901,7 @@ fn compare_vti6(
     };
     note("local", show(addr(LOCAL).map(|a| a.to_string())), show(p.local.map(|a| a.to_string())));
     note("remote", show(addr(REMOTE).map(|a| a.to_string())), show(p.remote.map(|a| a.to_string())));
-    note("key", show(have_key.map(|k| k.to_string())), show(p.key.map(|k| k.to_string())));
+    note("key", keys_text(have_key, have_okey), show(p.key.map(|k| k.to_string())));
     note("dev", show(have_dev.map(str::to_string)), show(p.underlay_dev.clone()));
     if changes.is_empty() {
         return;
@@ -3026,6 +3033,15 @@ fn compare_erspan(
     }
 }
 
+/// A tunnel's keys as `ip -d link` would name them: one key, when it is the
+/// same both ways, as a declared key is (#782).
+fn keys_text(ikey: Option<u32>, okey: Option<u32>) -> String {
+    match (ikey, okey) {
+        (i, o) if i == o => i.map_or_else(|| "none".to_string(), |k| k.to_string()),
+        (i, o) => format!("ikey {} okey {}", or_none(i), or_none(o)),
+    }
+}
+
 /// Where an IPv4 tunnel family keeps each parameter in `IFLA_INFO_DATA`.
 struct TunnelIds {
     link: u16,
@@ -3084,15 +3100,19 @@ fn compare_tunnel(
     let have_local = data.ipv4(ids.local).filter(|a| !a.is_unspecified());
     let have_remote = data.ipv4(ids.remote).filter(|a| !a.is_unspecified());
     let have_ttl = ids.ttl.and_then(|t| data.u8(t)).filter(|t| *t != 0);
-    let have_key = ids.keys.and_then(|(ikey, _, flags)| {
+    // Each way's key: a GRE key is there when its flags say so, a VTI key
+    // when it is not 0.
+    let key_of = |key: u16, flags: Option<u16>| {
         let keyed = match flags {
-            Some((iflags, _)) => data.0.get(&iflags).and_then(|f| f.get(..2)).is_some_and(|f| {
+            Some(flags) => data.0.get(&flags).and_then(|f| f.get(..2)).is_some_and(|f| {
                 u16::from_be_bytes([f[0], f[1]]) & GRE_KEY != 0
             }),
-            None => data.u32_be(ikey).is_some_and(|k| k != 0),
+            None => data.u32_be(key).is_some_and(|k| k != 0),
         };
-        keyed.then(|| data.u32_be(ikey)).flatten()
-    });
+        keyed.then(|| data.u32_be(key)).flatten()
+    };
+    let have_key = ids.keys.and_then(|(ikey, _, flags)| key_of(ikey, flags.map(|(i, _)| i)));
+    let have_okey = ids.keys.and_then(|(_, okey, flags)| key_of(okey, flags.map(|(_, o)| o)));
     let have_dev = data
         .u32(ids.link)
         .filter(|i| *i != 0)
@@ -3111,7 +3131,7 @@ fn compare_tunnel(
         note("ttl", show(have_ttl.map(|t| t.to_string())), show(p.ttl.map(|t| t.to_string())));
     }
     if ids.keys.is_some() {
-        note("key", show(have_key.map(|k| k.to_string())), show(p.key.map(|k| k.to_string())));
+        note("key", keys_text(have_key, have_okey), show(p.key.map(|k| k.to_string())));
     }
     note("dev", show(have_dev.map(str::to_string)), show(p.underlay_dev.clone()));
     if changes.is_empty() {
