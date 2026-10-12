@@ -728,3 +728,57 @@ async fn every_target_reaches_the_same_namespace() -> nlink::Result<()> {
     let _ = sleeper.wait();
     Ok(())
 }
+
+/// #257: a process run in a VRF has its sockets bound to it, as `ip vrf
+/// exec` does. With the peer's subnet routed only in the VRF's table, `ping`
+/// reaches it through `vrf("red")` and not without; the default cgroup is
+/// `vrf/<netns inode>/red` under the caller's.
+#[tokio::test]
+async fn a_process_in_a_vrf_routes_through_its_table() -> nlink::Result<()> {
+    use namespace::NetnsCommand;
+    use nlink::netlink::link::VrfLink;
+    use std::process::Command;
+    nlink::require_root!();
+    // cgroupfs and BPF program loading are the host's.
+    nlink::require_host_root!();
+    nlink::require_modules!("vrf", "veth");
+
+    let pair = crate::common::topo::NsPair::new("vrfexec", 98).await?;
+    let a: Connection<Route> = pair.a.connection()?;
+    a.add_link(VrfLink::new("red", 100)).await?;
+    a.set_link_up("red").await?;
+    // The veth's connected route moves to table 100.
+    a.set_link_master(pair.a_if, "red").await?;
+    let ping = || {
+        let mut cmd = Command::new("ping");
+        cmd.args(["-c", "1", "-W", "1", &pair.b_addr.to_string()]);
+        cmd
+    };
+
+    let plain = NetnsCommand::new(pair.a.name(), ping())?.output()?;
+    assert!(!plain.status.success(), "the main table has no route to the peer");
+
+    let dir = std::path::PathBuf::from("/sys/fs/cgroup").join(format!("nlink-test-vrf-{}", std::process::id()));
+    std::fs::create_dir(&dir)?;
+    let in_vrf = NetnsCommand::new(pair.a.name(), ping())?.cgroup(&dir).vrf("red").output();
+    let _ = std::fs::remove_dir(&dir);
+    let in_vrf = in_vrf?;
+    assert!(
+        in_vrf.status.success(),
+        "ping in the VRF: {}",
+        String::from_utf8_lossy(&in_vrf.stderr)
+    );
+
+    // Without a cgroup of its own: `vrf/<netns inode>/red`, kept.
+    let mut cat = Command::new("cat");
+    cat.arg("/proc/self/cgroup");
+    let out = NetnsCommand::new(pair.a.name(), cat)?.vrf("red").output()?;
+    let path = String::from_utf8_lossy(&out.stdout).trim().trim_start_matches("0::").to_string();
+    let inode = std::fs::metadata(format!("/run/netns/{}", pair.a.name()))
+        .map(|m| std::os::unix::fs::MetadataExt::ino(&m))?;
+    assert!(path.ends_with(&format!("/vrf/{inode}/red")), "{path}");
+    let dir = std::path::Path::new("/sys/fs/cgroup").join(path.trim_start_matches('/'));
+    let _ = std::fs::remove_dir(&dir);
+    let _ = std::fs::remove_dir(dir.parent().unwrap());
+    Ok(())
+}
