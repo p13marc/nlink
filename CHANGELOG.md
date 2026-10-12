@@ -2847,6 +2847,14 @@ All notable changes to this project will be documented in this file.
   A shared table keeps its comment, and declared objects carry none. Off by
   default: counters and dynamic elements start again.
 
+
+- **Netdev chains on several devices (#703).** `Chain::device` (and the
+  declared chain's) adds a device. A chain on two or more is written as
+  `NFTA_HOOK_DEVS`, as nft writes `devices = { a, b }`; one device is still
+  `NFTA_HOOK_DEV`. The declarative diff compares a chain's devices as a set,
+  and a changed set recreates the chain. `DeclaredChain::devices()` is new.
+  It used to replace the device: see the migration guide.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

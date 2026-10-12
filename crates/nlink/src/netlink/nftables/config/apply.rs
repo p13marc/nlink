@@ -87,7 +87,7 @@ fn build_chain(table: &str, family: Family, declared: &DeclaredChain) -> Result<
     if let Some(ct) = declared.chain_type() {
         chain = chain.chain_type(ct);
     }
-    if let Some(dev) = declared.device() {
+    for dev in declared.devices() {
         chain = chain.device(dev);
     }
     if let Some(comment) = declared.comment() {

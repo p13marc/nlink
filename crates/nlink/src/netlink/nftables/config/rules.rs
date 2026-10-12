@@ -242,7 +242,7 @@ fn validate_chain(
     if !hook.is_valid_for_family(family) {
         return refuse(format!("the {family:?} family has no {hook:?} hook"));
     }
-    if (family == Family::Netdev || hook == Hook::InetIngress) && chain.device().is_none() {
+    if (family == Family::Netdev || hook == Hook::InetIngress) && chain.devices().is_empty() {
         return refuse(format!("a {hook:?} chain needs a device"));
     }
     // No type is `filter`: the kernel's default.
