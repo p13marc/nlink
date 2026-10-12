@@ -140,9 +140,35 @@ pub enum Step {
         /// Why, when it is there now: a link change in this apply flushes
         /// it (#649).
         reason: Option<String>,
+        /// The protocol `after` is installed with: the plan's when unset, as
+        /// for a declared route; an undo's, the one the route had (#783).
+        #[cfg_attr(
+            feature = "serde",
+            serde(default, skip_serializing_if = "Option::is_none", with = "opt_protocol")
+        )]
+        #[cfg_attr(feature = "schemars", schemars(with = "Option<u8>"))]
+        protocol: Option<RouteProtocol>,
+        /// The protocol of the route it overwrites, which the inverse puts
+        /// it back with (#783).
+        #[cfg_attr(
+            feature = "serde",
+            serde(default, skip_serializing_if = "Option::is_none", with = "opt_protocol")
+        )]
+        #[cfg_attr(feature = "schemars", schemars(with = "Option<u8>"))]
+        before_protocol: Option<RouteProtocol>,
     },
     /// Delete a route.
-    DeleteRoute(DeclaredRoute),
+    DeleteRoute {
+        /// The route.
+        route: DeclaredRoute,
+        /// The protocol it has, which the inverse puts it back with (#783).
+        #[cfg_attr(
+            feature = "serde",
+            serde(default, skip_serializing_if = "Option::is_none", with = "opt_protocol")
+        )]
+        #[cfg_attr(feature = "schemars", schemars(with = "Option<u8>"))]
+        protocol: Option<RouteProtocol>,
+    },
     /// Install a neighbour with `NLM_F_REPLACE` (#516): added, or
     /// overwriting the entry in its place.
     SetNeighbour {
@@ -273,18 +299,31 @@ impl Step {
                 address: address.clone(),
                 reason: None,
             },
-            Self::ReplaceRoute { before, after, .. } => match before {
+            Self::ReplaceRoute {
+                before,
+                after,
+                protocol,
+                before_protocol,
+                ..
+            } => match before {
                 Some(before) => Self::ReplaceRoute {
                     before: Some(after.clone()),
                     after: before.clone(),
                     reason: None,
+                    protocol: *before_protocol,
+                    before_protocol: *protocol,
                 },
-                None => Self::DeleteRoute(after.clone()),
+                None => Self::DeleteRoute {
+                    route: after.clone(),
+                    protocol: *protocol,
+                },
             },
-            Self::DeleteRoute(route) => Self::ReplaceRoute {
+            Self::DeleteRoute { route, protocol } => Self::ReplaceRoute {
                 before: None,
                 after: route.clone(),
                 reason: None,
+                protocol: *protocol,
+                before_protocol: None,
             },
             Self::AddQdisc(q) => Self::DeleteQdisc {
                 qdisc: q.clone(),
@@ -551,7 +590,7 @@ impl fmt::Display for Step {
                 ),
                 None => write!(f, "+ route {}", route_text(after)),
             },
-            Self::DeleteRoute(route) => write!(f, "- route {}", route_text(route)),
+            Self::DeleteRoute { route, .. } => write!(f, "- route {}", route_text(route)),
             Self::SetNeighbour { before, after } => {
                 let replaced: Vec<(DeclaredNeighbour, DeclaredNeighbour)> =
                     before.iter().map(|b| (after.clone(), b.clone())).collect();
@@ -801,7 +840,9 @@ impl super::ConfigDiff {
                 .find(|(r, _)| r == route)
                 .map(|(_, before)| before.clone());
             steps.push(Step::ReplaceRoute {
+                before_protocol: before.as_ref().and_then(|b| self.protocol_of(b)),
                 before,
+                protocol: None,
                 after: route.clone(),
                 reason: self
                     .routes_readded
@@ -846,7 +887,10 @@ impl super::ConfigDiff {
                 previous: previous.clone().map(Box::new),
             });
         }
-        steps.extend(self.routes_to_remove.iter().cloned().map(Step::DeleteRoute));
+        steps.extend(self.routes_to_remove.iter().map(|route| Step::DeleteRoute {
+            route: route.clone(),
+            protocol: self.protocol_of(route),
+        }));
         steps.extend(self.nexthops_to_remove.iter().cloned().map(Step::DeleteNexthop));
         steps.extend(
             self.addresses_to_remove
@@ -933,6 +977,8 @@ mod tests {
                 before: None,
                 after: route("10.1.0.0", 16, "10.0.0.2"),
                 reason: Some("re-add: flushed when d0 goes down".into()),
+                protocol: None,
+                before_protocol: None,
             },
             Step::SetVrfStrictMode { on: true },
         ]);
@@ -1108,7 +1154,7 @@ mod tests {
                 Step::DeleteAddress { reason: Some(_), .. } => "del-addr-early",
                 Step::AddAddress { .. } => "add-addr",
                 Step::ReplaceRoute { .. } => "route",
-                Step::DeleteRoute(_) => "del-route",
+                Step::DeleteRoute { .. } => "del-route",
                 Step::DeleteAddress { .. } => "del-addr",
                 _ => "other",
             })
@@ -1142,18 +1188,32 @@ mod tests {
     fn inverses_undo_what_can_be_undone() {
         let r = route("10.1.0.0", 16, "10.0.0.2");
         let old = route("10.1.0.0", 16, "10.0.0.1");
-        let Some(Step::ReplaceRoute { before, after, .. }) = (Step::ReplaceRoute {
+        let Some(Step::ReplaceRoute { before, after, protocol, .. }) = (Step::ReplaceRoute {
             before: Some(old.clone()),
             after: r.clone(),
             reason: None,
+            protocol: None,
+            before_protocol: Some(RouteProtocol::Static),
         })
         .inverse() else {
             panic!("a replace's inverse is a replace");
         };
-        assert_eq!((before, after), (Some(r.clone()), old));
+        // The route it overwrote goes back with its own protocol (#783).
+        assert_eq!((before, after, protocol), (Some(r.clone()), old, Some(RouteProtocol::Static)));
         assert!(matches!(
-            Step::ReplaceRoute { before: None, after: r.clone(), reason: None }.inverse(),
-            Some(Step::DeleteRoute(x)) if x == r
+            Step::ReplaceRoute {
+                before: None,
+                after: r.clone(),
+                reason: None,
+                protocol: None,
+                before_protocol: None,
+            }
+            .inverse(),
+            Some(Step::DeleteRoute { route: x, .. }) if x == r
+        ));
+        assert!(matches!(
+            Step::DeleteRoute { route: r.clone(), protocol: Some(RouteProtocol::Zebra) }.inverse(),
+            Some(Step::ReplaceRoute { protocol: Some(RouteProtocol::Zebra), .. })
         ));
         assert!(matches!(
             Step::AddAddress { address: addr("d0", "10.0.0.1", 24), reason: None }.inverse(),

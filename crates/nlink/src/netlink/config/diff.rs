@@ -432,6 +432,12 @@ pub struct ConfigDiff {
     #[cfg_attr(feature = "serde", serde(skip))]
     #[cfg_attr(feature = "schemars", schemars(skip))]
     pub(crate) routes_replaced: Vec<(DeclaredRoute, DeclaredRoute)>,
+    /// The protocol of each kernel route the diff read back (in
+    /// `routes_replaced` and `routes_to_remove`), which an undo puts it back
+    /// with (#783). Not counted or serialized.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) route_protocols: Vec<(DeclaredRoute, crate::netlink::types::route::RouteProtocol)>,
     /// The addresses in `addresses_to_add` that are there now, and that a
     /// link change in this apply flushes, with why (#649):
     /// `(declared, reason)`. Not counted or serialized.
@@ -483,6 +489,14 @@ pub struct ConfigDiff {
 }
 
 impl ConfigDiff {
+    /// The protocol a route the diff read back has (#783).
+    pub(crate) fn protocol_of(&self, route: &DeclaredRoute) -> Option<crate::netlink::types::route::RouteProtocol> {
+        self.route_protocols
+            .iter()
+            .find(|(r, _)| r == route)
+            .map(|(_, p)| *p)
+    }
+
     /// What the qdisc a step replaces or deletes at `q`'s slot has under it
     /// (#783).
     pub(crate) fn underneath_of(&self, q: &DeclaredQdisc) -> super::preserve::Underneath {
@@ -3099,9 +3113,10 @@ fn diff_routes(
                     kernel_routes
                         .iter()
                         .find(|r| r.priority().unwrap_or(0) == slot && r.header.rtm_tos == 0)
-                        .and_then(|r| declared_from_live(r, ifindex_to_name))
+                        .and_then(|r| Some((declared_from_live(r, ifindex_to_name)?, r.protocol())))
                 });
-                if let Some(replaced) = replaced {
+                if let Some((replaced, protocol)) = replaced {
+                    diff.route_protocols.push((replaced.clone(), protocol));
                     diff.routes_replaced.push((declared.clone(), replaced));
                 }
                 diff.routes_to_add.push(declared.clone());
@@ -3205,6 +3220,7 @@ fn diff_routes(
             continue;
         }
         if let Some(route) = declared_from_live(r, ifindex_to_name) {
+            diff.route_protocols.push((route.clone(), r.protocol()));
             diff.routes_to_remove.push(route);
         }
     }

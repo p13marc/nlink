@@ -1870,3 +1870,49 @@ async fn ipv4_multipath_keeps_its_ipv6_gateways() -> Result<()> {
     })
     .await
 }
+
+/// A route an apply replaces or purges comes back from the undo with the
+/// protocol it had (#783). A config owns `static` routes as well as `boot`
+/// ones, so it replaces and purges `proto static` routes, systemd-networkd's
+/// among them; the undo put them back as the plan's `boot`.
+#[tokio::test]
+async fn an_undo_puts_a_route_back_with_its_protocol() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("route-proto-undo")?;
+        let conn = conn_in_ns(&ns)?;
+        let base = || -> Result<NetworkConfig> {
+            Ok(NetworkConfig::new().link("d0", |l| l.dummy().up()).address("d0", "10.90.0.1/24")?)
+        };
+        let applied = base()?.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let protocol = |dst: &str| -> Result<String> {
+            let r = crate::common::converge::ip_json(&ns, &["route", "show", dst])
+                .map_err(nlink::Error::invalid_message)?;
+            // `ip -j` leaves the protocol out for `boot`.
+            Ok(r[0]["protocol"].as_str().unwrap_or("boot").to_string())
+        };
+        ns.exec("ip", &["route", "add", "10.91.0.0/24", "via", "10.90.0.2", "proto", "static"])?;
+        ns.exec("ip", &["route", "add", "10.92.0.0/24", "via", "10.90.0.2", "proto", "static"])?;
+
+        // Replaced by a declared route, and the replace undone.
+        let replacing = base()?.route("10.91.0.0/24", |r| r.via("10.90.0.3"))?;
+        let applied = replacing.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        assert_eq!(protocol("10.91.0.0/24")?, "boot");
+        let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
+        assert!(undone.is_success(), "{undone:?}");
+        assert_eq!(protocol("10.91.0.0/24")?, "static", "the replaced route");
+
+        // Purged, and the purge undone.
+        let applied = base()?.apply_with_options(&conn, ApplyOptions::default().with_purge(true)).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
+        assert!(undone.is_success(), "{undone:?}");
+        assert_eq!(protocol("10.92.0.0/24")?, "static", "the purged route");
+        Ok(())
+    })
+    .await
+}

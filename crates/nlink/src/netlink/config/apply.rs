@@ -485,7 +485,7 @@ fn step_object(step: &Step) -> crate::netlink::ErrorObject {
             address(a)
         }
         Step::RefuseRoute(c) => route(&c.route),
-        Step::ReplaceRoute { after: r, .. } | Step::DeleteRoute(r) => route(r),
+        Step::ReplaceRoute { after: r, .. } | Step::DeleteRoute { route: r, .. } => route(r),
         Step::SetNeighbour { after: n, .. } | Step::DeleteNeighbour(n) => ErrorObject::Neighbour {
             dev: n.dev.clone(),
             destination: n.destination,
@@ -545,7 +545,7 @@ fn step_operation(step: &Step) -> String {
         Step::ReplaceRoute { after, .. } => {
             format!("add route {}/{}", after.destination, after.prefix_len)
         }
-        Step::DeleteRoute(r) => format!("remove route {}/{}", r.destination, r.prefix_len),
+        Step::DeleteRoute { route: r, .. } => format!("remove route {}/{}", r.destination, r.prefix_len),
         Step::SetNeighbour { after, .. } => format!("set {after}"),
         Step::DeleteNeighbour(n) => format!("remove {n}"),
         Step::SetFdb { after, .. } => format!("set {after}"),
@@ -1081,11 +1081,11 @@ async fn run_step(
             }
             Err(e) => return Err(e),
         },
-        Step::ReplaceRoute { after: route, .. } => {
+        Step::ReplaceRoute { after: route, protocol, .. } => {
             match add_route(
                 conn,
                 route,
-                plan.routes_protocol.unwrap_or(RouteProtocol::Boot),
+                protocol.or(plan.routes_protocol).unwrap_or(RouteProtocol::Boot),
             )
             .await
             {
@@ -1103,7 +1103,7 @@ async fn run_step(
                 Err(e) => return Err(e),
             }
         }
-        Step::DeleteRoute(route) => {
+        Step::DeleteRoute { route, .. } => {
             if del_route(conn, route).await? {
                 Outcome::Changed(
                     format!("Removed route {}/{}", route.destination, route.prefix_len),
