@@ -502,6 +502,58 @@ async fn a_mirred_by_name_follows_its_target() -> nlink::Result<()> {
     Ok(())
 }
 
+/// A tree read back from its JSON (#645) applies, and the config it was
+/// written from then diffs empty: classes, a leaf, a flower that mirrors
+/// to an IFB by name, a matchall, and the IFB redirect.
+#[cfg(feature = "serde")]
+#[tokio::test]
+async fn a_tree_read_back_from_json_applies() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!(
+        "dummy", "ifb", "sch_htb", "sch_fq_codel", "sch_ingress", "cls_flower", "cls_matchall",
+        "act_mirred", "act_gact"
+    );
+
+    let cfg = NetworkConfig::new()
+        .link("d0", |l| l.dummy().up())
+        .link("nlkifb8", |l| l.ifb().up())
+        .qdisc("d0", |q: QdiscBuilder| q.htb().default_class(0x20))
+        .qdisc("d0", |q: QdiscBuilder| q.clsact())
+        .tc("d0", |t| {
+            t.class(h(1, 0), h(1, 1), HtbClassConfig::new(Rate::mbit(100)))
+                .class(h(1, 1), h(1, 0x10), HtbClassConfig::new(Rate::mbit(60)).ceil(Rate::mbit(100)))
+                .class(h(1, 1), h(1, 0x20), HtbClassConfig::new(Rate::mbit(40)))
+                .leaf(h(1, 0x10), h(0x10, 0), FqCodelConfig::new())
+                .filter(
+                    h(1, 0),
+                    FilterPriority::new(1),
+                    EthProto::IP,
+                    ssh_to(22, h(1, 0x10)).actions(
+                        ActionList::new().with(MirredAction::mirror_to_egress(0).to_dev("nlkifb8")),
+                    ),
+                )
+                .filter(h(1, 0), FilterPriority::new(2), EthProto::ALL, MatchallFilter::new().classid(h(1, 0x20)))
+                .redirect_ingress_to("nlkifb8")
+        });
+    let json = cfg.to_json_string()?;
+    let back = NetworkConfig::from_json_str(&json)?;
+
+    let ns = TestNamespace::new("tt-json")?;
+    let conn = ns.connection()?;
+    let applied = back.apply(&conn).await?;
+    assert!(applied.is_success(), "{:?}", applied.errors);
+    let diff = cfg.diff(&conn).await?;
+    assert!(diff.is_empty(), "the tree read back is not the one written:\n{diff}\n{json}");
+    // And the diff serializes in the same words.
+    let changed = NetworkConfig::from_json_str(&json.replace("rate 60mbit", "rate 30mbit"))?;
+    let diff = changed.diff(&conn).await?;
+    let written = serde_json::to_string(&diff).map_err(|e| nlink::Error::invalid_message(e.to_string()))?;
+    assert!(written.contains(r#""classes-to-change":[{"parent":"1:1","id":"1:10","kind":"htb","params":"rate 30mbit ceil 100mbit"}]"#), "{written}");
+    let filters = filters_at(&ns, "d0", "1:").map_err(nlink::Error::invalid_message)?;
+    assert_eq!(filters, [(1, "flower".to_string()), (2, "matchall".to_string())]);
+    Ok(())
+}
+
 /// A VLAN whose id changes is deleted and created again, which takes its
 /// classes and filters with it. Those were blockers, so the recreate was
 /// refused; declared in its tree, the apply puts them back (#514).

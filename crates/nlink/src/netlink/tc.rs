@@ -8014,6 +8014,43 @@ impl HtbClassConfig {
         }
         Ok(cfg)
     }
+
+    /// The class as the tokens [`parse_params`](Self::parse_params)
+    /// reads, its inverse (#645). Values left at their defaults are not
+    /// written.
+    pub fn to_params(&self) -> Result<Vec<String>> {
+        let default = Self::new(self.rate);
+        let mut out = vec!["rate".to_string(), self.rate.to_string()];
+        let mut put = |k: &str, v: String| {
+            out.push(k.to_string());
+            out.push(v);
+        };
+        if let Some(c) = self.ceil {
+            put("ceil", c.to_string());
+        }
+        if let Some(b) = self.burst {
+            put("burst", b.to_string());
+        }
+        if let Some(b) = self.cburst {
+            put("cburst", b.to_string());
+        }
+        if let Some(p) = self.prio {
+            put("prio", p.to_string());
+        }
+        if let Some(q) = self.quantum {
+            put("quantum", crate::util::Bytes::new(u64::from(q)).to_string());
+        }
+        if self.mtu != default.mtu {
+            put("mtu", self.mtu.to_string());
+        }
+        if self.mpu != default.mpu {
+            put("mpu", self.mpu.to_string());
+        }
+        if self.overhead != default.overhead {
+            put("overhead", self.overhead.to_string());
+        }
+        Ok(out)
+    }
 }
 
 impl HtbClassConfig {
@@ -8259,56 +8296,108 @@ impl HfscClassConfig {
         [self.rsc, self.fsc, self.usc]
     }
 
-    /// Parse a simplified `tc(8)`-style HFSC class param token slice.
+    /// Parse a `tc(8)`-style HFSC class param token slice.
     ///
-    /// Accepts the rate-only forms: `rt rate <rate>`, `ls rate <rate>`,
-    /// `ul rate <rate>`. The full `m1/d/m2` service-curve grammar is
-    /// not parsed here — callers needing arbitrary curves should use
-    /// the typed builder (`HfscClassConfig::new().rt_curve(...)`)
-    /// directly. Strict rejection on unknown tokens.
+    /// Each curve is `rt`, `ls`, `ul`, or `sc` (real-time and link-sharing
+    /// both), followed by `[m1 <rate> d <time>] m2 <rate>`, or by
+    /// `rate <rate>`, which is `m2` alone. `d` is a time (`5ms`, `100us`).
+    /// Strict rejection on unknown tokens.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         use crate::util::Rate;
         let mut cfg = HfscClassConfig::new();
         let mut i = 0;
         while i < params.len() {
-            let curve = params[i];
-            let kind = match curve {
-                "rt" | "ls" | "ul" => curve,
-                "sc" => {
-                    return Err(Error::invalid_message(
-                        "hfsc: `sc` (real-time + link-share combined) not modelled by parse_params — use HfscClassConfig::rt_curve + ls_curve on the typed builder",
-                    ));
-                }
-                other => {
-                    return Err(Error::invalid_message(format!(
-                        "hfsc: unknown token `{other}` (recognised: rt, ls, ul; each followed by `rate <rate>`)"
-                    )));
-                }
-            };
-            // Expect `rate <rate>` after the curve keyword.
-            let next = params.get(i + 1).copied().ok_or_else(|| {
-                Error::invalid_message(format!("hfsc: `{kind}` requires `rate <rate>`"))
-            })?;
-            if next != "rate" {
+            let kind = params[i];
+            if !matches!(kind, "rt" | "ls" | "ul" | "sc") {
                 return Err(Error::invalid_message(format!(
-                    "hfsc: `{kind}` followed by `{next}` — only the `rate <rate>` form is parsed (use the typed builder for full m1/d/m2 curves)"
+                    "hfsc: unknown token `{kind}` (recognised: rt, ls, ul, sc; each followed by \
+                     `[m1 <rate> d <time>] m2 <rate>` or `rate <rate>`)"
                 )));
             }
-            let v = params.get(i + 2).copied().ok_or_else(|| {
-                Error::invalid_message(format!("hfsc: `{kind} rate` requires a value"))
-            })?;
-            let rate = v
-                .parse::<Rate>()
-                .map_err(|e| Error::invalid_message(format!("hfsc: invalid rate `{v}`: {e}")))?;
-            cfg = match kind {
-                "rt" => cfg.rt_rate(rate),
-                "ls" => cfg.ls_rate(rate),
-                "ul" => cfg.ul_rate(rate),
-                _ => unreachable!(),
+            let rate = |key: &str, v: &str| -> Result<u32> {
+                v.parse::<Rate>()
+                    .map(|r| r.as_u32_bytes_per_sec_saturating())
+                    .map_err(|e| Error::invalid_message(format!("hfsc: invalid {key} `{v}`: {e}")))
             };
-            i += 3;
+            let (mut m1, mut d, mut m2) = (None, None, None);
+            i += 1;
+            while let Some(&key) = params.get(i) {
+                if !matches!(key, "m1" | "d" | "m2" | "rate") {
+                    break;
+                }
+                let v = params.get(i + 1).copied().ok_or_else(|| {
+                    Error::invalid_message(format!("hfsc: `{kind} {key}` requires a value"))
+                })?;
+                match key {
+                    "m1" => m1 = Some(rate(key, v)?),
+                    "d" => {
+                        let t = crate::util::parse::get_time(v).map_err(|e| {
+                            Error::invalid_message(format!("hfsc: invalid d `{v}`: {e}"))
+                        })?;
+                        let us = (t.as_nanos() + 500) / 1000;
+                        d = Some(u32::try_from(us).map_err(|_| {
+                            Error::invalid_message(format!("hfsc: d `{v}` is past u32 microseconds"))
+                        })?);
+                    }
+                    _ => m2 = Some(rate(key, v)?),
+                }
+                i += 2;
+            }
+            let m2 = m2.ok_or_else(|| {
+                Error::invalid_message(format!(
+                    "hfsc: `{kind}` requires `m2 <rate>` or `rate <rate>`"
+                ))
+            })?;
+            let curve = TcServiceCurve::new(m1.unwrap_or(0), d.unwrap_or(0), m2);
+            cfg = match kind {
+                "rt" => cfg.rt_curve(curve),
+                "ls" => cfg.ls_curve(curve),
+                "ul" => cfg.ul_curve(curve),
+                _ => cfg.rt_curve(curve).ls_curve(curve),
+            };
         }
         Ok(cfg)
+    }
+
+    /// The class as the tokens [`parse_params`](Self::parse_params)
+    /// reads, its inverse (#645): `sc` when the real-time and
+    /// link-sharing curves are one.
+    pub fn to_params(&self) -> Result<Vec<String>> {
+        use crate::util::Rate;
+        let curve = |kind: &str, c: &TcServiceCurve| {
+            let rate = |m: u32| Rate::bytes_per_sec(u64::from(m)).to_string();
+            let mut out = vec![kind.to_string()];
+            if c.m1 == 0 && c.d == 0 {
+                out.extend(["rate".to_string(), rate(c.m2)]);
+            } else {
+                out.extend([
+                    "m1".to_string(),
+                    rate(c.m1),
+                    "d".to_string(),
+                    format!("{}us", c.d),
+                    "m2".to_string(),
+                    rate(c.m2),
+                ]);
+            }
+            out
+        };
+        let same = |a: &TcServiceCurve, b: &TcServiceCurve| (a.m1, a.d, a.m2) == (b.m1, b.d, b.m2);
+        let mut out = Vec::new();
+        match (&self.rsc, &self.fsc) {
+            (Some(r), Some(f)) if same(r, f) => out.extend(curve("sc", r)),
+            (r, f) => {
+                if let Some(r) = r {
+                    out.extend(curve("rt", r));
+                }
+                if let Some(f) = f {
+                    out.extend(curve("ls", f));
+                }
+            }
+        }
+        if let Some(u) = &self.usc {
+            out.extend(curve("ul", u));
+        }
+        Ok(out)
     }
 }
 
@@ -8441,6 +8530,15 @@ impl DrrClassConfig {
             }
         }
         Ok(cfg)
+    }
+
+    /// The class as the tokens [`parse_params`](Self::parse_params)
+    /// reads, its inverse (#645).
+    pub fn to_params(&self) -> Result<Vec<String>> {
+        Ok(self
+            .quantum
+            .map(|q| vec!["quantum".to_string(), q.to_string()])
+            .unwrap_or_default())
     }
 }
 
@@ -8587,6 +8685,19 @@ impl QfqClassConfig {
             }
         }
         Ok(cfg)
+    }
+
+    /// The class as the tokens [`parse_params`](Self::parse_params)
+    /// reads, its inverse (#645).
+    pub fn to_params(&self) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        if let Some(w) = self.weight {
+            out.extend(["weight".to_string(), w.to_string()]);
+        }
+        if let Some(l) = self.lmax {
+            out.extend(["lmax".to_string(), l.to_string()]);
+        }
+        Ok(out)
     }
 }
 
@@ -11937,13 +12048,15 @@ mod tests {
         );
     }
 
+    /// A curve with an `m1` and no `m2` says what it lacks (#645 reads
+    /// the `m1`/`d`/`m2` form; it used to refuse everything but `rate`).
     #[test]
-    fn hfsc_class_parse_params_non_rate_form_errors() {
+    fn hfsc_class_parse_params_curve_without_m2_errors() {
         let err = HfscClassConfig::parse_params(&["rt", "rate", "10mbit", "ls", "m1", "100"])
             .unwrap_err();
         assert!(err.to_string().contains("hfsc:"), "kind-prefixed: {err}");
         assert!(
-            err.to_string().contains("only the `rate <rate>` form"),
+            err.to_string().contains("`ls` requires `m2 <rate>` or `rate <rate>`"),
             "got: {err}"
         );
     }
@@ -12116,5 +12229,93 @@ mod tests {
         assert!(TcHandle::major_only(0xffff).is_reserved_major());
         assert!(TcHandle::INGRESS.is_reserved_major());
         assert!(!TcHandle::major_only(0x8000).is_reserved_major());
+    }
+}
+
+/// `to_params` is `parse_params`' inverse for the class kinds a declared
+/// tree holds (#645): the tokens parse back to a class that writes the
+/// same request, and the same tokens.
+#[cfg(test)]
+mod class_params_tests {
+    use super::*;
+    use crate::util::{Bytes, Rate};
+
+    fn bytes(c: &impl ClassConfig) -> Vec<u8> {
+        let mut b = MessageBuilder::new(0, 0);
+        let start = b.len();
+        c.write_options(&mut b).unwrap();
+        b.as_bytes()[start..].to_vec()
+    }
+
+    macro_rules! round_trips {
+        ($ty:ident, $c:expr) => {{
+            let c: $ty = $c;
+            let tokens = c.to_params().unwrap_or_else(|e| panic!("{e}"));
+            let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+            let back = $ty::parse_params(&refs).unwrap_or_else(|e| panic!("{tokens:?}: {e}"));
+            assert_eq!(back.to_params().unwrap(), tokens);
+            assert_eq!(bytes(&back), bytes(&c), "{tokens:?}");
+            tokens
+        }};
+    }
+
+    #[test]
+    fn htb_round_trips() {
+        assert_eq!(
+            round_trips!(HtbClassConfig, HtbClassConfig::new(Rate::mbit(60)).ceil(Rate::mbit(100))),
+            ["rate", "60mbit", "ceil", "100mbit"]
+        );
+        round_trips!(
+            HtbClassConfig,
+            HtbClassConfig::new(Rate::bytes_per_sec(1_250_001))
+                .burst(Bytes::kib(32))
+                .cburst(Bytes::new(3000))
+                .prio(2)
+                .quantum(1514)
+                .mtu(9000)
+                .mpu(64)
+                .overhead(4)
+        );
+    }
+
+    #[test]
+    fn hfsc_round_trips_and_reads_curves() {
+        let two = TcServiceCurve::two_slope(2_500_000, 5000, 1_250_000);
+        assert_eq!(
+            round_trips!(HfscClassConfig, HfscClassConfig::new().rt_curve(two).ls_rate(Rate::mbit(60))),
+            ["rt", "m1", "20mbit", "d", "5000us", "m2", "10mbit", "ls", "rate", "60mbit"]
+        );
+        // One curve for both is `sc`.
+        assert_eq!(
+            round_trips!(HfscClassConfig, HfscClassConfig::new().rt_curve(two).ls_curve(two)),
+            ["sc", "m1", "20mbit", "d", "5000us", "m2", "10mbit"]
+        );
+        round_trips!(HfscClassConfig, HfscClassConfig::new().ls_rate(Rate::mbit(40)).ul_rate(Rate::mbit(80)));
+        // tc(8)'s spellings read as the same curve.
+        let parsed = HfscClassConfig::parse_params(&[
+            "rt", "m1", "20mbit", "d", "5ms", "m2", "10mbit", "ls", "m2", "60mbit",
+        ])
+        .unwrap();
+        assert_eq!(
+            bytes(&parsed),
+            bytes(&HfscClassConfig::new().rt_curve(two).ls_rate(Rate::mbit(60)))
+        );
+        for bad in [&["rt"][..], &["rt", "m1", "1mbit"], &["xx", "rate", "1mbit"], &["ls", "d", "1x", "m2", "1mbit"]] {
+            let err = HfscClassConfig::parse_params(bad).unwrap_err().to_string();
+            assert!(err.contains("hfsc: "), "{bad:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn drr_and_qfq_round_trip() {
+        assert_eq!(
+            round_trips!(DrrClassConfig, DrrClassConfig::new().quantum(Bytes::new(3000))),
+            ["quantum", "3000b"]
+        );
+        assert!(round_trips!(DrrClassConfig, DrrClassConfig::new()).is_empty());
+        assert_eq!(
+            round_trips!(QfqClassConfig, QfqClassConfig::new().weight(10).lmax(Bytes::kib(2))),
+            ["weight", "10", "lmax", "2kib"]
+        );
     }
 }

@@ -39,10 +39,9 @@ pub struct NetworkConfig {
     /// Nexthop objects and groups (#516).
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
     pub(crate) nexthops: Vec<DeclaredNexthop>,
-    /// The TC trees declared with [`tc`](Self::tc). Not in JSON or YAML
-    /// yet: a filter's actions have no document form.
-    #[cfg_attr(feature = "serde", serde(skip))]
-    #[cfg_attr(feature = "schemars", schemars(skip))]
+    /// The TC trees declared with [`tc`](Self::tc): in JSON and YAML, each
+    /// class, filter and action as its kind and tc(8)'s words (#645).
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
     pub(crate) tc: Vec<super::tc_tree::DeclaredTc>,
     /// The `rtm_protocol` declared routes are installed with, and the one
     /// the diff treats as the config's own; `None` is `boot` (#512). See

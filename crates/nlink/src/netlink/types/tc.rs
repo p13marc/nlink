@@ -2338,24 +2338,31 @@ pub mod action {
     /// Goto chain (opcode, chain is encoded in upper bits).
     pub const TC_ACT_GOTO_CHAIN: i32 = 0x20000000;
 
+    /// `TC_ACT_EXT_VAL_MASK`: the low 28 bits of an extended verdict
+    /// carry its value (a goto's chain), the high four its opcode.
+    pub const TC_ACT_EXT_VAL_MASK: i32 = 0x0FFF_FFFF;
+
     /// Encode a goto_chain action value.
     ///
-    /// The chain number is encoded in the lower 24 bits.
+    /// The chain number is encoded in the lower 28 bits
+    /// (`TC_ACT_EXT_VAL_MASK`); it used to be cut to 24.
     #[inline]
     pub const fn tc_act_goto_chain(chain: u32) -> i32 {
-        TC_ACT_GOTO_CHAIN | (chain as i32 & 0x00FFFFFF)
+        TC_ACT_GOTO_CHAIN | (chain as i32 & TC_ACT_EXT_VAL_MASK)
     }
 
     /// Decode the chain number from a goto_chain action.
     #[inline]
     pub const fn tc_act_chain(action: i32) -> u32 {
-        (action & 0x00FFFFFF) as u32
+        (action & TC_ACT_EXT_VAL_MASK) as u32
     }
 
-    /// Check if an action is a goto_chain.
+    /// Check if an action is a goto_chain: its opcode, the high four
+    /// bits, is `TC_ACT_GOTO_CHAIN` (the kernel's `TC_ACT_EXT_CMP`). It
+    /// used to test one bit, which `TC_ACT_UNSPEC` (-1, `continue`) has.
     #[inline]
     pub const fn is_goto_chain(action: i32) -> bool {
-        (action & TC_ACT_GOTO_CHAIN) != 0
+        (action & !TC_ACT_EXT_VAL_MASK) == TC_ACT_GOTO_CHAIN
     }
 
     /// Parse action result from string.

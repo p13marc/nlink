@@ -55,6 +55,8 @@ mod diff;
 mod kind;
 mod plan;
 mod tc_tree;
+#[cfg(feature = "serde")]
+mod tc_tree_serde;
 mod types;
 
 // `ApplyError` is a field of `ApplyResult` and `LinkChanges` a field of
