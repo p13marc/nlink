@@ -1950,3 +1950,39 @@ async fn a_tunnels_mac_and_mtu_go_out_at_create() -> Result<()> {
     })
     .await
 }
+
+/// An ERSPAN tunnel's output key is compared too (#782): the session goes
+/// out as both keys, and the comparison read the input key alone, so an
+/// erspan whose output key differed converged as it was.
+#[tokio::test]
+async fn an_erspans_output_key_is_compared() -> Result<()> {
+    use nlink::netlink::link::ErspanVersion;
+    nlink::require_root!();
+    nlink::require_modules!("ip_gre");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("erspan-okey")?;
+        let conn = conn_in_ns(&ns)?;
+        ns.exec(
+            "ip",
+            &["link", "add", "er1", "type", "erspan", "seq", "ikey", "5", "okey", "6", "local", "10.94.0.1", "remote", "10.94.0.2", "erspan_ver", "1", "erspan", "3"],
+        )?;
+        let cfg = NetworkConfig::new().link("er1", |l| {
+            l.erspan(5)
+                .erspan_local("10.94.0.1".parse::<std::net::Ipv4Addr>().unwrap())
+                .erspan_remote("10.94.0.2".parse::<std::net::Ipv4Addr>().unwrap())
+                .erspan_version(ErspanVersion::V1 { index: 3 })
+        });
+        let diff = cfg.diff(&conn).await?;
+        assert!(!diff.is_empty(), "okey 6 compared equal to session 5");
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let link = crate::common::converge::ip_json(&ns, &["-d", "link", "show", "er1"])
+            .map_err(nlink::Error::invalid_message)?;
+        let data = &link[0]["linkinfo"]["info_data"];
+        assert_eq!(data["ikey"], data["okey"], "{data}");
+        assert!(cfg.diff(&conn).await?.is_empty(), "it did not converge");
+        Ok(())
+    })
+    .await
+}

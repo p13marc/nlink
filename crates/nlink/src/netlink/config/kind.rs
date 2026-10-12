@@ -2987,7 +2987,9 @@ fn compare_erspan(
     if let Some(want) = p.ttl {
         note("ttl", show(data.u8(TTL).map(|v| v.to_string())), want.to_string());
     }
-    note("session", show(data.u32_be(IKEY).map(|k| k.to_string())), p.session.to_string());
+    // The session is the key both ways: the output key is compared too
+    // (#782).
+    note("session", keys_text(data.u32_be(IKEY), data.u32_be(OKEY)), p.session.to_string());
     note("version", show(have_version.map(|v| format!("{v:?}"))), format!("{:?}", p.version));
     note("dev", show(have_dev.map(str::to_string)), show(p.underlay_dev.clone()));
     if changes.is_empty() {

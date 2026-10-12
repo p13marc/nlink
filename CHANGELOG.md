@@ -888,6 +888,10 @@ All notable changes to this project will be documented in this file.
   `GretapLink`, `Ip6GretapLink`, `ErspanLink`, `Ip6ErspanLink` and
   `MacsecLink` gain `address()`, and `VtiLink` gains `mtu()`.
 
+- **An ERSPAN tunnel's output key is compared too (#782).** Its session
+  goes out as both keys, but the comparison read only the input key. So an
+  erspan or ip6erspan whose output key differed matched its declaration.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
