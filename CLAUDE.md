@@ -944,7 +944,53 @@ lists every break.
 - **And:** `AsFd` throughout, NFLOG, hwsim and mesh, `get_stats64_all`
   and `RateSampler`, `blocking::Connection`.
 
+The 2026-10-12 run worked through every open issue after #534:
+- **The undo** puts back everything an apply changes. Since #649 that
+  covers kind parameters, replaced qdiscs, TC trees, re-add reasons and
+  serializable plans; since #745, a deleted link too, read back as
+  declarations with everything on it.
+- **The errors** say which namespace and which object they are about
+  (#718).
+- **Declarative TC** gained HFSC/DRR/QFQ, trees in JSON, the recipes as
+  declarations, and an undeclared tree kept across a recreate (#645).
+- **nftables** gained the later statements and objects (#703); the nest
+  schema and family-aware guards took the safe half of #708.
+- **Telemetry** (#166): the netdev family, `ethtool -T`, a link's PHYs,
+  per-CPU SAs and AccECN.
+- **Tooling:** `replay` (#168), the YNL spec gate (#167) and
+  `ip vrf exec` (#257).
+
+#708's typed redesigns (`ChainKind`, `RuleSpec`/`lift`, `Change<T>`) stay
+open. So does #747: replacing `serde_yaml` is a dependency choice.
+
 Lessons to carry:
+- **A counter in a before/after comparison is a flake waiting for
+  load.** One test compared HTB's `direct_packets_stat` (#771). Under load
+  it failed one CI run in three and never alone, and it cost four PRs a
+  rerun each before CI's exact command in podman named it.
+- **A thread that exits inside a namespace holds it a moment longer.**
+  `join` returns when the kernel clears the thread's TID, before it
+  releases the thread's namespaces. So `Netns::pids` right after a `run`
+  could list the caller, and a handle's worker, never joined, held it
+  longer (#797). It failed one CI run in three and never on the host. A
+  probe PR whose workflow posted its own failures back to the PR named the
+  test, and busy-looping every CPU reproduced it.
+- **A dump is not a request.** The kernel echoes a route's nexthop
+  gateway and device next to its nexthop id (`nexthop_compat_mode`), and a
+  request may not send both (#769). A read-back strips the echo. And a
+  dump does not filter by what its request names unless its handler says
+  so: ethtool's default dump answered for every device, and a getter
+  sent as one read `lo` (#754, #773); `unix_diag_dump` ignores the inode
+  (#776); a TC class or filter dump with no interface is empty (#778). A
+  sweep for dumps that name one object found three of these at once, and
+  one for read-backs sent to the kernel again found four more: an echoed
+  nexthop encap (#769), an address read back bare (#781), a tunnel's
+  output key never compared (#782), a qdisc's tree lost on undo (#783).
+  One for fields a comparison or a create skipped found five: a multipath
+  hop's IPv6 gateway (#786), a route's protocol on undo (#783), a tunnel's
+  MAC and a vti's MTU at create (#788), an HTB class's quantum, mpu and
+  overhead (#789), a police's conform verdict and peakrate and a gact's
+  random verdict (#791).
 - **A sweep finds what one site hides.** Converting the BPF constructors
   to `AsFd` found that `from_pinned` had never opened a real pin (#710):
   bpffs refuses `open(2)`, and the only tests used a missing path.
@@ -1101,9 +1147,9 @@ longer built and five library bugs the examples had been documenting around).
 crates.io) — narrative in `CHANGELOG.md ## [0.24.0]` +
 `docs/migration_guide/0.23.0-to-0.24.0.md`.
 
-Cycle-sized roadmap items still open from #170: #166 (modern-kernel
-telemetry families), #167 (spec-first netlink codegen), #168
-(record/replay mock transport).
+Roadmap items from #170: #167 (the YNL spec gate) and #168 (record/replay)
+landed in 0.32. #166 is open for what needs hardware to test: RSS context
+lifecycle and the cable test.
 
 Open follow-on work is tracked as forge issues, not in `plans/`.
 
