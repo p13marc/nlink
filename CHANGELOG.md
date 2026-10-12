@@ -2725,6 +2725,16 @@ All notable changes to this project will be documented in this file.
   A `log` carrying any of these used to decode as `Unknown`. The default level
   (`warn`) reads back as none.
 
+- **Header writes (#703).** `Rule::set_header(HeaderWrite)` writes `ip dscp`,
+  `ip ttl`, `ip saddr` and `ip daddr`, `ip6 dscp`, `ip6 hoplimit`, `ip6 saddr`
+  and `ip6 daddr`, and `tcp`/`udp sport` and `dport`, as nft writes them:
+  - behind nft's guard;
+  - with the checksums the field sits in updated;
+  - a field narrower than 16 bits read, masked and written back.
+
+  It writes `Expr::PayloadSet`, which `RuleExpr::PayloadSet` decodes (it was
+  `Unknown`). `PayloadCsum` is new.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
