@@ -245,3 +245,52 @@ async fn cc_info_struct_matches_congestion_name() -> nlink::Result<()> {
     }
     Ok(())
 }
+
+/// #166: the `tcp_info` fields kernels appended after `snd_wnd` read back.
+/// An idle loopback pair's advertised receive window is `ss -ti`'s
+/// `rcv_wnd` (where this `ss` prints it), and a fresh pair has seen no RTO
+/// and no rehash.
+#[tokio::test]
+async fn tcp_info_reads_the_receive_window_and_rto_counters() -> nlink::Result<()> {
+    use std::io::{Read, Write};
+    require_root!();
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    let (mut server, _) = listener.accept().expect("accept");
+    client.write_all(&[0u8; 1000]).expect("send");
+    let mut buf = [0u8; 1000];
+    server.read_exact(&mut buf).expect("receive");
+
+    let conn = Connection::<SockDiag>::new()?;
+    let filter = SocketFilter {
+        kind: FilterKind::Inet(InetFilter {
+            protocol: Protocol::Tcp,
+            states: TcpState::all_mask(),
+            local_port: Some(port),
+            extensions: nlink::sockdiag::InetExtension::Info.mask(),
+            ..Default::default()
+        }),
+    };
+    let got = conn.query(&filter).await?;
+    let info = got
+        .iter()
+        .filter_map(|s| s.as_inet())
+        .find(|s| s.state == nlink::sockdiag::SocketState::Tcp(TcpState::Established))
+        .and_then(|s| s.tcp_info.clone())
+        .expect("the server side's tcp_info");
+    assert!(info.rcv_wnd > 0, "{info:?}");
+    assert_eq!((info.total_rto, info.total_rto_time, info.rehash), (0, 0, 0));
+
+    let ss = std::process::Command::new("ss")
+        .args(["-tin", "state", "established", "sport", &format!("= :{port}")])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    if let Some(shown) = ss.split_whitespace().find_map(|w| w.strip_prefix("rcv_wnd:")) {
+        assert_eq!(shown.parse::<u32>().ok(), Some(info.rcv_wnd), "{ss}");
+    }
+    drop(client);
+    Ok(())
+}

@@ -513,6 +513,35 @@ pub struct TcpInfo {
     pub rcv_ooopack: u32,
     /// Send window.
     pub snd_wnd: u32,
+    /// The receive window this end advertises, after scaling (bytes).
+    pub rcv_wnd: u32,
+    /// Rehash attempts, by PLB or after a timeout.
+    pub rehash: u32,
+    /// RTO timeouts, SYN/SYN-ACK and recurring ones included.
+    pub total_rto: u16,
+    /// RTO recoveries, an unfinished one included.
+    pub total_rto_recoveries: u16,
+    /// Time spent in RTO recoveries (ms), an unfinished one included.
+    pub total_rto_time: u32,
+
+    /// Accurate ECN (kernel 6.18+, #166): CE marks received.
+    pub received_ce: u32,
+    /// Accurate ECN: bytes delivered marked ECT(1).
+    pub delivered_e1_bytes: u32,
+    /// Accurate ECN: bytes delivered marked ECT(0).
+    pub delivered_e0_bytes: u32,
+    /// Accurate ECN: bytes delivered marked CE.
+    pub delivered_ce_bytes: u32,
+    /// Accurate ECN: bytes received marked ECT(1).
+    pub received_e1_bytes: u32,
+    /// Accurate ECN: bytes received marked ECT(0).
+    pub received_e0_bytes: u32,
+    /// Accurate ECN: bytes received marked CE.
+    pub received_ce_bytes: u32,
+    /// Accurate ECN: why it fell back, if it did (`TCP_ACCECN_*_FAIL_*` bits).
+    pub accecn_fail_mode: u16,
+    /// Accurate ECN: whether the AccECN option has been seen, and how.
+    pub accecn_opt_seen: u16,
 }
 
 impl TcpInfo {

@@ -2931,6 +2931,19 @@ All notable changes to this project will be documented in this file.
   attribute, so check what reads back. The CI kernel is older, so this is
   checked by unit test only.
 
+
+- **`tcp_info` fields after `snd_wnd`, and AccECN (#166).** `TcpInfo` reads the
+  fields later kernels appended:
+  - `rcv_wnd`, `rehash`, `total_rto`, `total_rto_recoveries` and
+    `total_rto_time`;
+  - 6.18's Accurate ECN counters: `received_ce`, the six
+    delivered/received ECT(0)/ECT(1)/CE byte counts, `accecn_fail_mode`
+    and `accecn_opt_seen`.
+
+  Each block is read only when the kernel sends it. The offsets were checked
+  with `offsetof` against the uapi headers, 6.18's against its source. The
+  AccECN block is unit-pinned: no kernel here sends it.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
