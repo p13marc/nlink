@@ -9,8 +9,8 @@
 //! stream are printed; the rest are drained without storing.
 //!
 //! The same pattern works for: `stream_neighbors`,
-//! `stream_addresses`, `stream_qdiscs`, `stream_classes`,
-//! `stream_filters`, `Connection<Xfrm>::stream_sas`,
+//! `stream_addresses`, `stream_qdiscs`, `stream_classes_by_index`,
+//! `stream_filters_by_index`, `Connection<Xfrm>::stream_sas`,
 //! `Connection<Xfrm>::stream_sps`,
 //! `Connection<Netfilter>::stream_conntrack` (`_v4` / `_v6`),
 //! `Connection<Nftables>::stream_rules`.

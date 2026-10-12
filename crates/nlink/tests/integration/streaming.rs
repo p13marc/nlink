@@ -69,3 +69,50 @@ async fn stream_links_matches_eager_dump_count() -> nlink::Result<()> {
     );
     Ok(())
 }
+
+/// One interface's TC classes and filters stream as the eager getters read
+/// them (#778). The old `stream_classes()`/`stream_filters()` sent no
+/// interface, which a class or filter dump needs, and always ended empty.
+#[tokio::test]
+async fn tc_classes_and_filters_stream_per_interface() -> nlink::Result<()> {
+    use nlink::TcHandle;
+    require_root!();
+    nlink::require_modules!("dummy", "sch_htb", "sch_ingress", "cls_matchall");
+
+    let ns = TestNamespace::new("stream-tc")?;
+    let conn = ns.connection()?;
+    conn.add_link(DummyLink::new("d0")).await?;
+    let tc = |args: &str| ns.exec("tc", &args.split_whitespace().collect::<Vec<_>>()).map(drop);
+    tc("qdisc add dev d0 root handle 1: htb default 10")?;
+    tc("class add dev d0 parent 1: classid 1:1 htb rate 100mbit")?;
+    tc("class add dev d0 parent 1:1 classid 1:10 htb rate 10mbit")?;
+    tc("filter add dev d0 parent 1: prio 1 protocol ip matchall classid 1:10")?;
+    tc("filter add dev d0 parent 1: prio 2 protocol ip matchall classid 1:1")?;
+    tc("qdisc add dev d0 clsact")?;
+    tc("filter add dev d0 ingress prio 3 protocol all matchall action pass")?;
+    let d0 = conn.get_link_by_name("d0").await?.expect("d0").ifindex();
+
+    let mut streamed = Vec::new();
+    let mut stream = conn.stream_classes_by_index(d0).await?;
+    while let Some(c) = stream.next().await {
+        streamed.push(c?.handle());
+    }
+    drop(stream);
+    let eager: Vec<TcHandle> = conn.get_classes_by_index(d0).await?.iter().map(|c| c.handle()).collect();
+    assert_eq!(streamed, eager);
+    assert!(streamed.contains(&TcHandle::new(1, 0x10)), "{streamed:?}");
+
+    for (parent, prios) in [(None, vec![1, 2]), (Some(TcHandle::CLSACT_INGRESS), vec![3])] {
+        let mut streamed = Vec::new();
+        let mut stream = conn.stream_filters_by_index(d0, parent).await?;
+        while let Some(f) = stream.next().await {
+            let f = f?;
+            // The classifier that heads each priority is not a filter.
+            if f.handle_raw() != 0 {
+                streamed.push(f.priority().as_u16());
+            }
+        }
+        assert_eq!(streamed, prios, "under {parent:?}");
+    }
+    Ok(())
+}
