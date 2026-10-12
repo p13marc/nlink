@@ -1,16 +1,23 @@
 //! Set timeouts and `dynset` (`add|update|delete @set` from a rule) —
-//! ipset `timeout` and `SET --add-set` — checked on traffic, and declared
-//! dynamic sets that keep what the packet path put in them.
+//! ipset `timeout` and `SET --add-set` — checked on traffic, declared
+//! dynamic sets that keep what the packet path put in them, and dynset
+//! per-element statements.
 
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use nlink::netlink::nftables::config::NftablesConfig;
 use nlink::netlink::nftables::types::{
-    Chain, ChainType, Family, Hook, PacketField, Priority, Rule, Set, SetElement, SetKeyType,
+    Chain, ChainType, Family, Hook, LimitUnit, PacketField, Priority, Register, Rule, Set,
+    SetElement, SetKeyType,
+};
+use nlink::netlink::nftables::{
+    DynsetExpr, DynsetOp, ElementStatement, LimitExpr, QuotaExpr, RuleExpr,
 };
 use nlink::netlink::{Connection, Nftables};
 
+use crate::common::converge::assert_transition;
+use crate::common::counters::rule_packets;
 use crate::common::traffic::{lo_up, send_udp};
 use crate::common::{TestNamespace, with_timeout};
 
@@ -288,6 +295,183 @@ async fn an_element_that_expires_before_the_apply_does_not_fail_it() -> nlink::R
         tokio::time::sleep(Duration::from_millis(1500)).await;
         diff.apply(&conn).await?;
         assert!(cfg.diff(&conn).await?.is_empty());
+        Ok(())
+    })
+    .await
+}
+
+// ============================================================================
+// #703 — dynset per-element statements
+// ============================================================================
+
+/// `nft list table inet`, named `T` and without the time each element has
+/// left, which runs on between two listings.
+fn listed_table(ns: &TestNamespace, table: &str) -> nlink::Result<String> {
+    let out = ns.exec("nft", &["list", "table", "inet", table])?;
+    let mut words = out.split_whitespace();
+    let mut kept = Vec::new();
+    while let Some(word) = words.next() {
+        if word == "expires" {
+            words.next();
+        } else {
+            kept.push(word);
+        }
+    }
+    Ok(kept.join(" ").replacen(&format!("table inet {table}"), "table inet T", 1))
+}
+
+/// #703: dynset statements as nft writes them — one, two, a limit, a
+/// connlimit — decode typed, and nlink installs the same rules; `nft`
+/// lists the two tables alike, before traffic and after, when each
+/// element carries its own counter, quota and limit. An inet table, where
+/// nft guards `ip daddr` with `meta nfproto` as nlink does in every family:
+/// nft 1.0.6 cannot list a guarded dynset key in an ip table.
+#[tokio::test]
+async fn dynset_statements_read_and_write_as_nft_does() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables", "nft_limit", "nft_quota", "nft_connlimit");
+
+    let ns = TestNamespace::new("nft-dynstmt")?;
+    lo_up(&ns).await?;
+    let script = "table inet a {
+ set s1 { type ipv4_addr; flags dynamic; }
+ set s2 { type ipv4_addr; flags dynamic,timeout; }
+ set s3 { type ipv4_addr; flags dynamic; }
+ set s4 { type ipv4_addr; flags dynamic; }
+ chain out {
+  type filter hook output priority 0;
+  add @s1 { ip daddr counter }
+  update @s2 { ip daddr timeout 30s limit rate over 1/minute burst 2 packets } counter
+  add @s3 { ip daddr counter quota over 1000 bytes }
+  add @s4 { ip daddr ct count over 3 }
+ }
+}
+";
+    let file = std::env::temp_dir().join(format!("nlink-dynstmt-{}.nft", std::process::id()));
+    std::fs::write(&file, script).map_err(nlink::Error::from)?;
+    let installed = ns.exec("nft", &["-f", file.to_str().unwrap()]);
+    let _ = std::fs::remove_file(&file);
+    installed?;
+
+    let conn = ns.connection_for::<Nftables>()?;
+    conn.add_table("b", Family::Inet).await?;
+    for (name, timeouts) in [("s1", false), ("s2", true), ("s3", false), ("s4", false)] {
+        // nft gives a dynamic set a size of 65535.
+        let set = Set::new("b", name).family(Family::Inet).dynamic().size(65535);
+        conn.add_set(if timeouts { set.per_element_timeouts() } else { set }).await?;
+    }
+    conn.add_chain(
+        Chain::new("b", "out")?
+            .family(Family::Inet)
+            .hook(Hook::Output)
+            .priority(Priority::Filter)
+            .chain_type(ChainType::Filter),
+    )
+    .await?;
+    let dynset = |op, set| DynsetExpr::new(op, set, Register::R0);
+    let limit = LimitExpr::packets(1, LimitUnit::Minute).burst(2).over();
+    for rule in [
+        Rule::new("b", "out").dynset(PacketField::Ip4Daddr, dynset(DynsetOp::Add, "s1").counter()),
+        Rule::new("b", "out")
+            .dynset(
+                PacketField::Ip4Daddr,
+                dynset(DynsetOp::Update, "s2").timeout(Duration::from_secs(30)).statement(limit),
+            )
+            .counter(),
+        Rule::new("b", "out").dynset(
+            PacketField::Ip4Daddr,
+            dynset(DynsetOp::Add, "s3").counter().statement(QuotaExpr::new(1000).over()),
+        ),
+        Rule::new("b", "out").dynset(
+            PacketField::Ip4Daddr,
+            dynset(DynsetOp::Add, "s4").statement(ElementStatement::Connlimit { count: 3, over: true }),
+        ),
+    ] {
+        conn.add_rule(rule.family(Family::Inet)).await?;
+    }
+    assert_eq!(listed_table(&ns, "b")?, listed_table(&ns, "a")?, "nlink's b, nft's a");
+
+    // 6 datagrams and the 6 port unreachables they draw, all to 127.0.0.1.
+    send_udp(&ns, &["127.0.0.1:9"], 6);
+    let after = listed_table(&ns, "b")?;
+    assert_eq!(after, listed_table(&ns, "a")?, "after traffic");
+    assert!(after.contains("127.0.0.1 counter packets 12"), "{after}");
+
+    let unknown = conn
+        .list_rules("a", Family::Inet)
+        .await?
+        .iter()
+        .flat_map(|r| r.expressions())
+        .filter(|e| matches!(e, RuleExpr::Unknown { .. }))
+        .count();
+    assert_eq!(unknown, 0, "every dynset and its statements decode typed");
+    Ok(())
+}
+
+/// `ip t`: UDP to an address over `burst` packets a minute is counted, per
+/// address (`update @flood { ip daddr limit rate over 1/minute burst N }`),
+/// and every address gets a counter and a quota of its own in `seen`.
+fn flood(burst: u32) -> NftablesConfig {
+    NftablesConfig::new().table("t", Family::Ip, move |t| {
+        t.chain("out", |c| {
+            c.hook(Hook::Output)
+                .priority(Priority::Filter)
+                .chain_type(ChainType::Filter)
+        })
+        .set("flood", |s| s.key_type(SetKeyType::Ipv4Addr).dynamic())
+        .set("seen", |s| s.key_type(SetKeyType::Ipv4Addr).dynamic())
+        .rule_keyed("out", "flood", move |r| {
+            let limit = LimitExpr::packets(1, LimitUnit::Minute).burst(burst).over();
+            r.match_l4proto(17)
+                .dynset(
+                    PacketField::Ip4Daddr,
+                    DynsetExpr::new(DynsetOp::Update, "flood", Register::R0).statement(limit),
+                )
+                .counter()
+        })
+        // Two statements: NFT_DYNSET_F_EXPR goes out and is never echoed.
+        .rule_keyed("out", "seen", |r| {
+            r.match_l4proto(17).dynset(
+                PacketField::Ip4Daddr,
+                DynsetExpr::new(DynsetOp::Add, "seen", Register::R0)
+                    .counter()
+                    .statement(QuotaExpr::new(1 << 20)),
+            )
+        })
+    })
+}
+
+/// #703: declared dynset statements converge, limit each address on its
+/// own, and a statement changed in place (burst 2 → 3) is applied: the next
+/// addresses are let through one packet more.
+#[tokio::test]
+async fn declared_dynset_statements_converge_and_limit_per_address() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables", "nft_limit", "nft_quota");
+
+    let ns = TestNamespace::new("nft-dynstmt-decl")?;
+    lo_up(&ns).await?;
+    let steps = [flood(2), flood(3)];
+    assert_transition(&ns, &steps, false, async |i, conn| {
+        let over = async || {
+            rule_packets(conn, "t", Family::Ip, "out", 0)
+                .await
+                .map_err(|e| e.to_string())
+        };
+        let before = over().await?;
+        // Two addresses of their own per step, five datagrams each.
+        let first = 10 + 2 * i;
+        let targets = [format!("127.0.0.{first}:9"), format!("127.0.0.{}:9", first + 1)];
+        send_udp(&ns, &targets, 5);
+        let counted = over().await? - before;
+        let burst = [2, 3][i] as u64;
+        if counted != 2 * (5 - burst) {
+            return Err(format!("step {}: {counted} over the limit, want {}", i + 1, 2 * (5 - burst)));
+        }
+        let seen = ns.exec("nft", &["list", "set", "ip", "t", "seen"]).map_err(|e| e.to_string())?;
+        if !seen.contains(&format!("127.0.0.{first} counter packets 5 ")) {
+            return Err(format!("step {}: no per-element counter: {seen}", i + 1));
+        }
         Ok(())
     })
     .await

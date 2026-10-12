@@ -2776,6 +2776,15 @@ All notable changes to this project will be documented in this file.
   (`ObjectState::CtHelper`); a declared helper converges, and a changed one is
   recreated with the rules that use it.
 
+
+- **dynset per-element statements (#703).** `DynsetExpr::statement` (and
+  `counter()`) gives each element an `ElementStatement` of its own (a
+  counter, limit, quota or connlimit): `add @seen { ip saddr counter }`, `update @flood { ip saddr limit rate
+  over 10/second }`. `Rule::dynset(field, DynsetExpr)` is the general form of
+  `add_to_set`/`update_in_set`/`delete_from_set` that carries them. They are
+  written as nft writes them, and `RuleExpr::Dynset` decodes them into its new
+  `statements` field; a dynset with statements used to decode as `Unknown`.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
