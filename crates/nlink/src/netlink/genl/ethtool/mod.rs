@@ -187,6 +187,10 @@ pub enum EthtoolCmd {
 // Header Attributes
 // =============================================================================
 
+/// `ETHTOOL_FLAG_OMIT_REPLY`: a set or act request does not answer with
+/// its optional reply message.
+pub const ETHTOOL_FLAG_OMIT_REPLY: u32 = 1 << 1;
+
 /// Attributes for the request header (nested under ETHTOOL_A_HEADER).
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

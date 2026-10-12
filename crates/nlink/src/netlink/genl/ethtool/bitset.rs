@@ -46,6 +46,7 @@ impl EthtoolBitset {
         let mut compact_value: Option<&[u8]> = None;
         let mut compact_mask: Option<&[u8]> = None;
         let mut is_nomask = false;
+        let mut bits: Option<&[u8]> = None;
 
         for (attr_type, payload) in AttrIter::new(data) {
             match attr_type {
@@ -63,10 +64,15 @@ impl EthtoolBitset {
                 }
                 t if t == EthtoolBitsetAttr::Bits as u16 => {
                     // Bit-by-bit format
-                    bitset.parse_bits(payload)?;
+                    bits = Some(payload);
                 }
                 _ => {}
             }
+        }
+
+        // After the loop, so NOMASK is known whatever the attribute order.
+        if let Some(bits) = bits {
+            bitset.parse_bits(bits, is_nomask)?;
         }
 
         // Handle compact format
@@ -89,11 +95,16 @@ impl EthtoolBitset {
     ///   `parse` works for the name-only shape; if `Index` is
     ///   absent we synthesize one from the entry's position so the
     ///   bit still gets recorded.
-    fn parse_bits(&mut self, data: &[u8]) -> Result<()> {
+    ///
+    /// A NOMASK bitset is a list: every bit in it is set, and none carries
+    /// ETHTOOL_A_BITSET_BIT_VALUE. The wanted, active and nochange feature
+    /// sets come as lists, and read as all clear while the flag was
+    /// required (#754).
+    fn parse_bits(&mut self, data: &[u8], is_nomask: bool) -> Result<()> {
         for (_idx, bit_data) in AttrIter::new(data) {
             let mut index: Option<u32> = None;
             let mut name: Option<String> = None;
-            let mut value = false;
+            let mut value = is_nomask;
 
             for (attr_type, payload) in AttrIter::new(bit_data) {
                 match attr_type {

@@ -4,7 +4,7 @@
 //! settings using the ethtool netlink interface.
 
 use super::{
-    ETHTOOL_GENL_NAME, ETHTOOL_GENL_VERSION, ETHTOOL_MCGRP_MONITOR, EthtoolBitsetAttr,
+    ETHTOOL_FLAG_OMIT_REPLY, ETHTOOL_GENL_NAME, ETHTOOL_GENL_VERSION, ETHTOOL_MCGRP_MONITOR, EthtoolBitsetAttr,
     EthtoolChannelsAttr, EthtoolCmd, EthtoolCoalesceAttr, EthtoolEeeAttr, EthtoolFeaturesAttr,
     EthtoolFecAttr, EthtoolHeaderAttr, EthtoolLinkinfoAttr, EthtoolLinkmodesAttr,
     EthtoolLinkstateAttr, EthtoolModuleEepromAttr, EthtoolPauseAttr, EthtoolRingsAttr,
@@ -1928,69 +1928,16 @@ impl Connection<Ethtool> {
         Ok(())
     }
 
-    /// Send an ethtool GET request (dump style).
+    /// Send an ethtool GET for one device and return its reply payload.
+    ///
+    /// A `doit`. It was a dump (`NLM_F_DUMP`), which ethtool answers for
+    /// every device in the namespace — `ethnl_default_start` drops the
+    /// device a dump names — and this kept the first message: every getter
+    /// built on it (link state, info and modes, features, rings, channels,
+    /// coalesce, …) read the namespace's first device, `lo`, whatever it
+    /// was asked for.
     async fn ethtool_get(&self, cmd: EthtoolCmd, ifname: &str) -> Result<Vec<u8>> {
-        let family_id = self.state().family_id;
-
-        let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
-
-        // Append GENL header
-        let genl_hdr = GenlMsgHdr::new(cmd as u8, ETHTOOL_GENL_VERSION);
-        builder.append(&genl_hdr);
-
-        // Append request header with device name
-        let header_token = builder.nest_start(1 | NLA_F_NESTED); // ETHTOOL_A_*_HEADER = 1
-        builder.append_attr_str(EthtoolHeaderAttr::DevName as u16, ifname);
-        builder.nest_end(header_token);
-
-        // Send request
-        let seq = self.socket().next_seq();
-        builder.set_seq(seq);
-        builder.set_pid(self.socket().pid());
-
-        // #134 — dual-mode recv (dump). Register/lock before send.
-        let mut session = self.recv_session_dump(seq).await?;
-        let msg = builder.finish();
-        self.socket().send(&msg).await?;
-
-        // Plan 172 — wrap the recv loop in the Connection-level
-        // operation timeout (Plan 171 default: 30s).
-        self.with_timeout(async {
-            // Receive responses until NLMSG_DONE
-            let mut result_payload: Option<Vec<u8>> = None;
-
-            loop {
-                let data: Vec<u8> = session.recv_with_timeout(self).await?;
-                let mut done = false;
-
-                for msg_result in MessageIter::new(&data) {
-                    let (header, payload) = msg_result?;
-
-                    match classify(header, payload, seq) {
-                        Classification::SkipSeq | Classification::Ack => continue,
-                        Classification::Error(e) => return Err(e),
-                        Classification::Done(result) => {
-                            result?;
-                            done = true;
-                            break;
-                        }
-                        Classification::Data { payload } => {
-                            // Store the first valid response payload
-                            if result_payload.is_none() {
-                                result_payload = Some(payload.to_vec());
-                            }
-                        }
-                    }
-                }
-
-                if done {
-                    break;
-                }
-            }
-
-            result_payload.ok_or_else(|| Error::invalid_message("no response received"))
-        })
-        .await
+        self.ethtool_get_with(cmd, ifname, |_| {}).await
     }
 
     /// Send a parameterized ethtool GET (`doit`, not a dump): the caller
@@ -2069,9 +2016,14 @@ impl Connection<Ethtool> {
         // Append GENL header
         builder.append(&GenlMsgHdr::new(cmd as u8, ETHTOOL_GENL_VERSION));
 
-        // Append request header with device name
+        // Append request header with device name. A set request may
+        // answer with a reply message — FEATURES_SET does, with what it
+        // changed — before its ACK, unless the header asks it not to; an
+        // ACK-only exchange saw that reply as an error, so `set_features`
+        // failed on every device.
         let header_token = builder.nest_start(1 | NLA_F_NESTED); // ETHTOOL_A_*_HEADER = 1
         builder.append_attr_str(EthtoolHeaderAttr::DevName as u16, ifname);
+        builder.append_attr_u32(EthtoolHeaderAttr::Flags as u16, ETHTOOL_FLAG_OMIT_REPLY);
         builder.nest_end(header_token);
 
         // Let caller append additional attributes
