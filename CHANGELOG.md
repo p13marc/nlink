@@ -2812,6 +2812,20 @@ All notable changes to this project will be documented in this file.
   Both are written as nft writes them and decode typed: `RuleExpr::Osf` and
   `ObjectState::Secmark`. `OsfTtl` is new and audited.
 
+
+- **Ranges of marks and other host-order keys (#703).** An interval set of
+  marks, ifindexes or class ids used to be refused. Its keys now go in
+  network order, as nft writes them, so ranges compare and merge as the
+  numbers they are; they read back in host order.
+  - `SetElement::mark_range(first, last)` builds one.
+  - `Rule::match_in_interval_set` / `match_not_in_interval_set` convert the
+    packet's field before the lookup.
+  - `NftablesConfig::validate` refuses a plain `match_in_set` on such a set,
+    which would never match.
+
+  A concatenation with a host-order field is still refused in an interval
+  set.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

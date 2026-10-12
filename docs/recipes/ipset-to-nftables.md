@@ -25,7 +25,7 @@ setup to one declared `NftablesConfig`. The how-to for each feature is in
 | `hash:mac` | `SetKeyType::EtherAddr`, `SetElement::ether(mac)` |
 | `bitmap:port` | `SetKeyType::InetService`, with `.interval()` for port ranges |
 | `hash:ip,iface` | concatenation with `SetKeyType::IfIndex`, matched with `PacketField::Iif` |
-| `hash:net,iface` | not yet: a prefix needs an interval set, and an interval set with a host-order field (the ifindex) is refused |
+| `hash:net,iface` | not yet: a prefix needs an interval set, and an interval set of a concatenation with a host-order field (the ifindex) is refused |
 | `list:set` | no single equivalent: one rule per member set, or merge the members |
 
 `family inet6` is `SetKeyType::Ipv6Addr`. An nftables set holds one address

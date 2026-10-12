@@ -647,7 +647,14 @@ impl DeclaredSet {
     /// overlapping ranges is an error from the kernel).
     pub(crate) fn wire_elements(&self) -> Vec<SetElement> {
         use crate::netlink::nftables::interval;
-        if self.merges_ranges() {
+        if self.merges_ranges() && self.key_type.is_host_order() {
+            // Merged as the numbers they are, in network order (#703).
+            let wire: Vec<SetElement> = self.elements.iter().map(SetElement::host_to_wire).collect();
+            interval::canonicalize_elements(&wire)
+                .iter()
+                .map(SetElement::wire_to_host)
+                .collect()
+        } else if self.merges_ranges() {
             interval::canonicalize_elements(&self.elements)
         } else {
             self.elements.clone()

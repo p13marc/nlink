@@ -186,9 +186,41 @@ impl super::types::NftablesConfig {
                     crate::netlink::nftables::connection::ElementWrite::Add,
                 )?;
             }
+            check_interval_lookups(table)?;
         }
         Ok(())
     }
+}
+
+/// A lookup in an interval set of host-order keys needs the key in network
+/// order, as the set stores it: a rule that looks a mark up as it is would
+/// never match (#703).
+fn check_interval_lookups(table: &super::types::DeclaredTable) -> Result<()> {
+    use crate::netlink::nftables::types::{ByteorderOp, swaps_range_keys};
+    use crate::netlink::nftables::Expr;
+    for rule in table.rules() {
+        let exprs = &rule.body.exprs;
+        for (i, expr) in exprs.iter().enumerate() {
+            let Expr::Lookup(lookup) = expr else { continue };
+            let Some(set) = table.sets().iter().find(|s| s.name() == lookup.set) else {
+                continue;
+            };
+            let converted = i
+                .checked_sub(1)
+                .is_some_and(|p| matches!(exprs[p], Expr::Byteorder { op: ByteorderOp::Hton, .. }));
+            if swaps_range_keys(set.key_type(), set.flags()) && !converted {
+                return Err(Error::invalid_message(format!(
+                    "{}/{}: set {} is an interval set of {:?} keys, which it keeps in \
+                     network order; look it up with `match_in_interval_set`",
+                    table.name(),
+                    rule.chain(),
+                    set.name(),
+                    set.key_type()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The chain checks of [`validate`](super::types::NftablesConfig::validate).
