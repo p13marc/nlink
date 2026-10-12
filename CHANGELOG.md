@@ -2735,6 +2735,17 @@ All notable changes to this project will be documented in this file.
   It writes `Expr::PayloadSet`, which `RuleExpr::PayloadSet` decodes (it was
   `Unknown`). `PayloadCsum` is new.
 
+- **`queue`, `dup` and `fwd` (#703).**
+  - `QueueExpr` covers a queue, a range of queues or a register, with
+    `QueueFlags` (`bypass`, `fanout`).
+  - `Rule::dup_to(addr, device)` and `Rule::dup_to_device(ifindex)` send a
+    copy of the packet.
+  - `Rule::fwd_to(ifindex)` and `Rule::fwd_ip_to(addr, ifindex)` forward the
+    packet from a netdev chain.
+
+  Each is written as nft writes it, and decoded: `RuleExpr::Queue`,
+  `RuleExpr::Dup`, `RuleExpr::Fwd`.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

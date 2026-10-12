@@ -1455,3 +1455,128 @@ async fn a_port_write_moves_the_datagram() -> nlink::Result<()> {
     assert_eq!(arrivals(&pair, 7992, 7992, 3)?.len(), 0, "nothing left for 7992");
     Ok(())
 }
+
+/// #703: `queue`, `dup` and `fwd` as nft writes them: nft installs each in
+/// one chain, nlink in another, and `nft` lists the two alike.
+#[tokio::test]
+async fn queue_dup_and_fwd_read_and_write_as_nft_does() -> nlink::Result<()> {
+    use nlink::netlink::nftables::{QueueExpr, QueueFlags};
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "nft_queue", "nft_dup_ipv4", "nft_dup_netdev", "nft_fwd_netdev", "dummy");
+
+    let ns = TestNamespace::new("nft-qdf")?;
+    ns.add_dummy("d0")?;
+    let route = ns.connection()?;
+    let d0 = route.get_link_by_name("d0").await?.expect("d0").ifindex();
+    let script = "table ip t {
+        chain a { type filter hook output priority 0;
+            queue num 3 bypass
+            queue num 1-4 fanout
+            queue flags bypass,fanout num 2-5
+            dup to 10.0.0.1 device \"d0\"
+            dup to 10.0.0.2
+        }
+        chain b { type filter hook output priority 0; }
+    }
+    table netdev n {
+        chain a { type filter hook ingress device \"d0\" priority 0;
+            fwd to \"d0\"
+            fwd ip to 10.0.0.1 device \"d0\"
+            dup to \"d0\"
+        }
+        chain b { type filter hook ingress device \"d0\" priority 0; }
+    }";
+    let file = std::env::temp_dir().join(format!("nlink-qdf-{}.nft", std::process::id()));
+    std::fs::write(&file, script).map_err(nlink::Error::from)?;
+    let installed = ns.exec("nft", &["-f", file.to_str().unwrap()]);
+    let _ = std::fs::remove_file(&file);
+    installed?;
+
+    let nft = ns.connection_for::<Nftables>()?;
+    let ip = |r: Rule| r.family(Family::Ip);
+    for rule in [
+        Rule::new("t", "b").expr(QueueExpr::num(3).flags(QueueFlags::BYPASS)),
+        Rule::new("t", "b").expr(QueueExpr::range(1, 4).flags(QueueFlags::FANOUT)),
+        Rule::new("t", "b").expr(QueueExpr::range(2, 5).flags(QueueFlags::BYPASS | QueueFlags::FANOUT)),
+        Rule::new("t", "b").dup_to(Ipv4Addr::new(10, 0, 0, 1).into(), Some(d0)),
+        Rule::new("t", "b").dup_to(Ipv4Addr::new(10, 0, 0, 2).into(), None),
+    ] {
+        nft.add_rule(ip(rule)).await?;
+    }
+    let netdev = |r: Rule| r.family(Family::Netdev);
+    for rule in [
+        Rule::new("n", "b").fwd_to(d0),
+        Rule::new("n", "b").fwd_ip_to(Ipv4Addr::new(10, 0, 0, 1).into(), d0),
+        Rule::new("n", "b").dup_to_device(d0),
+    ] {
+        nft.add_rule(netdev(rule)).await?;
+    }
+    for (family, table) in [("ip", "t"), ("netdev", "n")] {
+        assert_eq!(
+            listed_rules(&ns, family, table, "b")?,
+            listed_rules(&ns, family, table, "a")?,
+            "{family} {table}: nlink's chain b, nft's chain a"
+        );
+    }
+    let decoded = nft
+        .list_rules("t", Family::Ip)
+        .await?
+        .iter()
+        .chain(nft.list_rules("n", Family::Netdev).await?.iter())
+        .flat_map(|r| r.expressions())
+        .filter(|e| matches!(e, RuleExpr::Queue(_) | RuleExpr::Dup { .. } | RuleExpr::Fwd { .. }))
+        .count();
+    assert_eq!(decoded, 2 * 8, "both chains decode typed");
+    Ok(())
+}
+
+/// #703: `queue`, `dup` and `fwd` act on traffic. A datagram queued with
+/// no program listening is dropped, and with `bypass` it is not; one
+/// duplicated to `b` arrives twice; one forwarded at `b`'s ingress to a
+/// dummy never reaches the socket and leaves the dummy instead.
+#[tokio::test]
+async fn queue_dup_and_fwd_act_on_traffic() -> nlink::Result<()> {
+    use nlink::netlink::nftables::{QueueExpr, QueueFlags};
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "nft_queue", "nfnetlink_queue", "nft_dup_ipv4", "nft_fwd_netdev", "veth", "dummy");
+
+    let pair = crate::common::topo::NsPair::new("nftqdf", 95).await?;
+    let b_route = pair.b.connection()?;
+    b_route.add_link(DummyLink::new("x0")).await?;
+    b_route.set_link_up("x0").await?;
+    let x0 = b_route.get_link_by_name("x0").await?.expect("x0").ifindex();
+    let b = NftablesConfig::new()
+        .table("q", Family::Inet, |t| {
+            t.chain("in", |c| c.hook(Hook::Input).priority(Priority::Filter).chain_type(ChainType::Filter))
+                .rule_keyed("in", "drop-queue", |r| r.match_udp_dport(7997).expr(QueueExpr::num(7)))
+                .rule_keyed("in", "bypass-queue", |r| {
+                    r.match_udp_dport(7996).expr(QueueExpr::num(8).flags(QueueFlags::BYPASS))
+                })
+        })
+        .table("f", Family::Netdev, |t| {
+            t.chain("in", |c| {
+                c.hook(Hook::NetdevIngress).device(pair.b_if).priority(Priority::Filter)
+            })
+            .rule_keyed("in", "fwd", |r| r.match_udp_dport(7999).fwd_to(x0))
+        });
+    let nft = pair.b.connection_for::<Nftables>()?;
+    b.diff(&nft).await?.apply(&nft).await?;
+    assert!(b.diff(&nft).await?.is_empty(), "the declared statements do not converge");
+    let a = NftablesConfig::new().table("d", Family::Ip, |t| {
+        t.chain("out", |c| c.hook(Hook::Output).priority(Priority::Filter).chain_type(ChainType::Filter))
+            .rule_keyed("out", "dup", |r| {
+                r.match_udp_dport(7998).dup_to(pair.b_addr.into(), Some(pair.a_ifindex))
+            })
+    });
+    let a_nft = pair.a.connection_for::<Nftables>()?;
+    a.diff(&a_nft).await?.apply(&a_nft).await?;
+
+    assert_eq!(arrivals(&pair, 7997, 7997, 3)?.len(), 0, "queued with no listener: dropped");
+    assert_eq!(arrivals(&pair, 7996, 7996, 3)?.len(), 3, "queued with bypass: accepted");
+    assert_eq!(arrivals(&pair, 7998, 7998, 3)?.len(), 6, "each datagram and its copy");
+    let before = b_route.get_link_by_name("x0").await?.expect("x0").stats().map_or(0, |s| s.tx_packets());
+    assert_eq!(arrivals(&pair, 7999, 7999, 3)?.len(), 0, "forwarded away at ingress");
+    let after = b_route.get_link_by_name("x0").await?.expect("x0").stats().map_or(0, |s| s.tx_packets());
+    assert!(after >= before + 3, "x0 sent {} of the 3", after - before);
+    Ok(())
+}
