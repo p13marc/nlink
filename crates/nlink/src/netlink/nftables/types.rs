@@ -3059,6 +3059,46 @@ impl Rule {
         self
     }
 
+    /// Match `field` in an interval set ([`Set::interval`], #703): what
+    /// [`match_in_set`](Self::match_in_set) is for a set of ranges. A
+    /// host-order field — a mark, an interface index, a class id — is put
+    /// in network order first, as nft does, because an interval set stores
+    /// those keys that way so their ranges compare as numbers. For any other
+    /// field it is `match_in_set`.
+    pub fn match_in_interval_set(mut self, field: PacketField, set: &str) -> Self {
+        self.push_interval_key(field);
+        self.exprs
+            .push(super::expr::LookupExpr::new(set, Register::R0).into());
+        self
+    }
+
+    /// [`match_in_interval_set`](Self::match_in_interval_set), inverted:
+    /// `<field> != @<set>`.
+    pub fn match_not_in_interval_set(mut self, field: PacketField, set: &str) -> Self {
+        self.push_interval_key(field);
+        self.exprs.push(
+            super::expr::LookupExpr::new(set, Register::R0)
+                .invert()
+                .into(),
+        );
+        self
+    }
+
+    /// Load `field` into `R0` as an interval set keeps it.
+    fn push_interval_key(&mut self, field: PacketField) {
+        use super::expr::Expr;
+        self.push_field_load(field);
+        if field.key_type().is_host_order() {
+            self.exprs.push(Expr::Byteorder {
+                sreg: Register::R0,
+                dreg: Register::R0,
+                op: ByteorderOp::Hton,
+                len: field.len(),
+                size: field.len(),
+            });
+        }
+    }
+
     /// Match `field` when it is *not* in a named set: `<field> != @<set>` —
     /// iptables `-m set ! --match-set`. Packets that fail the field's
     /// protocol guard (an IPv6 packet, for an IPv4 field) do not match.
@@ -4829,6 +4869,21 @@ impl Set {
     pub(crate) fn ranges_per_field(&self) -> bool {
         ranges_per_field(&self.key_type, self.flags)
     }
+
+    /// Whether this interval set stores host-order keys in network order
+    /// ([`SetElement::host_to_wire`]), as nft does (#703).
+    pub(crate) fn swaps_range_keys(&self) -> bool {
+        swaps_range_keys(&self.key_type, self.flags)
+    }
+}
+
+/// Whether an interval set of `key_type` keeps its keys in network order
+/// although the field is in host order: a mark, an ifindex, a class id. A
+/// concatenation with such a field is not modelled.
+pub(crate) fn swaps_range_keys(key_type: &SetKeyType, flags: SetFlags) -> bool {
+    flags.contains(SetFlags::INTERVAL)
+        && key_type.concat_fields().is_none()
+        && key_type.is_host_order()
 }
 
 /// Whether a set holds ranges as a start and an inclusive end in one
@@ -4979,6 +5034,14 @@ impl SetElement {
     /// A port range, inclusive (`1000-2000`).
     pub fn port_range(start: u16, end: u16) -> Self {
         Self::range(start.to_be_bytes().to_vec(), end.to_be_bytes().to_vec())
+    }
+
+    /// A range of marks, `start` to `end` inclusive, for an interval set of
+    /// marks (#703): written in network order, as nft writes it, and read
+    /// back in host order like [`mark`](Self::mark). Match it with
+    /// [`Rule::match_in_interval_set`].
+    pub fn mark_range(start: u32, end: u32) -> Self {
+        Self::range(start.to_ne_bytes().to_vec(), end.to_ne_bytes().to_vec())
     }
 
     /// An IPv4 prefix (`10.0.0.0/8`) as the range it covers. Host bits in
@@ -5156,14 +5219,21 @@ impl SetElement {
                 Some(fields) => fields.iter().map(|f| f.len().next_multiple_of(4) as usize).collect(),
                 None => vec![self.key.len()],
             };
+            // A host-order key compares as the number it is (#703).
+            let (key, end) = if set.swaps_range_keys() {
+                let wire = self.host_to_wire();
+                (wire.key, wire.key_end.unwrap_or_default())
+            } else {
+                (self.key.clone(), end.clone())
+            };
             let mut at = 0;
             for width in widths {
                 let field = at..at + width;
                 at += width;
-                if end.len() != self.key.len() || end[field.clone()] < self.key[field] {
+                if end.len() != key.len() || end[field.clone()] < key[field] {
                     return Err(Error::invalid_message(format!(
-                        "set {}: range end {end:02x?} is not at or after its start {:02x?}",
-                        set.name, self.key
+                        "set {}: range end {end:02x?} is not at or after its start {key:02x?}",
+                        set.name
                     )));
                 }
             }
@@ -5256,6 +5326,31 @@ impl SetElement {
     pub(crate) fn with_key_end(mut self, key_end: Option<Vec<u8>>) -> Self {
         self.key_end = key_end.filter(|end| *end != self.key);
         self
+    }
+
+    /// A host-order key (a mark, an ifindex, a class id) as an interval set
+    /// stores it: in network order, so its ranges compare as numbers (#703).
+    pub(crate) fn host_to_wire(&self) -> Self {
+        self.with_keys(|k| u32::from_ne_bytes(k).to_be_bytes())
+    }
+
+    /// The inverse of [`host_to_wire`](Self::host_to_wire).
+    pub(crate) fn wire_to_host(&self) -> Self {
+        self.with_keys(|k| u32::from_be_bytes(k).to_ne_bytes())
+    }
+
+    fn with_keys(&self, swap: impl Fn([u8; 4]) -> [u8; 4]) -> Self {
+        let swap = |key: &[u8]| match <[u8; 4]>::try_from(key) {
+            Ok(word) => swap(word).to_vec(),
+            Err(_) => key.to_vec(),
+        };
+        let key = swap(&self.key);
+        Self {
+            // A range of one value is that value, as `with_key_end` has it.
+            key_end: self.key_end.as_deref().map(swap).filter(|end| *end != key),
+            key,
+            ..self.clone()
+        }
     }
 }
 

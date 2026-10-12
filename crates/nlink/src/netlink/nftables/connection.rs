@@ -871,14 +871,18 @@ impl Connection<Nftables> {
         // An interval set of concatenated keys (`NFT_SET_CONCAT`) holds each
         // range in one element already; another interval set holds starts
         // and end-plus-ones to pair.
-        let flags = self
-            .list_sets_in(table, family)
-            .await?
-            .iter()
-            .find(|s| s.name == set)
-            .map_or(SetFlags::empty(), |s| s.flags);
+        let sets = self.list_sets_in(table, family).await?;
+        let info = sets.iter().find(|s| s.name == set);
+        let flags = info.map_or(SetFlags::empty(), |s| s.flags);
         if flags.contains(SetFlags::INTERVAL) && !flags.contains(SetFlags::CONCAT) {
             elements = super::interval::pair_elements(&elements);
+            // Paired in network order, read in host order (#703).
+            let host_order = [SetKeyType::Mark, SetKeyType::IfIndex, SetKeyType::ClassId]
+                .iter()
+                .any(|t| info.is_some_and(|s| s.key_type == t.type_id()));
+            if host_order {
+                elements = elements.iter().map(SetElement::wire_to_host).collect();
+            }
         }
         Ok(elements)
     }
@@ -2608,15 +2612,17 @@ pub(crate) enum ElementWrite {
 /// cannot encode is an error, never something dropped. Shared by the
 /// element writers and `NftablesConfig::validate`.
 pub(crate) fn check_elements(set: &Set, elements: &[SetElement], write: ElementWrite) -> Result<()> {
-    // Ranges are compared and incremented as big-endian numbers, which a
-    // host-order key is not; `nft` byte-swaps those, nlink does not model
-    // that.
+    // Ranges are compared and incremented as big-endian numbers. A
+    // host-order key goes in network order, as nft writes it (#703); in a
+    // concatenation that is not modelled.
     if !elements.is_empty()
         && set.flags.contains(SetFlags::INTERVAL)
         && set.key_type.is_host_order()
+        && !set.swaps_range_keys()
     {
         return Err(Error::invalid_message(format!(
-            "set {}: interval sets of {:?} keys are not modelled (host byte order)",
+            "set {}: interval sets of {:?} keys are not modelled (a host-order field in a \
+             concatenation)",
             set.name, set.key_type
         )));
     }
@@ -2650,6 +2656,13 @@ fn append_set_elements(
     write: ElementWrite,
 ) -> Result<()> {
     check_elements(set, elements, write)?;
+    let in_wire_order: Vec<SetElement>;
+    let elements = if set.swaps_range_keys() {
+        in_wire_order = elements.iter().map(SetElement::host_to_wire).collect();
+        &in_wire_order[..]
+    } else {
+        elements
+    };
     // A delete names the element by its key (and range end); its data and
     // timeout are the kernel's business, not the request's.
     let carry = |e: &SetElement| match write {
@@ -3250,9 +3263,13 @@ mod transaction_tests {
         // A range that runs backwards.
         let back = SetElement::ipv4_range(v4, std::net::Ipv4Addr::new(10, 0, 0, 0));
         assert!(refused(&Set::new("t", "s").interval(), back));
-        // Host-order keys do not compare as numbers.
+        // A host-order key goes in network order (#703); in a concatenation
+        // that is not modelled.
         let marks = Set::new("t", "s").key_type(SetKeyType::Mark).interval();
-        assert!(refused(&marks, SetElement::mark(1)));
+        assert!(!refused(&marks, SetElement::mark(1)));
+        let mark_and_addr = SetKeyType::Concat(vec![SetKeyType::Ipv4Addr, SetKeyType::Mark]);
+        let concat = Set::new("t", "s").key_type(mark_and_addr).interval();
+        assert!(refused(&concat, SetElement::concat([SetElement::ipv4(v4), SetElement::mark(1)])));
         // A prefix longer than the address.
         assert!(SetElement::ipv4_prefix(v4, 33).is_err());
     }
@@ -3412,6 +3429,44 @@ mod transaction_tests {
         assert_eq!(wire[0].key_end(), Some(&[10, 0, 0, 255, 0x07, 0xd0, 0, 0][..]));
         // A single key has no KEY_END.
         assert_eq!(wire[1], one);
+    }
+
+    /// A mark range goes in network order, as nft writes it, its end plus
+    /// one counted as a number; a hash set of marks keeps host order (#703).
+    #[test]
+    fn mark_ranges_go_out_in_network_order() {
+        let set = Set::new("t", "m").key_type(SetKeyType::Mark).interval();
+        let tx = new_tx().add_set_elements(&set, &[SetElement::mark_range(1, 255), SetElement::mark(0x100)]);
+        assert!(tx.error.is_none(), "{:?}", tx.error);
+        let mut wire = Vec::new();
+        super::parse_set_elements(body_after_nfgenmsg(&tx.messages[0]), &mut wire);
+        let keys: Vec<(&[u8], bool)> = wire.iter().map(|e| (e.key(), e.is_interval_end())).collect();
+        assert_eq!(
+            keys,
+            [
+                (&[0, 0, 0, 1][..], false),
+                (&[0, 0, 1, 0][..], true),
+                (&[0, 0, 1, 0][..], false),
+                (&[0, 0, 1, 1][..], true),
+            ]
+        );
+        // Paired and read back: host order again.
+        let paired: Vec<SetElement> = super::super::interval::pair_elements(&wire)
+            .iter()
+            .map(SetElement::wire_to_host)
+            .collect();
+        assert_eq!(paired[0].key(), 1u32.to_ne_bytes());
+        assert_eq!(paired[0].key_end(), Some(&255u32.to_ne_bytes()[..]));
+
+        let hash = Set::new("t", "h").key_type(SetKeyType::Mark);
+        let tx = new_tx().add_set_elements(&hash, &[SetElement::mark(1)]);
+        let mut wire = Vec::new();
+        super::parse_set_elements(body_after_nfgenmsg(&tx.messages[0]), &mut wire);
+        assert_eq!(wire[0].key(), 1u32.to_ne_bytes());
+
+        // A range runs forwards as a number, whatever its bytes.
+        assert!(SetElement::mark_range(255, 256).check_for(&set, false).is_ok());
+        assert!(SetElement::mark_range(256, 255).check_for(&set, false).is_err());
     }
 
     #[test]

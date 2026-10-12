@@ -98,8 +98,14 @@ The kernel stores `[a, b]` as two elements, `a` and `b + 1` flagged as an
 interval end. `list_set_elements` pairs them back into ranges. Declared
 ranges that overlap or touch are merged before they are written, as the
 kernel's lookups would see them, so `10.0.0.0/25` + `10.0.0.128/25` is one
-`/24` and converges. A mark or ifindex key is host-order and does not
-compare as a number, so interval elements of those types are refused.
+`/24` and converges.
+
+A mark, ifindex or class id is a host-order key, whose bytes do not compare
+as the number they are. An interval set of those keeps them in network
+order, as `nft` does: give it `SetElement::mark_range(1, 10)` (read back in
+host order), and look it up with `match_in_interval_set`, which converts the
+packet's mark first. `match_in_set` does not, so `NftablesConfig::validate`
+refuses it on such a set.
 
 ## Combinations — concatenated keys
 
@@ -351,8 +357,9 @@ How each piece reconciles:
 
 ## Caveats
 
-- **Interval sets of host-order keys** (mark, ifindex) are refused: `nft`
-  byte-swaps those, nlink does not model that.
+- **Interval sets of concatenations with a host-order field** (`ip saddr .
+  meta mark`) are refused: a single mark or ifindex key is modelled, a
+  concatenation with one is not.
 - **`list_set_elements` on an interval set** needs one extra round-trip to
   learn the set's flags.
 - **Elements a rule adds** (`add @set`) are not notified as events by the

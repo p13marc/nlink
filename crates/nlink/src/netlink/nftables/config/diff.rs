@@ -1276,14 +1276,20 @@ fn element_changes(
     use super::super::interval;
     let ensure = declared.element_mode() == SetElementMode::Ensure;
     if declared.merges_ranges() {
+        // Ranges compare as numbers: a host-order key in network order, and
+        // back for the writer (#703).
+        let swap = declared.key_type().is_host_order();
+        let to_wire = |e: &SetElement| if swap { e.host_to_wire() } else { e.clone() };
+        let to_host = |e: SetElement| if swap { e.wire_to_host() } else { e };
+        let current: Vec<SetElement> = current.iter().map(to_wire).collect();
         // The declared elements, merged, with their timeouts (#483).
-        let wanted_elements = declared.wire_elements();
+        let wanted_elements: Vec<SetElement> = declared.wire_elements().iter().map(to_wire).collect();
         let wanted: Vec<interval::Range> = wanted_elements.iter().map(interval::range_of).collect();
         let held: Vec<interval::Range> = current.iter().map(interval::range_of).collect();
         if interval::canonicalize(held.clone()) == interval::canonicalize(wanted.clone()) {
             return (Vec::new(), Vec::new());
         }
-        let to_add = if ensure {
+        let to_add: Vec<SetElement> = if ensure {
             // Ensure keeps what the kernel holds, so a declared range that
             // overlaps one added at runtime goes in as the parts it does not
             // cover: the kernel refuses an overlapping range, which made
@@ -1310,7 +1316,7 @@ fn element_changes(
                 .cloned()
                 .collect()
         };
-        let to_remove = if ensure {
+        let to_remove: Vec<SetElement> = if ensure {
             Vec::new()
         } else {
             held.iter()
@@ -1318,7 +1324,10 @@ fn element_changes(
                 .map(interval::element_of)
                 .collect()
         };
-        return (to_add, to_remove);
+        return (
+            to_add.into_iter().map(to_host).collect(),
+            to_remove.into_iter().map(to_host).collect(),
+        );
     }
     // A map element whose data changed is removed and added again; the
     // removals go first in the batch.
