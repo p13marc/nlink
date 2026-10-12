@@ -1993,7 +1993,7 @@ pub struct Chain {
     pub(crate) priority: Option<Priority>,
     pub(crate) chain_type: Option<ChainType>,
     pub(crate) policy: Option<Policy>,
-    pub(crate) device: Option<String>,
+    pub(crate) devices: Vec<String>,
     pub(crate) comment: Option<String>,
     /// Tag it as the declarative apply's own (#527).
     pub(crate) owned: bool,
@@ -2023,7 +2023,7 @@ impl Chain {
             priority: None,
             chain_type: None,
             policy: None,
-            device: None,
+            devices: Vec::new(),
             comment: None,
             owned: false,
         })
@@ -2067,13 +2067,17 @@ impl Chain {
         self
     }
 
-    /// Bind a base chain to a specific interface (`type filter hook
-    /// ingress device eth0 priority -150`). **Required** for the netdev
-    /// hooks ([`Hook::NetdevIngress`]/[`Hook::NetdevEgress`]) and for
+    /// Bind a base chain to an interface (`type filter hook ingress device
+    /// eth0 priority -150`). **Required** for the netdev hooks
+    /// ([`Hook::NetdevIngress`]/[`Hook::NetdevEgress`]) and for
     /// [`Hook::InetIngress`] — without it the kernel rejects the chain.
     /// On any other hook a recent kernel refuses it (`EOPNOTSUPP`).
+    ///
+    /// Call it again to bind the chain to several devices (`devices = {
+    /// eth0, eth1 }`, #703): one goes as `NFTA_HOOK_DEV`, several as
+    /// `NFTA_HOOK_DEVS`, as nft writes them. It used to replace the device.
     pub fn device(mut self, dev: impl Into<String>) -> Self {
-        self.device = Some(dev.into());
+        self.devices.push(dev.into());
         self
     }
 }

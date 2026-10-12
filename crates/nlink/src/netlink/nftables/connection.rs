@@ -366,9 +366,7 @@ impl Connection<Nftables> {
             builder.append_attr_u32_be(NFTA_HOOK_HOOKNUM, hook.number(chain.family));
             let priority = chain.priority.unwrap_or(Priority::Filter).to_i32();
             builder.append_attr_u32_be(NFTA_HOOK_PRIORITY, priority as u32);
-            if let Some(dev) = &chain.device {
-                builder.append_attr_str(NFTA_HOOK_DEV, dev);
-            }
+            append_hook_devices(&mut builder, &chain.devices);
             builder.nest_end(hook_nest);
         }
 
@@ -1976,9 +1974,7 @@ impl Transaction {
             builder.append_attr_u32_be(NFTA_HOOK_HOOKNUM, hook.number(chain.family));
             let priority = chain.priority.unwrap_or(Priority::Filter).to_i32();
             builder.append_attr_u32_be(NFTA_HOOK_PRIORITY, priority as u32);
-            if let Some(dev) = &chain.device {
-                builder.append_attr_str(NFTA_HOOK_DEV, dev);
-            }
+            append_hook_devices(&mut builder, &chain.devices);
             builder.nest_end(hook_nest);
         }
 
@@ -2872,6 +2868,23 @@ pub fn kernel_has_destroy() -> bool {
     })
 }
 
+/// A base chain's devices, as nft writes them (#703): one as
+/// `NFTA_HOOK_DEV`, several as `NFTA_HOOK_DEVS` of `NFTA_DEVICE_NAME`s —
+/// which the kernel dumps the same way.
+fn append_hook_devices(builder: &mut MessageBuilder, devices: &[String]) {
+    match devices {
+        [] => {}
+        [one] => builder.append_attr_str(NFTA_HOOK_DEV, one),
+        several => {
+            let nest = builder.nest_start(NFTA_HOOK_DEVS | 0x8000);
+            for dev in several {
+                builder.append_attr_str(NFTA_DEVICE_NAME, dev);
+            }
+            builder.nest_end(nest);
+        }
+    }
+}
+
 /// A flowtable's devices: one `NFTA_DEVICE_NAME` each, directly in the
 /// `NFTA_FLOWTABLE_HOOK_DEVS` nest (`nf_tables_parse_netdev_hooks`). They
 /// were wrapped in an `NFTA_LIST_ELEM` nest, whose bytes the kernel read as
@@ -3044,6 +3057,30 @@ mod transaction_tests {
         let hook_nest = find_attr(body, NFTA_CHAIN_HOOK).expect("NFTA_CHAIN_HOOK missing");
         let dev = find_attr(&hook_nest, NFTA_HOOK_DEV).expect("NFTA_HOOK_DEV missing");
         assert_eq!(&dev[..dev.len().saturating_sub(1)], b"eth0");
+    }
+
+    /// Two devices go as NFTA_HOOK_DEVS of NFTA_DEVICE_NAMEs, as nft
+    /// writes them (#703); one stays NFTA_HOOK_DEV.
+    #[test]
+    fn add_chain_emits_nfta_hook_devs_for_two_devices() {
+        let chain = Chain::new("ft", "ingress")
+            .unwrap()
+            .family(Family::Netdev)
+            .hook(Hook::NetdevIngress)
+            .device("eth0")
+            .device("eth1");
+        let tx = new_tx().add_chain(chain);
+        let body = body_after_nfgenmsg(&tx.messages[0]);
+        let hook_nest = find_attr(body, NFTA_CHAIN_HOOK).expect("NFTA_CHAIN_HOOK missing");
+        assert!(find_attr(&hook_nest, NFTA_HOOK_DEV).is_none());
+        let devs = find_attr(&hook_nest, NFTA_HOOK_DEVS).expect("NFTA_HOOK_DEVS missing");
+        let names: Vec<(u16, Vec<u8>)> = crate::netlink::attr::AttrIter::new(&devs)
+            .map(|(t, v)| (t & 0x7FFF, v.to_vec()))
+            .collect();
+        assert_eq!(
+            names,
+            [(NFTA_DEVICE_NAME, b"eth0\0".to_vec()), (NFTA_DEVICE_NAME, b"eth1\0".to_vec())]
+        );
     }
 
     #[test]

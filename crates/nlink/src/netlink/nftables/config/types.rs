@@ -388,7 +388,8 @@ pub struct DeclaredChain {
     pub(crate) priority: Option<Priority>,
     pub(crate) policy: Option<Policy>,
     pub(crate) chain_type: Option<ChainType>,
-    pub(crate) device: Option<String>,
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
+    pub(crate) devices: Vec<String>,
     pub(crate) exclusive: bool,
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub(crate) comment: Option<String>,
@@ -421,8 +422,17 @@ impl DeclaredChain {
     pub fn chain_type(&self) -> Option<ChainType> {
         self.chain_type
     }
+    /// The device of a chain bound to one; see [`devices`](Self::devices)
+    /// for one bound to several.
     pub fn device(&self) -> Option<&str> {
-        self.device.as_deref()
+        match self.devices.as_slice() {
+            [one] => Some(one),
+            _ => None,
+        }
+    }
+    /// Every device the chain is bound to (#703).
+    pub fn devices(&self) -> &[String] {
+        &self.devices
     }
 
     /// Is this a base chain (one that hooks into the kernel
@@ -438,7 +448,7 @@ pub struct DeclaredChainBuilder {
     priority: Option<Priority>,
     policy: Option<Policy>,
     chain_type: Option<ChainType>,
-    device: Option<String>,
+    devices: Vec<String>,
     exclusive: bool,
     comment: Option<String>,
 }
@@ -451,7 +461,7 @@ impl DeclaredChainBuilder {
             priority: None,
             policy: None,
             chain_type: None,
-            device: None,
+            devices: Vec::new(),
             exclusive: false,
             comment: None,
         }
@@ -511,9 +521,10 @@ impl DeclaredChainBuilder {
     /// [`validate`](super::NftablesConfig::validate) checks; a recent kernel
     /// refuses it on any other hook (`EOPNOTSUPP`). Mirrors the imperative
     /// [`Chain::device`](crate::netlink::nftables::types::Chain::device)
-    /// setter.
+    /// setter: call it again to bind several devices (#703). A changed set
+    /// of devices recreates the chain.
     pub fn device(mut self, dev: impl Into<String>) -> Self {
-        self.device = Some(dev.into());
+        self.devices.push(dev.into());
         self
     }
 
@@ -524,7 +535,7 @@ impl DeclaredChainBuilder {
             priority: self.priority,
             policy: self.policy,
             chain_type: self.chain_type,
-            device: self.device,
+            devices: self.devices,
             exclusive: self.exclusive,
             comment: self.comment,
         }

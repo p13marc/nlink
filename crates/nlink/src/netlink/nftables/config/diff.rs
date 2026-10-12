@@ -769,13 +769,13 @@ impl NftablesDiff {
         for (tbl, fam, c) in &self.chains_to_modify {
             lines.push(format!(
                 "~ chain {fam:?} {tbl}/{} (policy={:?} hook={:?} priority={:?} type={:?} \
-                 device={:?})",
+                 devices={:?})",
                 c.name(),
                 c.policy(),
                 c.hook(),
                 c.priority(),
                 c.chain_type(),
-                c.device(),
+                c.devices(),
             ));
         }
         for (tbl, fam, name) in &self.chains_to_delete {
@@ -971,21 +971,25 @@ fn chain_change(declared: &DeclaredChain, current: &ChainInfo, comments: bool) -
             why.push(format!("priority {have} -> {}", p.to_i32()));
         }
         // A chain bound to several devices dumps `NFTA_HOOK_DEVS` without
-        // `NFTA_HOOK_DEV`. An update only adds devices, so a different one
-        // is a recreate too (#484).
-        if let Some(dev) = declared.device() {
-            let have: Vec<&str> = if current.devices.is_empty() {
+        // `NFTA_HOOK_DEV`. An update only adds devices, so a different set
+        // is a recreate too (#484), compared as a set (#703).
+        if !declared.devices().is_empty() {
+            let mut have: Vec<&str> = if current.devices.is_empty() {
                 current.device.as_deref().into_iter().collect()
             } else {
                 current.devices.iter().map(String::as_str).collect()
             };
-            if have != [dev] {
+            let mut want: Vec<&str> = declared.devices().iter().map(String::as_str).collect();
+            have.sort_unstable();
+            want.sort_unstable();
+            want.dedup();
+            if have != want {
                 let have = if have.is_empty() {
                     "none".to_string()
                 } else {
                     have.join(",")
                 };
-                why.push(format!("device {have} -> {dev}"));
+                why.push(format!("device {have} -> {}", want.join(",")));
             }
         }
     }

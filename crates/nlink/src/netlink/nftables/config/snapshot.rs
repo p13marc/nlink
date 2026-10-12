@@ -123,7 +123,7 @@ impl RulesetSnapshot {
                     priority: chain.priority().map(|p| p.to_i32()).or(base.then_some(0)),
                     chain_type: chain.chain_type(),
                     device: chain.device().map(str::to_string),
-                    devices: chain.device().map(str::to_string).into_iter().collect(),
+                    devices: chain.devices().to_vec(),
                     // A base chain without a policy accepts.
                     policy: chain
                         .policy()
