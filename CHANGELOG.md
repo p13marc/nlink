@@ -736,6 +736,24 @@ All notable changes to this project will be documented in this file.
 - **An ife `use tcindex` over 65535 is refused (#645).** It used to be truncated
   to 16 bits.
 
+- **police's `conform-exceed` is read exceed first, as tc(8) reads it
+  (#751).** tc-police(8)'s form is `conform-exceed EXCEEDACT[/NOTEXCEEDACT]`.
+  nlink took the first value as the conform action. So `conform-exceed
+  drop/pipe` dropped the traffic that conformed and piped the traffic that
+  exceeded, with no error, in `PoliceAction::parse_params` and in `nlink-tc`.
+  The conform half is now optional, as in tc(8).
+- **A gate's bare times are nanoseconds (#751).** tc-gate(8) reads a bare
+  `base-time`, `cycle-time` or `sched-entry` interval as nanoseconds. nlink
+  read it as microseconds, a thousand times too long. A bare decimal is now
+  refused.
+- **A gate interval past `u32` nanoseconds is refused (#751).** That's about
+  4.29 s. `GateAction::sched_entry` used to wrap it; writing the action now
+  says so.
+- **ct reads tc(8)'s `nat` (#751).** `nat src|dst addr <range>` was refused,
+  because the `addr` keyword wasn't read. A bare `nat`, which NATs as the
+  conntrack entry says, was refused too. The old form without `addr` still
+  reads. `CtAction::nat()` is new.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

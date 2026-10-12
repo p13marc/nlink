@@ -912,11 +912,11 @@ impl PoliceAction {
     /// - `peakrate <tc-rate>` — optional peak rate.
     /// - `mtu <bytes>` — optional MTU (default 2047).
     /// - `avrate <tc-rate>` — optional stateful average rate.
-    /// - `conform-exceed <conform>/<exceed>` — slash-separated
-    ///   verdict pair (e.g. `pass/drop`). Each side accepts the
-    ///   same verdict keywords as `gact`. Alternative forms
-    ///   `conform <verdict>` and `exceed <verdict>` are also
-    ///   recognised individually.
+    /// - `conform-exceed <exceed>[/<conform>]` — as tc-police(8) reads
+    ///   it, the exceed action first (`drop/pipe` drops what exceeds and
+    ///   pipes what conforms; it was read the other way round until
+    ///   0.32, #751). Each side accepts the same verdict keywords as
+    ///   `gact`. `conform <verdict>` and `exceed <verdict>` set one each.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut act = Self::new();
         let mut i = 0;
@@ -990,19 +990,23 @@ impl PoliceAction {
                     i += 2;
                 }
                 "conform-exceed" => {
+                    // tc-police(8): `conform-exceed EXCEEDACT[/NOTEXCEEDACT]`,
+                    // the exceed action first. It was read conform-first,
+                    // so a line from tc(8) policed the wrong traffic (#751).
                     let s = action_need_value(params, i, "police", key)?;
-                    let (conform_s, exceed_s) = s.split_once('/').ok_or_else(|| {
-                        Error::invalid_message(format!(
-                            "police: `conform-exceed` requires `<conform>/<exceed>` (got `{s}`)"
-                        ))
-                    })?;
-                    let conform = parse_gact_verdict(conform_s).map_err(|e| {
-                        Error::invalid_message(e.to_string().replace("gact:", "police:"))
-                    })?;
-                    let exceed = parse_gact_verdict(exceed_s).map_err(|e| {
-                        Error::invalid_message(e.to_string().replace("gact:", "police:"))
-                    })?;
-                    act = act.conform(conform).exceed(exceed);
+                    let (exceed_s, conform_s) = match s.split_once('/') {
+                        Some((e, c)) => (e, Some(c)),
+                        None => (s, None),
+                    };
+                    let verdict = |v: &str| {
+                        parse_gact_verdict(v).map_err(|e| {
+                            Error::invalid_message(e.to_string().replace("gact:", "police:"))
+                        })
+                    };
+                    act = act.exceed(verdict(exceed_s)?);
+                    if let Some(c) = conform_s {
+                        act = act.conform(verdict(c)?);
+                    }
                     i += 2;
                 }
                 "conform" => {
@@ -1023,7 +1027,7 @@ impl PoliceAction {
                 }
                 other => {
                     return Err(Error::invalid_message(format!(
-                        "police: unknown token `{other}` (recognised: rate, burst/buffer/maxburst, peakrate, mtu, avrate, conform-exceed <c>/<e>, conform, exceed)"
+                        "police: unknown token `{other}` (recognised: rate, burst/buffer/maxburst, peakrate, mtu, avrate, conform-exceed <exceed>[/<conform>], conform, exceed)"
                     )));
                 }
             }
@@ -3511,8 +3515,10 @@ impl ActionConfig for IfeAction {
 struct GateEntry {
     /// Gate open (admit) during this interval.
     open: bool,
-    /// Interval length in nanoseconds.
-    interval_ns: u32,
+    /// Interval length in nanoseconds. The kernel's field is a `u32`; a
+    /// longer one is refused when the action is written (#751), where it
+    /// used to wrap.
+    interval_ns: u64,
     /// Internal priority value (`-1` = unset).
     ipv: Option<i32>,
     /// Max octets admitted in this interval (`-1` = unset).
@@ -3605,7 +3611,7 @@ impl GateAction {
     ) -> Self {
         self.entries.push(GateEntry {
             open,
-            interval_ns: interval.as_nanos() as u32,
+            interval_ns: u64::try_from(interval.as_nanos()).unwrap_or(u64::MAX),
             ipv,
             max_octets,
         });
@@ -3657,19 +3663,24 @@ impl GateAction {
         ) || is_verdict(tok)
     }
 
-    /// A time in nanoseconds as a tc(8) time string. A whole number of
-    /// nanoseconds (`<n>ns`) is read exactly: the time parser goes through
-    /// a float, which holds no more than 2^53 ns (104 days), and an
+    /// A time in nanoseconds as a tc(8) time string. A bare number is
+    /// nanoseconds, as tc-gate(8) reads it (#751); it was read as
+    /// microseconds, a thousand times too long. A whole number of
+    /// nanoseconds (`<n>` or `<n>ns`) is read exactly: the time parser goes
+    /// through a float, which holds no more than 2^53 ns (104 days), and an
     /// absolute `base-time` is past that.
     fn time_ns(key: &str, s: &str) -> Result<u64> {
         let invalid = || {
             Error::invalid_message(format!("gate: invalid {key} `{s}` (expected a tc-style time)"))
         };
-        if let Some(n) = s.strip_suffix("ns")
-            && !n.is_empty()
-            && n.bytes().all(|b| b.is_ascii_digit())
-        {
-            return n.parse::<u64>().map_err(|_| invalid());
+        let whole = s.strip_suffix("ns").unwrap_or(s);
+        if !whole.is_empty() && whole.bytes().all(|b| b.is_ascii_digit()) {
+            return whole.parse::<u64>().map_err(|_| invalid());
+        }
+        if !s.bytes().any(|b| b.is_ascii_alphabetic()) {
+            return Err(Error::invalid_message(format!(
+                "gate: invalid {key} `{s}` (a bare time is a whole number of nanoseconds)"
+            )));
         }
         crate::util::parse::get_time(s)
             .map(|d| d.as_nanos() as u64)
@@ -3687,8 +3698,9 @@ impl GateAction {
     ///
     /// - `priority <int>`
     /// - `base-time <time>` / `cycle-time <time>` / `cycle-time-ext <time>`
-    ///   (`tc(8)` time strings, e.g. `1ms`, `200us`; a whole number of
-    ///   nanoseconds, `<n>ns`, is read exactly).
+    ///   (`tc(8)` time strings, e.g. `1ms`, `200us`; a bare number is
+    ///   nanoseconds, as tc-gate(8) reads it, and a whole number of
+    ///   nanoseconds is read exactly).
     /// - `clockid <id>` (`TAI`/`REALTIME`/`MONOTONIC`/`BOOTTIME` or a number).
     /// - `sched-entry open|close <interval> [<ipv> [<max-octets>]]` —
     ///   repeatable; the optional `ipv`/`max-octets` are consumed
@@ -3753,7 +3765,7 @@ impl GateAction {
                         )
                     })?;
                     let interval_ns = Self::time_ns("sched-entry interval", interval_s)?;
-                    let interval_ns: u32 = interval_ns.try_into().map_err(|_| {
+                    let interval_ns: u64 = u32::try_from(interval_ns).map(u64::from).map_err(|_| {
                         Error::invalid_message(format!(
                             "gate: sched-entry interval `{interval_s}` exceeds u32 nanoseconds"
                         ))
@@ -3826,7 +3838,7 @@ impl ActionConfig for GateAction {
             out.extend([
                 "sched-entry".to_string(),
                 state.to_string(),
-                Self::time_token(e.interval_ns.into()),
+                Self::time_token(e.interval_ns),
             ]);
             // Positional: a max-octets is the value after an ipv.
             match (e.ipv, e.max_octets) {
@@ -3875,7 +3887,14 @@ impl ActionConfig for GateAction {
                     // NLA_FLAG: present = gate open, absent = closed.
                     builder.append_attr(gate::TCA_GATE_ENTRY_GATE, &[]);
                 }
-                builder.append_attr_u32(gate::TCA_GATE_ENTRY_INTERVAL, e.interval_ns);
+                let interval = u32::try_from(e.interval_ns).map_err(|_| {
+                    Error::invalid_message(format!(
+                        "gate: sched-entry {idx}'s interval of {} ns is past the kernel's \
+                         u32 nanoseconds (about 4.29 s)",
+                        e.interval_ns
+                    ))
+                })?;
+                builder.append_attr_u32(gate::TCA_GATE_ENTRY_INTERVAL, interval);
                 if let Some(ipv) = e.ipv {
                     builder.append_attr_u32(gate::TCA_GATE_ENTRY_IPV, ipv as u32);
                 }
@@ -4373,6 +4392,14 @@ impl CtAction {
         self
     }
 
+    /// NAT the connection as its conntrack entry says, with no range of
+    /// its own (tc-ct(8)'s bare `nat`): the reply direction of a NATed
+    /// flow.
+    pub fn nat(mut self) -> Self {
+        self.ct_action |= ct::TCA_CT_ACT_NAT;
+        self
+    }
+
     /// Configure SNAT with IPv4 address range.
     pub fn nat_src(mut self, min: Ipv4Addr, max: Ipv4Addr) -> Self {
         self.ct_action |= ct::TCA_CT_ACT_NAT | ct::TCA_CT_ACT_NAT_SRC;
@@ -4519,27 +4546,29 @@ impl CtAction {
                     i += 3;
                 }
                 "nat" => {
-                    // Form: nat src|dst <addr> | nat src|dst <min>-<max>
-                    let dir = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::invalid_message(
-                            "ct: `nat` requires `src|dst <addr>` or `src|dst <min>-<max>`"
-                                .to_string(),
-                        )
-                    })?;
-                    let range_s = params.get(i + 2).copied().ok_or_else(|| {
-                        Error::invalid_message(format!(
-                            "ct: `nat {dir}` requires an address or `<min>-<max>` range"
-                        ))
-                    })?;
-                    let src = match dir {
-                        "src" => true,
-                        "dst" => false,
-                        other => {
-                            return Err(Error::invalid_message(format!(
-                                "ct: `nat` direction must be `src` or `dst` (got `{other}`)"
-                            )));
+                    // tc-ct(8): `nat [src|dst addr <addr>[-<addr>]]`. The
+                    // `addr` keyword was not read until 0.32 (#751), and a
+                    // range without it still is; a bare `nat` NATs as the
+                    // conntrack entry says.
+                    let src = match params.get(i + 1).copied() {
+                        Some("src") => true,
+                        Some("dst") => false,
+                        _ => {
+                            act = act.nat();
+                            i += 1;
+                            continue;
                         }
                     };
+                    let dir = params[i + 1];
+                    let mut at = i + 2;
+                    if params.get(at) == Some(&"addr") {
+                        at += 1;
+                    }
+                    let range_s = params.get(at).copied().ok_or_else(|| {
+                        Error::invalid_message(format!(
+                            "ct: `nat {dir} addr` requires an address or `<min>-<max>` range"
+                        ))
+                    })?;
                     act = match parse_ip_range_or_single(range_s)? {
                         (IpAddr::V4(min), IpAddr::V4(max)) if src => act.nat_src(min, max),
                         (IpAddr::V4(min), IpAddr::V4(max)) => act.nat_dst(min, max),
@@ -4551,7 +4580,7 @@ impl CtAction {
                             )));
                         }
                     };
-                    i += 3;
+                    i = at + 1;
                 }
                 "port" => {
                     let s = action_need_value(params, i, "ct", key)?;
@@ -4694,12 +4723,20 @@ impl ActionConfig for CtAction {
             .map(|(_, dir)| dir)
             .collect();
         if flags & NAT != 0 || !dirs.is_empty() || !ranges.is_empty() {
-            if flags & NAT == 0 || dirs.is_empty() || ranges.is_empty() {
+            if flags & NAT == 0 || dirs.is_empty() != ranges.is_empty() {
                 return Err(no_token("NAT without a direction and an address"));
+            }
+            if dirs.is_empty() {
+                out.push("nat".to_string());
             }
             for dir in &dirs {
                 for range in &ranges {
-                    out.extend(["nat".to_string(), dir.to_string(), range.clone()]);
+                    out.extend([
+                        "nat".to_string(),
+                        dir.to_string(),
+                        "addr".to_string(),
+                        range.clone(),
+                    ]);
                 }
             }
         }
@@ -7900,23 +7937,49 @@ mod tests {
         assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
     }
 
+    /// #751: a bare gate time is nanoseconds, as tc-gate(8) reads it, and a
+    /// bare decimal means nothing; an interval past the kernel's u32
+    /// nanoseconds is refused when written, where it used to wrap.
     #[test]
-    fn police_parse_params_conform_exceed_pair() {
-        let a = PoliceAction::parse_params(&[
-            "rate",
-            "1mbit",
-            "burst",
-            "32k",
-            "conform-exceed",
-            "pass/drop",
-        ])
-        .unwrap();
-        let b = PoliceAction::new()
-            .rate(crate::util::Rate::mbit(1))
-            .burst(crate::util::Bytes::kib(32))
-            .conform(action::TC_ACT_OK)
-            .exceed(action::TC_ACT_SHOT);
-        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
+    fn gate_times_are_nanoseconds_and_intervals_do_not_wrap() {
+        use std::time::Duration;
+        let parsed = GateAction::parse_params(&["base-time", "1000", "sched-entry", "open", "2000"])
+            .unwrap();
+        let want = GateAction::new()
+            .base_time(Duration::from_nanos(1000))
+            .sched_entry(true, Duration::from_nanos(2000), None, None);
+        assert_eq!(write_options_bytes(&parsed), write_options_bytes(&want));
+        let err = GateAction::parse_params(&["base-time", "1.5"]).unwrap_err();
+        assert!(err.to_string().contains("whole number of nanoseconds"), "{err}");
+
+        let long = GateAction::new().sched_entry(true, Duration::from_secs(5), None, None);
+        let mut b = MessageBuilder::new(0, 0);
+        let err = ActionConfig::write_options(&long, &mut b).unwrap_err();
+        assert!(err.to_string().contains("past the kernel's u32 nanoseconds"), "{err}");
+    }
+
+    /// #751: `conform-exceed` is exceed first, as tc-police(8) reads it:
+    /// `drop/pipe` drops what exceeds and pipes what conforms. The conform
+    /// half is optional.
+    #[test]
+    fn police_parse_params_conform_exceed_is_exceed_first() {
+        let police = |pair: &str| {
+            PoliceAction::parse_params(&["rate", "1mbit", "burst", "32k", "conform-exceed", pair])
+                .unwrap()
+        };
+        let base = || {
+            PoliceAction::new()
+                .rate(crate::util::Rate::mbit(1))
+                .burst(crate::util::Bytes::kib(32))
+        };
+        assert_eq!(
+            write_options_bytes(&police("drop/pipe")),
+            write_options_bytes(&base().exceed(action::TC_ACT_SHOT).conform(action::TC_ACT_PIPE))
+        );
+        assert_eq!(
+            write_options_bytes(&police("reclassify")),
+            write_options_bytes(&base().exceed(action::TC_ACT_RECLASSIFY))
+        );
     }
 
     #[test]
@@ -7946,10 +8009,11 @@ mod tests {
         assert!(err.to_string().contains("invalid rate"));
     }
 
+    /// The conform half is optional (#751); what is there must be a verdict.
     #[test]
-    fn police_parse_params_conform_exceed_missing_slash_errors() {
+    fn police_parse_params_conform_exceed_bad_verdict_errors() {
         let err = PoliceAction::parse_params(&["conform-exceed", "passdrop"]).unwrap_err();
-        assert!(err.to_string().contains("requires `<conform>/<exceed>`"));
+        assert!(err.to_string().contains("police: unknown verdict `passdrop`"), "{err}");
     }
 
     #[test]
@@ -8009,10 +8073,27 @@ mod tests {
         assert!(err.to_string().contains("`<value> <mask>`"));
     }
 
+    /// #751: `nat` reads as tc-ct(8) writes it — `nat src addr <range>`,
+    /// the old form without `addr` too, and a bare `nat` — and what follows
+    /// a bare `nat` is a token of its own.
     #[test]
-    fn ct_parse_params_nat_unknown_direction_errors() {
+    fn ct_parse_params_nat_reads_tc_spelling() {
+        let v4 = |s: &str| s.parse::<Ipv4Addr>().unwrap();
+        let want = write_options_bytes(&CtAction::new().nat_src(v4("10.0.0.1"), v4("10.0.0.9")));
+        for form in [
+            &["nat", "src", "addr", "10.0.0.1-10.0.0.9"][..],
+            &["nat", "src", "10.0.0.1-10.0.0.9"],
+        ] {
+            assert_eq!(write_options_bytes(&CtAction::parse_params(form).unwrap()), want, "{form:?}");
+        }
+        assert_eq!(
+            write_options_bytes(&CtAction::parse_params(&["nat"]).unwrap()),
+            write_options_bytes(&CtAction::new().nat())
+        );
         let err = CtAction::parse_params(&["nat", "wat", "10.0.0.1"]).unwrap_err();
-        assert!(err.to_string().contains("must be `src` or `dst`"));
+        assert!(err.to_string().contains("`wat`"), "{err}");
+        let err = CtAction::parse_params(&["nat", "dst", "addr"]).unwrap_err();
+        assert!(err.to_string().contains("requires an address"), "{err}");
     }
 
     // ---- PeditAction (munge DSL parser) ----
@@ -8557,7 +8638,7 @@ mod params_tests {
                     .nat_src(v4("10.0.0.1"), v4("10.0.0.10"))
                     .nat_port_range(1024, 65535)
             ),
-            ["commit", "nat", "src", "10.0.0.1-10.0.0.10", "port", "1024-65535"]
+            ["commit", "nat", "src", "addr", "10.0.0.1-10.0.0.10", "port", "1024-65535"]
         );
         let mut label = [0u8; 16];
         (label[0], label[15]) = (0x12, 0x01);
@@ -8615,6 +8696,7 @@ mod params_tests {
             assert!(CtAction::parse_params(bad).is_err(), "{bad:?}");
         }
         assert!(ActionConfig::to_params(&CtAction::commit().helper("", inet, tcp)).is_err());
+        assert_eq!(round_trips(CtAction::new().nat()), ["nat"]);
     }
 
     #[test]

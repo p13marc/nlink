@@ -85,7 +85,7 @@ jobs:
                    act_gact act_police cls_fw sch_prio sch_sfq sch_tbf sch_pie sch_fq_pie sch_plug \
                    bonding macvlan macvtap ipvlan netkit vxlan geneve macsec ip_gre ipip sit ip_vti ip6_vti ip6_tunnel xfrm_interface mpls_router mpls_iptunnel ip6_gre \
                    nft_ct nft_log nft_masq nft_nat nft_redir sch_cake nft_fib_inet nft_connlimit nfnetlink_log \
-                   cls_bpf act_bpf sch_hfsc sch_drr sch_qfq; do
+                   cls_bpf act_bpf sch_hfsc sch_drr sch_qfq act_gate act_ct; do
             if [ -d "/sys/module/$m" ] || grep -qE "(^|/)$m\.ko" $idx 2>/dev/null; then
               continue
             fi
@@ -120,7 +120,7 @@ jobs:
             act_gact,act_police,cls_fw,sch_prio,sch_sfq,sch_tbf,sch_pie,sch_fq_pie,sch_plug,
             bonding,macvlan,macvtap,ipvlan,netkit,vxlan,geneve,macsec,vrf,ip_gre,ipip,sit,ip_vti,ip6_vti,ip6_tunnel,xfrm_interface,mpls_router,mpls_iptunnel,ip6_gre,
             nft_ct,nft_log,nft_masq,nft_nat,nft_redir,sch_cake,nft_fib_inet,nft_connlimit,nfnetlink_log,
-            cls_bpf,act_bpf,sch_hfsc,sch_drr,sch_qfq
+            cls_bpf,act_bpf,sch_hfsc,sch_drr,sch_qfq,act_gate,act_ct
           # NLINK_TEST_STRICT_HOST_ROOT is deliberately NOT set. This
           # lane's containers are rootless: uid 0 here is the runner's
           # unprivileged user wearing a mapping, and six tests need root
