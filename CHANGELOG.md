@@ -2826,6 +2826,14 @@ All notable changes to this project will be documented in this file.
   A concatenation with a host-order field is still refused in an interval
   set.
 
+
+- **`DESTROY` deletes (#703).** `Transaction::destroy_table`, `destroy_chain`,
+  `destroy_rule`, `destroy_set`, `destroy_object` and `destroy_flowtable`
+  delete what is there and take what is already gone as deleted, where the
+  matching `del_*` fails the whole batch with `ENOENT` (`NFT_MSG_DESTROY*`,
+  kernel 6.3+; `connection::kernel_has_destroy()` tells). They join
+  `destroy_set_elements`.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

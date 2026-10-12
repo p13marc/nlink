@@ -2098,8 +2098,20 @@ impl Transaction {
     }
 
     /// Add a table deletion to the batch.
-    pub fn del_table(mut self, name: &str, family: Family) -> Self {
-        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_DELTABLE), NLM_F_REQUEST);
+    pub fn del_table(self, name: &str, family: Family) -> Self {
+        self.push_table_delete(NFT_MSG_DELTABLE, name, family)
+    }
+
+    /// Like [`del_table`](Self::del_table), but a table that is already
+    /// gone is not an error: `NFT_MSG_DESTROYTABLE` (#703). The `destroy_*`
+    /// deletes need kernel 6.3+, and an older kernel refuses the whole
+    /// batch; see [`kernel_has_destroy`].
+    pub fn destroy_table(self, name: &str, family: Family) -> Self {
+        self.push_table_delete(NFT_MSG_DESTROYTABLE, name, family)
+    }
+
+    fn push_table_delete(mut self, msg: u8, name: &str, family: Family) -> Self {
+        let mut builder = MessageBuilder::new(nft_msg_type(msg), NLM_F_REQUEST);
         let nfgenmsg = NfGenMsg::new(family);
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_TABLE_NAME, name);
@@ -2163,8 +2175,18 @@ impl Transaction {
 
     /// Add a chain deletion to the batch. Mirrors the imperative
     /// [`Connection::<Nftables>::del_chain`](Connection) shape.
-    pub fn del_chain(mut self, table: &str, name: &str, family: Family) -> Self {
-        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_DELCHAIN), NLM_F_REQUEST);
+    pub fn del_chain(self, table: &str, name: &str, family: Family) -> Self {
+        self.push_chain_delete(NFT_MSG_DELCHAIN, table, name, family)
+    }
+
+    /// Like [`del_chain`](Self::del_chain), but a chain that is already
+    /// gone is not an error: `NFT_MSG_DESTROYCHAIN`, kernel 6.3+ (#703).
+    pub fn destroy_chain(self, table: &str, name: &str, family: Family) -> Self {
+        self.push_chain_delete(NFT_MSG_DESTROYCHAIN, table, name, family)
+    }
+
+    fn push_chain_delete(mut self, msg: u8, table: &str, name: &str, family: Family) -> Self {
+        let mut builder = MessageBuilder::new(nft_msg_type(msg), NLM_F_REQUEST);
         let nfgenmsg = NfGenMsg::new(family);
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_CHAIN_TABLE, table);
@@ -2176,8 +2198,25 @@ impl Transaction {
     /// Add a rule deletion to the batch (by kernel handle).
     /// Mirrors the imperative
     /// [`Connection::<Nftables>::del_rule`](Connection).
-    pub fn del_rule(mut self, table: &str, chain: &str, family: Family, handle: u64) -> Self {
-        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_DELRULE), NLM_F_REQUEST);
+    pub fn del_rule(self, table: &str, chain: &str, family: Family, handle: u64) -> Self {
+        self.push_rule_delete(NFT_MSG_DELRULE, table, chain, family, handle)
+    }
+
+    /// Like [`del_rule`](Self::del_rule), but a rule that is already gone
+    /// is not an error: `NFT_MSG_DESTROYRULE`, kernel 6.3+ (#703).
+    pub fn destroy_rule(self, table: &str, chain: &str, family: Family, handle: u64) -> Self {
+        self.push_rule_delete(NFT_MSG_DESTROYRULE, table, chain, family, handle)
+    }
+
+    fn push_rule_delete(
+        mut self,
+        msg: u8,
+        table: &str,
+        chain: &str,
+        family: Family,
+        handle: u64,
+    ) -> Self {
+        let mut builder = MessageBuilder::new(nft_msg_type(msg), NLM_F_REQUEST);
         let nfgenmsg = NfGenMsg::new(family);
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_RULE_TABLE, table);
@@ -2252,8 +2291,19 @@ impl Transaction {
 
     /// Add a flowtable deletion to the batch. Mirrors the
     /// imperative [`Connection::<Nftables>::del_flowtable`](Connection).
-    pub fn del_flowtable(mut self, family: Family, table: &str, name: &str) -> Self {
-        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_DELFLOWTABLE), NLM_F_REQUEST);
+    pub fn del_flowtable(self, family: Family, table: &str, name: &str) -> Self {
+        self.push_flowtable_delete(NFT_MSG_DELFLOWTABLE, family, table, name)
+    }
+
+    /// Like [`del_flowtable`](Self::del_flowtable), but a flowtable that is
+    /// already gone is not an error: `NFT_MSG_DESTROYFLOWTABLE`, kernel
+    /// 6.3+ (#703).
+    pub fn destroy_flowtable(self, family: Family, table: &str, name: &str) -> Self {
+        self.push_flowtable_delete(NFT_MSG_DESTROYFLOWTABLE, family, table, name)
+    }
+
+    fn push_flowtable_delete(mut self, msg: u8, family: Family, table: &str, name: &str) -> Self {
+        let mut builder = MessageBuilder::new(nft_msg_type(msg), NLM_F_REQUEST);
         let nfgenmsg = NfGenMsg::new(family);
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_FLOWTABLE_TABLE, table);
@@ -2321,8 +2371,18 @@ impl Transaction {
 
     /// Add a set deletion to the batch. Mirrors the imperative
     /// [`Connection::<Nftables>::del_set`](Connection).
-    pub fn del_set(mut self, table: &str, name: &str, family: Family) -> Self {
-        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_DELSET), NLM_F_REQUEST);
+    pub fn del_set(self, table: &str, name: &str, family: Family) -> Self {
+        self.push_set_delete(NFT_MSG_DELSET, table, name, family)
+    }
+
+    /// Like [`del_set`](Self::del_set), but a set that is already gone is
+    /// not an error: `NFT_MSG_DESTROYSET`, kernel 6.3+ (#703).
+    pub fn destroy_set(self, table: &str, name: &str, family: Family) -> Self {
+        self.push_set_delete(NFT_MSG_DESTROYSET, table, name, family)
+    }
+
+    fn push_set_delete(mut self, msg: u8, table: &str, name: &str, family: Family) -> Self {
+        let mut builder = MessageBuilder::new(nft_msg_type(msg), NLM_F_REQUEST);
         let nfgenmsg = NfGenMsg::new(family);
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_SET_TABLE, table);
@@ -2397,13 +2457,37 @@ impl Transaction {
     /// Add an object deletion to the batch. Mirrors
     /// [`Connection::<Nftables>::del_object`](Connection).
     pub fn del_object(
-        mut self,
+        self,
         table: &str,
         name: &str,
         object_type: ObjectType,
         family: Family,
     ) -> Self {
-        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_DELOBJ), NLM_F_REQUEST);
+        self.push_object_delete(NFT_MSG_DELOBJ, table, name, object_type, family)
+    }
+
+    /// Like [`del_object`](Self::del_object), but an object that is
+    /// already gone is not an error: `NFT_MSG_DESTROYOBJ`, kernel 6.3+
+    /// (#703).
+    pub fn destroy_object(
+        self,
+        table: &str,
+        name: &str,
+        object_type: ObjectType,
+        family: Family,
+    ) -> Self {
+        self.push_object_delete(NFT_MSG_DESTROYOBJ, table, name, object_type, family)
+    }
+
+    fn push_object_delete(
+        mut self,
+        msg: u8,
+        table: &str,
+        name: &str,
+        object_type: ObjectType,
+        family: Family,
+    ) -> Self {
+        let mut builder = MessageBuilder::new(nft_msg_type(msg), NLM_F_REQUEST);
         append_object_key(&mut builder, table, name, object_type, family);
         self.push(builder);
         self
