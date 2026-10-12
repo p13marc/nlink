@@ -1816,3 +1816,57 @@ async fn an_undo_puts_back_the_tree_under_a_qdisc() -> Result<()> {
     })
     .await
 }
+
+/// An IPv4 multipath route through IPv6 gateways (RFC 5549) keeps them
+/// (#786). `Ipv4Route::multipath` sent a hop's IPv6 gateway nowhere, so
+/// the route went in through bare devices; and the parser read only
+/// `RTA_GATEWAY`, not the `RTA_VIA` the kernel dumps such a hop with, so a
+/// route `ip` made read back without its gateways, which a removal's undo
+/// then put back without.
+#[tokio::test]
+async fn ipv4_multipath_keeps_its_ipv6_gateways() -> Result<()> {
+    use nlink::netlink::route::{Ipv4Route, NextHop};
+    use std::net::{IpAddr, Ipv6Addr};
+    nlink::require_root!();
+    nlink::require_modules!("dummy");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("mp-via")?;
+        let conn = conn_in_ns(&ns)?;
+        let applied = NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .link("d1", |l| l.dummy().up())
+            .apply(&conn)
+            .await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let gw = |s: &str| s.parse::<Ipv6Addr>().unwrap();
+        conn.add_route(
+            Ipv4Route::new("10.89.0.0", 24).multipath(vec![
+                NextHop::new().gateway_v6(gw("fe80::1")).dev("d0"),
+                NextHop::new().gateway_v6(gw("fe80::2")).dev("d1"),
+            ]),
+        )
+        .await?;
+        let route = crate::common::converge::ip_json(&ns, &["route", "show", "10.89.0.0/24"])
+            .map_err(nlink::Error::invalid_message)?;
+        let vias: Vec<String> = route[0]["nexthops"]
+            .as_array()
+            .map(|h| h.iter().map(|h| h["via"]["host"].as_str().unwrap_or("none").to_string()).collect())
+            .unwrap_or_default();
+        assert_eq!(vias, ["fe80::1", "fe80::2"], "{route}");
+
+        let read: Vec<Option<IpAddr>> = conn
+            .get_routes()
+            .await?
+            .iter()
+            .find(|r| r.destination() == Some(&"10.89.0.0".parse().unwrap()))
+            .and_then(|r| r.multipath())
+            .unwrap_or_default()
+            .iter()
+            .map(|h| h.gateway)
+            .collect();
+        assert_eq!(read, [Some(gw("fe80::1").into()), Some(gw("fe80::2").into())]);
+        Ok(())
+    })
+    .await
+}

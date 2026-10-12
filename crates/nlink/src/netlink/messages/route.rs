@@ -631,6 +631,15 @@ fn parse_multipath(data: &[u8], family: u8) -> Vec<ParsedNextHop> {
             {
                 gateway = Some(addr);
             }
+            // A gateway of the other family (RFC 5549): `struct rtvia`,
+            // its family then its address (#786).
+            if (nla_type & 0x3FFF) == attr_ids::RTA_VIA
+                && let Some(via) = payload.get(..2)
+                && let Ok(addr) =
+                    parse_ip_addr(&payload[2..], u16::from_ne_bytes([via[0], via[1]]) as u8)
+            {
+                gateway = Some(addr);
+            }
             // Align to 4 bytes for the next nested attr.
             let aligned = (nla_len + 3) & !3;
             nested += aligned.max(4); // never let `nested` stall
