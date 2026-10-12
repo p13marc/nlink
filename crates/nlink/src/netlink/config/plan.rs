@@ -185,6 +185,11 @@ pub enum Step {
     },
     /// Add a declared qdisc.
     AddQdisc(DeclaredQdisc),
+    /// Put back a recreated link's TC tree that the config does not
+    /// declare, kept with
+    /// [`PlanOptions::preserve_undeclared_tc`](super::PlanOptions::preserve_undeclared_tc)
+    /// (#645): after the declared qdiscs, before the declared trees.
+    RestoreTc(super::preserve::PreservedTc),
     /// Diff a declared TC tree again, against the device as the steps
     /// before left it, and apply the difference (#514).
     TcTree {
@@ -521,6 +526,7 @@ impl fmt::Display for Step {
             Self::AddQdisc(q) => {
                 write!(f, "+ qdisc {} on {} ({:?})", q.qdisc_type.kind(), q.dev, q.parent)
             }
+            Self::RestoreTc(tc) => write!(f, "+ restore {tc} (kept across its recreate)"),
             Self::TcTree { dev, planned, .. } if planned.is_empty() => {
                 write!(f, "~ tc {dev} (diffed again after the qdiscs)")
             }
@@ -752,6 +758,13 @@ impl super::ConfigDiff {
             });
         }
         steps.extend(self.qdiscs_to_add.iter().cloned().map(Step::AddQdisc));
+        steps.extend(
+            self.links_to_recreate
+                .iter()
+                .filter(|r| !r.is_refused())
+                .filter_map(|r| r.preserved_tc.clone())
+                .map(Step::RestoreTc),
+        );
         for (tree, previous) in &self.tc_declared {
             let planned = self
                 .tc

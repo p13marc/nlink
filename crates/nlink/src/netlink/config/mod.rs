@@ -54,6 +54,7 @@ mod apply;
 mod diff;
 mod kind;
 mod plan;
+mod preserve;
 mod tc_tree;
 #[cfg(feature = "serde")]
 mod tc_tree_serde;
@@ -75,6 +76,7 @@ pub use kind::{
     RecreatePolicy,
 };
 pub use plan::{JournalEntry, Plan, Step};
+pub use preserve::{PreservedTc, TcObject};
 pub use tc_tree::{
     ClassSpec, DeclaredClass, DeclaredFilter, DeclaredLeaf, DeclaredTc, FilterSpec, TcBuilder,
     TcTreeDiff,

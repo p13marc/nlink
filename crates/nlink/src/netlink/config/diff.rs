@@ -111,6 +111,16 @@ pub struct PlanOptions {
     /// State the caller manages itself: never a blocker, never purged, and
     /// reported when a recreate destroys it (#513).
     pub owned: Vec<super::Owned>,
+
+    /// Keep what a recreated link carries in TC that the config does not
+    /// declare — its qdiscs, classes and filters — and put it back once
+    /// the link is created again, instead of refusing the recreate (#645).
+    /// The diff snapshots each object as the kernel dumps it
+    /// ([`LinkRecreate::preserved_tc`](super::LinkRecreate::preserved_tc));
+    /// the apply replays them, a mirred action's target looked up again by
+    /// name. A BPF filter or action cannot be replayed from its dump, and
+    /// still refuses the recreate.
+    pub preserve_undeclared_tc: bool,
 }
 
 /// The name [`PlanOptions`] had before 0.32.
@@ -146,6 +156,13 @@ impl PlanOptions {
     /// config does not declare; see [`Self::recreate_policy`].
     pub fn recreate_policy(mut self, policy: super::RecreatePolicy) -> Self {
         self.recreate_policy = policy;
+        self
+    }
+
+    /// Keep a recreated link's undeclared TC tree; see
+    /// [`Self::preserve_undeclared_tc`].
+    pub fn preserve_undeclared_tc(mut self, on: bool) -> Self {
+        self.preserve_undeclared_tc = on;
         self
     }
 

@@ -159,6 +159,12 @@ impl ApplyOptions {
         self
     }
 
+    /// See [`PlanOptions::preserve_undeclared_tc`] (#645).
+    pub fn with_preserve_undeclared_tc(mut self, on: bool) -> Self {
+        self.plan.preserve_undeclared_tc = on;
+        self
+    }
+
     /// See [`PlanOptions::caller_owned`] (#513).
     pub fn with_caller_owned(mut self, owned: impl IntoIterator<Item = super::Owned>) -> Self {
         self.plan.owned.extend(owned);
@@ -488,6 +494,7 @@ fn step_object(step: &Step) -> crate::netlink::ErrorObject {
         Step::RefuseNexthop(c) => ErrorObject::Nexthop { id: c.nexthop.id },
         Step::SetNexthop { after: n, .. } | Step::DeleteNexthop(n) => ErrorObject::Nexthop { id: n.id },
         Step::DeleteQdisc(q) | Step::ReplaceQdisc { after: q, .. } | Step::AddQdisc(q) => qdisc(q),
+        Step::RestoreTc(tc) => ErrorObject::Tc { dev: tc.dev.clone() },
         Step::TcTree { dev, .. } => ErrorObject::Tc { dev: dev.clone() },
     }
 }
@@ -542,6 +549,7 @@ fn step_operation(step: &Step) -> String {
             format!("replace qdisc {} on {}", q.qdisc_type.kind(), q.dev)
         }
         Step::AddQdisc(q) => format!("add qdisc {} on {}", q.qdisc_type.kind(), q.dev),
+        Step::RestoreTc(tc) => format!("restore the TC tree on {}", tc.dev),
         Step::TcTree { dev, .. } => format!("tc tree on {dev}"),
     }
 }
@@ -1012,6 +1020,10 @@ async fn run_step(
         // Diffed again against the device as the steps above left it: a
         // root qdisc replaced or a link recreated took its tree, and a
         // redirect's target may have a new ifindex (#514).
+        Step::RestoreTc(tc) => {
+            let restored = super::preserve::restore(conn, tc).await?;
+            Outcome::Changed(format!("Restored {tc}"), restored)
+        }
         Step::TcTree {
             dev,
             tree,
