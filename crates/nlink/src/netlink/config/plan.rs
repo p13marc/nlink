@@ -179,7 +179,13 @@ pub enum Step {
     DeleteRule(DeclaredRule),
     /// Delete a qdisc the previous config declared; the kernel's default
     /// comes back (#512).
-    DeleteQdisc(DeclaredQdisc),
+    DeleteQdisc {
+        /// The qdisc.
+        qdisc: DeclaredQdisc,
+        /// What it has under it, which goes with it (#783).
+        #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "super::Underneath::is_nothing"))]
+        underneath: super::Underneath,
+    },
     /// Replace a qdisc with the declared one.
     ReplaceQdisc {
         /// The live qdisc it replaces, as a declaration, where its kind
@@ -187,6 +193,11 @@ pub enum Step {
         before: Option<DeclaredQdisc>,
         /// The qdisc installed.
         after: DeclaredQdisc,
+        /// What the live qdisc has under it, which a replace by another
+        /// kind or at another handle destroys (#783). A replace in place
+        /// keeps it, and this is [`Nothing`](super::Underneath::Nothing).
+        #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "super::Underneath::is_nothing"))]
+        underneath: super::Underneath,
     },
     /// Add a declared qdisc.
     AddQdisc(DeclaredQdisc),
@@ -275,25 +286,57 @@ impl Step {
                 after: route.clone(),
                 reason: None,
             },
-            Self::AddQdisc(q) => Self::DeleteQdisc(q.clone()),
+            Self::AddQdisc(q) => Self::DeleteQdisc {
+                qdisc: q.clone(),
+                underneath: super::Underneath::Nothing,
+            },
+            // A qdisc that took a tree with it puts the tree back, itself
+            // first; one that took what cannot be put back has no inverse
+            // (#783).
+            Self::DeleteQdisc {
+                underneath: super::Underneath::Tree { tree },
+                ..
+            }
+            | Self::ReplaceQdisc {
+                underneath: super::Underneath::Tree { tree },
+                ..
+            } => Self::RestoreTc((**tree).clone()),
+            Self::DeleteQdisc {
+                underneath: super::Underneath::Lost { .. },
+                ..
+            }
+            | Self::ReplaceQdisc {
+                underneath: super::Underneath::Lost { .. },
+                ..
+            } => return None,
             // Removing what a kernel-default declaration replaced, whose kind
             // did not read back: nothing to put back.
-            Self::DeleteQdisc(q) if q.qdisc_type == crate::netlink::tc_spec::QdiscSpec::KernelDefault => {
+            Self::DeleteQdisc { qdisc: q, .. }
+                if q.qdisc_type == crate::netlink::tc_spec::QdiscSpec::KernelDefault =>
+            {
                 return None;
             }
             // The qdisc it replaced; the kernel's default root comes back
             // when the declared one goes (#649).
-            Self::ReplaceQdisc { before: Some(before), after } => {
+            Self::ReplaceQdisc {
+                before: Some(before),
+                after,
+                ..
+            } => {
                 if before.qdisc_type == crate::netlink::tc_spec::QdiscSpec::KernelDefault {
-                    Self::DeleteQdisc(after.clone())
+                    Self::DeleteQdisc {
+                        qdisc: after.clone(),
+                        underneath: super::Underneath::Nothing,
+                    }
                 } else {
                     Self::ReplaceQdisc {
                         before: Some(after.clone()),
                         after: before.clone(),
+                        underneath: super::Underneath::Nothing,
                     }
                 }
             }
-            Self::DeleteQdisc(q) => Self::AddQdisc(q.clone()),
+            Self::DeleteQdisc { qdisc: q, .. } => Self::AddQdisc(q.clone()),
             Self::SetNeighbour { before, after } => match before {
                 Some(before) => Self::SetNeighbour {
                     before: Some(after.clone()),
@@ -529,14 +572,14 @@ impl fmt::Display for Step {
             }
             Self::DeleteNexthop(n) => write!(f, "- {n}"),
             Self::DeleteRule(r) => write!(f, "- {r}"),
-            Self::DeleteQdisc(q) => write!(
+            Self::DeleteQdisc { qdisc: q, .. } => write!(
                 f,
                 "- qdisc {} on {} ({:?})",
                 q.qdisc_type.kind(),
                 q.dev,
                 q.effective_parent()
             ),
-            Self::ReplaceQdisc { after: q, before } => {
+            Self::ReplaceQdisc { after: q, before, .. } => {
                 write!(f, "~ qdisc {} on {} ({:?})", q.qdisc_type.kind(), q.dev, q.parent)?;
                 match before {
                     Some(b) => write!(f, " (replacing {})", b.qdisc_type.kind()),
@@ -770,11 +813,15 @@ impl super::ConfigDiff {
         // A rule after the routes of the table it looks up, so traffic it
         // steers there finds them.
         steps.extend(self.rules_to_add.iter().cloned().map(Step::AddRule));
-        steps.extend(self.qdiscs_to_remove.iter().cloned().map(Step::DeleteQdisc));
+        steps.extend(self.qdiscs_to_remove.iter().map(|q| Step::DeleteQdisc {
+            qdisc: q.clone(),
+            underneath: self.underneath_of(q),
+        }));
         for q in &self.qdiscs_to_replace {
             steps.push(Step::ReplaceQdisc {
                 before: self.qdiscs_replaced.iter().find(|(d, _)| d == q).map(|(_, b)| b.clone()),
                 after: q.clone(),
+                underneath: self.underneath_of(q),
             });
         }
         steps.extend(self.qdiscs_to_add.iter().cloned().map(Step::AddQdisc));

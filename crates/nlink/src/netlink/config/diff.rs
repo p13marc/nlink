@@ -448,6 +448,11 @@ pub struct ConfigDiff {
     #[cfg_attr(feature = "serde", serde(skip))]
     #[cfg_attr(feature = "schemars", schemars(skip))]
     pub(crate) qdiscs_replaced: Vec<(DeclaredQdisc, DeclaredQdisc)>,
+    /// What each qdisc a replace or a removal takes has under it, by device
+    /// and slot (#783).
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) qdiscs_underneath: Vec<((String, QdiscParent), super::preserve::Underneath)>,
     /// The protocol the apply installs declared routes with: the config's
     /// [`routes_protocol`](super::NetworkConfig::routes_protocol) (#512).
     /// Not shown or serialized.
@@ -478,6 +483,16 @@ pub struct ConfigDiff {
 }
 
 impl ConfigDiff {
+    /// What the qdisc a step replaces or deletes at `q`'s slot has under it
+    /// (#783).
+    pub(crate) fn underneath_of(&self, q: &DeclaredQdisc) -> super::preserve::Underneath {
+        self.qdiscs_underneath
+            .iter()
+            .find(|((dev, parent), _)| *dev == q.dev && *parent == q.effective_parent())
+            .map(|(_, u)| u.clone())
+            .unwrap_or_default()
+    }
+
     /// The JSON Schema (draft 7) of the JSON a `ConfigDiff` serializes to,
     /// pretty-printed. Requires the `schemars` feature. Publish it beside
     /// a `diff` output so a change to the diff's shape is a visible change
@@ -1304,17 +1319,36 @@ impl Snapshot {
         }
         // Every device a tree is declared on, by this config or the
         // previous one, whose tree's removal is this diff's.
-        let tree_links: Vec<u32> = super::tc_tree::with_previous(config, opts)
+        let ifindex_of = |dev: &str| {
+            snapshot
+                .links
+                .iter()
+                .find(|l| l.name() == Some(dev))
+                .map(|l| l.ifindex())
+        };
+        let mut tree_links: Vec<u32> = super::tc_tree::with_previous(config, opts)
             .iter()
-            .map(|(t, _)| t)
-            .filter_map(|t| {
+            .filter_map(|(t, _)| ifindex_of(&t.dev))
+            .collect();
+        // And every device whose root or hook a declared qdisc, this
+        // config's or the previous one's, takes the place of or removes:
+        // what is under the live one goes with it, and an undo puts it back
+        // (#783).
+        let qdisc_devs: Vec<u32> = config
+            .qdiscs
+            .iter()
+            .chain(opts.previous.iter().flat_map(|p| p.qdiscs.iter()))
+            .filter_map(|q| ifindex_of(&q.dev))
+            .filter(|i| {
                 snapshot
-                    .links
+                    .qdiscs
                     .iter()
-                    .find(|l| l.name() == Some(t.dev.as_str()))
-                    .map(|l| l.ifindex())
+                    .any(|q| q.ifindex() == *i && q.handle().major() != 0 && (q.is_root() || q.parent().is_ingress()))
             })
             .collect();
+        tree_links.extend(qdisc_devs);
+        tree_links.sort_unstable();
+        tree_links.dedup();
         snapshot.read_tc(conn, tree_links).await?;
         if config
             .links
@@ -1712,7 +1746,7 @@ pub(crate) fn diff_snapshot(
     }
 
     // Diff qdiscs
-    diff_qdiscs(config, &current_qdiscs, &ifindex_to_name, opts, &mut diff);
+    diff_qdiscs(config, &current_qdiscs, &ifindex_to_name, &snapshot.tc, opts, &mut diff);
 
     // Neighbours (#516), against what the link changes leave: a link
     // recreated, flushed or given another MAC has none.
@@ -3407,9 +3441,31 @@ fn diff_qdiscs(
     config: &NetworkConfig,
     current: &[TcMessage],
     ifindex_to_name: &HashMap<u32, &str>,
+    tc: &HashMap<u32, super::tc_tree::TcLive>,
     opts: &PlanOptions,
     diff: &mut ConfigDiff,
 ) {
+    // What a live qdisc has under it, which taking it away destroys (#783).
+    // A device whose classes and filters were not read has nothing known
+    // under it: `read_for` reads them for every device whose root or hook
+    // a declaration changes.
+    let underneath = |live: &TcMessage| {
+        let dev = ifindex_to_name.get(&live.ifindex()).copied().unwrap_or("?");
+        let qdiscs: Vec<TcMessage> = current
+            .iter()
+            .filter(|q| q.ifindex() == live.ifindex())
+            .cloned()
+            .collect();
+        match tc.get(&live.ifindex()) {
+            Some(t) => super::preserve::underneath(dev, live, &qdiscs, t, ifindex_to_name),
+            None => super::preserve::Underneath::Nothing,
+        }
+    };
+    let record = |diff: &mut ConfigDiff, dev: &str, parent: QdiscParent, u: super::preserve::Underneath| {
+        if !u.is_nothing() {
+            diff.qdiscs_underneath.push(((dev.to_string(), parent), u));
+        }
+    };
     // Build map of current root qdiscs by device
     let mut current_root_qdisc: HashMap<&str, &TcMessage> = HashMap::new();
     let mut current_ingress_qdisc: HashMap<&str, &TcMessage> = HashMap::new();
@@ -3449,6 +3505,7 @@ fn diff_qdiscs(
                     },
                 );
                 diff.qdiscs_to_remove.push(removed);
+                record(diff, &declared.dev, declared.effective_parent(), underneath(live));
             }
             continue;
         }
@@ -3475,9 +3532,11 @@ fn diff_qdiscs(
             };
 
             if existing_kind != desired_kind {
-                // Different type, need to replace.
+                // Different type, need to replace: a graft, which destroys
+                // what is under the live one (#783).
                 diff.qdiscs_to_replace.push(declared.clone());
                 replaced(diff);
+                record(diff, &declared.dev, declared.effective_parent(), underneath(existing));
             } else if !declared.qdisc_type.matches(existing) {
                 // Same kind, different parameters — replace.
                 diff.qdiscs_to_replace.push(declared.clone());
@@ -3487,9 +3546,11 @@ fn diff_qdiscs(
                 .is_some_and(|h| h != existing.handle())
             {
                 // At another handle than the one declared, or than `1:`
-                // for a classful kind, which its classes name (#514).
+                // for a classful kind, which its classes name (#514): a
+                // graft too.
                 diff.qdiscs_to_replace.push(declared.clone());
                 replaced(diff);
+                record(diff, &declared.dev, declared.effective_parent(), underneath(existing));
             }
         } else {
             // No qdisc at this position, need to add.
@@ -3509,15 +3570,19 @@ fn diff_qdiscs(
             QdiscParent::Root => &current_root_qdisc,
             QdiscParent::Ingress => &current_ingress_qdisc,
         };
-        let live = current_map
+        let live_qdisc = current_map
             .get(prev.dev.as_str())
-            .is_some_and(|q| q.handle().major() != 0);
+            .filter(|q| q.handle().major() != 0);
+        let live = live_qdisc.is_some();
         let queued = diff
             .qdiscs_to_remove
             .iter()
             .any(|q| q.dev == prev.dev && q.effective_parent() == parent);
         if !still && live && !queued && !opts.owns_qdisc(&prev.dev, parent) {
             diff.qdiscs_to_remove.push(prev.clone());
+            if let Some(q) = live_qdisc {
+                record(diff, &prev.dev, parent, underneath(q));
+            }
         }
     }
 }

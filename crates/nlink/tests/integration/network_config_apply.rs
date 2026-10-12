@@ -1740,3 +1740,79 @@ async fn a_tunnels_output_key_is_compared() -> Result<()> {
     })
     .await
 }
+
+/// A qdisc the apply takes away takes its tree with it, and the undo puts
+/// both back (#783): an HTB root with classes, a leaf qdisc and filters,
+/// replaced by another kind of root, and removed when the previous config
+/// declared it. The undo used to add the bare qdisc back, and say nothing
+/// was lost.
+#[tokio::test]
+async fn an_undo_puts_back_the_tree_under_a_qdisc() -> Result<()> {
+    use std::sync::Arc;
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "sch_htb", "sch_fq_codel", "sch_netem", "cls_matchall", "cls_u32");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("qdisc-tree-undo")?;
+        let conn = conn_in_ns(&ns)?;
+        let htb = Arc::new(
+            NetworkConfig::new()
+                .link("d0", |l| l.dummy().up())
+                .qdisc("d0", |q| q.htb().default_class(0x10)),
+        );
+        let tc = |args: &str| ns.exec("tc", &args.split_whitespace().collect::<Vec<_>>()).map(drop);
+        let shown = || -> Result<Vec<String>> {
+            ["qdisc show dev d0", "class show dev d0", "filter show dev d0 parent 1:"]
+                .iter()
+                .map(|a| ns.exec("tc", &a.split_whitespace().collect::<Vec<_>>()))
+                .map(|r| {
+                    r.map(|out| {
+                        out.lines()
+                            .map(|l| {
+                                // Counters and per-install numbering are not state.
+                                let mut w: Vec<&str> = l.split_whitespace().collect();
+                                while let Some(i) = w.iter().position(|x| matches!(*x, "direct_packets_stat" | "index" | "ref" | "bind")) {
+                                    w.drain(i..(i + 2).min(w.len()));
+                                }
+                                w.join(" ")
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                })
+                .collect()
+        };
+        let fq = NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .qdisc("d0", |q| q.fq_codel());
+        let bare = NetworkConfig::new().link("d0", |l| l.dummy().up());
+        let previous = nlink::netlink::config::PlanOptions::default().previous(htb.clone());
+        let steps: [(&NetworkConfig, Option<&nlink::netlink::config::PlanOptions>); 2] = [(&fq, None), (&bare, Some(&previous))];
+        for (next, plan) in steps {
+            let applied = htb.apply(&conn).await?;
+            assert!(applied.is_success(), "{applied:?}");
+            tc("class add dev d0 parent 1: classid 1:10 htb rate 10mbit")?;
+            tc("class add dev d0 parent 1: classid 1:20 htb rate 20mbit")?;
+            tc("qdisc add dev d0 parent 1:20 handle 20: netem delay 5ms")?;
+            tc("filter add dev d0 parent 1: prio 1 protocol ip matchall classid 1:20")?;
+            tc("filter add dev d0 parent 1: prio 2 protocol ip u32 match ip dst 10.0.0.0/8 classid 1:10")?;
+            let before = shown()?;
+
+            let diff = match plan {
+                Some(p) => next.diff_with_options(&conn, p.clone()).await?,
+                None => next.diff(&conn).await?,
+            };
+            let applied = diff.apply(&conn, nlink::ExecOptions::new()).await?;
+            assert!(applied.is_success(), "{applied:?}");
+            assert!(!shown()?[1].contains("1:20"), "the tree went: {:?}", shown()?);
+            let stuck: Vec<String> = applied.irreversible().map(|s| s.to_string()).collect();
+            assert!(stuck.is_empty(), "{stuck:?}");
+            let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
+            assert!(undone.is_success(), "{undone:?}");
+            assert_eq!(shown()?, before);
+            ns.exec("tc", &["qdisc", "del", "dev", "d0", "root"])?;
+        }
+        Ok(())
+    })
+    .await
+}

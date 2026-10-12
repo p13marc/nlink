@@ -499,7 +499,7 @@ fn step_object(step: &Step) -> crate::netlink::ErrorObject {
         },
         Step::RefuseNexthop(c) => ErrorObject::Nexthop { id: c.nexthop.id },
         Step::SetNexthop { after: n, .. } | Step::DeleteNexthop(n) => ErrorObject::Nexthop { id: n.id },
-        Step::DeleteQdisc(q) | Step::ReplaceQdisc { after: q, .. } | Step::AddQdisc(q) => qdisc(q),
+        Step::DeleteQdisc { qdisc: q, .. } | Step::ReplaceQdisc { after: q, .. } | Step::AddQdisc(q) => qdisc(q),
         Step::RestoreTc(tc) => ErrorObject::Tc { dev: tc.dev.clone() },
         Step::TcTree { dev, .. } => ErrorObject::Tc { dev: dev.clone() },
     }
@@ -552,7 +552,7 @@ fn step_operation(step: &Step) -> String {
         Step::DeleteFdb(e) => format!("remove {e}"),
         Step::AddRule(r) => format!("add {r}"),
         Step::DeleteRule(r) => format!("remove {r}"),
-        Step::DeleteQdisc(q) => format!("delete qdisc {} on {}", q.qdisc_type.kind(), q.dev),
+        Step::DeleteQdisc { qdisc: q, .. } => format!("delete qdisc {} on {}", q.qdisc_type.kind(), q.dev),
         Step::ReplaceQdisc { after: q, .. } => {
             format!("replace qdisc {} on {}", q.qdisc_type.kind(), q.dev)
         }
@@ -1118,7 +1118,7 @@ async fn run_step(
             }
         }
         // The kernel puts its default back (#512).
-        Step::DeleteQdisc(qdisc) => {
+        Step::DeleteQdisc { qdisc, .. } => {
             let parent = match qdisc.effective_parent() {
                 QdiscParent::Root => crate::TcHandle::ROOT,
                 QdiscParent::Ingress => crate::TcHandle::INGRESS,

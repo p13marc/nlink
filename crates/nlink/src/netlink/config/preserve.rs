@@ -141,6 +141,127 @@ impl std::fmt::Display for PreservedTc {
     }
 }
 
+/// What a qdisc that goes has under it (#783): the classes, the qdiscs in
+/// them and the filters that its replacement by another kind or handle, or
+/// its deletion, destroys with it. An undo puts it back with
+/// [`Step::RestoreTc`](super::Step::RestoreTc).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "serde",
+    serde(tag = "kind", rename_all = "kebab-case", rename_all_fields = "kebab-case")
+)]
+#[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
+pub enum Underneath {
+    /// Nothing the kernel does not make with it.
+    #[default]
+    Nothing,
+    /// The qdisc and the tree under it, read back whole: what the inverse
+    /// puts back.
+    Tree {
+        /// The qdisc first, then its classes, qdiscs and filters.
+        tree: Box<PreservedTc>,
+    },
+    /// Something under it that cannot be put back: the step has no
+    /// inverse.
+    Lost {
+        /// What, and why.
+        why: Vec<String>,
+    },
+}
+
+impl Underneath {
+    /// Whether it is [`Nothing`](Self::Nothing).
+    pub fn is_nothing(&self) -> bool {
+        *self == Self::Nothing
+    }
+}
+
+/// What `root`, a root or hook qdisc on `dev`, has under it (#783): every
+/// qdisc in its classes, transitively, the classes users make (a prio's
+/// bands, an mq's queues and fq_codel's flows come back with their qdisc),
+/// and the filters at any of them. `qdiscs` and `live` are the device's.
+pub(crate) fn underneath(
+    dev: &str,
+    root: &TcMessage,
+    qdiscs: &[TcMessage],
+    live: &super::tc_tree::TcLive,
+    names: &HashMap<u32, &str>,
+) -> Underneath {
+    let mut majors = vec![root.handle().major()];
+    let mut nested: Vec<&TcMessage> = Vec::new();
+    loop {
+        let more: Vec<&TcMessage> = qdiscs
+            .iter()
+            .filter(|q| q.handle() != root.handle() && q.handle().major() != 0)
+            .filter(|q| majors.contains(&q.parent().major()) && !majors.contains(&q.handle().major()))
+            .collect();
+        if more.is_empty() {
+            break;
+        }
+        majors.extend(more.iter().map(|q| q.handle().major()));
+        nested.extend(more);
+    }
+    let classes: Vec<&TcMessage> = live
+        .classes
+        .iter()
+        .filter(|c| {
+            majors.contains(&c.handle().major())
+                && c.handle().minor() != 0
+                && matches!(c.kind(), Some("htb" | "hfsc" | "drr" | "qfq" | "cbq"))
+        })
+        .collect();
+    let filters: Vec<&TcMessage> = live
+        .filters
+        .iter()
+        .filter(|f| majors.contains(&f.parent().major()) && !automatic_u32_table(f))
+        .collect();
+    if nested.is_empty() && classes.is_empty() && filters.is_empty() {
+        return Underneath::Nothing;
+    }
+    let mut why = Vec::new();
+    let mut tree = PreservedTc {
+        dev: dev.to_string(),
+        ..PreservedTc::default()
+    };
+    for q in std::iter::once(&root).chain(nested.iter()) {
+        match TcObject::qdisc(q) {
+            Some(o) => tree.qdiscs.push(o),
+            None => why.push(format!(
+                "qdisc {} {} on {dev}, which does not read back as a declaration",
+                q.kind().unwrap_or("?"),
+                q.handle()
+            )),
+        }
+    }
+    tree.classes = classes.into_iter().map(TcObject::from_live).collect();
+    for f in filters {
+        if !replayable_filter(f) {
+            why.push(format!(
+                "filter {} pref {} on {dev}, whose BPF program is named by id",
+                f.kind().unwrap_or("?"),
+                f.priority().as_u16()
+            ));
+            continue;
+        }
+        for target in mirred_targets(f) {
+            match names.get(&target) {
+                Some(n) => {
+                    tree.targets.insert(target, n.to_string());
+                }
+                None => why.push(format!("a filter on {dev} redirects to ifindex {target}, which is gone")),
+            }
+        }
+        tree.filters.push(TcObject::from_live(f));
+    }
+    if why.is_empty() {
+        Underneath::Tree { tree: Box::new(tree) }
+    } else {
+        Underneath::Lost { why }
+    }
+}
+
 /// A map as a list of pairs: a plan's steps are an internally tagged enum,
 /// whose buffering does not read a number key back from its string.
 #[cfg(feature = "serde")]
