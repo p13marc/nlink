@@ -614,6 +614,11 @@ pub const NFTA_SET_GC_INTERVAL: u16 = 12;
 /// `NFTA_SET_OBJ_TYPE` — an object map's object type (`NFT_OBJECT_*`).
 pub const NFTA_SET_OBJ_TYPE: u16 = 15;
 pub const NFTA_SET_HANDLE: u16 = 16;
+/// `NFTA_SET_EXPR` — the one statement every element gets (#703).
+pub const NFTA_SET_EXPR: u16 = 17;
+/// `NFTA_SET_EXPRESSIONS` — several, a list of `NFTA_LIST_ELEM`; taken
+/// only with [`NFT_SET_EXPR`], which the set keeps in its flags.
+pub const NFTA_SET_EXPRESSIONS: u16 = 18;
 
 // Set element attributes
 pub const NFTA_SET_ELEM_LIST_TABLE: u16 = 1;
@@ -636,6 +641,10 @@ pub const NFTA_SET_ELEM_OBJREF: u16 = 9;
 /// `NFTA_SET_ELEM_KEY_END` — the inclusive end of a range, in the same
 /// element: how an interval set of concatenated keys stores one.
 pub const NFTA_SET_ELEM_KEY_END: u16 = 10;
+/// `NFTA_SET_ELEM_EXPR` — an element's one statement, with its live state.
+pub const NFTA_SET_ELEM_EXPR: u16 = 7;
+/// `NFTA_SET_ELEM_EXPRESSIONS` — several, a list of `NFTA_LIST_ELEM`.
+pub const NFTA_SET_ELEM_EXPRESSIONS: u16 = 11;
 /// `NFT_SET_ELEM_INTERVAL_END` — an interval set's range-end element.
 pub const NFT_SET_ELEM_INTERVAL_END: u32 = 1;
 /// `NFT_SET_ELEM_CATCHALL` — the catch-all (`*`) element.

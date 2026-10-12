@@ -2,10 +2,10 @@
 //! declared structs.
 
 use super::super::{
-    expr::Expr,
+    expr::{ElementStatement, Expr},
     types::{
         ChainType, Family, Hook, Policy, Priority, Rule, Set, SetDataType, SetElement, SetFlags,
-        SetKeyType,
+        SetKeyType, SetPolicy,
     },
     object::{Object, ObjectConfig},
 };
@@ -564,6 +564,10 @@ pub struct DeclaredSet {
     pub(crate) elements: Vec<SetElement>,
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub(crate) comment: Option<String>,
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub(crate) policy: Option<SetPolicy>,
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
+    pub(crate) statements: Vec<ElementStatement>,
 }
 
 /// How a declared set's elements are reconciled with the kernel's.
@@ -629,6 +633,14 @@ impl DeclaredSet {
     pub fn elements(&self) -> &[SetElement] {
         &self.elements
     }
+    /// Declared backend policy, if any.
+    pub fn policy(&self) -> Option<SetPolicy> {
+        self.policy
+    }
+    /// The statements every element gets.
+    pub fn statements(&self) -> &[ElementStatement] {
+        &self.statements
+    }
 
     /// The elements as they are written: for an interval set, the declared
     /// ranges sorted and merged where they overlap or touch (sending
@@ -674,6 +686,8 @@ impl DeclaredSet {
         set.data_type = self.data_type.clone();
         set.comment = self.comment.clone();
         set.owned = true;
+        set.policy = self.policy;
+        set.statements = self.statements.clone();
         set
     }
 }
@@ -691,6 +705,8 @@ pub struct DeclaredSetBuilder {
     data_type: Option<SetDataType>,
     elements: Vec<SetElement>,
     comment: Option<String>,
+    policy: Option<SetPolicy>,
+    statements: Vec<ElementStatement>,
 }
 
 impl DeclaredSetBuilder {
@@ -715,7 +731,32 @@ impl DeclaredSetBuilder {
             data_type: None,
             elements: Vec::new(),
             comment: None,
+            policy: None,
+            statements: Vec::new(),
         }
+    }
+
+    /// Backend policy — see
+    /// [`Set::policy`](crate::netlink::nftables::Set::policy). A changed
+    /// policy recreates the set; leaving it undeclared never counts as
+    /// drift.
+    pub fn policy(mut self, policy: SetPolicy) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+
+    /// A statement every element gets — see
+    /// [`Set::statement`](crate::netlink::nftables::Set::statement).
+    /// Changed statements recreate the set, and its elements start again
+    /// from zero.
+    pub fn statement(mut self, statement: impl Into<ElementStatement>) -> Self {
+        self.statements.push(statement.into());
+        self
+    }
+
+    /// A `counter` on every element: [`statement`](Self::statement).
+    pub fn counter(self) -> Self {
+        self.statement(ElementStatement::Counter)
     }
 
     /// A map — see [`Set::map`](crate::netlink::nftables::Set::map). A
@@ -859,6 +900,8 @@ impl DeclaredSetBuilder {
             data_type: self.data_type,
             elements: self.elements,
             comment: self.comment,
+            policy: self.policy,
+            statements: self.statements,
         }
     }
 }

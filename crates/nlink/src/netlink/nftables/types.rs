@@ -4462,6 +4462,32 @@ impl PacketField {
     }
 }
 
+/// What the kernel picks a set's backend for (`NFTA_SET_POLICY`, #703):
+/// lookup speed, the default, or memory.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(u32)]
+#[non_exhaustive]
+pub enum SetPolicy {
+    /// `policy performance`, the default; the kernel does not dump it.
+    #[default]
+    Performance = 0,
+    /// `policy memory`.
+    Memory = 1,
+}
+
+impl SetPolicy {
+    pub(crate) fn from_u32(v: u32) -> Option<Self> {
+        match v {
+            0 => Some(Self::Performance),
+            1 => Some(Self::Memory),
+            _ => None,
+        }
+    }
+}
+
 /// Set flags — `NFTA_SET_FLAGS`, the `NFT_SET_*` bits, in the shape of
 /// [`CtState`] and [`TcpFlags`]. Combine with `|`.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -4574,6 +4600,9 @@ pub struct Set {
     pub(crate) comment: Option<String>,
     /// Tag it as the declarative apply's own (#527).
     pub(crate) owned: bool,
+    pub(crate) policy: Option<SetPolicy>,
+    /// What every element gets (#703).
+    pub(crate) statements: Vec<super::expr::ElementStatement>,
 }
 
 impl Set {
@@ -4591,7 +4620,34 @@ impl Set {
             data_type: None,
             comment: None,
             owned: false,
+            policy: None,
+            statements: Vec::new(),
         }
+    }
+
+    /// `policy memory`: let the kernel pick the set's backend for memory
+    /// rather than lookup speed (#703). Written when the set is created;
+    /// the declarative diff recreates a set whose declared policy changed.
+    pub fn policy(mut self, policy: SetPolicy) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+
+    /// Give every element a `statement` of its own (#703): `set s { …;
+    /// counter; }`, ipset's `counters`. The kernel adds it to each element,
+    /// whether a control-plane add or a [`DynsetExpr`](super::DynsetExpr)
+    /// puts it there, and a lookup that matches the element updates it:
+    /// [`SetElement::counter`] reads what it counted. Written when the set
+    /// is created; the declarative diff recreates a set whose statements
+    /// changed.
+    pub fn statement(mut self, statement: impl Into<super::expr::ElementStatement>) -> Self {
+        self.statements.push(statement.into());
+        self
+    }
+
+    /// A `counter` on every element: [`statement`](Self::statement).
+    pub fn counter(self) -> Self {
+        self.statement(super::expr::ElementStatement::Counter)
     }
 
     /// Give the set a comment, which `nft list` shows (#528). Written when
@@ -4721,11 +4777,16 @@ impl Set {
     /// The flags as written; see [`wire_flags`]. A set with a data type is
     /// a map, whatever its flags say.
     pub(crate) fn wire_flags(&self) -> SetFlags {
-        let flags = wire_flags(&self.key_type, self.flags);
-        match &self.data_type {
-            Some(data) => flags | data.flag(),
-            None => flags,
+        let mut flags = wire_flags(&self.key_type, self.flags);
+        if let Some(data) = &self.data_type {
+            flags |= data.flag();
         }
+        // Several statements are NFTA_SET_EXPRESSIONS, which the kernel
+        // takes only with NFT_SET_EXPR, and keeps.
+        if self.statements.len() > 1 {
+            flags |= SetFlags::EXPR;
+        }
+        flags
     }
 
     /// See [`ranges_per_field`].
@@ -4775,6 +4836,10 @@ pub struct SetElement {
     flags: u32,
     /// Its comment (#528).
     comment: Option<String>,
+    /// Its counter's packets and bytes, as the kernel reports them (#703).
+    counter: Option<(u64, u64)>,
+    /// Its quota's bytes used, as the kernel reports them (#703).
+    quota_used: Option<u64>,
 }
 
 /// What a map element maps its key to.
@@ -4802,6 +4867,8 @@ impl SetElement {
             expiration: None,
             flags: 0,
             comment: None,
+            counter: None,
+            quota_used: None,
         }
     }
 
@@ -4991,6 +5058,20 @@ impl SetElement {
         self.expiration
     }
 
+    /// The packets and bytes the element's own counter has counted, as read
+    /// back from the kernel (#703): a set with a counter on every element
+    /// ([`Set::counter`]), or one a [`DynsetExpr`](super::DynsetExpr) gave
+    /// it.
+    pub fn counter(&self) -> Option<(u64, u64)> {
+        self.counter
+    }
+
+    /// The bytes the element's own quota has used, as read back from the
+    /// kernel (#703).
+    pub fn quota_used(&self) -> Option<u64> {
+        self.quota_used
+    }
+
     /// Whether this is a raw interval-end marker (`NFT_SET_ELEM_INTERVAL_END`),
     /// as an element event reports it.
     pub fn is_interval_end(&self) -> bool {
@@ -5120,6 +5201,19 @@ impl SetElement {
         self
     }
 
+    /// With the live state of its statements, as dumped.
+    pub(crate) fn with_statements(mut self, statements: &[super::expr::RuleExpr]) -> Self {
+        use super::expr::RuleExpr;
+        for statement in statements {
+            match statement {
+                RuleExpr::Counter { packets, bytes } => self.counter = Some((*packets, *bytes)),
+                RuleExpr::Quota { consumed, .. } => self.quota_used = Some(*consumed),
+                _ => {}
+            }
+        }
+        self
+    }
+
     /// With the range end read back (`NFTA_SET_ELEM_KEY_END`). An end equal
     /// to the key is a single key — what `nft` writes for one — so it reads
     /// back as one.
@@ -5171,6 +5265,11 @@ pub struct SetInfo {
     /// Created by nlink's declarative apply: it carries nlink's
     /// ownership tag (#527).
     pub managed: bool,
+    /// Its backend policy (#703).
+    pub policy: SetPolicy,
+    /// The statements every element gets (#703), as their templates dump:
+    /// a counter at zero.
+    pub statements: Vec<super::expr::RuleExpr>,
 }
 
 /// The inclusive range a prefix covers: `addr` with its host bits cleared,
