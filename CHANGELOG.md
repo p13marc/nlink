@@ -833,6 +833,13 @@ All notable changes to this project will be documented in this file.
   `stream_filters_by_index(ifindex, parent)` stream one interface's; the
   old two are deprecated.
 
+- **A route through an encap or on-link nexthop object converges (#769).**
+  The kernel echoes the nexthop object's encap and on-link flag with the
+  route, as it does its gateway and device. The diff compared them as the
+  route's own, so a declared route through an MPLS-encapsulating nexthop
+  never converged. And the read-back kept the encap, so undoing a replace
+  of one sent the encap with the id, which the kernel refuses.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

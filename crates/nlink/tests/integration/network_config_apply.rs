@@ -1610,3 +1610,48 @@ async fn a_route_through_a_nexthop_reads_back_as_one() -> Result<()> {
     })
     .await
 }
+
+/// A nexthop's encap is echoed with the route too (#769): a route through
+/// an MPLS-encapsulating nexthop object never converged, the diff taking
+/// the echoed `encap mpls` for the route's own; and it read back with it,
+/// so the undo of its replace sent the encap with the id, which the
+/// kernel refuses as it refuses a gateway.
+#[tokio::test]
+async fn a_route_through_an_encap_nexthop_reads_back_as_one() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "mpls_router", "mpls_iptunnel");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("nhid-encap")?;
+        let conn = conn_in_ns(&ns)?;
+        let base = || -> Result<NetworkConfig> {
+            Ok(NetworkConfig::new()
+                .link("d0", |l| l.dummy().up())
+                .address("d0", "10.83.0.1/24")?)
+        };
+        let applied = base()?.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        ns.exec("ip", &["nexthop", "add", "id", "7", "encap", "mpls", "100", "via", "10.83.0.2", "dev", "d0"])?;
+        let routes = |ns: &TestNamespace| -> Result<serde_json::Value> {
+            crate::common::converge::ip_json(ns, &["route", "show", "10.84.0.0/16"])
+                .map_err(nlink::Error::invalid_message)
+        };
+        let a = base()?.route("10.84.0.0/16", |r| r.nhid(7))?;
+        let applied = a.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        // The echoed encap is the object's, not a difference.
+        let again = a.diff(&conn).await?;
+        assert!(again.is_empty(), "a route through the nexthop did not converge:\n{again}");
+
+        let b = base()?.route("10.84.0.0/16", |r| r.via("10.83.0.3").dev("d0"))?;
+        let applied = b.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
+        assert!(undone.is_success(), "{undone:?}");
+        assert_eq!(routes(&ns)?[0]["nhid"], 7, "{}", routes(&ns)?);
+        let back = a.diff(&conn).await?;
+        assert!(back.is_empty(), "the undo left:\n{back}");
+        Ok(())
+    })
+    .await
+}

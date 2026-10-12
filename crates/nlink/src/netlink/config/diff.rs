@@ -3174,10 +3174,10 @@ pub(super) fn declared_from_live(
             IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
         }
     });
-    // A route through a nexthop object is dumped with the nexthop's gateway
-    // and device as well (`nexthop_compat_mode`, on by default). Read back
-    // with them, its delete matched no route and its re-add was refused:
-    // a request may not name both (#769).
+    // A route through a nexthop object is dumped with the nexthop's gateway,
+    // device, encap and onlink flag as well (`nexthop_compat_mode`, on by
+    // default). Read back with them, its delete matched no route and its
+    // re-add was refused: a request may not name both (#769).
     let through_object = r.nh_id().is_some();
     Some(DeclaredRoute {
         destination,
@@ -3195,9 +3195,13 @@ pub(super) fn declared_from_live(
         attrs: super::types::RouteAttrs {
             prefsrc: r.prefsrc().copied(),
             scope: Some(r.scope()),
-            onlink: r.is_onlink(),
+            onlink: r.is_onlink() && !through_object,
             nhid: r.nh_id(),
-            mpls_encap: r.mpls_encap_labels().unwrap_or_default().to_vec(),
+            mpls_encap: r
+                .mpls_encap_labels()
+                .filter(|_| !through_object)
+                .unwrap_or_default()
+                .to_vec(),
             multipath: r
                 .multipath()
                 .filter(|_| !through_object)
@@ -3316,9 +3320,12 @@ fn route_matches(
 fn route_attrs_match(declared: &DeclaredRoute, r: &RouteMessage) -> bool {
     let a = &declared.attrs;
     let live = super::types::RouteAttrs::default().with_metrics(r.metrics());
+    // Through a nexthop object, the encap and on-link flag dumped are the
+    // object's, echoed (#769).
+    let own = r.nh_id().is_none();
     a.prefsrc.as_ref() == r.prefsrc()
-        && a.mpls_encap.as_slice() == r.mpls_encap_labels().unwrap_or_default()
-        && a.onlink == r.is_onlink()
+        && (!own || a.mpls_encap.as_slice() == r.mpls_encap_labels().unwrap_or_default())
+        && (!own || a.onlink == r.is_onlink())
         && a.scope.is_none_or(|s| s == r.scope())
         && (a.mtu, a.advmss, a.window) == (live.mtu, live.advmss, live.window)
         && (a.initcwnd, a.initrwnd, a.hoplimit) == (live.initcwnd, live.initrwnd, live.hoplimit)
