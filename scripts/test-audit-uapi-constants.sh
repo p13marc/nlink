@@ -15,6 +15,9 @@
 #   6. invented variant in a UAPI enum -> caught (no such kernel constant)
 #   7. older build host, vouched-for  -> skipped, not failed
 #   8. older build host, UNvouched    -> still caught (the hole stays closed)
+#  14. distro-patched headers, the upstream value listed -> accepted, said so
+#  15. distro-patched headers, NOT listed            -> caught
+#  16. a listed constant whose nlink value drifted   -> caught
 
 set -euo pipefail
 
@@ -349,6 +352,46 @@ restore
 mkdir -p "$WORK_DIR/no-yaml"
 echo 'raise ImportError("simulated: PyYAML is not installed")' > "$WORK_DIR/no-yaml/yaml.py"
 PYTHONPATH="$WORK_DIR/no-yaml" expect_fail "#167 a missing PyYAML fails the audit" "PyYAML is not installed"
+
+# 14. Distro-patched headers. Ubuntu 24.04's linux-libc-dev 6.8.0 backports
+#     per-CPU SAs without the two attributes upstream numbered before them, so
+#     its XFRMA_SA_PCPU is 33 where upstream's is 35: the failure that took
+#     down #795's audit job. Deleting those two enumerators from a copy makes
+#     either kind of host look like that one.
+DISTRO_HEADERS="$WORK_DIR/distro-headers"
+cp -r /usr/include/linux "$DISTRO_HEADERS"
+for const in 'XFRMA_SA_DIR,' 'XFRMA_NAT_KEEPALIVE_INTERVAL,'; do
+    sed -i "/${const}/d" "$DISTRO_HEADERS/xfrm.h"
+done
+if output="$(NLINK_UAPI_HEADER_DIR="$DISTRO_HEADERS" run_audit)" && grep -qF "XFRMA_SA_PCPU: these headers say 33, upstream 35" <<<"$output"; then
+    echo "  ok   distro headers: nlink's upstream value is accepted, and said so"
+else
+    echo "  FAIL distro headers: the listed upstream value was not accepted, or not reported"
+    sed 's/^/       /' <<<"$output"
+    FAILURES=$((FAILURES + 1))
+fi
+
+# 15. ...for the constant listed, and no other: unlisted, it is a mismatch.
+grep -v '^XFRMA_SA_PCPU' "$WORK_DIR/scripts/audit-uapi-constants.distro" \
+    > "$WORK_DIR/scripts/.distro.tmp"
+mv "$WORK_DIR/scripts/.distro.tmp" "$WORK_DIR/scripts/audit-uapi-constants.distro"
+if output="$(NLINK_UAPI_HEADER_DIR="$DISTRO_HEADERS" run_audit)"; then
+    echo "  FAIL distro headers: an unlisted disagreement was waved through"
+    FAILURES=$((FAILURES + 1))
+elif grep -qF "XFRMA_SA_PCPU = 35, but XFRMA_SA_PCPU = 33" <<<"$output"; then
+    echo "  ok   distro headers: an unlisted disagreement still fails"
+else
+    echo "  FAIL distro headers: failed, but not about XFRMA_SA_PCPU"
+    FAILURES=$((FAILURES + 1))
+fi
+restore
+
+# 16. The list excuses the headers, never nlink: a drifted nlink value fails
+#     against distro headers and upstream ones alike.
+sed -i 's/^const XFRMA_SA_PCPU: u16 = 35;/const XFRMA_SA_PCPU: u16 = 36;/' \
+    "$WORK_DIR/crates/nlink/src/netlink/xfrm.rs"
+NLINK_UAPI_HEADER_DIR="$DISTRO_HEADERS" expect_fail "distro headers: a drifted nlink value is caught" "XFRMA_SA_PCPU = 36"
+restore
 
 echo
 if ((FAILURES > 0)); then
