@@ -3225,6 +3225,27 @@ impl Rule {
         self.push_dynset(super::expr::DynsetOp::Delete, field, set, None)
     }
 
+    /// `<op> @<set> { <field> [timeout T] [statements] }`: the general form
+    /// of [`add_to_set`](Self::add_to_set), [`update_in_set`](Self::update_in_set)
+    /// and [`delete_from_set`](Self::delete_from_set), for a `dynset` with
+    /// per-element statements (#703). Loads `field` and sets the dynset's
+    /// key register to it.
+    ///
+    /// ```no_run
+    /// # use nlink::netlink::nftables::{DynsetExpr, DynsetOp, LimitExpr};
+    /// # use nlink::netlink::nftables::types::{LimitUnit, PacketField, Register, Rule};
+    /// // update @flood { ip saddr limit rate over 10/second } drop
+    /// let flood = DynsetExpr::new(DynsetOp::Update, "flood", Register::R0)
+    ///     .statement(LimitExpr::packets(10, LimitUnit::Second).over());
+    /// let rule = Rule::new("filter", "input").dynset(PacketField::Ip4Saddr, flood).drop();
+    /// ```
+    pub fn dynset(mut self, field: PacketField, mut dynset: super::expr::DynsetExpr) -> Self {
+        self.push_field_load(field);
+        dynset.sreg_key = Register::R0;
+        self.exprs.push(dynset.into());
+        self
+    }
+
     fn push_dynset(
         mut self,
         op: super::expr::DynsetOp,

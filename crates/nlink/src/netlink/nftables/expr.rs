@@ -452,6 +452,14 @@ impl DynsetOp {
 /// for an element timeout. The rule continues when the update succeeds,
 /// and stops when it cannot (the set is full) — or the other way round
 /// with [`invert`](Self::invert).
+///
+/// Per-element [`statement`](Self::statement)s give each element its own
+/// state: `add @seen { ip saddr counter }` counts per address, and `update
+/// @flood { ip saddr limit rate over 10/second }` continues only for an
+/// address over its own rate (#703). They must be stateful — counter,
+/// limit, quota, connlimit — and the set dynamic. A set that declares its
+/// own element statements gives them to every element instead; then give
+/// the dynset none, or the same ones, which the kernel does not echo.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DynsetExpr {
@@ -468,6 +476,8 @@ pub struct DynsetExpr {
     /// Match when the update fails rather than when it succeeds
     /// (`NFT_DYNSET_F_INV`).
     pub invert: bool,
+    /// Per-element statements, each element its own (#703).
+    pub statements: Vec<ElementStatement>,
 }
 
 impl DynsetExpr {
@@ -480,7 +490,21 @@ impl DynsetExpr {
             sreg_data: None,
             timeout: None,
             invert: false,
+            statements: Vec::new(),
         }
+    }
+
+    /// Give each element its own `statement`, evaluated on every packet
+    /// that adds or updates it. A limit or quota stops the rule as it would
+    /// on its own.
+    pub fn statement(mut self, statement: impl Into<ElementStatement>) -> Self {
+        self.statements.push(statement.into());
+        self
+    }
+
+    /// A per-element `counter`.
+    pub fn counter(self) -> Self {
+        self.statement(ElementStatement::Counter)
     }
 
     /// Give the element this timeout instead of the set's default. The set
@@ -507,6 +531,53 @@ impl DynsetExpr {
 impl From<DynsetExpr> for Expr {
     fn from(e: DynsetExpr) -> Self {
         Expr::Dynset(e)
+    }
+}
+
+/// A statement a set element carries of its own (#703), from a
+/// [`DynsetExpr`] that adds it: the stateful expressions
+/// `nft_set_elem_expr_alloc` accepts.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ElementStatement {
+    /// `counter`: the element's packets and bytes.
+    Counter,
+    /// `limit rate …`: the element's own rate.
+    Limit(LimitExpr),
+    /// `quota …`: the element's own byte budget.
+    Quota(QuotaExpr),
+    /// `ct count [over] N`: the element's own connection count.
+    Connlimit {
+        /// Connections.
+        count: u32,
+        /// Match over `count` instead of up to it.
+        over: bool,
+    },
+}
+
+impl From<LimitExpr> for ElementStatement {
+    fn from(limit: LimitExpr) -> Self {
+        Self::Limit(limit)
+    }
+}
+
+impl From<QuotaExpr> for ElementStatement {
+    fn from(quota: QuotaExpr) -> Self {
+        Self::Quota(quota)
+    }
+}
+
+impl From<ElementStatement> for Expr {
+    fn from(statement: ElementStatement) -> Self {
+        match statement {
+            ElementStatement::Counter => Expr::Counter,
+            ElementStatement::Limit(limit) => Expr::Limit(limit),
+            ElementStatement::Quota(quota) => Expr::Quota(quota),
+            ElementStatement::Connlimit { count, over } => Expr::Connlimit { count, over },
+        }
     }
 }
 
@@ -1035,7 +1106,13 @@ pub(crate) fn write_expressions_as(builder: &mut MessageBuilder, exprs: &[Expr],
 /// Write a single expression as a nested NFTA_LIST_ELEM.
 fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
     let elem = builder.nest_start(NFTA_LIST_ELEM | 0x8000);
+    write_expr_body(builder, expr, form);
+    builder.nest_end(elem);
+}
 
+/// An expression's `NFTA_EXPR_NAME` and `NFTA_EXPR_DATA`, in the nest that
+/// holds it: a list element, or a dynset's `NFTA_DYNSET_EXPR`.
+fn write_expr_body(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
     match expr {
         Expr::Meta { dreg, key } => {
             builder.append_attr_str(NFTA_EXPR_NAME, "meta");
@@ -1545,6 +1622,7 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             sreg_data,
             timeout,
             invert,
+            statements,
         }) => {
             builder.append_attr_str(NFTA_EXPR_NAME, "dynset");
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
@@ -1561,7 +1639,28 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
                 (None, WireForm::Echo) => builder.append_attr_u64_be(NFTA_DYNSET_TIMEOUT, 0),
                 (None, WireForm::Request) => {}
             }
-            let flags = if *invert { NFT_DYNSET_F_INV } else { 0 };
+            let mut flags = if *invert { NFT_DYNSET_F_INV } else { 0 };
+            // One statement in NFTA_DYNSET_EXPR, several in
+            // NFTA_DYNSET_EXPRESSIONS, which the kernel takes only with
+            // NFT_DYNSET_F_EXPR — and never dumps.
+            match statements.as_slice() {
+                [] => {}
+                [one] => {
+                    let nest = builder.nest_start(NFTA_DYNSET_EXPR | 0x8000);
+                    write_expr_body(builder, &one.clone().into(), form);
+                    builder.nest_end(nest);
+                }
+                several => {
+                    let nest = builder.nest_start(NFTA_DYNSET_EXPRESSIONS | 0x8000);
+                    for statement in several {
+                        write_expr(builder, &statement.clone().into(), form);
+                    }
+                    builder.nest_end(nest);
+                    if form == WireForm::Request {
+                        flags |= NFT_DYNSET_F_EXPR;
+                    }
+                }
+            }
             builder.append_attr_u32_be(NFTA_DYNSET_FLAGS, flags);
             builder.nest_end(data);
         }
@@ -1614,8 +1713,6 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             builder.nest_end(data);
         }
     }
-
-    builder.nest_end(elem);
 }
 
 /// The attributes of a packet `limit`, as an expression or a limit object.
@@ -1975,9 +2072,9 @@ pub enum RuleExpr {
     /// `objref` — a named object, or an object map's pick. One naming an
     /// object type nlink does not model decodes as [`Unknown`](Self::Unknown).
     Objref(ObjrefExpr),
-    /// `dynset` — `add|update|delete @set { <key> [timeout T] }`. A dynset
-    /// carrying per-element expressions (`NFTA_DYNSET_EXPR`) or unknown
-    /// flags decodes as [`Unknown`](Self::Unknown).
+    /// `dynset` — `add|update|delete @set { <key> [timeout T]
+    /// [statements] }`. A dynset with unknown flags, or a statement that
+    /// does not decode, decodes as [`Unknown`](Self::Unknown).
     #[non_exhaustive]
     Dynset {
         /// Set name.
@@ -1992,6 +2089,9 @@ pub enum RuleExpr {
         timeout: Option<std::time::Duration>,
         /// `NFT_DYNSET_F_INV`.
         invert: bool,
+        /// Per-element statements (#703). Dumped only when the set
+        /// declares none of its own.
+        statements: Vec<RuleExpr>,
     },
     /// `ct` load of one direction's tuple.
     #[non_exhaustive]
@@ -2175,25 +2275,25 @@ pub enum RuleExpr {
 /// malformed elements (no `NFTA_EXPR_NAME`) are skipped. One odd
 /// expression from a future kernel must not fail a rule dump.
 pub fn parse_expressions(bytes: &[u8]) -> Vec<RuleExpr> {
-    let mut exprs = Vec::new();
-    for (kind, elem) in AttrIter::new(bytes) {
-        if kind != NFTA_LIST_ELEM {
-            continue;
+    AttrIter::new(bytes)
+        .filter(|(kind, _)| *kind == NFTA_LIST_ELEM)
+        .filter_map(|(_, elem)| parse_elem(elem))
+        .collect()
+}
+
+/// One expression from its `NFTA_EXPR_NAME` and `NFTA_EXPR_DATA`; `None`
+/// for a nameless one, which the kernel never emits.
+fn parse_elem(elem: &[u8]) -> Option<RuleExpr> {
+    let mut name: Option<&str> = None;
+    let mut data: &[u8] = &[];
+    for (attr, payload) in AttrIter::new(elem) {
+        match attr {
+            NFTA_EXPR_NAME => name = get::string(payload).ok(),
+            NFTA_EXPR_DATA => data = payload,
+            _ => {}
         }
-        let mut name: Option<&str> = None;
-        let mut data: &[u8] = &[];
-        for (attr, payload) in AttrIter::new(elem) {
-            match attr {
-                NFTA_EXPR_NAME => name = get::string(payload).ok(),
-                NFTA_EXPR_DATA => data = payload,
-                _ => {}
-            }
-        }
-        // The kernel never emits a nameless expression; skip defensively.
-        let Some(name) = name else { continue };
-        exprs.push(parse_expr(name, data));
     }
-    exprs
+    Some(parse_expr(name?, data))
 }
 
 /// Decode one expression; anything undecodable demotes to `Unknown`.
@@ -2852,6 +2952,7 @@ fn parse_dynset(data: &[u8]) -> Option<RuleExpr> {
     let mut sreg_data = None;
     let mut timeout = None;
     let mut invert = false;
+    let mut statements = Vec::new();
     for (attr, payload) in AttrIter::new(data) {
         match attr {
             NFTA_DYNSET_SET_NAME => set = get::string(payload).ok().map(str::to_string),
@@ -2864,15 +2965,22 @@ fn parse_dynset(data: &[u8]) -> Option<RuleExpr> {
                 let ms = get::u64_be(payload).ok()?;
                 timeout = (ms != 0).then(|| std::time::Duration::from_millis(ms));
             }
-            NFTA_DYNSET_FLAGS => match get::u32_be(payload).ok()? {
-                0 => {}
-                NFT_DYNSET_F_INV => invert = true,
-                _ => return None,
-            },
-            // Per-element expressions are not modelled: never half-decode.
-            NFTA_DYNSET_EXPR | NFTA_DYNSET_EXPRESSIONS => return None,
+            NFTA_DYNSET_FLAGS => {
+                let flags = get::u32_be(payload).ok()?;
+                if flags & !(NFT_DYNSET_F_INV | NFT_DYNSET_F_EXPR) != 0 {
+                    return None;
+                }
+                invert = flags & NFT_DYNSET_F_INV != 0;
+            }
+            NFTA_DYNSET_EXPR => statements.push(parse_elem(payload)?),
+            NFTA_DYNSET_EXPRESSIONS => statements.extend(parse_expressions(payload)),
             _ => {}
         }
+    }
+    // Never half-decode: a statement nlink cannot read keeps the whole
+    // dynset raw.
+    if statements.iter().any(|s| matches!(s, RuleExpr::Unknown { .. })) {
+        return None;
     }
     Some(RuleExpr::Dynset {
         set: set?,
@@ -2881,6 +2989,7 @@ fn parse_dynset(data: &[u8]) -> Option<RuleExpr> {
         sreg_data,
         timeout,
         invert,
+        statements,
     })
 }
 
@@ -3870,6 +3979,48 @@ mod decode_tests {
             RuleExpr::Dynset { op: DynsetOp::Update, timeout: Some(t), .. }
                 if *t == std::time::Duration::from_millis(1500)
         ));
+    }
+
+    /// One per-element statement goes in NFTA_DYNSET_EXPR, several in
+    /// NFTA_DYNSET_EXPRESSIONS with NFT_DYNSET_F_EXPR, a flag the kernel
+    /// requires and never dumps (#703). Both decode typed; a statement that
+    /// does not keeps the whole dynset raw.
+    #[test]
+    fn dynset_statements_go_as_the_kernel_takes_them_and_decode() {
+        let one = DynsetExpr::new(DynsetOp::Add, "seen", Register::R0).counter();
+        let limit = LimitExpr::packets(10, LimitUnit::Second).over();
+        let several = DynsetExpr::new(DynsetOp::Update, "flood", Register::R0)
+            .counter()
+            .statement(limit.clone());
+
+        let attrs = data_attrs_as(&[one.clone().into()], WireForm::Request);
+        assert!(attrs.contains_key(&NFTA_DYNSET_EXPR));
+        assert!(!attrs.contains_key(&NFTA_DYNSET_EXPRESSIONS));
+        assert_eq!(attrs[&NFTA_DYNSET_FLAGS], 0u32.to_be_bytes());
+        let request = data_attrs_as(&[several.clone().into()], WireForm::Request);
+        assert!(request.contains_key(&NFTA_DYNSET_EXPRESSIONS));
+        assert_eq!(request[&NFTA_DYNSET_FLAGS], NFT_DYNSET_F_EXPR.to_be_bytes());
+        let echo = data_attrs_as(&[several.clone().into()], WireForm::Echo);
+        assert_eq!(echo[&NFTA_DYNSET_FLAGS], 0u32.to_be_bytes());
+
+        let statements = |e: &RuleExpr| match e {
+            RuleExpr::Dynset { statements, .. } => statements.clone(),
+            other => panic!("not a dynset: {other:?}"),
+        };
+        let counter = RuleExpr::Counter { packets: 0, bytes: 0 };
+        let decoded = parse_expressions(&encode(&[one.into(), several.into()]));
+        assert_eq!(statements(&decoded[0]), std::slice::from_ref(&counter));
+        assert_eq!(statements(&decoded[1]), [counter, RuleExpr::Limit(limit)]);
+
+        let mut b = MessageBuilder::new(0, 0);
+        b.append_attr_str(NFTA_DYNSET_SET_NAME, "seen");
+        b.append_attr_u32_be(NFTA_DYNSET_OP, 0);
+        b.append_attr_u32_be(NFTA_DYNSET_SREG_KEY, 1);
+        let odd = b.nest_start(NFTA_DYNSET_EXPR | 0x8000);
+        b.append_attr_str(NFTA_EXPR_NAME, "future");
+        b.nest_end(odd);
+        let decoded = parse_expressions(&build_elem("dynset", &b.as_bytes()[16..]));
+        assert!(matches!(&decoded[0], RuleExpr::Unknown { name, .. } if name == "dynset"));
     }
 
     #[test]

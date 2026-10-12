@@ -659,16 +659,20 @@ pub const NFTA_DYNSET_SREG_DATA: u16 = 5;
 /// dumped, 0 when the expression has none; refused (`EOPNOTSUPP`) in a
 /// request for a set without `NFT_SET_TIMEOUT`.
 pub const NFTA_DYNSET_TIMEOUT: u16 = 6;
-/// `NFTA_DYNSET_EXPR` — one per-element expression (not modelled).
+/// `NFTA_DYNSET_EXPR` — one per-element statement, dumped only when the
+/// set declares none of its own.
 pub const NFTA_DYNSET_EXPR: u16 = 7;
 /// `NFTA_DYNSET_FLAGS` — always dumped.
 pub const NFTA_DYNSET_FLAGS: u16 = 9;
-/// `NFTA_DYNSET_EXPRESSIONS` — several per-element expressions (not
-/// modelled).
+/// `NFTA_DYNSET_EXPRESSIONS` — several per-element statements, a list of
+/// `NFTA_LIST_ELEM`; taken only with [`NFT_DYNSET_F_EXPR`].
 pub const NFTA_DYNSET_EXPRESSIONS: u16 = 10;
 /// `NFT_DYNSET_F_INV` — the rule matches when the update *fails* (a full
 /// set), instead of when it succeeds.
 pub const NFT_DYNSET_F_INV: u32 = 1;
+/// `NFT_DYNSET_F_EXPR` — the request carries `NFTA_DYNSET_EXPRESSIONS`.
+/// Never dumped.
+pub const NFT_DYNSET_F_EXPR: u32 = 2;
 
 // Set flags
 pub const NFT_SET_ANONYMOUS: u32 = 0x1;
