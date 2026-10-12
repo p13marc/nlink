@@ -180,6 +180,7 @@ PayloadCsum = NFT_PAYLOAD_CSUM
 NumgenKind = NFT_NG
     Incremental -> INCREMENTAL
 HashKind = NFT_HASH
+SocketKey = NFT_SOCKET
 
 # -------------------------------------------------------------------- ethtool
 EthtoolCmd = ETHTOOL_MSG

@@ -2757,6 +2757,17 @@ All notable changes to this project will be documented in this file.
   as `RuleExpr::Numgen` and `RuleExpr::Hash`. `NumgenKind` and `HashKind` are
   new.
 
+- **`tproxy`, `socket` and `synproxy` (#703).**
+  - `Rule::tproxy(family, addr, port)` hands a packet to a local transparent
+    socket.
+  - `Rule::match_socket(SocketMatch)` matches `socket transparent`,
+    `wildcard` or `mark`.
+  - `SynproxyExpr` answers a SYN with a cookie (mss, wscale, timestamp,
+    sack-perm).
+
+  Each is written as nft writes it, and decoded: `RuleExpr::Tproxy`,
+  `RuleExpr::Socket`, `RuleExpr::Synproxy`. `SocketKey` is new.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

@@ -1109,6 +1109,18 @@ impl PayloadCsum {
     }
 }
 
+/// What [`Rule::match_socket`] compares (#703).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SocketMatch {
+    /// `socket transparent 0|1`.
+    Transparent(bool),
+    /// `socket wildcard 0|1`.
+    Wildcard(bool),
+    /// `socket mark <mark>`.
+    Mark(u32),
+}
+
 /// A value a rule computes into its first register (#703): a `numgen`,
 /// a `jhash` of packet fields or a `symhash`. See [`Rule::generate`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2309,6 +2321,69 @@ impl Rule {
 
     /// Push `meta <key> == <value>` (a 1-byte metadata load + Eq compare
     /// in `R0`) — the shared shape of the nfproto/l4proto matcher guards.
+    /// Hand the packet to a local socket (#703): `tproxy [ip|ip6] to
+    /// [<addr>][:<port>]`. The socket is the one listening at `addr`
+    /// (or the packet's destination) and `port` (or the packet's), and
+    /// must have `IP_TRANSPARENT`; the packet keeps its destination.
+    /// `family` is the table's address family — `Ip`, `Ip6`, or `Inet` for
+    /// either (then without an address); an address must be of it.
+    pub fn tproxy(mut self, family: Family, addr: Option<std::net::IpAddr>, port: Option<u16>) -> Self {
+        let nfproto = match (family, addr) {
+            (Family::Ip, None | Some(std::net::IpAddr::V4(_))) => NFPROTO_IPV4,
+            (Family::Ip6, None | Some(std::net::IpAddr::V6(_))) => NFPROTO_IPV6,
+            (Family::Inet, None) => 0,
+            (Family::Inet, Some(std::net::IpAddr::V4(_))) => NFPROTO_IPV4,
+            (Family::Inet, Some(std::net::IpAddr::V6(_))) => NFPROTO_IPV6,
+            (family, addr) => {
+                self.error.get_or_insert(format!(
+                    "tproxy: {addr:?} in a {family:?} table (an address of the table's family, \
+                     in an ip, ip6 or inet table)"
+                ));
+                return self;
+            }
+        };
+        let mut next = [Register::R0, Register::R1].into_iter();
+        let mut load = |data: Vec<u8>| {
+            let r = next.next().expect("two at most");
+            self.exprs.push(Expr::Immediate { dreg: r, data });
+            r
+        };
+        let sreg_addr = addr.map(|a| {
+            load(match a {
+                std::net::IpAddr::V4(a) => a.octets().to_vec(),
+                std::net::IpAddr::V6(a) => a.octets().to_vec(),
+            })
+        });
+        let sreg_port = port.map(|p| load(p.to_be_bytes().to_vec()));
+        self.exprs.push(Expr::Tproxy {
+            family: nfproto,
+            sreg_addr,
+            sreg_port,
+        });
+        self
+    }
+
+    /// Match the packet's local socket (#703): `socket transparent 1`,
+    /// `socket wildcard 0`, `socket mark 7`. A packet with no local
+    /// socket does not match.
+    pub fn match_socket(mut self, m: SocketMatch) -> Self {
+        let (key, data) = match m {
+            SocketMatch::Transparent(on) => (super::expr::SocketKey::Transparent, vec![u8::from(on)]),
+            SocketMatch::Wildcard(on) => (super::expr::SocketKey::Wildcard, vec![u8::from(on)]),
+            SocketMatch::Mark(mark) => (super::expr::SocketKey::Mark, mark.to_ne_bytes().to_vec()),
+        };
+        self.exprs.push(Expr::Socket {
+            dreg: Register::R0,
+            key,
+        });
+        self.exprs.push(Expr::Cmp {
+            sreg: Register::R0,
+            op: CmpOp::Eq,
+            data,
+        });
+        self
+    }
+
     /// Compute a value into the first register (#703) — a `numgen`, a
     /// `jhash` of fields, a `symhash` — for the statement after it to
     /// use: [`set_meta_from`](Self::set_meta_from),

@@ -1687,3 +1687,114 @@ async fn numgen_and_hash_marks_packets() -> nlink::Result<()> {
     assert_eq!(count(4).await?, 3, "jhash mod 1 offset 7 is 7");
     Ok(())
 }
+
+/// #703: `tproxy`, `socket` and `synproxy` as nft writes them: nft
+/// installs each in one chain, nlink in another, and `nft` lists them
+/// alike.
+#[tokio::test]
+async fn tproxy_socket_and_synproxy_read_and_write_as_nft_does() -> nlink::Result<()> {
+    use nlink::netlink::nftables::{SocketMatch, SynproxyExpr};
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "nft_tproxy", "nft_socket", "nft_synproxy");
+
+    let ns = TestNamespace::new("nft-tps")?;
+    let script = "table ip t {
+        chain a { type filter hook prerouting priority -150;
+            tcp dport 80 tproxy to 10.0.0.1:8080
+            tcp dport 81 tproxy to :8081
+            socket transparent 1 meta mark set 1
+            socket wildcard 0 accept
+            socket mark 7 accept
+        }
+        chain b { type filter hook prerouting priority -150; }
+        chain sa { type filter hook input priority 0;
+            synproxy mss 1460 wscale 7 timestamp sack-perm
+            synproxy mss 1400
+        }
+        chain sb { type filter hook input priority 0; }
+    }
+    table inet i {
+        chain a { type filter hook prerouting priority -150;
+            tcp dport 82 tproxy ip to 10.0.0.1:8082
+        }
+        chain b { type filter hook prerouting priority -150; }
+    }";
+    let file = std::env::temp_dir().join(format!("nlink-tps-{}.nft", std::process::id()));
+    std::fs::write(&file, script).map_err(nlink::Error::from)?;
+    let installed = ns.exec("nft", &["-f", file.to_str().unwrap()]);
+    let _ = std::fs::remove_file(&file);
+    installed?;
+
+    let nft = ns.connection_for::<Nftables>()?;
+    let ten = Some(Ipv4Addr::new(10, 0, 0, 1).into());
+    let r = |table: &str, chain: &str, family| Rule::new(table, chain).family(family);
+    for rule in [
+        r("t", "b", Family::Ip).match_tcp_dport(80).tproxy(Family::Ip, ten, Some(8080)),
+        r("t", "b", Family::Ip).match_tcp_dport(81).tproxy(Family::Ip, None, Some(8081)),
+        r("t", "b", Family::Ip).match_socket(SocketMatch::Transparent(true)).set_mark(1),
+        r("t", "b", Family::Ip).match_socket(SocketMatch::Wildcard(false)).accept(),
+        r("t", "b", Family::Ip).match_socket(SocketMatch::Mark(7)).accept(),
+        r("t", "sb", Family::Ip).expr(SynproxyExpr::new().mss(1460).wscale(7).timestamp().sack_perm()),
+        r("t", "sb", Family::Ip).expr(SynproxyExpr::new().mss(1400)),
+        r("i", "b", Family::Inet).match_tcp_dport(82).tproxy(Family::Inet, ten, Some(8082)),
+    ] {
+        nft.add_rule(rule).await?;
+    }
+    for (family, table, ours, theirs) in [("ip", "t", "b", "a"), ("ip", "t", "sb", "sa"), ("inet", "i", "b", "a")] {
+        assert_eq!(
+            listed_rules(&ns, family, table, ours)?,
+            listed_rules(&ns, family, table, theirs)?,
+            "{family} {table}: nlink's {ours}, nft's {theirs}"
+        );
+    }
+    Ok(())
+}
+
+/// #703: `tproxy` hands a datagram to a transparent socket on another
+/// port: one sent to `b`'s port 7980 arrives at its `IP_TRANSPARENT`
+/// socket on 7981, which nothing else would deliver it to.
+#[tokio::test]
+async fn tproxy_hands_the_datagram_to_a_transparent_socket() -> nlink::Result<()> {
+    use std::net::{SocketAddr, UdpSocket};
+    use std::os::fd::AsRawFd;
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "nft_tproxy", "veth");
+
+    let pair = crate::common::topo::NsPair::new("nfttp", 94).await?;
+    let b = NftablesConfig::new().table("t", Family::Ip, |t| {
+        t.chain("pre", |c| c.hook(Hook::Prerouting).priority(Priority::Mangle).chain_type(ChainType::Filter))
+            .rule_keyed("pre", "tproxy", |r| r.match_udp_dport(7980).tproxy(Family::Ip, None, Some(7981)))
+    });
+    let nft = pair.b.connection_for::<Nftables>()?;
+    b.diff(&nft).await?.apply(&nft).await?;
+    assert!(b.diff(&nft).await?.is_empty(), "the declared tproxy does not converge");
+
+    let socket = crate::common::traffic::in_ns(&pair.b, || -> std::io::Result<UdpSocket> {
+        let s = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 7981))?;
+        let on: libc::c_int = 1;
+        // SAFETY: a valid fd and a c_int option of its size.
+        let rc = unsafe {
+            libc::setsockopt(
+                s.as_raw_fd(),
+                libc::SOL_IP,
+                libc::IP_TRANSPARENT,
+                (&on as *const libc::c_int).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(s)
+    })
+    .map_err(nlink::Error::from)?;
+    socket.set_read_timeout(Some(Duration::from_millis(500))).map_err(nlink::Error::from)?;
+    send_udp(&pair.a, &[SocketAddr::from((pair.b_addr, 7980))], 3);
+    let mut got = 0;
+    let mut buf = [0u8; 64];
+    while socket.recv_from(&mut buf).is_ok() {
+        got += 1;
+    }
+    assert_eq!(got, 3, "sent to 7980, delivered to the transparent socket on 7981");
+    Ok(())
+}
