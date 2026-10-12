@@ -50,7 +50,7 @@ pub use connection::{RawMessage, Transaction};
 pub use events::{GenInfo, NftablesEvent, NftablesGroup, SetElementsEvent, NFNLGRP_NFTABLES};
 pub use resync::{nftables_snapshot, BorrowedResyncStream, OwnedResyncStream};
 pub use expr::*;
-pub use object::{Object, ObjectConfig, ObjectInfo, ObjectState, ObjectType};
+pub use object::{CtHelperObject, Object, ObjectConfig, ObjectInfo, ObjectState, ObjectType};
 pub use types::*;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
@@ -479,6 +479,14 @@ pub const NFTA_HASH_SEED: u16 = 5;
 pub const NFTA_HASH_OFFSET: u16 = 6;
 /// `NFTA_HASH_TYPE` — `enum nft_hash_types`.
 pub const NFTA_HASH_TYPE: u16 = 7;
+
+// Ct helper object — `enum nft_ct_helper_attributes`.
+/// `NFTA_CT_HELPER_NAME` — the conntrack helper (`ftp`, `tftp`, …).
+pub const NFTA_CT_HELPER_NAME: u16 = 1;
+/// `NFTA_CT_HELPER_L3PROTO` — `NFPROTO_*` (be16).
+pub const NFTA_CT_HELPER_L3PROTO: u16 = 2;
+/// `NFTA_CT_HELPER_L4PROTO` — `IPPROTO_*` (u8).
+pub const NFTA_CT_HELPER_L4PROTO: u16 = 3;
 
 // Tproxy — `enum nft_tproxy_attributes`.
 /// `NFTA_TPROXY_FAMILY` — `NFPROTO_IPV4`, `NFPROTO_IPV6`, or 0 in an inet

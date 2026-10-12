@@ -2465,7 +2465,7 @@ fn append_object(builder: &mut MessageBuilder, object: &Object) -> Result<()> {
         object.config.object_type(),
         object.family,
     );
-    super::object::append_object_data(builder, &object.config);
+    super::object::append_object_data(builder, &object.config, object.family);
     append_userdata(builder, NFTA_OBJ_USERDATA, NFTNL_UDATA_COMMENT, object.comment.as_deref(), object.owned)
 }
 
