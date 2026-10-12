@@ -819,6 +819,12 @@ All notable changes to this project will be documented in this file.
   `lo`'s stats, empty, whatever the device. It is a single-device request
   now, as #754 made the other getters.
 
+- **A unix filter's inode picks out that socket (#776).**
+  `SocketFilter::unix().inode(n)` put the inode in the dump request,
+  which `unix_diag_dump` never reads; only the exact, non-dump lookup does.
+  So the filter returned every unix socket. The replies are now checked
+  against it, as the type and path already were (#223).
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

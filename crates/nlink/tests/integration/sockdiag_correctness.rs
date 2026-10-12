@@ -245,3 +245,39 @@ async fn an_mptcp_query_does_not_return_plain_tcp_sockets() -> nlink::Result<()>
     drop(listener);
     Ok(())
 }
+
+/// A unix filter's inode picks out that socket (#776). The dump's
+/// `udiag_ino` is the kernel's for an exact lookup (`unix_diag_get_exact`,
+/// which also needs the cookie); `unix_diag_dump` ignores it, and nothing
+/// checked the replies, so `.inode(n)` returned every unix socket.
+#[tokio::test]
+async fn the_unix_inode_filter_actually_filters() -> nlink::Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixListener;
+
+    let dir = std::env::temp_dir().join(format!("nlink-unix-ino-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let a = UnixListener::bind(dir.join("a")).expect("bind a");
+    let _b = UnixListener::bind(dir.join("b")).expect("bind b");
+    // A socket's inode is the one its fd links to: `socket:[N]`.
+    let link = std::fs::read_link(format!("/proc/self/fd/{}", a.as_raw_fd())).expect("fd link");
+    let inode: u32 = link
+        .to_string_lossy()
+        .trim_start_matches("socket:[")
+        .trim_end_matches(']')
+        .parse()
+        .expect("socket inode");
+
+    let conn = Connection::<SockDiag>::new()?;
+    let found = conn.query(&SocketFilter::unix().inode(inode).build()).await?;
+    let inodes: Vec<u32> = found
+        .iter()
+        .filter_map(|s| match s {
+            SocketInfo::Unix(u) => Some(u.inode),
+            _ => None,
+        })
+        .collect();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(inodes, [inode], "{} sockets came back", found.len());
+    Ok(())
+}
