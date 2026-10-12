@@ -12,12 +12,10 @@
 //!   to/from `Ipv4Addr` / `SocketAddrV4`.
 //! - **IPv6** is `Option<Vec<u8>>` (16 bytes). Same rationale.
 //! - **Counters** (vpn-rx-bytes, link-tx-packets, …) are typed as
-//!   `u64`. The YAML spec uses kernel `uint` (variable-width
-//!   unsigned), but in practice the kernel emits these always as
-//!   8-byte payloads on the `peer-get`/`peer-dump` path. The
-//!   `parse_u64_attr` helper accepts ≥ 8 bytes and ignores
-//!   trailing bytes (per CLAUDE.md `## Parser robustness` rule 1),
-//!   so future kernel widening stays compatible.
+//!   `u64`. The YAML spec has them as `uint`, which the kernel writes
+//!   with `nla_put_uint`: 4 bytes while the value fits in 32 bits, 8
+//!   after. `parse_u64_attr` reads both (#763; it took only the 8-byte
+//!   form, so a peer's small counters failed to decode).
 
 use super::types::{
     OvpnAttr, OvpnCipherAlg, OvpnCmd, OvpnDelPeerReason, OvpnKeySlot, OvpnKeyconfAttr,
