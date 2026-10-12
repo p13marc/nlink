@@ -319,6 +319,10 @@ mod tc_tree;
 #[path = "integration/stack_plan.rs"]
 mod stack_plan;
 
+// The netdev GENL family: features, queues, NAPI, queue statistics (#166).
+#[path = "integration/genl_netdev.rs"]
+mod genl_netdev;
+
 // The helpers in `common/` checked against themselves, including where
 // each must fail: a helper that cannot fail turns every test built on it
 // into a pass.

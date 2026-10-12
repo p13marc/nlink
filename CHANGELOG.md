@@ -2889,6 +2889,20 @@ All notable changes to this project will be documented in this file.
   it; it used to set a `VRF` environment variable and bind nothing. `vrf
   identify` and `vrf pids` read cgroup v2.
 
+
+- **The `netdev` Generic Netlink family (#166).** `Connection<Netdev>`
+  (`genl::netdev`) reads per-device facts rtnetlink does not carry:
+  - a device's XDP features, XDP receive metadata and AF_XDP flags
+    (`get_netdev`, `dump_netdevs`, typed `XdpFeatures`);
+  - its RX and TX queues and the NAPI instance serving each (`get_queue`,
+    `dump_queues`);
+  - its NAPI instances, their interrupts and kthreads (`get_napi`,
+    `dump_napis`);
+  - the standard queue statistics, per device or per queue (`dump_qstats`).
+
+  The commands and attribute sets are audited against `linux/netdev.h` and
+  the vendored YNL spec.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

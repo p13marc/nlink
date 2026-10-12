@@ -54,6 +54,7 @@ pub mod hwsim;
 pub mod macsec;
 pub mod mptcp;
 pub mod net_shaper;
+pub mod netdev;
 pub mod nl80211;
 pub mod ovpn;
 pub mod wireguard;
