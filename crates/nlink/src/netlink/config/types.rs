@@ -1275,6 +1275,14 @@ impl NetworkConfig {
         self
     }
 
+    /// Whether it declares an ingress or clsact qdisc on `dev`, the hook a
+    /// tree's redirect hangs off.
+    pub(crate) fn declares_ingress_hook(&self, dev: &str) -> bool {
+        self.qdiscs
+            .iter()
+            .any(|q| q.dev == dev && q.effective_parent() == QdiscParent::Ingress)
+    }
+
     /// Declare `dev`'s TC tree (#514): HTB, HFSC, DRR or QFQ classes, the
     /// leaf qdisc in a class, and filters with their actions. See
     /// [`TcBuilder`](super::TcBuilder) for what it declares; the device's

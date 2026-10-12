@@ -75,6 +75,7 @@ use std::net::IpAddr;
 
 use super::{
     Connection,
+    config::NetworkConfig,
     error::{Error, Result},
     filter::FlowerFilter,
     interface_ref::InterfaceRef,
@@ -314,6 +315,67 @@ impl PerPeerImpairer {
     }
 
     // ---- apply / clear ----
+
+    /// This impairer as a declaration (#645): what [`apply`](Self::apply)
+    /// installs on the device — the HTB root, `1:1`, a class, netem leaf
+    /// and flower filter per rule, and the default class with its netem —
+    /// added to `config`, with the same handles and priorities, so either
+    /// way of installing it diffs empty against the other. A declaration
+    /// names its device, so an impairer made with
+    /// [`new_by_index`](Self::new_by_index) is refused.
+    pub fn declare(&self, config: NetworkConfig) -> Result<NetworkConfig> {
+        let InterfaceRef::Name(dev) = &self.target else {
+            return Err(Error::invalid_message(
+                "PerPeerImpairer: a declaration names its device; this one has an ifindex",
+            ));
+        };
+        let link_rate = self.assumed_link_rate;
+        let parent = TcHandle::new(1, 1);
+        let total_rate = self.total_rate();
+        Ok(config
+            .qdisc(dev, |q| q.htb().default_class(u32::from(DEFAULT_CLASS_MINOR)))
+            .tc(dev, |mut t| {
+                t = t.class(
+                    TcHandle::major_only(1),
+                    parent,
+                    HtbClassConfig::new(total_rate).ceil(total_rate).build(),
+                );
+                for (i, rule) in self.rules.iter().enumerate() {
+                    let classid = TcHandle::new(1, (i + 2) as u16);
+                    let rate = rule.impairment.rate_cap.unwrap_or(link_rate);
+                    let priority = filter_priority(i);
+                    t = t
+                        .class(parent, classid, HtbClassConfig::new(rate).ceil(rate).build())
+                        .leaf(
+                            classid,
+                            TcHandle::major_only((i + 10) as u16),
+                            rule.impairment.netem.clone(),
+                        )
+                        .filter(
+                            TcHandle::major_only(1),
+                            priority,
+                            protocol_for(&rule.match_),
+                            build_flower(classid, priority, &rule.match_),
+                        );
+                }
+                let default = TcHandle::new(1, DEFAULT_CLASS_MINOR);
+                let rate = self
+                    .default_impairment
+                    .as_ref()
+                    .and_then(|d| d.rate_cap)
+                    .unwrap_or(link_rate);
+                t = t.class(parent, default, HtbClassConfig::new(rate).ceil(rate).build());
+                match &self.default_impairment {
+                    Some(d) => t.leaf(default, TcHandle::major_only(DEFAULT_LEAF_MAJOR), d.netem.clone()),
+                    None => t,
+                }
+            }))
+    }
+
+    /// [`declare`](Self::declare) into an empty config.
+    pub fn to_config(&self) -> Result<NetworkConfig> {
+        self.declare(NetworkConfig::new())
+    }
 
     /// Apply the impairment, replacing any existing root qdisc on the device.
     #[tracing::instrument(level = "info", skip_all, fields(target = ?self.target, rules = self.rules.len()))]
