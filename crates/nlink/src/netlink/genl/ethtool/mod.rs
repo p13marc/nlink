@@ -542,6 +542,33 @@ pub enum EthtoolTsinfoAttr {
     Stats = 6,
 }
 
+/// Attributes of one PHY on a link (`ETHTOOL_MSG_PHY_GET`, kernel 6.12,
+/// #166).
+#[repr(u16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EthtoolPhyAttr {
+    Unspec = 0,
+    /// Request header (nested).
+    Header = 1,
+    /// The PHY's index on its link (u32), which PHY-specific requests name
+    /// it by.
+    Index = 2,
+    /// Its driver's name (string).
+    Drvname = 3,
+    /// Its device name (string).
+    Name = 4,
+    /// What it is attached to (u32, `enum phy_upstream`): the MAC (0) or
+    /// another PHY (1).
+    UpstreamType = 5,
+    /// The index of the PHY it is attached to, when that is a PHY (u32).
+    UpstreamIndex = 6,
+    /// The SFP bus it sits behind, on an SFP module (string).
+    UpstreamSfpName = 7,
+    /// The SFP cage it drives (string).
+    DownstreamSfpName = 8,
+}
+
 /// Attributes for channel counts.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -528,6 +528,24 @@ async fn ethtool_reads_a_devices_timestamping() -> nlink::Result<()> {
     Ok(())
 }
 
+/// #166: PHY_GET answers for the named link, and a veth, being virtual,
+/// has no PHY: the list is empty, not an error, whether asked for the link
+/// or for the whole namespace.
+#[tokio::test]
+async fn ethtool_lists_a_links_phys() -> nlink::Result<()> {
+    use nlink::netlink::{Connection, Ethtool, link::VethLink};
+    require_root!();
+    nlink::require_module!("veth");
+
+    let ns = TestNamespace::new("ns-phys")?;
+    let conn = ns.connection()?;
+    conn.add_link(VethLink::new("ve0", "ve1")).await?;
+    let ethtool: Connection<Ethtool> = nlink::Connection::new_in_async(ns.name()).await?;
+    assert_eq!(ethtool.get_phys("ve0").await?, Vec::new());
+    assert_eq!(ethtool.dump_phys().await?, Vec::new());
+    Ok(())
+}
+
 /// `Diagnostics::watch()` subscribed on a new connection in the process's
 /// namespace, so `Diagnostics::new(lab_conn).watch()` watched the host. And
 /// it named a removed address's interface through the host's sysfs.

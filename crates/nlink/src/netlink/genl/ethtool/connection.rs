@@ -9,7 +9,8 @@ use super::{
     EthtoolFecAttr, EthtoolHeaderAttr, EthtoolLinkinfoAttr, EthtoolLinkmodesAttr,
     EthtoolLinkstateAttr, EthtoolModuleEepromAttr, EthtoolPauseAttr, EthtoolRingsAttr,
     EthtoolRssAttr, EthtoolStatsAttr, EthtoolStatsGrpAttr, EthtoolStringAttr,
-    EthtoolStringSet, EthtoolStringsetAttr, EthtoolStrsetAttr, EthtoolTsinfoAttr, EthtoolWolAttr,
+    EthtoolPhyAttr, EthtoolStringSet, EthtoolStringsetAttr, EthtoolStrsetAttr, EthtoolTsinfoAttr,
+    EthtoolWolAttr,
     WOL_MODE_NAMES,
     bitset::EthtoolBitset,
     stats_group, types::*,
@@ -20,10 +21,11 @@ use crate::{
         attr::{AttrIter, NLA_F_NESTED},
         builder::MessageBuilder,
         connection::Connection,
+        dump_frame::{Classification, classify},
         error::{Error, Result},
         genl::{GENL_HDRLEN, GenlMsgHdr},
         interface_ref::InterfaceRef,
-        message::{MessageIter, NLM_F_ACK, NLM_F_REQUEST, NlMsgError},
+        message::{MessageIter, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NlMsgError},
         protocol::{AsyncProtocolInit, Ethtool},
         socket::NetlinkSocket,
     },
@@ -803,6 +805,66 @@ impl Connection<Ethtool> {
             }
         }
         Ok(info)
+    }
+
+    /// The PHYs on a link (`ethtool --show-phys`, kernel 6.12, #166): the
+    /// one on the board, a media converter in front of it, one on an SFP
+    /// module. A virtual device has none. Accepts an interface name or
+    /// index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_phys"))]
+    pub async fn get_phys(&self, iface: impl Into<InterfaceRef>) -> Result<Vec<PhyInfo>> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        let replies = self.ethtool_dump(EthtoolCmd::PhyGet, Some(&ifname)).await?;
+        Ok(replies.iter().filter_map(|r| r.get(GENL_HDRLEN..)).map(phy_from_reply).collect())
+    }
+
+    /// Every PHY on every link in the connection's namespace (#166).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "dump_phys"))]
+    pub async fn dump_phys(&self) -> Result<Vec<PhyInfo>> {
+        let replies = self.ethtool_dump(EthtoolCmd::PhyGet, None).await?;
+        Ok(replies.iter().filter_map(|r| r.get(GENL_HDRLEN..)).map(phy_from_reply).collect())
+    }
+
+    /// An ethtool dump, of one device's objects when `ifname` is given: the
+    /// commands with a dump handler of their own (PHY_GET) honour the
+    /// device a dump names, unlike the default handler, which answers for
+    /// every device (#754, #773). Each reply's payload, GENL header first.
+    async fn ethtool_dump(&self, cmd: EthtoolCmd, ifname: Option<&str>) -> Result<Vec<Vec<u8>>> {
+        let mut builder = MessageBuilder::new(self.state().family_id, NLM_F_REQUEST | NLM_F_DUMP);
+        builder.append(&GenlMsgHdr::new(cmd as u8, ETHTOOL_GENL_VERSION));
+        if let Some(ifname) = ifname {
+            let header = builder.nest_start(1 | NLA_F_NESTED); // ETHTOOL_A_*_HEADER = 1
+            builder.append_attr_str(EthtoolHeaderAttr::DevName as u16, ifname);
+            builder.nest_end(header);
+        }
+        let seq = self.socket().next_seq();
+        builder.set_seq(seq);
+        builder.set_pid(self.socket().pid());
+
+        // #134 — dual-mode recv (dump). Register/lock before send.
+        let mut session = self.recv_session_dump(seq).await?;
+        let msg = builder.finish();
+        self.socket().send(&msg).await?;
+
+        self.with_timeout(async {
+            let mut replies = Vec::new();
+            loop {
+                let data: Vec<u8> = session.recv_with_timeout(self).await?;
+                for msg_result in MessageIter::new(&data) {
+                    let (header, payload) = msg_result?;
+                    match classify(header, payload, seq) {
+                        Classification::SkipSeq | Classification::Ack => continue,
+                        Classification::Error(e) => return Err(e),
+                        Classification::Done(result) => {
+                            result?;
+                            return Ok(replies);
+                        }
+                        Classification::Data { payload } => replies.push(payload.to_vec()),
+                    }
+                }
+            }
+        })
+        .await
     }
 
     fn parse_rings(&self, data: &[u8], rings: &mut Rings) -> Result<()> {
@@ -2101,6 +2163,100 @@ fn parse_one_stat(data: &[u8]) -> Option<(u32, u64)> {
         }
     }
     None
+}
+
+/// A PHY_GET reply's attributes, after its GENL header, as a [`PhyInfo`].
+fn phy_from_reply(data: &[u8]) -> PhyInfo {
+    let text = |p: &[u8]| std::str::from_utf8(p).unwrap_or("").trim_end_matches('\0').to_string();
+    let u32_of = |p: &[u8]| p.get(..4).map(|b| u32::from_ne_bytes(b.try_into().unwrap()));
+    let mut phy = PhyInfo::default();
+    let mut upstream_type = None;
+    let mut upstream_index = None;
+    for (attr_type, payload) in AttrIter::new(data) {
+        match attr_type & !NLA_F_NESTED {
+            t if t == EthtoolPhyAttr::Header as u16 => {
+                for (t, p) in AttrIter::new(payload) {
+                    match t {
+                        t if t == EthtoolHeaderAttr::DevIndex as u16 => phy.ifindex = u32_of(p),
+                        t if t == EthtoolHeaderAttr::DevName as u16 => phy.ifname = Some(text(p)),
+                        _ => {}
+                    }
+                }
+            }
+            t if t == EthtoolPhyAttr::Index as u16 => phy.index = u32_of(payload).unwrap_or(0),
+            t if t == EthtoolPhyAttr::Drvname as u16 => phy.driver = Some(text(payload)),
+            t if t == EthtoolPhyAttr::Name as u16 => phy.name = Some(text(payload)),
+            t if t == EthtoolPhyAttr::UpstreamType as u16 => upstream_type = u32_of(payload),
+            t if t == EthtoolPhyAttr::UpstreamIndex as u16 => upstream_index = u32_of(payload),
+            t if t == EthtoolPhyAttr::UpstreamSfpName as u16 => phy.upstream_sfp = Some(text(payload)),
+            t if t == EthtoolPhyAttr::DownstreamSfpName as u16 => {
+                phy.downstream_sfp = Some(text(payload))
+            }
+            _ => {}
+        }
+    }
+    // `PHY_UPSTREAM_MAC`, `PHY_UPSTREAM_PHY`.
+    phy.upstream = upstream_type.map(|t| match t {
+        0 => PhyUpstream::Mac,
+        1 => PhyUpstream::Phy {
+            index: upstream_index.unwrap_or(0),
+        },
+        other => PhyUpstream::Other(other),
+    });
+    phy
+}
+
+#[cfg(test)]
+mod phy_tests {
+    use super::*;
+    use crate::netlink::builder::MessageBuilder;
+
+    /// A media converter's PHY on an SFP module, as the kernel's
+    /// `phy_fill_reply` writes it.
+    #[test]
+    fn a_phy_reply_reads_back() {
+        let mut b = MessageBuilder::new(0, 0);
+        let header = b.nest_start(EthtoolPhyAttr::Header as u16 | NLA_F_NESTED);
+        b.append_attr_u32(EthtoolHeaderAttr::DevIndex as u16, 7);
+        b.append_attr_str(EthtoolHeaderAttr::DevName as u16, "eth0");
+        b.nest_end(header);
+        b.append_attr_u32(EthtoolPhyAttr::Index as u16, 2);
+        b.append_attr_str(EthtoolPhyAttr::Drvname as u16, "Marvell 88X3310");
+        b.append_attr_str(EthtoolPhyAttr::Name as u16, "sfp-eth0:00");
+        b.append_attr_u32(EthtoolPhyAttr::UpstreamType as u16, 1);
+        b.append_attr_u32(EthtoolPhyAttr::UpstreamIndex as u16, 1);
+        b.append_attr_str(EthtoolPhyAttr::UpstreamSfpName as u16, "sfp-eth0");
+        let phy = phy_from_reply(&b.as_bytes()[16..]);
+        assert_eq!(
+            phy,
+            PhyInfo {
+                ifname: Some("eth0".into()),
+                ifindex: Some(7),
+                index: 2,
+                driver: Some("Marvell 88X3310".into()),
+                name: Some("sfp-eth0:00".into()),
+                upstream: Some(PhyUpstream::Phy { index: 1 }),
+                upstream_sfp: Some("sfp-eth0".into()),
+                downstream_sfp: None,
+            }
+        );
+    }
+
+    /// The PHY on the board, attached to the MAC; an upstream kind newer
+    /// than nlink keeps its number.
+    #[test]
+    fn a_phy_on_the_mac_and_an_unknown_upstream() {
+        let mut b = MessageBuilder::new(0, 0);
+        b.append_attr_u32(EthtoolPhyAttr::Index as u16, 1);
+        b.append_attr_u32(EthtoolPhyAttr::UpstreamType as u16, 0);
+        b.append_attr_str(EthtoolPhyAttr::DownstreamSfpName as u16, "sfp-eth1");
+        let phy = phy_from_reply(&b.as_bytes()[16..]);
+        assert_eq!(phy.upstream, Some(PhyUpstream::Mac));
+        assert_eq!(phy.downstream_sfp.as_deref(), Some("sfp-eth1"));
+        let mut b = MessageBuilder::new(0, 0);
+        b.append_attr_u32(EthtoolPhyAttr::UpstreamType as u16, 9);
+        assert_eq!(phy_from_reply(&b.as_bytes()[16..]).upstream, Some(PhyUpstream::Other(9)));
+    }
 }
 
 #[cfg(test)]

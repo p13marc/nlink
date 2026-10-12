@@ -3003,6 +3003,15 @@ All notable changes to this project will be documented in this file.
   as on a recreate, and so does a MAC the kernel picked at random for a
   bridge with no ports.
 
+- **A link's PHYs (#166).** `Connection<Ethtool>::get_phys` lists the
+  PHYs on a link (`ETHTOOL_MSG_PHY_GET`, kernel 6.12, `ethtool
+  --show-phys`), and `dump_phys` the PHYs on every link: the one on the
+  board, a media converter in front of it, one on an SFP module. Each
+  `PhyInfo` has its index on the link (which PHY-specific requests name
+  it by), its driver and device names, what it is attached to (the MAC,
+  or another PHY), and the SFP bus or cage it sits behind or drives. A
+  virtual device has none.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
