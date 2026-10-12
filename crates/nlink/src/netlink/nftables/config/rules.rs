@@ -35,7 +35,10 @@ pub(crate) fn effective_rules(rules: &[DeclaredRule]) -> Vec<DeclaredRule> {
             if rule.handle_key.is_some() {
                 return rule.clone();
             }
-            let body = canonical_body(&super::diff::lower_to_expression_bytes(&rule.body));
+            let body = canonical_body(
+                &super::diff::lower_to_expression_bytes(&rule.body),
+                rule.body.family,
+            );
             let base = derived_key(&rule.chain, &body, rule.body.comment.as_deref());
             let n = seen.entry((rule.chain.clone(), base.clone())).or_insert(0);
             let key = if *n == 0 {
@@ -54,8 +57,105 @@ pub(crate) fn effective_rules(rules: &[DeclaredRule]) -> Vec<DeclaredRule> {
 /// A rule body as the diff compares it: the expression list normalized by
 /// its schema, with the live state the kernel echoes (counter values, quota
 /// consumption, a dynset timeout's jiffies) zeroed.
-pub(crate) fn canonical_body(bytes: &[u8]) -> Vec<u8> {
-    canonicalize_for_compare(super::diff::normalize_expressions(bytes))
+pub(crate) fn canonical_body(
+    bytes: &[u8],
+    family: crate::netlink::nftables::Family,
+) -> Vec<u8> {
+    let normalized = super::diff::normalize_expressions(bytes);
+    canonicalize_for_compare(drop_redundant_guards(normalized, family))
+}
+
+/// The expression list without the protocol guards a rule says twice, or
+/// that its family implies — what [`guards_for_family`] no longer writes.
+/// A rule an older nlink installed with them is the rule declared without
+/// them, and is not replaced on upgrade (#708).
+///
+/// [`guards_for_family`]: crate::netlink::nftables::expr::guards_for_family
+fn drop_redundant_guards(bytes: Vec<u8>, family: crate::netlink::nftables::Family) -> Vec<u8> {
+    use crate::netlink::nftables::expr::guard_implied;
+    use crate::netlink::nftables::{
+        MetaKey, NFTA_CMP_DATA, NFTA_CMP_OP, NFTA_CMP_SREG, NFTA_DATA_VALUE, NFTA_EXPR_DATA,
+        NFTA_EXPR_NAME, NFTA_LIST_ELEM, NFTA_META_DREG, NFTA_META_KEY,
+    };
+    // One list element: its whole TLV span, its name and its data's
+    // attributes.
+    struct Elem<'a> {
+        span: std::ops::Range<usize>,
+        name: &'a [u8],
+        attrs: Vec<(u16, &'a [u8])>,
+    }
+    let elems: Vec<Elem> = tlvs(&bytes, 0, bytes.len())
+        .into_iter()
+        .filter(|(ty, _, _)| *ty == NFTA_LIST_ELEM)
+        .map(|(_, at, len)| {
+            let mut name: &[u8] = &[];
+            let mut attrs = Vec::new();
+            for (ty, a, l) in tlvs(&bytes, at, len) {
+                match ty {
+                    NFTA_EXPR_NAME => name = bytes[a..a + l].strip_suffix(b"\0").unwrap_or(&bytes[a..a + l]),
+                    NFTA_EXPR_DATA => {
+                        attrs = tlvs(&bytes, a, l)
+                            .into_iter()
+                            .map(|(t, a, l)| (t, &bytes[a..a + l]))
+                            .collect();
+                    }
+                    _ => {}
+                }
+            }
+            Elem {
+                span: at - 4..(at + len).next_multiple_of(4).min(bytes.len()),
+                name,
+                attrs,
+            }
+        })
+        .collect();
+    fn attr<'a>(e: &Elem<'a>, id: u16) -> Option<&'a [u8]> {
+        e.attrs.iter().find(|(t, _)| *t == id).map(|(_, v)| *v)
+    }
+    let u32_of = |v: &[u8]| <[u8; 4]>::try_from(v).ok().map(u32::from_be_bytes);
+    let guard = |load: &Elem, cmp: &Elem| -> Option<(MetaKey, u8)> {
+        if load.name != b"meta" || cmp.name != b"cmp" {
+            return None;
+        }
+        let key = match u32_of(attr(load, NFTA_META_KEY)?)? {
+            k if k == MetaKey::NfProto as u32 => MetaKey::NfProto,
+            k if k == MetaKey::L4Proto as u32 => MetaKey::L4Proto,
+            _ => return None,
+        };
+        let same_reg = attr(load, NFTA_META_DREG)? == attr(cmp, NFTA_CMP_SREG)?;
+        let eq = u32_of(attr(cmp, NFTA_CMP_OP)?)? == 0;
+        let data = attr(cmp, NFTA_CMP_DATA)?;
+        let value = tlvs(data, 0, data.len())
+            .into_iter()
+            .find(|(t, _, _)| *t == NFTA_DATA_VALUE)
+            .map(|(_, a, l)| &data[a..a + l])?;
+        (same_reg && eq && value.len() == 1).then_some((key, value[0]))
+    };
+    let mut seen: Vec<(MetaKey, u8)> = Vec::new();
+    let mut drop = vec![false; elems.len()];
+    let mut i = 0;
+    while i + 1 < elems.len() {
+        if let Some((key, value)) = guard(&elems[i], &elems[i + 1]) {
+            if seen.contains(&(key, value)) || guard_implied(family, key, value) {
+                drop[i] = true;
+                drop[i + 1] = true;
+            }
+            seen.push((key, value));
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    if !drop.contains(&true) {
+        return bytes;
+    }
+    let mut out = Vec::with_capacity(bytes.len());
+    for (e, dropped) in elems.iter().zip(&drop) {
+        if !dropped {
+            out.extend_from_slice(&bytes[e.span.clone()]);
+        }
+    }
+    out
 }
 
 /// The key of a rule declared without one: `~` + the FNV-1a-64 of its
@@ -88,7 +188,7 @@ pub(crate) fn rekey_derived(rules: Vec<RuleInfo>) -> Vec<RuleInfo> {
                 .and_then(crate::netlink::nftables::userdata::human_comment_of);
             let base = derived_key(
                 &rule.chain,
-                &canonical_body(&rule.expression_bytes),
+                &canonical_body(&rule.expression_bytes, rule.family),
                 comment.as_deref(),
             );
             let n = seen.entry((rule.chain.clone(), base.clone())).or_insert(0);
@@ -546,6 +646,42 @@ fn longest_increasing(seq: &[usize]) -> HashSet<usize> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A rule an older nlink installed with redundant guards is, to the
+    /// diff, the rule written without them (#708); one with a guard its
+    /// family needs is not.
+    #[test]
+    fn redundant_guards_do_not_count() {
+        use crate::netlink::nftables::Family;
+        use crate::netlink::nftables::expr::{Expr, write_expressions};
+        use crate::netlink::nftables::types::{CmpOp, MetaKey, Register, Rule};
+        let bytes = |exprs: &[Expr]| {
+            let mut b = crate::netlink::builder::MessageBuilder::new(0, 0);
+            write_expressions(&mut b, exprs);
+            b.as_bytes()[20..].to_vec()
+        };
+        let guard = |key, value: u8| {
+            [
+                Expr::Meta { dreg: Register::R0, key },
+                Expr::Cmp { sreg: Register::R0, op: CmpOp::Eq, data: vec![value] },
+            ]
+        };
+        let lowered = Rule::new("t", "c").match_tcp_dport(22).match_tcp_sport(1);
+        let lowered = crate::netlink::nftables::expr::exprs_for_family(&lowered.exprs, Family::Ip);
+        let mut old: Vec<Expr> = guard(MetaKey::NfProto, 2).to_vec();
+        old.extend(Rule::new("t", "c").match_tcp_dport(22).match_tcp_sport(1).exprs);
+        assert_eq!(
+            canonical_body(&bytes(&old), Family::Ip),
+            canonical_body(&bytes(&lowered), Family::Ip),
+            "an implied nfproto guard and a repeated l4proto one"
+        );
+        // In inet the nfproto guard is the rule's.
+        assert_ne!(
+            canonical_body(&bytes(&old), Family::Inet),
+            canonical_body(&bytes(&lowered), Family::Inet)
+        );
+    }
+
     use super::*;
 
     /// Each chain the kernel would refuse, or read as another chain, and

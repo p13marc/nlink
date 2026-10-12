@@ -1150,7 +1150,85 @@ pub(crate) enum WireForm {
     Echo,
 }
 
-/// `exprs` as they must be sent in a `family` table (#480).
+/// `exprs` as they must be sent in a `family` table: protocol guards as
+/// the family needs them ([`guards_for_family`], #708), and rejects as it
+/// takes them (#480).
+pub(crate) fn exprs_for_family(exprs: &[Expr], family: Family) -> std::borrow::Cow<'_, [Expr]> {
+    match guards_for_family(exprs, family) {
+        std::borrow::Cow::Borrowed(exprs) => rejects_for_family(exprs, family),
+        std::borrow::Cow::Owned(exprs) => {
+            std::borrow::Cow::Owned(rejects_for_family(&exprs, family).into_owned())
+        }
+    }
+}
+
+/// The protocol guard a pair of expressions is: a `meta nfproto` or `meta
+/// l4proto` load and an equality with one byte, the shape the builders
+/// put in front of an address or a port.
+fn guard_at(exprs: &[Expr], i: usize) -> Option<(Register, MetaKey, u8)> {
+    match (exprs.get(i)?, exprs.get(i + 1)?) {
+        (
+            Expr::Meta { dreg, key: key @ (MetaKey::NfProto | MetaKey::L4Proto) },
+            Expr::Cmp { sreg, op: CmpOp::Eq, data },
+        ) if sreg == dreg && data.len() == 1 => Some((*dreg, *key, data[0])),
+        _ => None,
+    }
+}
+
+/// Whether a guard is always true in a `family` table: `meta nfproto
+/// ipv4` in an ip table, `ipv6` in an ip6 one.
+pub(crate) fn guard_implied(family: Family, key: MetaKey, value: u8) -> bool {
+    key == MetaKey::NfProto
+        && matches!((family, value), (Family::Ip, NFPROTO_IPV4) | (Family::Ip6, NFPROTO_IPV6))
+}
+
+/// `exprs` with their protocol guards as nft writes them in a `family`
+/// table (#708). The builders put a guard in front of every field, in every
+/// family; nft writes each once, and only where the family needs it:
+///
+/// - a guard already given earlier in the rule is dropped — `tcp dport 22`
+///   then a `clamp mss` guarded `meta l4proto tcp` three times;
+/// - `meta nfproto ipv4` is dropped in an ip table, `ipv6` in an ip6 one,
+///   where it is always true (and nft 1.0.6 cannot list a hash or dynset
+///   key behind it);
+/// - in a bridge or netdev table `meta nfproto` is the family's own, so a
+///   guard on it never matched: it is `meta protocol`, the ethertype, as
+///   nft writes it.
+pub(crate) fn guards_for_family(exprs: &[Expr], family: Family) -> std::borrow::Cow<'_, [Expr]> {
+    let mut seen: Vec<(MetaKey, u8)> = Vec::new();
+    let mut out: Option<Vec<Expr>> = None;
+    let mut i = 0;
+    while i < exprs.len() {
+        if let Some((reg, key, value)) = guard_at(exprs, i) {
+            let repeated = seen.contains(&(key, value));
+            seen.push((key, value));
+            let ethertype: Option<[u8; 2]> = match (family, key, value) {
+                (Family::Bridge | Family::Netdev, MetaKey::NfProto, NFPROTO_IPV4) => Some([0x08, 0x00]),
+                (Family::Bridge | Family::Netdev, MetaKey::NfProto, NFPROTO_IPV6) => Some([0x86, 0xdd]),
+                _ => None,
+            };
+            if repeated || guard_implied(family, key, value) || ethertype.is_some() {
+                let out = out.get_or_insert_with(|| exprs[..i].to_vec());
+                if let (Some(ethertype), false) = (ethertype, repeated) {
+                    out.push(Expr::Meta { dreg: reg, key: MetaKey::Protocol });
+                    out.push(Expr::Cmp { sreg: reg, op: CmpOp::Eq, data: ethertype.to_vec() });
+                }
+                i += 2;
+                continue;
+            }
+        }
+        if let Some(out) = out.as_mut() {
+            out.push(exprs[i].clone());
+        }
+        i += 1;
+    }
+    match out {
+        Some(out) => std::borrow::Cow::Owned(out),
+        None => std::borrow::Cow::Borrowed(exprs),
+    }
+}
+
+/// `exprs` with their rejects as a `family` table takes them (#480).
 ///
 /// `nft_reject_ipv4_eval` / `nft_reject_ipv6_eval` handle only
 /// `NFT_REJECT_ICMP_UNREACH` and `NFT_REJECT_TCP_RST`; an ICMPX reject falls
@@ -1161,7 +1239,7 @@ pub(crate) enum WireForm {
 /// `nft_reject_icmpv6_code` map it to, which is what the kernel echoes and
 /// what `nft` writes. Every other expression, and every other family, is
 /// passed through.
-pub(crate) fn exprs_for_family(exprs: &[Expr], family: Family) -> std::borrow::Cow<'_, [Expr]> {
+fn rejects_for_family(exprs: &[Expr], family: Family) -> std::borrow::Cow<'_, [Expr]> {
     // [no route, port, host, admin prohibited]
     const V4: [u8; 4] = [0, 3, 1, 13];
     const V6: [u8; 4] = [0, 4, 3, 1];

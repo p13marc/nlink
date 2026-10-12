@@ -6005,6 +6005,50 @@ mod tests {
         );
     }
 
+    /// What the guards of a rule become in each family (#708): said once,
+    /// dropped where the family implies them, an ethertype in bridge and
+    /// netdev tables.
+    #[test]
+    fn guards_are_written_as_the_family_needs_them() {
+        use super::super::expr::exprs_for_family;
+        let v4: Ipv4Addr = "10.0.0.1".parse().unwrap();
+        let rule = Rule::new("f", "c")
+            .match_saddr_v4(v4, 32)
+            .match_daddr_v4(v4, 32)
+            .match_tcp_dport(22)
+            .match_tcp_sport(1);
+        let guards = |family| -> Vec<(MetaKey, Vec<u8>)> {
+            let exprs = exprs_for_family(&rule.exprs, family);
+            exprs
+                .windows(2)
+                .filter_map(|w| match (&w[0], &w[1]) {
+                    (Expr::Meta { key, .. }, Expr::Cmp { data, .. })
+                        if matches!(key, MetaKey::NfProto | MetaKey::L4Proto | MetaKey::Protocol) =>
+                    {
+                        Some((*key, data.clone()))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            guards(Family::Inet),
+            [(MetaKey::NfProto, vec![NFPROTO_IPV4]), (MetaKey::L4Proto, vec![IPPROTO_TCP])]
+        );
+        assert_eq!(guards(Family::Ip), [(MetaKey::L4Proto, vec![IPPROTO_TCP])]);
+        for family in [Family::Bridge, Family::Netdev] {
+            assert_eq!(
+                guards(family),
+                [(MetaKey::Protocol, vec![0x08, 0x00]), (MetaKey::L4Proto, vec![IPPROTO_TCP])]
+            );
+        }
+        // An ip6 field in an ip table keeps its guard: the rule can never
+        // match, and says so.
+        let v6 = Rule::new("f", "c").match_saddr_v6("2001:db8::1".parse().unwrap(), 64);
+        let lowered = exprs_for_family(&v6.exprs, Family::Ip);
+        assert!(matches!(lowered.first(), Some(Expr::Meta { key: MetaKey::NfProto, .. })));
+    }
+
     #[test]
     fn prefix_to_mask_boundaries() {
         // v4 widths

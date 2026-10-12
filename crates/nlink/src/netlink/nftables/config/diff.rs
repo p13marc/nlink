@@ -1255,8 +1255,8 @@ fn object_change(declared: &ObjectConfig, current: Option<ObjectConfig>) -> Obje
 /// follows `nlink:<key> ` — must match too.
 fn rule_matches(declared: &DeclaredRule, kernel: &RuleInfo) -> bool {
     let canon = super::rules::canonical_body;
-    let declared_body = canon(&lower_to_expression_bytes(&declared.body));
-    let kernel_body = canon(&kernel.expression_bytes);
+    let declared_body = canon(&lower_to_expression_bytes(&declared.body), declared.body.family);
+    let kernel_body = canon(&kernel.expression_bytes, kernel.family);
     if declared_body != kernel_body {
         tracing::trace!(
             table = %declared.table(),

@@ -767,6 +767,22 @@ All notable changes to this project will be documented in this file.
   feature set's set bits without a value flag, and nlink read each of them as
   off.
 
+
+- **An address match in a bridge or netdev table matches (#708).** nlink put
+  a `meta nfproto ipv4`/`ipv6` guard in front of every address field. In a
+  bridge or netdev table `meta nfproto` is the table's own family, so such a
+  rule never matched anything, silently. The guard is now `meta protocol`,
+  the ethertype, as nft writes it.
+
+
+- **Protocol guards as nft writes them (#708).** A rule's `meta nfproto` and
+  `meta l4proto` guards are written once each: `tcp dport 22` with a `clamp
+  mss` used to say `meta l4proto tcp` three times. `nfproto` is left out
+  where an ip or ip6 table implies it; nft 1.0.6 could not list a hash input
+  or dynset key behind one. The declarative diff drops the same redundant
+  guards before comparing, so rules an older nlink installed with them still
+  diff empty.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
