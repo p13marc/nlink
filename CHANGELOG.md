@@ -2871,6 +2871,18 @@ All notable changes to this project will be documented in this file.
   and a changed set recreates the chain. `DeclaredChain::devices()` is new.
   It used to replace the device: see the migration guide.
 
+
+- **`ip vrf exec` (#257).** `NetnsCommand::vrf(name)` runs a process with
+  every inet socket it opens bound to the VRF, as `ip vrf exec` does: a
+  `BPF_PROG_TYPE_CGROUP_SOCK` program that sets the socket's `bound_dev_if` to
+  the VRF's ifindex is attached to the process's cgroup at
+  `BPF_CGROUP_INET_SOCK_CREATE`. The cgroup is the one given with `cgroup()`,
+  or `vrf/<netns inode>/<name>` under the caller's own: iproute2 uses
+  `vrf/<name>`, and the namespace keeps two VRFs called `red` apart.
+  `namespace::vrf_cgroup(name)` finds it again. `nlink-ip vrf exec` is built on
+  it; it used to set a `VRF` environment variable and bind nothing. `vrf
+  identify` and `vrf pids` read cgroup v2.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

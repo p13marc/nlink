@@ -59,10 +59,12 @@ use super::{
 };
 
 mod command;
+mod vrf_exec;
 mod netns;
 
 pub use netns::{Netns, NetnsId, NetnsRef, NetnsTarget, Sysctl};
 pub use command::{NetnsCommand, Overlay, etc_overlay_supported};
+pub use vrf_exec::vrf_cgroup;
 
 /// Specification for which network namespace to use.
 ///
