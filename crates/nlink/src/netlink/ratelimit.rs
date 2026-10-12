@@ -62,6 +62,7 @@ use std::{
 
 use super::{
     Connection,
+    config::NetworkConfig,
     error::{Error, Result},
     eth_proto::EthProto,
     link::IfbLink,
@@ -231,6 +232,51 @@ impl RateLimiter {
             ingress.latency = Some(latency);
         }
         self
+    }
+
+    /// This limiter as a declaration (#645): what [`apply`](Self::apply)
+    /// installs, added to `config`, so it is diffed and applied with the
+    /// rest of the config instead of beside it. A limiter installed
+    /// imperatively diffs empty against it, and one applied from it is
+    /// already what [`reconcile`](Self::reconcile) converges to.
+    ///
+    /// Egress is an HTB root on the device with its classes and fq_codel
+    /// leaf. Ingress is this limiter's IFB (named and tagged as `apply`
+    /// does), the same tree on it, and the redirect on the device's hook:
+    /// the clsact or ingress qdisc `config` declares there, or an ingress
+    /// qdisc otherwise. What `config` already declares on the device's root
+    /// or tree is merged with it, and a conflict fails its validation.
+    ///
+    /// ```
+    /// use nlink::Rate;
+    /// use nlink::netlink::{config::NetworkConfig, ratelimit::RateLimiter};
+    ///
+    /// let config = RateLimiter::new("eth0")
+    ///     .egress(Rate::mbit(100))
+    ///     .ingress(Rate::mbit(50))
+    ///     .declare(NetworkConfig::new().link("eth0", |l| l.up()));
+    /// config.validate()?;
+    /// # Ok::<(), nlink::Error>(())
+    /// ```
+    pub fn declare(&self, mut config: NetworkConfig) -> NetworkConfig {
+        if let Some(egress) = &self.egress {
+            config = declare_limit(config, &self.dev, egress);
+        }
+        if let Some(ingress) = &self.ingress {
+            let (ifb, tag) = (self.ifb_name(), self.ifb_tag());
+            config = config.link(&ifb, |l| l.ifb().alias(&tag).up());
+            config = declare_limit(config, &ifb, ingress);
+            if !config.declares_ingress_hook(&self.dev) {
+                config = config.qdisc(&self.dev, |q| q.ingress());
+            }
+            config = config.tc(&self.dev, |t| t.redirect_ingress_to(&ifb));
+        }
+        config
+    }
+
+    /// [`declare`](Self::declare) into an empty config.
+    pub fn to_config(&self) -> NetworkConfig {
+        self.declare(NetworkConfig::new())
     }
 
     /// Apply the rate limits: build this limiter's trees from scratch.
@@ -859,6 +905,22 @@ fn leaf_config(limit: &RateLimit) -> FqCodelConfig {
     fq_codel_leaf(limit.latency).build()
 }
 
+/// A limit's tree on `dev`, declared: what [`build_htb`] installs.
+fn declare_limit(config: NetworkConfig, dev: &str, limit: &RateLimit) -> NetworkConfig {
+    let (outer, leaf_class) = limit_classes(limit);
+    config
+        .qdisc(dev, |q| q.htb().default_class(LEAF_CLASS_MINOR as u32))
+        .tc(dev, |t| {
+            t.class(TcHandle::major_only(1), TcHandle::new(1, 1), outer)
+                .class(TcHandle::new(1, 1), TcHandle::new(1, LEAF_CLASS_MINOR), leaf_class)
+                .leaf(
+                    TcHandle::new(1, LEAF_CLASS_MINOR),
+                    TcHandle::major_only(LEAF_CLASS_MINOR),
+                    leaf_config(limit),
+                )
+        })
+}
+
 /// Build a limit's tree on a device from scratch: HTB `1:` (default class
 /// `0xa`), `1:1`, `1:a`, and the fq_codel leaf `a:`.
 async fn build_htb(conn: &Connection<Route>, ifindex: u32, limit: &RateLimit) -> Result<()> {
@@ -1229,6 +1291,67 @@ impl PerHostLimiter {
 
     /// Apply the per-host rate limits.
     #[tracing::instrument(level = "info", skip_all, fields(dev = %self.dev, rules = self.rules.len()))]
+    /// This limiter as a declaration (#645): what [`apply`](Self::apply)
+    /// installs on the device — the HTB root, `1:1`, a class, fq_codel leaf
+    /// and filters per rule, and the default class — added to `config`,
+    /// with the same handles and priorities, so either way of installing it
+    /// diffs empty against the other. An error for the rules `apply`
+    /// refuses.
+    pub fn declare(&self, config: NetworkConfig) -> Result<NetworkConfig> {
+        self.check_rules()?;
+        let mut filters = Vec::new();
+        for (i, rule) in self.rules.iter().enumerate() {
+            filters.extend(rule_filters(i, rule, TcHandle::new(1, (i + 2) as u16))?);
+        }
+        let total_rate: crate::util::Rate =
+            self.default_rate + self.rules.iter().map(|r| r.rate).sum::<crate::util::Rate>();
+        let parent = TcHandle::new(1, 1);
+        Ok(config
+            .qdisc(&self.dev, |q| q.htb().default_class(u32::from(DEFAULT_CLASS_MINOR)))
+            .tc(&self.dev, |mut t| {
+                t = t.class(
+                    TcHandle::major_only(1),
+                    parent,
+                    HtbClassConfig::new(total_rate).ceil(total_rate).build(),
+                );
+                for (i, rule) in self.rules.iter().enumerate() {
+                    let classid = TcHandle::new(1, (i + 2) as u16);
+                    t = t
+                        .class(
+                            parent,
+                            classid,
+                            HtbClassConfig::new(rule.rate).ceil(rule.ceil.unwrap_or(rule.rate)).build(),
+                        )
+                        .leaf(
+                            classid,
+                            TcHandle::major_only((i + 10) as u16),
+                            fq_codel_leaf(self.latency).build(),
+                        );
+                }
+                let default = TcHandle::new(1, DEFAULT_CLASS_MINOR);
+                t = t
+                    .class(
+                        parent,
+                        default,
+                        HtbClassConfig::new(self.default_rate).ceil(self.default_rate).build(),
+                    )
+                    .leaf(
+                        default,
+                        TcHandle::major_only(DEFAULT_LEAF_MAJOR),
+                        fq_codel_leaf(self.latency).build(),
+                    );
+                for (protocol, priority, filter) in filters {
+                    t = t.filter(TcHandle::major_only(1), priority, protocol, filter);
+                }
+                t
+            }))
+    }
+
+    /// [`declare`](Self::declare) into an empty config.
+    pub fn to_config(&self) -> Result<NetworkConfig> {
+        self.declare(NetworkConfig::new())
+    }
+
     pub async fn apply(&self, conn: &Connection<Route>) -> Result<()> {
         // An unusable rule fails before the live tree is torn down.
         self.check_rules()?;

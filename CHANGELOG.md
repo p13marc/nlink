@@ -2651,6 +2651,19 @@ All notable changes to this project will be documented in this file.
       addresses.
     - A bpf action opened with `from_pinned` is written `pinned <path>`.
 
+- **The TC recipes as declarations (#645).** `RateLimiter`, `PerHostLimiter`
+  and `PerPeerImpairer` each gain `declare(config)` and `to_config()`. Each
+  returns what its `apply` installs, as part of a `NetworkConfig`, with the
+  same handles, priorities, classes, leaves and filters. So a recipe can be
+  diffed and applied with the rest of a config, not beside it.
+  - Installed imperatively, the declaration diffs empty against it.
+  - Applied from the declaration, the recipe's `reconcile` has nothing to do.
+  - `RateLimiter`'s ingress half declares its tagged IFB and the redirect on
+    the device's hook. That's the clsact or ingress qdisc the config already
+    declares, or an ingress qdisc if it declares none.
+  - A `PerPeerImpairer` made with `new_by_index` can't be declared, since a
+    declaration names its device.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
