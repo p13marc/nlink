@@ -1916,3 +1916,37 @@ async fn an_undo_puts_a_route_back_with_its_protocol() -> Result<()> {
     })
     .await
 }
+
+/// What a link is declared with goes out when it is created, so one apply
+/// converges (#788): a gretap's, ip6gretap's, erspan's or macsec's MAC
+/// and a vti's MTU were left for a second apply's modify.
+#[tokio::test]
+async fn a_tunnels_mac_and_mtu_go_out_at_create() -> Result<()> {
+    use nlink::netlink::link::ErspanVersion;
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "ip_gre", "ip6_gre", "ip_vti", "macsec");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("create-mac")?;
+        let conn = conn_in_ns(&ns)?;
+        let mac = |n: u8| [0x02, 0, 0, 0, 0x89, n];
+        let cfg = NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .link("gt1", |l| l.gretap().tunnel_remote("10.93.0.2".parse().unwrap()).address(mac(1)))
+            .link("gt6", |l| l.ip6gretap().ip6tnl_remote("fd93::2".parse().unwrap()).address(mac(2)))
+            .link("er1", |l| {
+                l.erspan(5)
+                    .erspan_remote("10.93.0.3".parse::<std::net::Ipv4Addr>().unwrap())
+                    .erspan_version(ErspanVersion::V1 { index: 1 })
+                    .address(mac(3))
+            })
+            .link("ms1", |l| l.macsec("d0").macsec_port(9).address(mac(4)))
+            .link("vt1", |l| l.vti().tunnel_remote("10.93.0.4".parse().unwrap()).mtu(1300));
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let again = cfg.diff(&conn).await?;
+        assert!(again.is_empty(), "one apply did not converge:\n{again}");
+        Ok(())
+    })
+    .await
+}
