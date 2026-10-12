@@ -555,14 +555,21 @@ async fn a_tree_read_back_from_json_applies() -> nlink::Result<()> {
 }
 
 /// `tc <args>` in `ns`, as text with what differs between two installs of
-/// the same thing (action indexes and references) taken out.
+/// the same thing taken out: action indexes and references, and HTB's
+/// `direct_packets_stat`. That one counts what the qdisc sent past its
+/// classes, which on a link that is up includes IPv6's own packets sent
+/// between the qdisc's install and its default class's: one in three
+/// integration runs failed on it under load (#771).
 fn tc_shown(ns: &TestNamespace, args: &[&str]) -> Result<String, String> {
     let out = ns.exec("tc", args).map_err(|e| e.to_string())?;
     Ok(out
         .lines()
         .map(|l| {
             let mut words: Vec<&str> = l.split_whitespace().collect();
-            while let Some(i) = words.iter().position(|w| matches!(*w, "index" | "ref" | "bind")) {
+            while let Some(i) = words
+                .iter()
+                .position(|w| matches!(*w, "index" | "ref" | "bind" | "direct_packets_stat"))
+            {
                 words.drain(i..(i + 2).min(words.len()));
             }
             words.join(" ")
