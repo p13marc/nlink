@@ -66,7 +66,7 @@ the workflow. For local validation as a non-root user, the
 ```bash
 # The CI lane's features; the runner puts sudo in front of the test binary only.
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER='sudo -E' \
-  cargo test -p nlink --test integration --features lab,sockdiag,namespace_watcher,process,serde \
+  cargo test -p nlink --test integration --features lab,sockdiag,namespace_watcher,process,serde,replay \
   -- --test-threads=1
 ```
 
@@ -202,7 +202,8 @@ unsafe pointer casts in `types/`.
 | `schemars` | JSON Schema (draft 7) for `NetworkConfig` via `json_schema()` / `json_schema_value()` — wire into editor `json.schemas`/`yaml.schemas` or CI validation. Opt-in; implies `serde`; faithful to the human-facing JSON shape (CIDR strings, not parsed structs). 0.23+. |
 | `process` | `NetnsCommand::{spawn_tokio, output_async}`: a namespace process as a tokio child (`tokio/process`). In the integration lane's features. 0.32+, #521. |
 | `wireguard-keys` | `genl::wireguard::PrivateKey::{generate, public_key}` — X25519 key pairs without a crypto crate of your own (`x25519-dalek`). The key type itself, base64 and clamping, is always available. 0.31+, #529. |
-| `full` | All of the above except `lab`, which is test code: enable it in dev-dependencies (0.32, #532) |
+| `replay` | `nlink::replay`: record a connection's traffic against a real kernel, replay it without one (`Recorder`, `Fixture`) — for testing code that drives nlink. Not in `full`: it hooks every socket. 0.32+, #168. |
+| `full` | All of the above except `lab`, which is test code, and `replay`: enable them in dev-dependencies (0.32, #532) |
 
 ## Type-safe units (Rate / Bytes / Percent)
 
@@ -867,6 +868,9 @@ recipe rather than re-synthesizing:
   nftables decides, TC shapes: `Rule::set_priority` (HTB leaf, no
   filter), `set_mark_masked` + `FwFilter`, connmark save/restore, and
   `clamp_tcp_mss{,_to_pmtu}` on the same path.
+- [`replay-testing`](docs/recipes/replay-testing.md) — record a
+  connection's traffic once as root, replay it in unit tests with no
+  kernel (`nlink::replay`, feature `replay`, #168).
 - [`error-handling-patterns`](docs/recipes/error-handling-patterns.md) —
   `is_X()` recovery predicates + typed not-found variants.
 

@@ -52,6 +52,10 @@ wireguard-keys = ["dep:x25519-dalek"]
 # `NetnsCommand::spawn_tokio` and `output_async`: a namespace process
 # spawned as a tokio child, waited on without blocking the runtime (#521).
 process = ["tokio/process"]
+# Record a connection's netlink traffic and replay it without a kernel
+# (`nlink::replay`, #168): for testing code that drives nlink. Not in
+# `full`: it puts a hook on every socket.
+replay = []
 # Every library feature. `lab` is test code (namespace helpers,
 # require_root!, a tracing subscriber) and is not in it: enable it in
 # dev-dependencies (#532).

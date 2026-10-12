@@ -108,6 +108,10 @@ pub struct NetlinkSocket {
     /// #718 — what that namespace was opened as (`Netns::label`), which
     /// every error from this socket carries: see [`Self::stamp`].
     netns_label: Option<std::sync::Arc<str>>,
+    /// #168 — a recording of this socket's traffic, or one it answers
+    /// from instead of the kernel.
+    #[cfg(feature = "replay")]
+    hook: Option<crate::replay::Hook>,
 }
 
 impl NetlinkSocket {
@@ -335,7 +339,40 @@ impl NetlinkSocket {
             namespace_marker: None,
             netns: None,
             netns_label: None,
+            #[cfg(feature = "replay")]
+            hook: None,
         })
+    }
+
+    /// Record this socket's traffic, or answer from a recording (#168).
+    #[cfg(feature = "replay")]
+    pub(crate) fn with_hook(mut self, hook: crate::replay::Hook) -> Self {
+        self.hook = Some(hook);
+        self
+    }
+
+    /// The recording this socket answers from, if it does.
+    #[cfg(feature = "replay")]
+    fn replaying(&self) -> Option<&crate::replay::Replay> {
+        self.hook.as_ref().and_then(crate::replay::Hook::as_replay)
+    }
+
+    /// Note a datagram that went out, for a recording.
+    #[inline]
+    fn sent(&self, _msg: &[u8]) {
+        #[cfg(feature = "replay")]
+        if let Some(hook) = &self.hook {
+            hook.after_send(_msg);
+        }
+    }
+
+    /// Note a datagram that came in, for a recording.
+    #[inline]
+    fn received(&self, _data: &[u8], _multicast: bool) {
+        #[cfg(feature = "replay")]
+        if let Some(hook) = &self.hook {
+            hook.after_recv(_data, _multicast);
+        }
     }
 
     /// Record the namespace a socket was made in, the marker its streams
@@ -801,6 +838,10 @@ impl NetlinkSocket {
     /// [`send`](Self::send), its errors not yet stamped with the
     /// socket's protocol and namespace.
     async fn send_unstamped(&self, msg: &[u8]) -> Result<()> {
+        #[cfg(feature = "replay")]
+        if let Some(sent) = self.hook.as_ref().and_then(|h| h.before_send(msg)) {
+            return sent;
+        }
         let mut would_block_count: u32 = 0;
         loop {
             let mut guard = self.fd.ready(Interest::WRITABLE).await?;
@@ -808,6 +849,7 @@ impl NetlinkSocket {
             match guard.try_io(|inner| inner.get_ref().send(msg, 0)) {
                 Ok(result) => {
                     result?;
+                    self.sent(msg);
                     return Ok(());
                 }
                 Err(_would_block) => {
@@ -852,6 +894,10 @@ impl NetlinkSocket {
         if fds.is_empty() {
             return self.send(msg).await;
         }
+        #[cfg(feature = "replay")]
+        if let Some(sent) = self.hook.as_ref().and_then(|h| h.before_send(msg)) {
+            return sent;
+        }
 
         let fds: Vec<RawFd> = fds.iter().map(|fd| fd.as_raw_fd()).collect();
         let (mut cmsg_buf, cmsg_space) = build_scm_rights_control(&fds);
@@ -886,6 +932,7 @@ impl NetlinkSocket {
             match res {
                 Ok(result) => {
                     result?;
+                    self.sent(msg);
                     return Ok(());
                 }
                 Err(_would_block) => {
@@ -927,10 +974,18 @@ impl NetlinkSocket {
     /// [`recv_msg_from`](Self::recv_msg_from), its errors not yet stamped with the
     /// socket's protocol and namespace.
     async fn recv_msg_from_unstamped(&self) -> Result<(Vec<u8>, bool)> {
+        #[cfg(feature = "replay")]
+        if let Some(replay) = self.replaying() {
+            return replay.recv().await;
+        }
         loop {
             let mut guard = self.fd.ready(Interest::READABLE).await?;
             match guard.try_io(|inner| recv_whole(inner.get_ref(), 0)) {
-                Ok(Ok(got)) => return got.into_result(),
+                Ok(Ok(got)) => {
+                    let got = got.into_result()?;
+                    self.received(&got.0, got.1);
+                    return Ok(got);
+                }
                 Ok(Err(e)) => {
                     // Plan 234 §4 — route ENOBUFS to multicast
                     // subscribers via the dispatcher BEFORE
@@ -1006,8 +1061,16 @@ impl NetlinkSocket {
     /// [`try_recv_inner`](Self::try_recv_inner), its errors not yet stamped with the
     /// socket's protocol and namespace.
     fn try_recv_inner_unstamped(&self) -> Result<Option<(Vec<u8>, bool)>> {
+        #[cfg(feature = "replay")]
+        if let Some(replay) = self.replaying() {
+            return Ok(replay.try_recv());
+        }
         match recv_whole(self.fd.get_ref(), libc::MSG_DONTWAIT) {
-            Ok(got) => got.into_result().map(Some),
+            Ok(got) => {
+                let got = got.into_result()?;
+                self.received(&got.0, got.1);
+                Ok(Some(got))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
             Err(e) => {
                 // Same routing as recv_msg: multicast subscribers
@@ -1041,6 +1104,12 @@ impl NetlinkSocket {
     /// socket asked for them ([`set_pktinfo`](Self::set_pktinfo),
     /// [`set_listen_all_nsid`](Self::set_listen_all_nsid)) (#523).
     pub(crate) fn poll_recv_meta(&self, cx: &mut Context<'_>) -> Poll<Result<(Vec<u8>, RecvMeta)>> {
+        #[cfg(feature = "replay")]
+        if let Some(replay) = self.replaying() {
+            return replay
+                .poll_recv(cx)
+                .map(|r| r.map(|(data, _)| (data, RecvMeta::default())));
+        }
         loop {
             let mut guard = match self.fd.poll_read_ready(cx) {
                 Poll::Ready(Ok(guard)) => guard,
@@ -1051,7 +1120,11 @@ impl NetlinkSocket {
             match guard.try_io(|inner| recv_whole_meta(inner.get_ref(), 0, RECV_MAX_CAPACITY)) {
                 Ok(result) => match result {
                     Ok((got, meta)) => {
-                        return Poll::Ready(got.into_result().map(|(data, _)| (data, meta)));
+                        let got = got.into_result();
+                        if let Ok((data, multicast)) = &got {
+                            self.received(data, *multicast);
+                        }
+                        return Poll::Ready(got.map(|(data, _)| (data, meta)));
                     }
                     Err(e) => {
                         // Plan 234 §4 — see recv_msg for the
@@ -1364,6 +1437,10 @@ impl NetlinkSocket {
     /// [`Self::recv_batch`] but exposes the batch via the
     /// `Poll<Result<Vec<Vec<u8>>>>` shape.
     pub fn poll_recv_batch(&self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Vec<Vec<u8>>>> {
+        #[cfg(feature = "replay")]
+        if let Some(replay) = self.replaying() {
+            return replay.poll_recv(cx).map(|r| r.map(|(data, _)| vec![data]));
+        }
         let max = max.clamp(1, NL_BATCH_SIZE);
         loop {
             let mut guard = match self.fd.poll_read_ready(cx) {
@@ -1374,7 +1451,12 @@ impl NetlinkSocket {
             let result: std::result::Result<std::io::Result<Vec<Vec<u8>>>, _> =
                 guard.try_io(|inner| Self::recv_batch_inner(inner.get_ref().as_raw_fd(), max));
             match result {
-                Ok(Ok(frames)) => return Poll::Ready(Ok(frames)),
+                Ok(Ok(frames)) => {
+                    for frame in &frames {
+                        self.received(frame, false);
+                    }
+                    return Poll::Ready(Ok(frames));
+                }
                 Ok(Err(e)) => {
                     // Mirror recv_msg/poll_recv: tell the resync subscribers the
                     // kernel dropped multicast frames *before* handing the error
@@ -1423,6 +1505,11 @@ impl NetlinkSocket {
     /// [`recv_batch`](Self::recv_batch), its errors not yet stamped with the
     /// socket's protocol and namespace.
     async fn recv_batch_unstamped(&self, out: &mut Vec<Vec<u8>>, max: usize) -> Result<usize> {
+        #[cfg(feature = "replay")]
+        if let Some(replay) = self.replaying() {
+            out.push(replay.recv().await?.0);
+            return Ok(1);
+        }
         let max = max.clamp(1, NL_BATCH_SIZE);
         loop {
             let mut guard = self.fd.ready(Interest::READABLE).await?;
@@ -1436,6 +1523,9 @@ impl NetlinkSocket {
             match result {
                 Ok(Ok(frames)) => {
                     let n = frames.len();
+                    for frame in &frames {
+                        self.received(frame, false);
+                    }
                     out.extend(frames);
                     return Ok(n);
                 }
@@ -1542,13 +1632,25 @@ impl NetlinkSocket {
             return Ok(0);
         }
         let n = msgs.len().min(NL_BATCH_SIZE);
+        #[cfg(feature = "replay")]
+        if self.replaying().is_some() {
+            for msg in &msgs[..n] {
+                self.send_unstamped(msg).await?;
+            }
+            return Ok(n);
+        }
 
         loop {
             let mut guard = self.fd.ready(Interest::WRITABLE).await?;
             let result: std::result::Result<std::io::Result<usize>, _> = guard
                 .try_io(|inner| Self::send_batch_inner(inner.get_ref().as_raw_fd(), &msgs[..n]));
             match result {
-                Ok(Ok(sent)) => return Ok(sent),
+                Ok(Ok(sent)) => {
+                    for msg in &msgs[..sent] {
+                        self.sent(msg);
+                    }
+                    return Ok(sent);
+                }
                 Ok(Err(e)) => return Err(Error::from(e)),
                 Err(_would_block) => continue,
             }

@@ -115,6 +115,7 @@ jobs:
       - run: bash scripts/audit-bytes-le.sh
       - run: bash scripts/audit-ignored-tests.sh
       - run: bash scripts/audit-dump-termination.sh
+      - run: bash scripts/audit-socket-io.sh
       - run: bash scripts/audit-doc-examples.sh
 
   # Supply-chain lint (fleet standard, myserver#33): advisories, licenses,
