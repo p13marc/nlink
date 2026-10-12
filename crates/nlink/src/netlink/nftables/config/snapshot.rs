@@ -163,6 +163,7 @@ impl RulesetSnapshot {
                         },
                         ObjectConfig::Limit(l) => ObjectState::Limit(l.clone()),
                         ObjectConfig::CtHelper(h) => ObjectState::CtHelper(h.clone()),
+                        ObjectConfig::Secmark(c) => ObjectState::Secmark(c.clone()),
                     },
                     comment: None,
                     managed: true,

@@ -2363,6 +2363,35 @@ impl Rule {
         self
     }
 
+    /// Match the operating system a TCP SYN's fingerprint names (#703):
+    /// `osf [ttl loose|skip] [version] name "<name>"` — `Linux`, or with
+    /// `version` `Linux:3.11`. Only a SYN matches, and only in a
+    /// prerouting, input or forward chain. Without fingerprints loaded
+    /// (`nfnl_osf -f pf.os`) every SYN is `unknown`. A name over 15 bytes
+    /// is refused.
+    pub fn match_osf(mut self, name: &str, ttl: super::expr::OsfTtl, version: bool) -> Self {
+        use super::expr::Expr;
+        if name.len() >= super::NFT_OSF_MAXGENRELEN {
+            self.error.get_or_insert(format!(
+                "osf name `{name}` is longer than {} bytes",
+                super::NFT_OSF_MAXGENRELEN - 1
+            ));
+        }
+        self.exprs.push(Expr::Osf {
+            dreg: Register::R0,
+            ttl,
+            version,
+        });
+        let mut data = name.as_bytes().to_vec();
+        data.resize(super::NFT_OSF_MAXGENRELEN, 0);
+        self.exprs.push(Expr::Cmp {
+            sreg: Register::R0,
+            op: CmpOp::Eq,
+            data,
+        });
+        self
+    }
+
     /// Match the packet's local socket (#703): `socket transparent 1`,
     /// `socket wildcard 0`, `socket mark 7`. A packet with no local
     /// socket does not match.
@@ -3144,6 +3173,13 @@ impl Rule {
     /// `limit name "<name>"`: match against a named limit.
     pub fn limit_named(self, name: &str) -> Self {
         self.objref(super::object::ObjectType::Limit, name)
+    }
+
+    /// `meta secmark set "<name>"`: give the packet the security mark of the
+    /// named secmark object (`ObjectConfig::Secmark`, #703), which the LSM
+    /// (SELinux, AppArmor) then mediates.
+    pub fn set_secmark(self, name: &str) -> Self {
+        self.objref(super::object::ObjectType::Secmark, name)
     }
 
     /// `ct helper set "<name>"`: assign the named conntrack helper object

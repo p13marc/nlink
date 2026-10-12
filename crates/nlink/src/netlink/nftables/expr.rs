@@ -130,6 +130,13 @@ pub enum Expr {
     /// Answer a SYN for the server with a SYN cookie (#703) — see
     /// [`SynproxyExpr`].
     Synproxy(SynproxyExpr),
+    /// The operating system a TCP SYN's fingerprint names, into `dreg`
+    /// (#703) — see [`Rule::match_osf`].
+    Osf {
+        dreg: Register,
+        ttl: OsfTtl,
+        version: bool,
+    },
     /// A number into `dreg`: counting up, or at random, modulo `modulus`,
     /// plus `offset` (#703). See [`Rule::generate`].
     Numgen {
@@ -900,6 +907,21 @@ pub enum SocketKey {
     Cgroupv2 = 3,
 }
 
+/// How an `osf` compares a SYN's TTL with its fingerprint's
+/// (`NF_OSF_TTL_*`, #703).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(u8)]
+#[non_exhaustive]
+pub enum OsfTtl {
+    /// Exactly — nft's default.
+    #[default]
+    Exact = 0,
+    /// `ttl loose`: at most the fingerprint's.
+    Loose = 1,
+    /// `ttl skip`: not at all.
+    Skip = 2,
+}
+
 /// `synproxy`: answer a SYN for a server with a SYN cookie, and open the
 /// connection to it once the client's ACK proves the address (#703).
 /// Allowed in `input` and `forward` filter chains; the SYN must come
@@ -1545,6 +1567,19 @@ fn write_expr_body(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
             builder.append_attr_u32_be(NFTA_SOCKET_KEY, *key as u32);
             builder.append_attr_u32_be(NFTA_SOCKET_DREG, dreg.wire());
+            builder.nest_end(data);
+        }
+        // `nft_osf_dump` echoes all three; `nft_osf_init` refuses a FLAGS
+        // that is not NFT_OSF_F_VERSION, 0 included.
+        Expr::Osf { dreg, ttl, version } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "osf");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_u32_be(NFTA_OSF_DREG, dreg.wire());
+            builder.append_attr(NFTA_OSF_TTL, &[*ttl as u8]);
+            if *version || form == WireForm::Echo {
+                let flags = if *version { NFT_OSF_F_VERSION } else { 0 };
+                builder.append_attr_u32_be(NFTA_OSF_FLAGS, flags);
+            }
             builder.nest_end(data);
         }
         // What `nft_synproxy_dump` echoes: all three, always.
@@ -2223,6 +2258,16 @@ pub enum RuleExpr {
     },
     /// `synproxy`.
     Synproxy(SynproxyExpr),
+    /// `osf`.
+    #[non_exhaustive]
+    Osf {
+        /// Destination register.
+        dreg: Register,
+        /// How the TTL is compared.
+        ttl: OsfTtl,
+        /// The name carries the version: `genre:version`.
+        version: bool,
+    },
     /// `numgen`.
     #[non_exhaustive]
     Numgen {
@@ -2393,6 +2438,7 @@ fn parse_expr(name: &str, data: &[u8]) -> RuleExpr {
             }),
         "socket" => parse_socket(data),
         "synproxy" => parse_synproxy(data),
+        "osf" => parse_osf(data),
         "numgen" => parse_numgen(data),
         "hash" => parse_hash(data),
         "dup" => Some(RuleExpr::Dup {
@@ -2455,6 +2501,27 @@ fn parse_socket(data: &[u8]) -> Option<RuleExpr> {
     Some(RuleExpr::Socket {
         dreg: reg_attr(data, NFTA_SOCKET_DREG)?,
         key,
+    })
+}
+
+/// An `osf`.
+fn parse_osf(data: &[u8]) -> Option<RuleExpr> {
+    let attr = |id| AttrIter::new(data).find(|(t, _)| t & 0x7FFF == id).map(|(_, p)| p);
+    let ttl = match attr(NFTA_OSF_TTL).map_or(Some(0), |p| p.first().copied())? {
+        0 => OsfTtl::Exact,
+        1 => OsfTtl::Loose,
+        2 => OsfTtl::Skip,
+        _ => return None,
+    };
+    let version = match u32_attr(data, NFTA_OSF_FLAGS).unwrap_or(0) {
+        0 => false,
+        NFT_OSF_F_VERSION => true,
+        _ => return None,
+    };
+    Some(RuleExpr::Osf {
+        dreg: reg_attr(data, NFTA_OSF_DREG)?,
+        ttl,
+        version,
     })
 }
 
@@ -4082,6 +4149,29 @@ mod decode_tests {
         b.nest_end(odd);
         let decoded = parse_expressions(&build_elem("dynset", &b.as_bytes()[16..]));
         assert!(matches!(&decoded[0], RuleExpr::Unknown { name, .. } if name == "dynset"));
+    }
+
+    /// `nft_osf_init` refuses a FLAGS that is not NFT_OSF_F_VERSION, 0
+    /// included, and `nft_osf_dump` always writes it (#703).
+    #[test]
+    fn osf_sends_flags_only_for_a_version_and_echoes_them_always() {
+        let plain = [Expr::Osf { dreg: Register::R0, ttl: OsfTtl::Skip, version: false }];
+        assert!(!data_attrs_as(&plain, WireForm::Request).contains_key(&NFTA_OSF_FLAGS));
+        let echo = data_attrs_as(&plain, WireForm::Echo);
+        assert_eq!(echo[&NFTA_OSF_FLAGS], 0u32.to_be_bytes());
+        assert_eq!(echo[&NFTA_OSF_TTL], [2]);
+        let versioned = [Expr::Osf { dreg: Register::R0, ttl: OsfTtl::Loose, version: true }];
+        let request = data_attrs_as(&versioned, WireForm::Request);
+        assert_eq!(request[&NFTA_OSF_FLAGS], NFT_OSF_F_VERSION.to_be_bytes());
+
+        let decoded = parse_expressions(&encode(&[plain[0].clone(), versioned[0].clone()]));
+        assert_eq!(
+            decoded,
+            [
+                RuleExpr::Osf { dreg: Register::R0, ttl: OsfTtl::Skip, version: false },
+                RuleExpr::Osf { dreg: Register::R0, ttl: OsfTtl::Loose, version: true },
+            ]
+        );
     }
 
     #[test]

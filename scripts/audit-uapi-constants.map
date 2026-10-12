@@ -182,6 +182,10 @@ NumgenKind = NFT_NG
     Incremental -> INCREMENTAL
 HashKind = NFT_HASH
 SocketKey = NFT_SOCKET
+OsfTtl = NF_OSF_TTL
+    Exact -> TRUE
+    Loose -> LESS
+    Skip -> NOCHECK
 
 # -------------------------------------------------------------------- ethtool
 EthtoolCmd = ETHTOOL_MSG

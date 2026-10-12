@@ -505,6 +505,23 @@ pub const NFTA_SOCKET_DREG: u16 = 2;
 /// `NFTA_SOCKET_LEVEL` — a `cgroupv2` key's ancestor level.
 pub const NFTA_SOCKET_LEVEL: u16 = 3;
 
+// Osf — `enum nft_osf_attributes`.
+/// `NFTA_OSF_DREG`.
+pub const NFTA_OSF_DREG: u16 = 1;
+/// `NFTA_OSF_TTL` — `NF_OSF_TTL_*` (u8).
+pub const NFTA_OSF_TTL: u16 = 2;
+/// `NFTA_OSF_FLAGS` — `NFT_OSF_F_*` (be32): a request may carry only
+/// [`NFT_OSF_F_VERSION`]; the dump always has it, 0 included.
+pub const NFTA_OSF_FLAGS: u16 = 3;
+/// `NFT_OSF_F_VERSION` — the name is `genre:version`.
+pub const NFT_OSF_F_VERSION: u32 = 1;
+/// `NFT_OSF_MAXGENRELEN` — the register an `osf` writes, NUL included.
+pub const NFT_OSF_MAXGENRELEN: usize = 16;
+
+// Secmark object — `enum nft_secmark_attributes`.
+/// `NFTA_SECMARK_CTX` — the security context (string).
+pub const NFTA_SECMARK_CTX: u16 = 1;
+
 // Synproxy — `enum nft_synproxy_attributes`.
 /// `NFTA_SYNPROXY_MSS` (be16).
 pub const NFTA_SYNPROXY_MSS: u16 = 1;

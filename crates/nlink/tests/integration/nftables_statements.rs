@@ -1798,3 +1798,84 @@ async fn tproxy_hands_the_datagram_to_a_transparent_socket() -> nlink::Result<()
     assert_eq!(got, 3, "sent to 7980, delivered to the transparent socket on 7981");
     Ok(())
 }
+
+/// #703: `osf` as nft writes it — a name, `ttl skip`, `ttl loose` with the
+/// version — decodes typed, and nlink installs the same rules: `nft` lists
+/// the two chains alike.
+#[tokio::test]
+async fn osf_reads_and_writes_as_nft_does() -> nlink::Result<()> {
+    use nlink::netlink::nftables::OsfTtl;
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "nft_osf");
+
+    let ns = TestNamespace::new("nft-osf")?;
+    let script = "table inet t {
+        chain a { type filter hook input priority 0;
+            osf name \"unknown\" counter
+            osf ttl skip name \"Linux\" counter
+            osf ttl loose version \"Linux:3.11\" counter
+        }
+        chain b { type filter hook input priority 0; }
+    }";
+    let file = std::env::temp_dir().join(format!("nlink-osf-{}.nft", std::process::id()));
+    std::fs::write(&file, script).map_err(nlink::Error::from)?;
+    let installed = ns.exec("nft", &["-f", file.to_str().unwrap()]);
+    let _ = std::fs::remove_file(&file);
+    installed?;
+
+    let nft = ns.connection_for::<Nftables>()?;
+    let r = || Rule::new("t", "b").family(Family::Inet);
+    for rule in [
+        r().match_osf("unknown", OsfTtl::Exact, false).counter(),
+        r().match_osf("Linux", OsfTtl::Skip, false).counter(),
+        r().match_osf("Linux:3.11", OsfTtl::Loose, true).counter(),
+    ] {
+        nft.add_rule(rule).await?;
+    }
+    assert_eq!(
+        listed_rules(&ns, "inet", "t", "b")?,
+        listed_rules(&ns, "inet", "t", "a")?,
+        "nlink's chain b, nft's chain a"
+    );
+    let unknown = nft
+        .list_rules("t", Family::Inet)
+        .await?
+        .iter()
+        .flat_map(|r| r.expressions())
+        .filter(|e| matches!(e, RuleExpr::Unknown { .. }))
+        .count();
+    assert_eq!(unknown, 0, "every osf decodes typed");
+    Ok(())
+}
+
+/// #703: with no fingerprints loaded, `osf` names every TCP SYN
+/// `unknown`, and looks at nothing else: three SYNs to a closed port count
+/// three on `osf name "unknown"`, none on `osf name "Linux"`, and the RSTs
+/// that answer them count nowhere. Declared, the rules converge.
+#[tokio::test]
+async fn osf_names_each_syn() -> nlink::Result<()> {
+    use nlink::netlink::nftables::OsfTtl;
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "nft_osf");
+
+    let ns = TestNamespace::new("nft-osftr")?;
+    lo_up(&ns).await?;
+    let nft = ns.connection_for::<Nftables>()?;
+    let cfg = NftablesConfig::new().table("t", Family::Inet, |t| {
+        t.chain("in", |c| {
+            c.hook(Hook::Input)
+                .priority(Priority::Filter)
+                .chain_type(ChainType::Filter)
+        })
+        .rule_keyed("in", "unknown", |r| r.match_osf("unknown", OsfTtl::Exact, false).counter())
+        .rule_keyed("in", "linux", |r| r.match_osf("Linux", OsfTtl::Skip, false).counter())
+    });
+    cfg.diff(&nft).await?.apply(&nft).await?;
+    let again = cfg.diff(&nft).await?;
+    assert!(again.is_empty(), "second diff must be empty: {again}");
+
+    send_tcp_syns(&ns, &["127.0.0.1:9"], 3, Duration::from_millis(200));
+    assert_eq!(rule_packets(&nft, "t", Family::Inet, "in", 0).await?, 3);
+    assert_eq!(rule_packets(&nft, "t", Family::Inet, "in", 1).await?, 0);
+    Ok(())
+}
