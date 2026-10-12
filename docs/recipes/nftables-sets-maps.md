@@ -215,7 +215,8 @@ whose key is not in a value map stops at that rule.
 ## Counters, quotas and limits by name
 
 A stateful object lives in the table under a name, and rules share it. An
-object map picks one per key — ipset's per-element `counters`.
+object map picks one per key; for a counter on every element of a set, see
+[the next section](#a-counter-on-every-element).
 
 ```rust,no_run
 use nlink::netlink::nftables::types::{Family, PacketField, Rule, Set, SetDataType, SetElement};
@@ -249,6 +250,48 @@ if let Some(before) = conn
 # Ok(())
 # }
 ```
+
+## A counter on every element
+
+A set can give each element statements of its own — a counter, a quota, a
+limit — which every lookup that matches the element updates: ipset's
+`counters`, without an object per element. A rule can do the same for the
+elements it adds to a set (`update @flood { ip saddr limit rate over
+10/second }`).
+
+```rust,no_run
+use nlink::netlink::nftables::types::{
+    Family, LimitUnit, PacketField, Register, Rule, Set, SetElement,
+};
+use nlink::netlink::nftables::{DynsetExpr, DynsetOp, LimitExpr};
+use std::net::Ipv4Addr;
+
+# async fn run(conn: &nlink::Connection<nlink::netlink::Nftables>) -> nlink::Result<()> {
+let clients = Set::new("filter", "clients").counter();
+conn.add_set(clients.clone()).await?;
+conn.add_set_elements(&clients, &[SetElement::ipv4(Ipv4Addr::new(10, 0, 0, 5))])
+    .await?;
+conn.add_rule(Rule::new("filter", "forward").match_in_set(PacketField::Ip4Saddr, "clients"))
+    .await?;
+for element in conn.list_set_elements("filter", "clients", Family::Inet).await? {
+    if let Some((packets, bytes)) = element.counter() {
+        println!("{:?}: {packets} packets, {bytes} bytes", element.key());
+    }
+}
+
+// A source over 10 packets a second is dropped, each on a count of its own.
+conn.add_set(Set::new("filter", "flood").dynamic()).await?;
+let over = DynsetExpr::new(DynsetOp::Update, "flood", Register::R0)
+    .statement(LimitExpr::packets(10, LimitUnit::Second).over());
+conn.add_rule(Rule::new("filter", "input").dynset(PacketField::Ip4Saddr, over).drop())
+    .await?;
+# Ok(())
+# }
+```
+
+`SetElement::quota_used()` reads an element's quota the same way. A set's
+statements are fixed when it is created: the declarative diff recreates a
+set whose declared statements change, and its elements count from zero.
 
 ## Declaratively
 

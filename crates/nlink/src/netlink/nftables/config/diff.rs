@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::super::expr::RuleExpr;
+use super::super::expr::{ElementStatement, RuleExpr};
 use super::super::object::{ObjectConfig, ObjectType};
 use super::super::types::{
     ChainInfo, Family, RuleInfo, Set, SetElement, SetFlags, SetInfo, Verdict,
@@ -1021,6 +1021,19 @@ fn set_has_drifted(declared: &DeclaredSet, current: &SetInfo) -> bool {
             .data_type()
             .and_then(|d| d.len())
             .is_some_and(|len| current.data_len != Some(len))
+        // Neither changes in place (#703).
+        || declared.policy().is_some_and(|policy| policy != current.policy)
+        || !statements_match(declared.statements(), &current.statements)
+}
+
+/// Whether a set's statements are the declared ones, as the kernel keeps
+/// them. One nlink cannot read never matches.
+fn statements_match(declared: &[ElementStatement], current: &[RuleExpr]) -> bool {
+    declared.len() == current.len()
+        && declared.iter().zip(current).all(|(declared, current)| {
+            ElementStatement::from_rule_expr(current)
+                .is_some_and(|current| current.kernel_form() == declared.kernel_form())
+        })
 }
 
 /// Does `rule` reference the set `set`? A plain lookup decodes typed; an
@@ -2772,6 +2785,8 @@ mod tests {
             object_type: None,
             comment: None,
             managed: true,
+            policy: Default::default(),
+            statements: Vec::new(),
         }
     }
 
@@ -2788,6 +2803,8 @@ mod tests {
             data_type: None,
             elements: Vec::new(),
             comment: None,
+            policy: None,
+            statements: Vec::new(),
         }
     }
 

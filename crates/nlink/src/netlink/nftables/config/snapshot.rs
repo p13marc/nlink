@@ -219,6 +219,8 @@ fn set_info(set: &DeclaredSet, table: &str, family: Family, handle: u64) -> SetI
         }),
         comment: set.comment.clone(),
         managed: true,
+        policy: set.policy().unwrap_or_default(),
+        statements: set.statements().iter().map(|s| s.as_dumped()).collect(),
     }
 }
 

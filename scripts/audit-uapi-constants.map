@@ -117,6 +117,7 @@ ExthdrOp = NFT_EXTHDR_OP
     TcpOpt -> TCPOPT
 DynsetOp = NFT_DYNSET_OP
 ObjectType = NFT_OBJECT
+SetPolicy = NFT_SET_POL
 MetaKey = NFT_META
     IifName -> IIFNAME
     OifName -> OIFNAME

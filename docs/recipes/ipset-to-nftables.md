@@ -39,8 +39,8 @@ matchers guard each lookup by protocol.
 | `timeout N` (set default) | `Set::timeout(Duration)` |
 | `timeout N` on `ipset add` | `SetElement::with_timeout(Duration)` on a set with `.timeout(..)` or `.per_element_timeouts()` |
 | `maxelem N` | `Set::size(N)` |
-| `counters` | an object map of counters: `Set::map(SetDataType::Object(ObjectType::Counter))` and `SetElement::object(name)`, one `Object::counter` per element |
-| `comment` | not modelled on elements |
+| `counters` | `Set::counter()`: every element gets a counter of its own, read with `SetElement::counter()` from `list_set_elements` |
+| `comment` | `SetElement::with_comment(text)` (the declarative diff does not update a changed one) |
 | `-exist` on `add` | `add_set_elements` is idempotent for elements already present; declaratively, only missing elements are sent |
 | `ipset save` / `ipset restore` | an `NftablesConfig`: `diff` + `apply` is a restore that touches only what changed |
 | `ipset swap` | not needed: `apply` changes a set's elements in one atomic batch |
@@ -56,7 +56,7 @@ matchers guard each lookup by protocol.
 | `-j SET --add-set S src` | `.add_to_set(PacketField::Ip4Saddr, "S", None)` (the set must be `.dynamic()`) |
 | `-j SET --add-set S src --exist --timeout 60` | `.update_in_set(PacketField::Ip4Saddr, "S", Some(Duration::from_secs(60)))` |
 | `-j SET --del-set S src` | `.delete_from_set(PacketField::Ip4Saddr, "S")` |
-| `-m set --match-set S src --packets-gt N` | count per element with an object map of counters, and read them with `list_objects_in` |
+| `-m set --match-set S src --packets-gt N` | a set with `.counter()`, its elements read with `list_set_elements` and `SetElement::counter()` |
 | many `-j MARK` rules, one per address | one `set_mark_from_map(PacketField::Ip4Saddr, "marks")` with a value map |
 | many `-j ACCEPT/DROP/jump` rules, one per port | one `vmap(PacketField::TcpDport, "ports")` with a verdict map |
 
@@ -146,7 +146,8 @@ A few differences from the iptables version:
 
 ## Caveats
 
-- **Per-element comments** are not modelled.
+- **Per-element comments** are written with the element; the declarative
+  diff matches elements by key, so a comment changed later is not applied.
 - **`hash:net` with a `nomatch` exception** has no direct equivalent: put
   the exceptions in a second interval set and match it first with a
   `return` (or `accept`) rule.

@@ -2785,6 +2785,22 @@ All notable changes to this project will be documented in this file.
   written as nft writes them, and `RuleExpr::Dynset` decodes them into its new
   `statements` field; a dynset with statements used to decode as `Unknown`.
 
+
+- **Set statements and policy (#703).**
+  - `Set::counter()`/`Set::statement(..)` (and the same on a declared set)
+    give every element a counter, quota, limit or connlimit of its own: `set
+    s { …; counter; }`, ipset's `counters`. The kernel adds them to each
+    element, whether a control-plane add or a dynset puts it there, and a
+    lookup that matches the element updates them.
+  - `SetElement::counter()` and `SetElement::quota_used()` read what an
+    element's own counter and quota hold, from `list_set_elements`.
+  - `Set::policy(SetPolicy::Memory)` is `policy memory`.
+
+  `SetInfo` reports `policy` and `statements`. Both are written as nft writes
+  them, and the declarative diff recreates a set whose declared statements or
+  policy changed. The ipset recipe maps `counters` and per-element comments
+  to them.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

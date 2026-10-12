@@ -1,18 +1,22 @@
 //! Set lookups by packet field — IPv6 addresses, ports, `!= @set` — the raw
-//! escape hatch, and set-element / generation events, each checked against
-//! real traffic or real notifications.
+//! escape hatch, set-element / generation events, and sets whose elements
+//! count what they match, each checked against real traffic or real
+//! notifications.
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use nlink::netlink::nftables::config::NftablesConfig;
 use nlink::netlink::nftables::types::{
-    Chain, ChainType, CtState, Family, Hook, PacketField, Priority, Rule, Set, SetElement,
-    SetKeyType,
+    Chain, ChainType, CtState, Family, Hook, LimitUnit, PacketField, Priority, Rule, Set,
+    SetElement, SetKeyType, SetPolicy,
 };
-use nlink::netlink::nftables::{NftablesEvent, RawExpr};
+use nlink::netlink::nftables::{
+    ElementStatement, LimitExpr, NftablesEvent, QuotaExpr, RawExpr, RuleExpr,
+};
 use nlink::netlink::{Connection, Nftables};
 use tokio_stream::StreamExt;
 
+use crate::common::converge::assert_transition;
 use crate::common::traffic::{lo_up, send_udp};
 use crate::common::{TestNamespace, with_timeout};
 
@@ -220,4 +224,173 @@ async fn a_raw_notrack_untracks_and_converges() -> nlink::Result<()> {
         Ok(())
     })
     .await
+}
+
+// ============================================================================
+// #703 — statements on every element, and the set policy
+// ============================================================================
+
+/// #703: sets whose elements each get a counter, a counter and a quota, or
+/// a limit, one with `policy memory`, as nft writes them, decode typed, and
+/// nlink installs the same: `nft` lists the two tables alike, before
+/// traffic and after, when each element has counted what its lookup
+/// matched — which nlink reads back too.
+#[tokio::test]
+async fn set_statements_and_policy_read_and_write_as_nft_does() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables", "nft_quota", "nft_limit");
+
+    let ns = TestNamespace::new("nft-setstmt")?;
+    lo_up(&ns).await?;
+    let script = "table inet a {
+ set c { type ipv4_addr; counter; elements = { 127.0.0.1 } }
+ set m { type ipv4_addr; size 100; policy memory; counter; quota 1000 bytes; elements = { 127.0.0.1 } }
+ set l { type ipv4_addr; flags dynamic; limit rate 10/second; }
+ chain out {
+  type filter hook output priority 0;
+  meta l4proto udp ip daddr @c
+  meta l4proto udp ip daddr @m
+ }
+}
+";
+    let file = std::env::temp_dir().join(format!("nlink-setstmt-{}.nft", std::process::id()));
+    std::fs::write(&file, script).map_err(nlink::Error::from)?;
+    let installed = ns.exec("nft", &["-f", file.to_str().unwrap()]);
+    let _ = std::fs::remove_file(&file);
+    installed?;
+
+    let conn = ns.connection_for::<Nftables>()?;
+    conn.add_table("b", Family::Inet).await?;
+    let quota = QuotaExpr::new(1000);
+    for set in [
+        Set::new("b", "c").counter(),
+        Set::new("b", "m")
+            .size(100)
+            .policy(SetPolicy::Memory)
+            .counter()
+            .statement(quota.clone()),
+        Set::new("b", "l")
+            .dynamic()
+            .statement(LimitExpr::packets(10, LimitUnit::Second)),
+    ] {
+        let set = set.family(Family::Inet);
+        conn.add_set(set.clone()).await?;
+        if set.name() != "l" {
+            conn.add_set_elements(&set, &[SetElement::ipv4(Ipv4Addr::LOCALHOST)]).await?;
+        }
+    }
+    conn.add_chain(
+        Chain::new("b", "out")?
+            .family(Family::Inet)
+            .hook(Hook::Output)
+            .priority(Priority::Filter)
+            .chain_type(ChainType::Filter),
+    )
+    .await?;
+    for set in ["c", "m"] {
+        let rule = Rule::new("b", "out").family(Family::Inet).match_l4proto(17);
+        conn.add_rule(rule.match_in_set(PacketField::Ip4Daddr, set)).await?;
+    }
+    let listed = |table: &str| -> nlink::Result<String> {
+        let out = ns.exec("nft", &["list", "table", "inet", table])?;
+        Ok(out.replacen(&format!("table inet {table}"), "table inet T", 1))
+    };
+    assert_eq!(listed("b")?, listed("a")?, "nlink's table b, nft's table a");
+
+    send_udp(&ns, &["127.0.0.1:9"], 3);
+    assert_eq!(listed("b")?, listed("a")?, "after traffic");
+    for table in ["a", "b"] {
+        let elements = conn.list_set_elements(table, "m", Family::Inet).await?;
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0].counter().map(|(packets, _)| packets), Some(3), "{table}");
+        let (_, bytes) = elements[0].counter().unwrap();
+        assert_eq!(elements[0].quota_used(), Some(bytes), "{table}");
+    }
+
+    let sets = conn.list_sets_in("a", Family::Inet).await?;
+    let m = sets.iter().find(|s| s.name == "m").expect("set m");
+    assert_eq!(m.policy, SetPolicy::Memory);
+    let decoded: Vec<_> = m.statements.iter().filter(|e| !matches!(e, RuleExpr::Unknown { .. })).collect();
+    assert_eq!(decoded.len(), 2, "{:?}", m.statements);
+    Ok(())
+}
+
+/// `inet t`: UDP to a member of `hosts` is counted, and every member counts
+/// its own, with a quota of `quota` bytes of its own.
+fn counted_hosts(quota: u64, policy: Option<SetPolicy>) -> NftablesConfig {
+    NftablesConfig::new().table("t", Family::Inet, move |t| {
+        t.chain("out", |c| {
+            c.hook(Hook::Output)
+                .priority(Priority::Filter)
+                .chain_type(ChainType::Filter)
+        })
+        .set("hosts", move |s| {
+            let s = s
+                .key_type(SetKeyType::Ipv4Addr)
+                .counter()
+                .statement(ElementStatement::from(QuotaExpr::new(quota)))
+                .ipv4(Ipv4Addr::new(127, 0, 0, 2))
+                .ipv4(Ipv4Addr::new(127, 0, 0, 3));
+            match policy {
+                Some(policy) => s.policy(policy),
+                None => s,
+            }
+        })
+        .rule_keyed("out", "hosts", |r| {
+            r.match_l4proto(17)
+                .match_in_set(PacketField::Ip4Daddr, "hosts")
+                .counter()
+        })
+    })
+}
+
+/// #703: a declared set with a counter and a quota on every element
+/// converges, its members count their own traffic without making a diff,
+/// and a changed quota, then a changed policy, each recreate it — with the
+/// rule using it moved back — so its members count from zero again.
+#[tokio::test]
+async fn declared_set_statements_count_per_member_and_recreate_on_change() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables", "nft_quota");
+
+    let ns = TestNamespace::new("nft-setstmt-decl")?;
+    lo_up(&ns).await?;
+    let steps = [
+        counted_hosts(1 << 20, None),
+        counted_hosts(2 << 20, None),
+        counted_hosts(2 << 20, Some(SetPolicy::Memory)),
+    ];
+    assert_transition(&ns, &steps, false, async |i, conn| {
+        send_udp(&ns, &["127.0.0.2:9", "127.0.0.2:9"], 1);
+        let elements = conn
+            .list_set_elements("t", "hosts", Family::Inet)
+            .await
+            .map_err(|e| e.to_string())?;
+        let two = elements
+            .iter()
+            .find(|e| e.key() == [127, 0, 0, 2])
+            .ok_or("127.0.0.2 is gone")?;
+        // Two packets: the set (and its elements) is new at every step.
+        if two.counter().map(|(packets, _)| packets) != Some(2) {
+            return Err(format!("step {}: 127.0.0.2 counted {:?}", i + 1, two.counter()));
+        }
+        if two.quota_used() != two.counter().map(|(_, bytes)| bytes) {
+            return Err(format!("step {}: quota used {:?}", i + 1, two.quota_used()));
+        }
+        let sets = conn
+            .list_sets_in("t", Family::Inet)
+            .await
+            .map_err(|e| e.to_string())?;
+        let policy = sets.iter().find(|s| s.name == "hosts").map(|s| s.policy);
+        let want = if i == 2 { SetPolicy::Memory } else { SetPolicy::Performance };
+        if policy != Some(want) {
+            return Err(format!("step {}: policy {policy:?}", i + 1));
+        }
+        Ok(())
+    })
+    .await?;
+    let conn = ns.connection_for::<Nftables>()?;
+    let again = steps[2].diff(&conn).await?;
+    assert!(again.is_empty(), "traffic must not make a diff: {again}");
+    Ok(())
 }

@@ -570,6 +570,81 @@ impl From<QuotaExpr> for ElementStatement {
     }
 }
 
+impl ElementStatement {
+    /// The statement a decoded expression is, if it is one; its live state
+    /// (a counter's packets, a quota's use) is dropped.
+    pub(crate) fn from_rule_expr(expr: &RuleExpr) -> Option<Self> {
+        match expr {
+            RuleExpr::Counter { .. } => Some(Self::Counter),
+            RuleExpr::Limit(limit) => Some(Self::Limit(limit.clone())),
+            RuleExpr::Quota { bytes, over, .. } => {
+                let quota = QuotaExpr::new(*bytes);
+                Some(Self::Quota(if *over { quota.over() } else { quota }))
+            }
+            RuleExpr::Connlimit { count, over } => Some(Self::Connlimit {
+                count: *count,
+                over: *over,
+            }),
+            _ => None,
+        }
+    }
+
+    /// As a template the kernel dumps it: its state at zero.
+    pub(crate) fn as_dumped(&self) -> RuleExpr {
+        match self.kernel_form() {
+            Self::Counter => RuleExpr::Counter {
+                packets: 0,
+                bytes: 0,
+            },
+            Self::Limit(limit) => RuleExpr::Limit(limit),
+            Self::Quota(quota) => RuleExpr::Quota {
+                bytes: quota.bytes,
+                consumed: 0,
+                over: quota.over,
+                depleted: false,
+            },
+            Self::Connlimit { count, over } => RuleExpr::Connlimit { count, over },
+        }
+    }
+
+    /// As the kernel keeps it: a packet limit's burst of 0 is its 5.
+    pub(crate) fn kernel_form(&self) -> Self {
+        match self {
+            Self::Limit(limit) if limit.kind == LimitKind::Packets && limit.burst == 0 => {
+                Self::Limit(limit.clone().burst(5))
+            }
+            other => other.clone(),
+        }
+    }
+}
+
+/// One statement in `nest` (an `NFTA_*_EXPR`), several in `list` (an
+/// `NFTA_*_EXPRESSIONS` of `NFTA_LIST_ELEM`): how a set and a dynset carry
+/// them.
+pub(crate) fn write_statements(
+    builder: &mut MessageBuilder,
+    statements: &[ElementStatement],
+    nest: u16,
+    list: u16,
+    form: WireForm,
+) {
+    match statements {
+        [] => {}
+        [one] => {
+            let at = builder.nest_start(nest | 0x8000);
+            write_expr_body(builder, &one.clone().into(), form);
+            builder.nest_end(at);
+        }
+        several => {
+            let at = builder.nest_start(list | 0x8000);
+            for statement in several {
+                write_expr(builder, &statement.clone().into(), form);
+            }
+            builder.nest_end(at);
+        }
+    }
+}
+
 impl From<ElementStatement> for Expr {
     fn from(statement: ElementStatement) -> Self {
         match statement {
@@ -1643,23 +1718,9 @@ fn write_expr_body(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             // One statement in NFTA_DYNSET_EXPR, several in
             // NFTA_DYNSET_EXPRESSIONS, which the kernel takes only with
             // NFT_DYNSET_F_EXPR — and never dumps.
-            match statements.as_slice() {
-                [] => {}
-                [one] => {
-                    let nest = builder.nest_start(NFTA_DYNSET_EXPR | 0x8000);
-                    write_expr_body(builder, &one.clone().into(), form);
-                    builder.nest_end(nest);
-                }
-                several => {
-                    let nest = builder.nest_start(NFTA_DYNSET_EXPRESSIONS | 0x8000);
-                    for statement in several {
-                        write_expr(builder, &statement.clone().into(), form);
-                    }
-                    builder.nest_end(nest);
-                    if form == WireForm::Request {
-                        flags |= NFT_DYNSET_F_EXPR;
-                    }
-                }
+            write_statements(builder, statements, NFTA_DYNSET_EXPR, NFTA_DYNSET_EXPRESSIONS, form);
+            if statements.len() > 1 && form == WireForm::Request {
+                flags |= NFT_DYNSET_F_EXPR;
             }
             builder.append_attr_u32_be(NFTA_DYNSET_FLAGS, flags);
             builder.nest_end(data);
@@ -2283,7 +2344,7 @@ pub fn parse_expressions(bytes: &[u8]) -> Vec<RuleExpr> {
 
 /// One expression from its `NFTA_EXPR_NAME` and `NFTA_EXPR_DATA`; `None`
 /// for a nameless one, which the kernel never emits.
-fn parse_elem(elem: &[u8]) -> Option<RuleExpr> {
+pub(crate) fn parse_elem(elem: &[u8]) -> Option<RuleExpr> {
     let mut name: Option<&str> = None;
     let mut data: &[u8] = &[];
     for (attr, payload) in AttrIter::new(elem) {

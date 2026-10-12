@@ -623,6 +623,7 @@ impl Connection<Nftables> {
         append_set_data_type(&mut builder, &set);
         append_set_timeouts(&mut builder, &set);
         append_set_desc(&mut builder, &set);
+        append_set_statements(&mut builder, &set);
         append_userdata(&mut builder, NFTA_SET_USERDATA, NFTNL_UDATA_SET_COMMENT, set.comment.as_deref(), set.owned)?;
         // Set ID (arbitrary, used for referencing in same batch)
         builder.append_attr_u32_be(NFTA_SET_ID, 1);
@@ -1655,10 +1656,19 @@ pub(crate) fn parse_set(data: &[u8], family: Family) -> Option<SetInfo> {
         object_type: None,
         comment: None,
         managed: false,
+        policy: SetPolicy::Performance,
+        statements: Vec::new(),
     };
 
     for (attr_type, payload) in AttrIter::new(data) {
         match attr_type & 0x7FFF {
+            // Dumped only when it is not the default.
+            NFTA_SET_POLICY if payload.len() >= 4 => {
+                let policy = u32::from_be_bytes(payload[..4].try_into().unwrap());
+                set.policy = SetPolicy::from_u32(policy).unwrap_or_default();
+            }
+            NFTA_SET_EXPR => set.statements.extend(super::expr::parse_elem(payload)),
+            NFTA_SET_EXPRESSIONS => set.statements.extend(super::expr::parse_expressions(payload)),
             NFTA_SET_USERDATA => {
                 set.comment = super::userdata::comment_of(payload, super::userdata::NFTNL_UDATA_SET_COMMENT);
                 set.managed = super::userdata::is_owned(payload);
@@ -1751,6 +1761,7 @@ fn parse_set_elem(elem: &[u8]) -> Option<SetElement> {
     let mut expiration = None;
     let mut data = None;
     let mut comment = None;
+    let mut statements = Vec::new();
     let millis = |payload: &[u8]| {
         payload
             .get(..8)
@@ -1781,6 +1792,8 @@ fn parse_set_elem(elem: &[u8]) -> Option<SetElement> {
                 data = attr_str(payload).map(SetElementData::Object);
             }
             NFTA_SET_ELEM_EXPIRATION => expiration = millis(payload),
+            NFTA_SET_ELEM_EXPR => statements.extend(super::expr::parse_elem(payload)),
+            NFTA_SET_ELEM_EXPRESSIONS => statements.extend(super::expr::parse_expressions(payload)),
             NFTA_SET_ELEM_USERDATA => {
                 comment = super::userdata::comment_of(payload, super::userdata::NFTNL_UDATA_COMMENT);
             }
@@ -1795,6 +1808,7 @@ fn parse_set_elem(elem: &[u8]) -> Option<SetElement> {
             let element = SetElement::from_wire(key, flags)
                 .with_key_end(key_end)
                 .with_timers(timeout, expiration)
+                .with_statements(&statements)
                 .with_data(data);
             Some(match comment {
                 Some(comment) => element.with_comment(comment),
@@ -2295,6 +2309,7 @@ impl Transaction {
             self.defer(e);
         }
         append_set_desc(&mut builder, &set);
+        append_set_statements(&mut builder, &set);
         builder.append_attr_u32_be(NFTA_SET_ID, set_id);
         self.push(builder);
         self
@@ -2563,6 +2578,22 @@ fn append_set_desc(builder: &mut MessageBuilder, set: &Set) {
         builder.nest_end(concat);
     }
     builder.nest_end(desc);
+}
+
+/// Append the set's policy, if declared, and the statements every element
+/// gets (#703) — sent again, the same, on an update: the kernel refuses
+/// (`EEXIST`) one that differs.
+fn append_set_statements(builder: &mut MessageBuilder, set: &Set) {
+    if let Some(policy) = set.policy {
+        builder.append_attr_u32_be(NFTA_SET_POLICY, policy as u32);
+    }
+    super::expr::write_statements(
+        builder,
+        &set.statements,
+        NFTA_SET_EXPR,
+        NFTA_SET_EXPRESSIONS,
+        super::expr::WireForm::Request,
+    );
 }
 
 /// Whether elements are being added or deleted: a delete names elements by
@@ -3270,6 +3301,83 @@ mod transaction_tests {
         // The size shares the nest.
         let desc = find_attr(body, NFTA_SET_DESC).unwrap();
         assert!(find_attr(&desc, NFTA_SET_DESC_SIZE).is_some());
+    }
+
+    /// A set's statements go as nft writes them (#703): one in
+    /// NFTA_SET_EXPR, several in NFTA_SET_EXPRESSIONS with NFT_SET_EXPR;
+    /// a declared policy goes too. Both read back.
+    #[test]
+    fn set_statements_and_policy_are_written_and_read_back() {
+        use super::super::expr::{ElementStatement, LimitExpr, QuotaExpr};
+        use super::super::types::{LimitUnit, SetPolicy};
+        let one = Set::new("t", "c").counter();
+        let several = Set::new("t", "m")
+            .policy(SetPolicy::Memory)
+            .counter()
+            .statement(QuotaExpr::new(1000));
+        let tx = new_tx().add_set(one).add_set(several);
+        let flags = |body: &[u8]| {
+            u32::from_be_bytes(find_attr(body, NFTA_SET_FLAGS).unwrap().try_into().unwrap())
+        };
+
+        let body = body_after_nfgenmsg(&tx.messages[0]);
+        assert!(find_attr(body, NFTA_SET_EXPR).is_some());
+        assert!(find_attr(body, NFTA_SET_EXPRESSIONS).is_none());
+        assert!(find_attr(body, NFTA_SET_POLICY).is_none());
+        assert_eq!(flags(body), 0);
+        let set = parse_set(body, Family::Inet).unwrap();
+        assert_eq!(set.policy, SetPolicy::Performance);
+        assert_eq!(set.statements.len(), 1);
+
+        let body = body_after_nfgenmsg(&tx.messages[1]);
+        assert!(find_attr(body, NFTA_SET_EXPRESSIONS).is_some());
+        assert_eq!(flags(body), NFT_SET_EXPR);
+        let set = parse_set(body, Family::Inet).unwrap();
+        assert_eq!(set.policy, SetPolicy::Memory);
+        let read: Vec<_> = set
+            .statements
+            .iter()
+            .filter_map(ElementStatement::from_rule_expr)
+            .collect();
+        assert_eq!(read, [ElementStatement::Counter, QuotaExpr::new(1000).into()]);
+
+        // A packet limit's burst of 0 is the kernel's 5.
+        let limit = ElementStatement::from(LimitExpr::packets(10, LimitUnit::Second));
+        assert_eq!(
+            limit.kernel_form(),
+            LimitExpr::packets(10, LimitUnit::Second).burst(5).into()
+        );
+    }
+
+    /// An element's counter and quota read back from its dump (#703).
+    #[test]
+    fn an_element_reads_back_its_counter_and_quota() {
+        let mut b = MessageBuilder::new(0, 0);
+        let key = b.nest_start(NFTA_SET_ELEM_KEY | 0x8000);
+        b.append_attr(NFTA_DATA_VALUE, &[127, 0, 0, 1]);
+        b.nest_end(key);
+        let list = b.nest_start(NFTA_SET_ELEM_EXPRESSIONS | 0x8000);
+        for (name, attrs) in [
+            ("counter", vec![(NFTA_COUNTER_BYTES, 336u64), (NFTA_COUNTER_PACKETS, 4)]),
+            ("quota", vec![(NFTA_QUOTA_BYTES, 1000), (NFTA_QUOTA_CONSUMED, 336)]),
+        ] {
+            let elem = b.nest_start(NFTA_LIST_ELEM | 0x8000);
+            b.append_attr_str(NFTA_EXPR_NAME, name);
+            let data = b.nest_start(NFTA_EXPR_DATA | 0x8000);
+            for (attr, value) in attrs {
+                b.append_attr_u64_be(attr, value);
+            }
+            if name == "quota" {
+                b.append_attr_u32_be(NFTA_QUOTA_FLAGS, 0);
+            }
+            b.nest_end(data);
+            b.nest_end(elem);
+        }
+        b.nest_end(list);
+        let element = parse_set_elem(&b.as_bytes()[16..]).unwrap();
+        assert_eq!(element.counter(), Some((4, 336)));
+        assert_eq!(element.quota_used(), Some(336));
+        assert_eq!(SetElement::ipv4(std::net::Ipv4Addr::LOCALHOST).counter(), None);
     }
 
     #[test]
