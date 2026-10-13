@@ -88,6 +88,40 @@ impl ProgFd {
     }
 }
 
+/// `BPF_OBJ_GET_INFO_BY_FD`, from `enum bpf_cmd`.
+const BPF_OBJ_GET_INFO_BY_FD: libc::c_long = 15;
+
+/// `union bpf_attr`'s `info` member.
+#[repr(C)]
+struct InfoAttr {
+    bpf_fd: u32,
+    info_len: u32,
+    info: u64,
+}
+
+/// The id of the program `fd` holds, `bpf_prog_info`'s second field
+/// (#813). Eight bytes are asked for, the struct's `type` and `id`: the
+/// kernel copies what fits. `None` when the kernel will not say.
+pub(crate) fn prog_id(fd: RawFd) -> Option<u32> {
+    let mut info = [0u32; 2];
+    let attr = InfoAttr {
+        bpf_fd: u32::try_from(fd).ok()?,
+        info_len: std::mem::size_of_val(&info) as u32,
+        info: info.as_mut_ptr() as u64,
+    };
+    // SAFETY: `attr` is a fully initialized `bpf_attr` prefix of the size
+    // passed, and `info` is writable for the `info_len` it gives.
+    let r = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            BPF_OBJ_GET_INFO_BY_FD,
+            &attr as *const InfoAttr,
+            std::mem::size_of::<InfoAttr>(),
+        )
+    };
+    (r == 0).then_some(info[1])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

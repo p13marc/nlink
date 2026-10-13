@@ -3033,6 +3033,54 @@ async fn a_pinned_bpf_program_attaches_as_filter_and_action() -> Result<()> {
     Ok(())
 }
 
+/// #813: a declared bpf action is compared by its program. A request names
+/// the program by fd and a dump by id, so the comparison went by kind
+/// alone, and a filter whose action ran another program matched.
+#[tokio::test]
+async fn a_declared_bpf_action_is_compared_by_its_program() -> Result<()> {
+    use nlink::netlink::action::{ActionList, BpfAction};
+    use nlink::netlink::config::NetworkConfig;
+    use nlink::{EthProto, FilterPriority};
+    require_root!();
+    // Loading a program needs CAP_BPF in the initial user namespace.
+    nlink::require_host_root!();
+    nlink::require_modules!("dummy", "sch_ingress", "cls_matchall", "act_bpf");
+
+    let one = BpfPin::load("decl-one", BPF_PROG_TYPE_SCHED_ACT)?;
+    let two = BpfPin::load("decl-two", BPF_PROG_TYPE_SCHED_ACT)?;
+    let ns = TestNamespace::new("tc-bpf-decl")?;
+    let conn = ns.connection()?;
+    let actions = |pin: &BpfPin| -> Result<ActionList> {
+        Ok(ActionList::new().with(BpfAction::from_pinned(&pin.path)?.name("act").build()))
+    };
+    let declared = actions(&one)?;
+    let cfg = NetworkConfig::new()
+        .link("d0", |l| l.dummy().up())
+        .qdisc("d0", |q| q.clsact())
+        .tc("d0", move |t| {
+            t.filter(TcHandle::CLSACT_INGRESS, FilterPriority::new(1), EthProto::ALL, MatchallFilter::new().actions(declared.clone()))
+        });
+    let applied = cfg.apply(&conn).await?;
+    assert!(applied.is_success(), "{applied:?}");
+    assert!(cfg.diff(&conn).await?.is_empty(), "the declared action did not converge");
+
+    ns.exec("tc", &["filter", "del", "dev", "d0", "ingress", "prio", "1"])?;
+    conn.add_filter_full(
+        "d0",
+        TcHandle::CLSACT_INGRESS,
+        None,
+        EthProto::ALL,
+        FilterPriority::new(1),
+        MatchallFilter::new().actions(actions(&two)?),
+    )
+    .await?;
+    assert!(!cfg.diff(&conn).await?.is_empty(), "another program compared equal");
+    let applied = cfg.apply(&conn).await?;
+    assert!(applied.is_success(), "{applied:?}");
+    assert!(cfg.diff(&conn).await?.is_empty(), "did not converge");
+    Ok(())
+}
+
 const BPF_PROG_TYPE_SCHED_CLS: u32 = 3;
 const BPF_PROG_TYPE_SCHED_ACT: u32 = 4;
 

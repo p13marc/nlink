@@ -645,6 +645,24 @@ enum ActionSummary {
     /// Its rate, burst and mtu, its exceed and conform verdicts, peakrate
     /// and average rate (#791).
     Police { rate: u64, burst: u32, mtu: u32, action: i32, conform: u32, peakrate: u32, avrate: u32 },
+    /// A gate's schedule as the kernel keeps it (#813): its verdict,
+    /// priority, base time, cycle and extension, flags and clock, and each
+    /// entry's state, interval, IPV and octet limit, with the kernel's
+    /// defaults for what was not sent.
+    Gate {
+        action: i32,
+        priority: i32,
+        base: u64,
+        cycle: u64,
+        ext: u64,
+        flags: u32,
+        clockid: i32,
+        entries: Vec<(bool, u32, i32, i32)>,
+    },
+    /// A bpf action's verdict, program and name (#813). A request names
+    /// its program by fd and a dump by id, so the fd is read as the id of
+    /// the program it holds.
+    Bpf { action: i32, prog: Option<u32>, name: Option<String> },
     /// Any other kind (#791): its options' attributes, but for its
     /// timestamps and padding and the bookkeeping at the head of its parms
     /// (index, capabilities, references), which tell two installs of one
@@ -658,7 +676,8 @@ enum ActionSummary {
 /// (`TCA_<KIND>_TM`, `_PAD`, ctinfo's `_STATS_*`), and its parms, the
 /// structs that start with `struct tc_gen`. Not `bpf`, which is sent a
 /// program's fd and reports the program's id, nor `gate`, whose echo
-/// fills each entry and the cycle in; those compare by kind.
+/// fills each entry and the cycle in: those have summaries of their own
+/// (#813).
 fn action_layout(kind: &str) -> Option<(&'static [u16], &'static [u16])> {
     Some(match kind {
         "vlan" => (&[1, 5], &[2]),
@@ -674,6 +693,66 @@ fn action_layout(kind: &str) -> Option<(&'static [u16], &'static [u16])> {
         // `TCA_DEF_*`.
         "simple" => (&[1, 4], &[2]),
         _ => return None,
+    })
+}
+
+/// A gate's schedule as [`ActionSummary::Gate`] compares it (#813), from
+/// what is sent or reported: `act_gate`'s defaults stand in for what a
+/// request leaves out (`gate_setup_*`: priority, IPV and octet limit -1,
+/// the cycle the sum of the intervals, `CLOCK_TAI`). An entry's index is
+/// its place in the list, which the kernel numbers itself.
+fn gate_summary(opts: &[u8]) -> Option<ActionSummary> {
+    use crate::netlink::types::tc::action::gate::*;
+    use zerocopy::FromBytes;
+    const CLOCK_TAI: i32 = 11;
+    let find = |id: u16| AttrIter::new(opts).find(|(t, _)| t & 0x7FFF == id).map(|(_, p)| p);
+    let u32_of = |p: &[u8]| p.get(..4).map(|b| u32::from_ne_bytes(b.try_into().unwrap()));
+    let u64_of = |p: &[u8]| p.get(..8).map(|b| u64::from_ne_bytes(b.try_into().unwrap()));
+    let (parms, _) = TcGate::read_from_prefix(find(TCA_GATE_PARMS)?).ok()?;
+    let entries: Vec<(bool, u32, i32, i32)> = find(TCA_GATE_ENTRY_LIST)
+        .map(|list| {
+            AttrIter::new(list)
+                .map(|(_, one)| {
+                    let field = |id: u16| AttrIter::new(one).find(|(t, _)| t & 0x7FFF == id).map(|(_, p)| p);
+                    (
+                        field(TCA_GATE_ENTRY_GATE).is_some(),
+                        field(TCA_GATE_ENTRY_INTERVAL).and_then(u32_of).unwrap_or(0),
+                        field(TCA_GATE_ENTRY_IPV).and_then(u32_of).map_or(-1, |v| v as i32),
+                        field(TCA_GATE_ENTRY_MAX_OCTETS).and_then(u32_of).map_or(-1, |v| v as i32),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let sum: u64 = entries.iter().map(|e| u64::from(e.1)).sum();
+    Some(ActionSummary::Gate {
+        action: parms.action,
+        priority: find(TCA_GATE_PRIORITY).and_then(u32_of).map_or(-1, |v| v as i32),
+        base: find(TCA_GATE_BASE_TIME).and_then(u64_of).unwrap_or(0),
+        cycle: find(TCA_GATE_CYCLE_TIME).and_then(u64_of).filter(|c| *c != 0).unwrap_or(sum),
+        ext: find(TCA_GATE_CYCLE_TIME_EXT).and_then(u64_of).unwrap_or(0),
+        flags: find(TCA_GATE_FLAGS).and_then(u32_of).unwrap_or(0),
+        clockid: find(TCA_GATE_CLOCKID).and_then(u32_of).map_or(CLOCK_TAI, |v| v as i32),
+        entries,
+    })
+}
+
+/// A bpf action as [`ActionSummary::Bpf`] compares it (#813): the
+/// program by the id a dump reports, or by the fd a request sends.
+fn bpf_summary(opts: &[u8]) -> Option<ActionSummary> {
+    use crate::netlink::types::tc::action::bpf_act::*;
+    use zerocopy::FromBytes;
+    let find = |id: u16| AttrIter::new(opts).find(|(t, _)| t & 0x7FFF == id).map(|(_, p)| p);
+    let u32_of = |p: &[u8]| p.get(..4).map(|b| u32::from_ne_bytes(b.try_into().unwrap()));
+    let (parms, _) = crate::netlink::types::tc::action::TcGen::read_from_prefix(find(TCA_ACT_BPF_PARMS)?).ok()?;
+    let prog = find(TCA_ACT_BPF_ID).and_then(u32_of).or_else(|| {
+        let fd = find(TCA_ACT_BPF_FD).and_then(u32_of)?;
+        crate::netlink::bpf_fd::prog_id(fd as std::os::fd::RawFd)
+    });
+    Some(ActionSummary::Bpf {
+        action: parms.action,
+        prog,
+        name: find(TCA_ACT_BPF_NAME).map(|p| String::from_utf8_lossy(p).trim_end_matches('\0').to_string()),
     })
 }
 
@@ -800,6 +879,8 @@ fn split_filter(kind: &str, options: &[u8]) -> (BTreeMap<u16, Vec<u8>>, Vec<Acti
                     .map(|(_, p)| p)
             };
             let summary = match kind.as_str() {
+                "gate" => gate_summary(opts),
+                "bpf" => bpf_summary(opts),
                 "mirred" => find(mirred::TCA_MIRRED_PARMS)
                     .and_then(|p| mirred::TcMirred::read_from_prefix(p).ok())
                     .map(|(m, _)| ActionSummary::Mirred {
