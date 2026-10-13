@@ -1200,15 +1200,15 @@ async fn the_previous_config_removes_its_neighbours() -> Result<()> {
     .await
 }
 
-/// A veth or netkit pair whose peer here has another name is not the
-/// declared pair (#793). The comparison looked at the peer's namespace and
-/// never its name, so a pair made with another peer name passed for the
-/// declared one, and the declared peer never appeared. It is a recreate
-/// now, which the apply refuses while the other peer is undeclared, since
-/// the kernel deletes it with the pair; once that pair is gone, the apply
-/// makes the declared one.
+/// A veth or netkit pair whose peer here has another name has its peer
+/// renamed to the declared one (#793, #804). The comparison looked at the
+/// peer's namespace and never its name, so a pair made with another peer
+/// name passed for the declared one (#793); then it was a recreate, which
+/// the apply refused while the old peer was undeclared. Renaming the peer in
+/// place converges in one apply and keeps what is on the peer; the undo
+/// renames it back.
 #[tokio::test]
-async fn a_pairs_peer_name_is_compared() -> Result<()> {
+async fn a_pairs_peer_is_renamed_to_the_declared_name() -> Result<()> {
     nlink::require_root!();
     nlink::require_modules!("veth", "netkit");
 
@@ -1225,17 +1225,23 @@ async fn a_pairs_peer_name_is_compared() -> Result<()> {
             } else {
                 conn.add_link(nlink::netlink::link::NetkitLink::new("v0", "v0-x")).await?;
             }
+            ns.exec("ip", &["link", "set", "v0-x", "up"])?;
+            ns.exec("ip", &["addr", "add", "10.94.0.2/24", "dev", "v0-x"])?;
             let diff = cfg.diff(&conn).await?;
-            assert_eq!(diff.links_to_recreate.len(), 1, "{kind}: a peer v0-x passed for v0-p: {diff}");
-            let err = cfg.apply(&conn).await.expect_err("the other peer is undeclared");
-            assert!(err.to_string().contains("peer v0-x -> v0-p"), "{kind}: {err}");
-
-            ns.exec("ip", &["link", "del", "v0"])?;
+            assert_eq!(diff.links_to_rename.len(), 1, "{kind}: a peer v0-x passed for v0-p: {diff}");
+            assert!(diff.links_to_recreate.is_empty(), "{kind}: {diff}");
             let applied = cfg.apply(&conn).await?;
             assert!(applied.is_success(), "{kind}: {applied:?}");
             let links = ns.exec("ip", &["-br", "link", "show"])?;
-            assert!(links.contains("v0-p@v0"), "{kind}: {links}");
+            assert!(links.contains("v0-p@v0") && !links.contains("v0-x"), "{kind}: {links}");
+            let addrs = ns.exec("ip", &["-br", "addr", "show", "dev", "v0-p"])?;
+            assert!(addrs.contains("10.94.0.2/24") && addrs.contains("UP"), "{kind}: {addrs}");
             assert!(cfg.diff(&conn).await?.is_empty(), "{kind}: did not converge");
+
+            let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
+            assert!(undone.is_success(), "{kind}: {undone:?}");
+            let links = ns.exec("ip", &["-br", "link", "show"])?;
+            assert!(links.contains("v0-x@v0"), "{kind}: the undo did not rename it back: {links}");
             ns.exec("ip", &["link", "del", "v0"])?;
         }
         Ok(())

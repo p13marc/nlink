@@ -52,6 +52,9 @@ pub enum Step {
     /// A link whose recreate would destroy what the config does not
     /// declare (#417): the apply fails here.
     RefuseRecreate(LinkRecreate),
+    /// Rename a veth's or netkit's peer to the name its pair declares
+    /// (#804), down for the rename and up again after it.
+    RenameLink(super::LinkRename),
     /// Delete a link to create it again: a kind parameter it cannot change
     /// live (#417). The create is a later step.
     DeleteForRecreate(LinkRecreate),
@@ -292,6 +295,11 @@ impl Step {
             Self::CreateLink(link) => Self::DeleteLink {
                 name: link.name.clone(),
             },
+            Self::RenameLink(r) => Self::RenameLink(super::LinkRename {
+                from: r.to.clone(),
+                to: r.from.clone(),
+                peer_of: r.peer_of.clone(),
+            }),
             Self::DeleteForRecreate(r) => Self::RestoreLink(r.restore.clone()?),
             Self::RemoveLink(r) => Self::RestoreLink(r.restore.clone()?),
             Self::RestoreTc(tc) => Self::ClearTc { dev: tc.dev.clone() },
@@ -561,6 +569,7 @@ impl fmt::Display for Step {
             Self::RefuseNexthop(conflict) => write!(f, "{conflict}"),
             Self::RefuseRemoval(removal) => write!(f, "{removal}"),
             Self::RefuseRecreate(recreate) => write!(f, "{recreate}"),
+            Self::RenameLink(rename) => write!(f, "{rename}"),
             Self::DeleteForRecreate(recreate) => write!(
                 f,
                 "- link {} (to recreate it: {})",
@@ -746,6 +755,8 @@ impl super::ConfigDiff {
                 .cloned()
                 .map(Step::RefuseRemoval),
         );
+        // Before anything that names the peer by the name it is given.
+        steps.extend(self.links_to_rename.iter().cloned().map(Step::RenameLink));
         for recreate in &self.links_to_recreate {
             steps.push(if recreate.is_refused() {
                 Step::RefuseRecreate(recreate.clone())

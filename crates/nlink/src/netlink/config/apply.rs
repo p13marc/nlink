@@ -468,6 +468,7 @@ fn step_object(step: &Step) -> crate::netlink::ErrorObject {
     };
     match step {
         Step::MissingLink { name } | Step::DeleteLink { name } => link(name),
+        Step::RenameLink(r) => link(&r.from),
         Step::RestoreLink(r) => link(r.links.first().map_or("?", |l| l.name.as_str())),
         Step::ClearTc { dev } => ErrorObject::Tc { dev: dev.clone() },
         Step::RefuseRemoval(r) | Step::RemoveLink(r) => link(&r.name),
@@ -520,6 +521,7 @@ fn step_operation(step: &Step) -> String {
         }
         Step::RemoveLink(r) => format!("delete link {} ({})", r.name, r.link_kind),
         Step::DeleteLink { name } => format!("delete link {name}"),
+        Step::RenameLink(r) => format!("rename link {} to {}", r.from, r.to),
         Step::RestoreLink(r) => format!("restore link {r}"),
         Step::ClearTc { dev } => format!("clear the TC tree on {dev}"),
         Step::RaiseMtuFirst { link, mtu } => format!("set link {link} mtu={mtu}"),
@@ -892,6 +894,27 @@ async fn run_step(
                 return Ok(Outcome::Unchanged(None));
             }
             Outcome::Changed(format!("Deleted link {name}"), 1)
+        }
+        // The kernel renames no running device (`dev_change_name`: EBUSY),
+        // so the peer goes down for it and comes back up (#804).
+        Step::RenameLink(r) => {
+            let Some(link) = conn.get_link_by_name(r.from.as_str()).await? else {
+                // Renamed already, by an apply that stopped after it.
+                if conn.get_link_by_name(r.to.as_str()).await?.is_some() {
+                    return Ok(Outcome::Unchanged(Some(format!("{} is already {}", r.from, r.to))));
+                }
+                return Err(conn.interface_not_found(r.from.as_str()));
+            };
+            let ifindex = link.ifindex();
+            let up = link.is_up();
+            if up {
+                conn.set_link_down_by_index(ifindex).await?;
+            }
+            conn.set_link_name_by_index(ifindex, r.to.as_str()).await?;
+            if up {
+                conn.set_link_up_by_index(ifindex).await?;
+            }
+            Outcome::Changed(format!("Renamed link {} to {}", r.from, r.to), 1)
         }
         Step::RestoreLink(restore) => {
             let n = restore_links(conn, restore).await?;

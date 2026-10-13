@@ -73,7 +73,7 @@ pub use diff::{
     ConfigDiff, LinkChanges, NexthopConflict, PlanOptions, RouteConflict, Snapshot, VethPeerChange,
 };
 pub use kind::{
-    Blocker, BlockerFilter, Certainty, LinkRecreate, LinkRemoval, OfflineDiff, OfflineRecreate, Owned,
+    Blocker, BlockerFilter, Certainty, LinkRecreate, LinkRemoval, LinkRename, OfflineDiff, OfflineRecreate, Owned,
     RecreatePolicy,
 };
 pub use plan::{JournalEntry, Plan, Step};

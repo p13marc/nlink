@@ -3296,6 +3296,18 @@ All notable changes to this project will be documented in this file.
     replace's undo puts it back as it was. #783 had made that undo
     irreversible.
 
+- **A veth or netkit pair's peer is renamed to the name its pair declares
+  (#804).** Since #793 a peer in this namespace with another name was a
+  recreate, which the apply refused while the old peer was undeclared. The
+  apply now renames the peer in place: it takes the peer down, since the
+  kernel renames no running device, renames it, and puts it back up. What
+  is on the peer, addresses included, stays. The diff lists it in
+  `ConfigDiff::links_to_rename` (`LinkRename`; the JSON gains a
+  `links-to-rename` key). The plan step is `Step::RenameLink`, whose undo
+  renames it back, and the rest of the diff is against the renamed link. A
+  recreate is still planned when another link already has the declared
+  name.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

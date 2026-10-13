@@ -269,6 +269,11 @@ pub struct ConfigDiff {
     /// [`links_to_add`](Self::links_to_add). A refused one
     /// ([`LinkRecreate::is_refused`]) makes the apply fail instead (#417).
     pub links_to_recreate: Vec<LinkRecreate>,
+    /// Peers of declared veth and netkit pairs to rename to the name their
+    /// pair declares (#804), before anything else: the rest of the diff
+    /// is against the renamed links.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Vec::is_empty"))]
+    pub links_to_rename: Vec<super::LinkRename>,
     /// Links to create.
     pub links_to_add: Vec<DeclaredLink>,
     /// Links to modify (name, changes).
@@ -573,6 +578,7 @@ impl ConfigDiff {
     /// Check if no changes are needed.
     pub fn is_empty(&self) -> bool {
         self.links_to_recreate.is_empty()
+            && self.links_to_rename.is_empty()
             && self.links_to_add.is_empty()
             && self.links_to_modify.is_empty()
             && self.veth_peers_to_modify.is_empty()
@@ -603,6 +609,7 @@ impl ConfigDiff {
     /// Get the total number of changes.
     pub fn change_count(&self) -> usize {
         self.links_to_recreate.len()
+            + self.links_to_rename.len()
             + self.links_to_add.len()
             + self.links_to_modify.len()
             + self.veth_peers_to_modify.len()
@@ -644,6 +651,9 @@ impl ConfigDiff {
         let mut lines = Vec::new();
 
         // Links
+        for rename in &self.links_to_rename {
+            lines.push(rename.to_string());
+        }
         for recreate in &self.links_to_recreate {
             lines.push(recreate.to_string());
         }
@@ -1493,7 +1503,7 @@ pub(crate) fn diff_snapshot(
     opts: &PlanOptions,
 ) -> Result<ConfigDiff> {
     let mut diff = ConfigDiff::default();
-    let current_links = snapshot.links.clone();
+    let mut current_links = snapshot.links.clone();
     let current_addresses = snapshot.addresses.clone();
     let current_routes = snapshot.routes.clone();
     let current_qdiscs = snapshot.qdiscs.clone();
@@ -1539,6 +1549,14 @@ pub(crate) fn diff_snapshot(
         },
     );
     diff.links_to_recreate = plan.recreate.clone();
+    // The rest of the diff is against the links as the renames leave them
+    // (#804): a renamed peer's own declaration, its addresses and routes.
+    diff.links_to_rename = plan.renames.clone();
+    for rename in &plan.renames {
+        if let Some(link) = current_links.iter_mut().find(|l| l.name.as_deref() == Some(&rename.from)) {
+            link.name = Some(rename.to.clone());
+        }
+    }
     diff.links_to_remove = plan.remove.clone();
     diff.routes_protocol = Some(config.routes_protocol());
     diff.owner = config.owner.clone();
@@ -4345,6 +4363,7 @@ mod tests {
                 "links-to-modify",
                 "links-to-recreate",
                 "links-to-remove",
+                "links-to-rename",
                 "neighbours-to-remove",
                 "neighbours-to-set",
                 "nexthops-refused",
