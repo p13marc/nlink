@@ -963,7 +963,36 @@ The 2026-10-12 run worked through every open issue after #534:
 #708's typed redesigns (`ChainKind`, `RuleSpec`/`lift`, `Change<T>`) stay
 open. So does #747: replacing `serde_yaml` is a dependency choice.
 
+The 2026-10-13 run swept tc(8) parity across every kind. Each action,
+qdisc, class and filter kind's tc lines were installed through `tc` and
+through nlink's `parse_params`, and the `tc -d` output compared, with every
+failure collected (`every_*_kinds_lines_install_as_tcs`). It found:
+- **Five things that never installed:** red and choke, missing their STAB
+  (#819); taprio, whose entries were nested as the wrong attribute (#823);
+  route filters, with handle 0, and a mark-only u32 (#825); and a u32
+  ematch, with a 12-byte key (#828).
+- **Values that went out wrong with no error:**
+  - skbmod and ife byte order (#816);
+  - a tunnel_key's key id (#811);
+  - u32 match values read as hex (#831);
+  - sfb's times read as microseconds and its unset fields sent as 0
+    (#820);
+  - red's probability read as a percentage (#819).
+- **About sixty of tc's own words refused** (#817, #820, #826, #829), and
+  most of tc-flower(8) (#827).
+
 Lessons to carry:
+- **Install it both ways, for every kind.** The parity tests that existed
+  covered the kinds a bug had been filed against; the sweep covered every
+  kind and found the rest at once. A kind no test installs can be one the
+  kernel refuses outright. Read the reference tool's source, not its man
+  page, and compile its arithmetic as an oracle for what the kernel never
+  dumps back (RED's STAB, from `tc_red.c`).
+- **A dump answers in the kernel's terms.** Under a VLAN tag a flower's
+  `TCA_FLOWER_KEY_ETH_TYPE` reads back as the innermost protocol, so a
+  declared VLAN filter could never have converged; a convergence test for
+  each new key found it (#827). And flow's hash mode is `EOPNOTSUPP` outside
+  the initial user namespace, which only the rootless lane showed.
 - **A counter in a before/after comparison is a flake waiting for
   load.** One test compared HTB's `direct_packets_stat` (#771). Under load
   it failed one CI run in three and never alone, and it cost four PRs a
