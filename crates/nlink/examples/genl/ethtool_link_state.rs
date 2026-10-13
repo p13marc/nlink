@@ -30,7 +30,10 @@ async fn main() -> nlink::Result<()> {
     // Get link state
     let state = conn.get_link_state(&ifname).await?;
     println!("Link State:");
-    println!("  Link detected: {}", if state.link { "yes" } else { "no" });
+    match state.link {
+        Some(link) => println!("  Link detected: {}", if link { "yes" } else { "no" }),
+        None => println!("  Link detected: unknown (the driver does not report it)"),
+    }
 
     if let Some(sqi) = state.sqi {
         let max = state.sqi_max.unwrap_or(100);

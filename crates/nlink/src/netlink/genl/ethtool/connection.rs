@@ -110,7 +110,7 @@ impl Connection<Ethtool> {
     /// // By index
     /// let state = conn.get_link_state(5u32).await?;
     ///
-    /// println!("Link detected: {}", state.link);
+    /// println!("Link detected: {:?}", state.link);
     /// # Ok(())
     /// # }
     /// ```
@@ -142,7 +142,7 @@ impl Connection<Ethtool> {
                     self.parse_header(payload, &mut state.ifname, &mut state.ifindex)?;
                 }
                 t if t == EthtoolLinkstateAttr::Link as u16 && !payload.is_empty() => {
-                    state.link = payload[0] != 0;
+                    state.link = Some(payload[0] != 0);
                 }
                 t if t == EthtoolLinkstateAttr::Sqi as u16 && payload.len() >= 4 => {
                     state.sqi = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));

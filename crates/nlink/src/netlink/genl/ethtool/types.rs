@@ -198,8 +198,11 @@ pub struct LinkState {
     pub ifname: Option<String>,
     /// Interface index.
     pub ifindex: Option<u32>,
-    /// Link is detected (carrier present).
-    pub link: bool,
+    /// Link is detected (carrier present), or `None` when the driver
+    /// cannot tell: one without `ethtool_ops::get_link`, such as a dummy,
+    /// gets no `ETHTOOL_A_LINKSTATE_LINK`, and ethtool prints no "Link
+    /// detected" (#839).
+    pub link: Option<bool>,
     /// Signal Quality Index (0-100, if supported).
     pub sqi: Option<u32>,
     /// Maximum SQI value supported by the device.
@@ -380,9 +383,12 @@ impl Features {
         self.hw.is_set(feature)
     }
 
-    /// Check if a feature can be changed.
+    /// Check if a feature can be changed: the device lists it in `hw`
+    /// (its `hw_features`) and the kernel does not hold it fixed. ethtool
+    /// marks the rest `[fixed]`; until #839 only the second half was
+    /// checked.
     pub fn is_changeable(&self, feature: &str) -> bool {
-        !self.nochange.is_set(feature)
+        self.hw.is_set(feature) && !self.nochange.is_set(feature)
     }
 
     /// Get all active feature names.

@@ -27,7 +27,7 @@
 //!
 //! // Query link state
 //! let state = conn.get_link_state("eth0").await?;
-//! println!("Link: {}", if state.link { "up" } else { "down" });
+//! println!("Link: {:?}", state.link);
 //!
 //! // Query link modes
 //! let modes = conn.get_link_modes("eth0").await?;

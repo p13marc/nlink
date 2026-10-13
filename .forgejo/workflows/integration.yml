@@ -55,8 +55,9 @@ jobs:
           # assertion fails), which the flag below used to hide (#350).
           # nftables: tests that need a rule nlink did not write add it the
           # way a person does, with `nft` (#459).
+          # ethtool: nlink's ethtool getters are compared with the CLI's (#839).
           apt-get install -y --no-install-recommends iproute2 conntrack nodejs git iputils-ping \
-            nftables
+            nftables ethtool
       - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - name: Guard that kernel modules are available on the runner VM
         shell: bash
