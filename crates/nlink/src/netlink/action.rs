@@ -2576,6 +2576,8 @@ impl TunnelKeyAction {
     /// - `release` — strip tunnel metadata (decap path).
     ///
     /// Set-only modifiers (rejected with `release`):
+    /// - `src_ip <addr>` / `dst_ip <addr>` — the outer addresses, either
+    ///   family, as tc-tunnel_key(8) spells them (#811).
     /// - `src <ipv4>` / `dst <ipv4>` — IPv4 outer addresses.
     /// - `src6 <ipv6>` / `dst6 <ipv6>` — IPv6 outer addresses.
     /// - `id <vni>` — tunnel key (VNI for VXLAN, etc.).
@@ -2618,6 +2620,25 @@ impl TunnelKeyAction {
                 v if is_verdict(v) => {
                     act = act.action(parse_gact_verdict(v)?);
                     i += 1;
+                }
+                // tc-tunnel_key(8)'s own words, for either family (#811).
+                "src_ip" | "dst_ip" => {
+                    let s = action_need_value(params, i, "tunnel_key", key)?;
+                    let addr: IpAddr = s.parse().map_err(|_| {
+                        Error::invalid_message(format!("tunnel_key: invalid {key} `{s}`"))
+                    })?;
+                    if !is_set {
+                        return Err(Error::invalid_message(
+                            "tunnel_key: src/dst/id/etc. only valid with `set`".to_string(),
+                        ));
+                    }
+                    act = match (key, addr) {
+                        ("src_ip", IpAddr::V4(a)) => act.src(a),
+                        ("src_ip", IpAddr::V6(a)) => act.src6(a),
+                        (_, IpAddr::V4(a)) => act.dst(a),
+                        (_, IpAddr::V6(a)) => act.dst6(a),
+                    };
+                    i += 2;
                 }
                 "src" => {
                     let s = action_need_value(params, i, "tunnel_key", key)?;
@@ -2844,11 +2865,11 @@ impl ActionConfig for TunnelKeyAction {
                 builder.append_attr(tunnel_key::TCA_TUNNEL_KEY_ENC_IPV6_DST, &addr.octets());
             }
 
-            // Key ID (as big-endian u32, but stored in network order)
+            // Key ID: a `__be32`. The header's comment says be64, but
+            // `tunnel_key_init()` reads it with `nla_get_be32()`, so the 8
+            // bytes this used to send installed key id 0 (#811).
             if let Some(id) = self.key_id {
-                // Key ID is encoded as BE64 in the kernel
-                let id_be64 = (id as u64).to_be_bytes();
-                builder.append_attr(tunnel_key::TCA_TUNNEL_KEY_ENC_KEY_ID, &id_be64);
+                builder.append_attr(tunnel_key::TCA_TUNNEL_KEY_ENC_KEY_ID, &id.to_be_bytes());
             }
 
             // Destination port (network byte order)
