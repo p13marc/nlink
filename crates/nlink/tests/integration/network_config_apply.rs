@@ -1781,6 +1781,50 @@ async fn an_undo_puts_back_an_address_with_its_attributes() -> Result<()> {
     .await
 }
 
+/// A replaced qdisc set in a way its spec cannot say is not put back as
+/// another (#783). An sfq with another divisor, flows, depth or head drop
+/// read back as a plain sfq, so its replace's undo restored one with the
+/// kernel's defaults and called that the qdisc it had replaced. The replace
+/// is irreversible now; a plain sfq still comes back.
+#[tokio::test]
+async fn a_replaced_qdisc_its_spec_cannot_say_is_not_put_back_as_another() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "sch_sfq", "sch_fq_codel");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("qdisc-lossy")?;
+        let conn = conn_in_ns(&ns)?;
+        let cfg = NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .qdisc("d0", |q| q.fq_codel());
+        let applied = NetworkConfig::new().link("d0", |l| l.dummy().up()).apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let sfq = || -> Result<String> {
+            let out = ns.exec("tc", &["qdisc", "show", "dev", "d0"])?;
+            Ok(out.lines().next().unwrap_or_default().to_string())
+        };
+        for (args, reversible) in [
+            (&["divisor", "512", "flows", "64", "depth", "32", "headdrop"][..], false),
+            (&["perturb", "10"][..], true),
+        ] {
+            let mut add = vec!["qdisc", "replace", "dev", "d0", "root", "handle", "1:", "sfq"];
+            add.extend(args);
+            ns.exec("tc", &add)?;
+            let before = sfq()?;
+            let applied = cfg.apply(&conn).await?;
+            assert!(applied.is_success(), "{applied:?}");
+            assert_eq!(applied.irreversible().count(), usize::from(!reversible), "sfq {args:?}: {:?}", applied.journal);
+            if reversible {
+                let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
+                assert!(undone.is_success(), "{undone:?}");
+                assert_eq!(sfq()?, before, "the undo put back another sfq");
+            }
+        }
+        Ok(())
+    })
+    .await
+}
+
 /// A declared IPv4 broadcast is installed and compared (#783), and one not
 /// declared is left alone. `DeclaredAddress` had no broadcast, so an undo or
 /// a #745 restore put an address back without the one it had, and without

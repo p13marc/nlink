@@ -500,6 +500,8 @@ pub mod qdisc {
         pub const TCA_FQ_CODEL_CE_THRESHOLD: u16 = 7;
         pub const TCA_FQ_CODEL_DROP_BATCH_SIZE: u16 = 8;
         pub const TCA_FQ_CODEL_MEMORY_LIMIT: u16 = 9;
+        pub const TCA_FQ_CODEL_CE_THRESHOLD_SELECTOR: u16 = 10;
+        pub const TCA_FQ_CODEL_CE_THRESHOLD_MASK: u16 = 11;
     }
 
     /// ETS (Enhanced Transmission Selection) qdisc attributes
