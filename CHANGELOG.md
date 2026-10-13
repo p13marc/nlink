@@ -1183,6 +1183,16 @@ All notable changes to this project will be documented in this file.
   - flow's `key` and its `and`/`or`/`xor`, folded into one mask and xor
     in order as tc folds them.
 
+- **A basic filter takes tc's ematch expressions, and a u32 ematch installs
+  (#828).** `BasicFilter::parse_params` reads `match EXPR` as tc-ematch(8)
+  does: `cmp(...)` and `u32(...)` matches, each optionally `not`, joined
+  by `and` or `or`, ending where the expression stops. A match may be one
+  argument or several. Groups and the other modules are refused with a
+  clear error. A u32 ematch from the builder never installed: nlink sent
+  its key as 12 bytes, and the kernel validates the whole `struct
+  tc_u32_key`. It also sent the key's word in host order, where the
+  packet's word is big-endian. Both are tc's now.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
