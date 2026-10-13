@@ -3269,6 +3269,73 @@ async fn a_tunnel_keys_id_is_installed_as_tc_installs_it() -> Result<()> {
     Ok(())
 }
 
+/// One tc(8) qdisc line installed at `dummy0`'s root by `tc` and by nlink
+/// makes the same qdisc: `tc -j` reports the same options for both.
+async fn qdisc_same_as_tc(
+    ns: &TestNamespace,
+    conn: &Connection<Route>,
+    kind: &str,
+    line: &str,
+    config: impl nlink::netlink::tc::QdiscConfig,
+) -> Result<()> {
+    let options = || -> Result<serde_json::Value> {
+        let out = ns.exec("tc", &["-j", "qdisc", "show", "dev", "dummy0", "root"])?;
+        let listed: serde_json::Value =
+            serde_json::from_str(&out).map_err(|e| nlink::Error::invalid_message(format!("{e}: {out}")))?;
+        Ok(listed[0]["options"].clone())
+    };
+    let mut args = vec!["qdisc", "add", "dev", "dummy0", "root", kind];
+    args.extend(line.split_whitespace());
+    ns.exec("tc", &args)?;
+    let theirs = options()?;
+    ns.exec("tc", &["qdisc", "del", "dev", "dummy0", "root"])?;
+    conn.add_qdisc("dummy0", config).await?;
+    let ours = options()?;
+    ns.exec("tc", &["qdisc", "del", "dev", "dummy0", "root"])?;
+    assert_eq!(theirs, ours, "{kind} {line}: tc's, then nlink's");
+    Ok(())
+}
+
+/// #806: an sfq's divisor, flows, depth and head drop are what tc(8)
+/// makes of the same words. `SfqConfig` could not say them, and sent the
+/// v0 struct, from which the kernel takes no depth or head drop.
+#[tokio::test]
+async fn sfq_divisor_flows_depth_and_headdrop_are_tcs() -> Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "sch_sfq");
+
+    let (ns, conn) = setup_tc_ns("tc-sfq-opts").await?;
+    for line in ["divisor 512 flows 64 depth 32 headdrop", "limit 100 depth 10", "flows 200 quantum 3000", "perturb 10"] {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        qdisc_same_as_tc(&ns, &conn, "sfq", line, SfqConfig::parse_params(&words)?).await?;
+    }
+    Ok(())
+}
+
+/// #806: an fq_codel's drop batch and CE threshold selector, and a TBF's
+/// overhead, mpu and link layer, are what tc(8) makes of the same words.
+/// The configs could not say them.
+#[tokio::test]
+async fn fq_codel_and_tbf_framing_are_tcs() -> Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "sch_fq_codel", "sch_tbf");
+
+    let (ns, conn) = setup_tc_ns("tc-qdisc-opts").await?;
+    for line in ["drop_batch 32", "ce_threshold 2ms ce_threshold_selector 0x01/0x01", "ce_threshold 2ms ce_threshold_selector 0x04/0xfc"] {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        qdisc_same_as_tc(&ns, &conn, "fq_codel", line, FqCodelConfig::parse_params(&words)?).await?;
+    }
+    for line in [
+        "rate 1mbit burst 32k limit 64k overhead 24 mpu 64",
+        "rate 1mbit burst 32k limit 64k linklayer atm",
+        "rate 10mbit burst 64k limit 128k peakrate 20mbit mtu 2k overhead 8",
+    ] {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        qdisc_same_as_tc(&ns, &conn, "tbf", line, TbfConfig::parse_params(&words)?).await?;
+    }
+    Ok(())
+}
+
 /// #751: a gate's bare times are nanoseconds and a ct `nat` is spelled
 /// with `addr`, as tc(8) reads them. nlink read a bare gate time as
 /// microseconds, and refused the `addr` keyword.

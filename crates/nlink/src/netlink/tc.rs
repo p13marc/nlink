@@ -1280,6 +1280,13 @@ pub struct FqCodelConfig {
     pub ce_threshold: Option<Duration>,
     /// Memory limit in bytes.
     pub memory_limit: Option<u32>,
+    /// The most packets dropped at once when the queue is full; the
+    /// kernel's is 64. tc(8) `drop_batch` (#806).
+    pub drop_batch: Option<u32>,
+    /// Which packets the CE threshold applies to: those whose DS field
+    /// (the TOS byte), masked with the second, equals the first. tc(8)
+    /// `ce_threshold_selector V/M` (#806).
+    pub ce_threshold_selector: Option<(u8, u8)>,
 }
 
 impl Default for FqCodelConfig {
@@ -1300,7 +1307,23 @@ impl FqCodelConfig {
             ecn: None,
             ce_threshold: None,
             memory_limit: None,
+            drop_batch: None,
+            ce_threshold_selector: None,
         }
+    }
+
+    /// Set the most packets dropped at once when the queue is full
+    /// (#806).
+    pub fn drop_batch(mut self, packets: u32) -> Self {
+        self.drop_batch = Some(packets);
+        self
+    }
+
+    /// Apply the CE threshold to the packets whose DS field, masked with
+    /// `mask`, equals `value` (#806).
+    pub fn ce_threshold_selector(mut self, value: u8, mask: u8) -> Self {
+        self.ce_threshold_selector = Some((value, mask));
+        self
     }
 
     /// Set the target delay (default: 5ms).
@@ -1446,6 +1469,35 @@ impl FqCodelConfig {
                     })?);
                     i += 2;
                 }
+                "drop_batch" => {
+                    let s = need_value()?;
+                    cfg.drop_batch = Some(s.parse().map_err(|_| {
+                        Error::invalid_message(format!(
+                            "fq_codel: invalid drop_batch `{s}` (expected unsigned integer packets)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "ce_threshold_selector" => {
+                    let s = need_value()?;
+                    let byte = |v: &str| {
+                        match v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")) {
+                            Some(hex) => u8::from_str_radix(hex, 16),
+                            None => v.parse(),
+                        }
+                        .ok()
+                    };
+                    let (value, mask) = s
+                        .split_once('/')
+                        .and_then(|(v, m)| Some((byte(v)?, byte(m)?)))
+                        .ok_or_else(|| {
+                            Error::invalid_message(format!(
+                                "fq_codel: invalid ce_threshold_selector `{s}` (expected VALUE/MASK, bytes)"
+                            ))
+                        })?;
+                    cfg.ce_threshold_selector = Some((value, mask));
+                    i += 2;
+                }
                 "ecn" => {
                     cfg.ecn = Some(true);
                     i += 1;
@@ -1522,6 +1574,14 @@ impl FqCodelConfig {
         }
         if let Some(mem) = self.memory_limit {
             builder.append_attr_u32(fq_codel::TCA_FQ_CODEL_MEMORY_LIMIT, mem);
+        }
+        if let Some(batch) = self.drop_batch {
+            builder.append_attr_u32(fq_codel::TCA_FQ_CODEL_DROP_BATCH_SIZE, batch);
+        }
+        // The kernel takes the selector only with its mask.
+        if let Some((value, mask)) = self.ce_threshold_selector {
+            builder.append_attr_u8(fq_codel::TCA_FQ_CODEL_CE_THRESHOLD_SELECTOR, value);
+            builder.append_attr_u8(fq_codel::TCA_FQ_CODEL_CE_THRESHOLD_MASK, mask);
         }
         Ok(())
     }
@@ -2231,6 +2291,15 @@ pub struct TbfConfig {
     /// the qdisc is written, because the kernel installs a TBF with no
     /// limit with no queue at all and drops every packet.
     pub limit: crate::util::Bytes,
+    /// Bytes the kernel adds to each packet's size when it charges the
+    /// rates, for framing the device does not count. tc(8) `overhead`
+    /// (#806).
+    pub overhead: u16,
+    /// The least size a packet is charged as. tc(8) `mpu` (#806).
+    pub mpu: u16,
+    /// The link layer the rate tables are for: ATM rounds each packet up
+    /// to whole cells. tc(8) `linklayer` (#806).
+    pub linklayer: super::psched::LinkLayer,
 }
 
 impl Default for TbfConfig {
@@ -2248,7 +2317,28 @@ impl TbfConfig {
             burst: crate::util::Bytes::ZERO,
             mtu: 1514,
             limit: crate::util::Bytes::ZERO,
+            overhead: 0,
+            mpu: 0,
+            linklayer: super::psched::LinkLayer::Ethernet,
         }
+    }
+
+    /// Set the per-packet overhead the rates charge (#806).
+    pub fn overhead(mut self, bytes: u16) -> Self {
+        self.overhead = bytes;
+        self
+    }
+
+    /// Set the least size a packet is charged as (#806).
+    pub fn mpu(mut self, bytes: u16) -> Self {
+        self.mpu = bytes;
+        self
+    }
+
+    /// Set the link layer the rate tables are for (#806).
+    pub fn linklayer(mut self, linklayer: super::psched::LinkLayer) -> Self {
+        self.linklayer = linklayer;
+        self
     }
 
     /// Set the rate.
@@ -2397,6 +2487,33 @@ impl TbfConfig {
                         "tbf: `latency` is a derived form (limit = rate * latency) and is not modelled by TbfConfig — compute the limit yourself",
                     ));
                 }
+                "overhead" | "mpu" => {
+                    let s = need_value()?;
+                    let bytes = crate::util::parse::get_size(s).ok().and_then(|b| u16::try_from(b).ok()).ok_or_else(|| {
+                        Error::invalid_message(format!(
+                            "tbf: invalid {key} `{s}` (expected a size up to 65535 bytes)"
+                        ))
+                    })?;
+                    if key == "overhead" {
+                        cfg.overhead = bytes;
+                    } else {
+                        cfg.mpu = bytes;
+                    }
+                    i += 2;
+                }
+                "linklayer" => {
+                    let s = need_value()?;
+                    cfg.linklayer = match s {
+                        "ethernet" => super::psched::LinkLayer::Ethernet,
+                        "atm" | "adsl" => super::psched::LinkLayer::Atm,
+                        _ => {
+                            return Err(Error::invalid_message(format!(
+                                "tbf: invalid linklayer `{s}` (expected ethernet, atm or adsl)"
+                            )));
+                        }
+                    };
+                    i += 2;
+                }
                 other => {
                     return Err(Error::invalid_message(format!(
                         "tbf: unknown token `{other}`"
@@ -2438,16 +2555,21 @@ impl QdiscConfig for TbfConfig {
         // tbf_change() runs both through PSCHED_TICKS2NS(). Writing the raw
         // byte count made the bucket drain ~125x too fast at 1 mbit, so
         // tbf_enqueue() dropped every packet over ~262 bytes (#192).
-        let mut rate = TcRateSpec {
-            rate: rate_bps.min(u32::MAX as u64) as u32,
+        // The overhead, mpu and link layer go on both rates, as tc(8) puts
+        // them (#806).
+        let spec = |rate: u32| TcRateSpec {
+            rate,
+            overhead: self.overhead,
+            mpu: self.mpu,
             ..Default::default()
         };
-        let rtab = psched::tc_calc_rtable(&mut rate, rate_bps, self.mtu, psched::LinkLayer::default());
+        let mut rate = spec(rate_bps.min(u32::MAX as u64) as u32);
+        let rtab = psched::tc_calc_rtable(&mut rate, rate_bps, self.mtu, self.linklayer);
 
         let mut peakrate = TcRateSpec::default();
         let ptab = peakrate_bps.map(|pr| {
-            peakrate.rate = pr.min(u32::MAX as u64) as u32;
-            psched::tc_calc_rtable(&mut peakrate, pr, self.mtu, psched::LinkLayer::default())
+            peakrate = spec(pr.min(u32::MAX as u64) as u32);
+            psched::tc_calc_rtable(&mut peakrate, pr, self.mtu, self.linklayer)
         });
 
         let qopt = tbf::TcTbfQopt {
@@ -2894,6 +3016,18 @@ pub struct SfqConfig {
     pub limit: crate::util::Packets,
     /// Quantum (bytes per round).
     pub quantum: u32,
+    /// The hash table's buckets, a power of two up to 65536; 0, the
+    /// default, leaves the kernel's (1024). tc(8) `divisor` (#806).
+    pub divisor: u32,
+    /// The most flows; 0 leaves the kernel's (128). A limit caps it.
+    /// tc(8) `flows` (#806).
+    pub flows: u32,
+    /// The most packets a flow queues, up to 127; 0 leaves the kernel's
+    /// (127). tc(8) `depth` (#806).
+    pub depth: u32,
+    /// Drop from the head of a full flow's queue, not its tail. tc(8)
+    /// `headdrop` (#806).
+    pub headdrop: bool,
 }
 
 impl Default for SfqConfig {
@@ -2909,7 +3043,35 @@ impl SfqConfig {
             perturb: 0,
             limit: crate::util::Packets::ZERO,
             quantum: 0,
+            divisor: 0,
+            flows: 0,
+            depth: 0,
+            headdrop: false,
         }
+    }
+
+    /// Set the hash table's buckets, a power of two up to 65536 (#806).
+    pub fn divisor(mut self, buckets: u32) -> Self {
+        self.divisor = buckets;
+        self
+    }
+
+    /// Set the most flows (#806).
+    pub fn flows(mut self, flows: u32) -> Self {
+        self.flows = flows;
+        self
+    }
+
+    /// Set the most packets a flow queues, up to 127 (#806).
+    pub fn depth(mut self, packets: u32) -> Self {
+        self.depth = packets;
+        self
+    }
+
+    /// Drop from the head of a full flow's queue (#806).
+    pub fn headdrop(mut self, on: bool) -> Self {
+        self.headdrop = on;
+        self
     }
 
     /// Set the perturbation period in seconds.
@@ -2942,10 +3104,12 @@ impl SfqConfig {
     /// - `quantum <bytes>` — bytes dequeued per round (tc-style size).
     /// - `perturb <seconds>` — hash perturbation interval.
     /// - `limit <packets>` — queue limit in packets.
+    /// - `divisor <buckets>`, `flows <n>`, `depth <packets>`, `headdrop`
+    ///   (#806).
     ///
-    /// **Not yet typed-modelled** (returns `Error::invalid_message`):
-    /// `divisor` — `SfqConfig` doesn't expose the hash-table divisor
-    /// field. File an issue if you need it.
+    /// **Not typed-modelled** (returns `Error::invalid_message`): the
+    /// SFQRED words (`redflowlimit`, `min`, `max`, `avpkt`, `burst`,
+    /// `probability`, `ecn`, `harddrop`).
     ///
     /// Strict: unknown tokens, missing values, and unparseable
     /// numbers all return an error.
@@ -2991,11 +3155,29 @@ impl SfqConfig {
                     })?;
                     i += 2;
                 }
-                "divisor" => {
-                    return Err(Error::invalid_message(
-                        "sfq: `divisor` is not modelled by SfqConfig — file an issue if you need it"
-                            ,
-                    ));
+                key @ ("divisor" | "flows" | "depth") => {
+                    let s = need_value()?;
+                    let v: u32 = s.parse().map_err(|_| {
+                        Error::invalid_message(format!(
+                            "sfq: invalid {key} `{s}` (expected unsigned integer)"
+                        ))
+                    })?;
+                    cfg = match key {
+                        "divisor" => cfg.divisor(v),
+                        "flows" => cfg.flows(v),
+                        _ => cfg.depth(v),
+                    };
+                    i += 2;
+                }
+                "headdrop" => {
+                    cfg.headdrop = true;
+                    i += 1;
+                }
+                red @ ("redflowlimit" | "min" | "max" | "avpkt" | "burst" | "probability" | "ecn"
+                | "harddrop") => {
+                    return Err(Error::invalid_message(format!(
+                        "sfq: `{red}` (SFQRED) is not modelled by SfqConfig"
+                    )));
                 }
                 other => {
                     return Err(Error::invalid_message(format!(
@@ -3019,13 +3201,21 @@ impl QdiscConfig for SfqConfig {
         InPlace::Recreate
     }
 
+    /// The v1 struct whole, as tc(8) sends it: `sfq_change()` takes depth
+    /// and head drop only from one of its full size (#806). Zero is the
+    /// kernel's default for each field, and no SFQRED.
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
-        let qopt = sfq::TcSfqQopt {
-            quantum: self.quantum,
-            perturb_period: self.perturb,
-            limit: self.limit.as_u32(),
-            divisor: 0,
-            flows: 0,
+        let qopt = sfq::TcSfqQoptV1 {
+            v0: sfq::TcSfqQopt {
+                quantum: self.quantum,
+                perturb_period: self.perturb,
+                limit: self.limit.as_u32(),
+                divisor: self.divisor,
+                flows: self.flows,
+            },
+            depth: self.depth,
+            headdrop: u32::from(self.headdrop),
+            ..Default::default()
         };
         builder.append(&qopt);
         Ok(())
@@ -11304,9 +11494,13 @@ mod tests {
         assert_eq!(cfg.quantum, 1024);
     }
 
+    /// #806: divisor, flows, depth and head drop are modelled; SFQRED is
+    /// not, and says so.
     #[test]
-    fn sfq_parse_params_divisor_rejected() {
-        let err = SfqConfig::parse_params(&["divisor", "1024"]).unwrap_err();
+    fn sfq_parse_params_divisor_flows_depth_headdrop() {
+        let cfg = SfqConfig::parse_params(&["divisor", "512", "flows", "64", "depth", "32", "headdrop"]).unwrap();
+        assert_eq!((cfg.divisor, cfg.flows, cfg.depth, cfg.headdrop), (512, 64, 32, true));
+        let err = SfqConfig::parse_params(&["redflowlimit", "100000"]).unwrap_err();
         assert!(err.to_string().contains("not modelled"), "got: {err}");
     }
 

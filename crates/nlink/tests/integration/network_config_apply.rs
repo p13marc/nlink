@@ -2006,44 +2006,102 @@ async fn an_undo_puts_back_an_address_with_its_attributes() -> Result<()> {
     .await
 }
 
-/// A replaced qdisc set in a way its spec cannot say is not put back as
-/// another (#783). An sfq with another divisor, flows, depth or head drop
-/// read back as a plain sfq, so its replace's undo restored one with the
-/// kernel's defaults and called that the qdisc it had replaced. The replace
-/// is irreversible now; a plain sfq still comes back.
+/// An sfq's divisor, depth and head drop, an fq_codel's drop batch and CE
+/// threshold selector, and a TBF's overhead, mpu and link layer are
+/// declared, converge, and are compared (#806). The configs could not say
+/// them, and the comparison did not read them.
 #[tokio::test]
-async fn a_replaced_qdisc_its_spec_cannot_say_is_not_put_back_as_another() -> Result<()> {
+async fn sfq_fq_codel_and_tbf_settings_converge_and_are_compared() -> Result<()> {
+    use nlink::netlink::psched::LinkLayer;
+    use nlink::{Bytes, Rate};
     nlink::require_root!();
-    nlink::require_modules!("dummy", "sch_sfq", "sch_fq_codel");
+    nlink::require_modules!("dummy", "sch_sfq", "sch_fq_codel", "sch_tbf");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("qdisc-settings")?;
+        let conn = conn_in_ns(&ns)?;
+        let link = || NetworkConfig::new().link("d0", |l| l.dummy().up());
+        let rows = [
+            (link().qdisc("d0", |q| q.sfq().divisor(512).depth(32).headdrop(true)), "replace", "sfq divisor 256 depth 32 headdrop"),
+            (link().qdisc("d0", |q| q.fq_codel().drop_batch(32)), "change", "fq_codel drop_batch 16"),
+            (
+                link().qdisc("d0", |q| {
+                    q.tbf(Rate::mbit(1), Bytes::kib(32))
+                        .limit_bytes(Bytes::kib(64))
+                        .overhead(24)
+                        .mpu(64)
+                        .linklayer(LinkLayer::Atm)
+                }),
+                "change",
+                "tbf rate 1mbit burst 32k limit 64k overhead 8 mpu 64 linklayer atm",
+            ),
+        ];
+        for (cfg, how, drift) in rows {
+            let applied = cfg.apply(&conn).await?;
+            assert!(applied.is_success(), "{drift}: {applied:?}");
+            let again = cfg.diff(&conn).await?;
+            assert!(again.is_empty(), "before `{drift}`: did not converge:\n{again}");
+            // sfq has no change operation: a new one stands in for it.
+            if how == "replace" {
+                ns.exec("tc", &["qdisc", "del", "dev", "d0", "root"])?;
+            }
+            let verb = if how == "replace" { "add" } else { "change" };
+            let mut args = vec!["qdisc", verb, "dev", "d0", "root"];
+            args.extend(drift.split_whitespace());
+            ns.exec("tc", &args)?;
+            assert!(!cfg.diff(&conn).await?.is_empty(), "`{drift}` compared equal to the declaration");
+            let applied = cfg.apply(&conn).await?;
+            assert!(applied.is_success(), "{drift}: {applied:?}");
+            let back = cfg.diff(&conn).await?;
+            assert!(back.is_empty(), "from `{drift}`, did not converge:\n{back}");
+            ns.exec("tc", &["qdisc", "del", "dev", "d0", "root"])?;
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// A replaced qdisc comes back from its undo as it was, settings a spec
+/// did not carry included (#783, #806). An sfq with another divisor,
+/// flows, depth or head drop read back as a plain sfq, so its replace's
+/// undo restored one with the kernel's defaults. #783 made such a replace
+/// irreversible; #806 has the spec carry them, so it comes back.
+#[tokio::test]
+async fn a_replaced_qdisc_comes_back_from_its_undo_as_it_was() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "sch_sfq", "sch_fq_codel", "sch_tbf");
 
     with_timeout(async {
         let ns = TestNamespace::new("qdisc-lossy")?;
         let conn = conn_in_ns(&ns)?;
-        let cfg = NetworkConfig::new()
-            .link("d0", |l| l.dummy().up())
-            .qdisc("d0", |q| q.fq_codel());
         let applied = NetworkConfig::new().link("d0", |l| l.dummy().up()).apply(&conn).await?;
         assert!(applied.is_success(), "{applied:?}");
-        let sfq = || -> Result<String> {
+        let shown = || -> Result<String> {
             let out = ns.exec("tc", &["qdisc", "show", "dev", "d0"])?;
             Ok(out.lines().next().unwrap_or_default().to_string())
         };
-        for (args, reversible) in [
-            (&["divisor", "512", "flows", "64", "depth", "32", "headdrop"][..], false),
-            (&["perturb", "10"][..], true),
-        ] {
-            let mut add = vec!["qdisc", "replace", "dev", "d0", "root", "handle", "1:", "sfq"];
-            add.extend(args);
+        // A qdisc tc makes, then a declared one of another kind replaces.
+        let fq_codel = || NetworkConfig::new().link("d0", |l| l.dummy().up()).qdisc("d0", |q| q.fq_codel());
+        let sfq = || NetworkConfig::new().link("d0", |l| l.dummy().up()).qdisc("d0", |q| q.sfq());
+        let rows = [
+            ("sfq divisor 512 flows 64 depth 32 headdrop", fq_codel()),
+            ("sfq perturb 10", fq_codel()),
+            ("tbf rate 1mbit burst 32k limit 64k overhead 24 mpu 64 linklayer atm", fq_codel()),
+            ("fq_codel drop_batch 32 ce_threshold 2ms ce_threshold_selector 0x01/0x01", sfq()),
+        ];
+        for (line, cfg) in rows {
+            // sfq has no change operation: a new one, not a replace.
+            let _ = ns.exec("tc", &["qdisc", "del", "dev", "d0", "root"]);
+            let mut add = vec!["qdisc", "add", "dev", "d0", "root", "handle", "1:"];
+            add.extend(line.split_whitespace());
             ns.exec("tc", &add)?;
-            let before = sfq()?;
+            let before = shown()?;
             let applied = cfg.apply(&conn).await?;
             assert!(applied.is_success(), "{applied:?}");
-            assert_eq!(applied.irreversible().count(), usize::from(!reversible), "sfq {args:?}: {:?}", applied.journal);
-            if reversible {
-                let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
-                assert!(undone.is_success(), "{undone:?}");
-                assert_eq!(sfq()?, before, "the undo put back another sfq");
-            }
+            assert_eq!(applied.irreversible().count(), 0, "{line}: {:?}", applied.journal);
+            let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
+            assert!(undone.is_success(), "{undone:?}");
+            assert_eq!(shown()?, before, "the undo put back another qdisc for `{line}`");
         }
         Ok(())
     })

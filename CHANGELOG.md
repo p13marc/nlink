@@ -3272,6 +3272,20 @@ All notable changes to this project will be documented in this file.
   or another PHY), and the SFP bus or cage it sits behind or drives. A
   virtual device has none.
 
+- **sfq, fq_codel and TBF carry the settings tc(8) gives them (#806).**
+  - `SfqConfig` has `divisor`, `flows`, `depth` and `headdrop`. It sends
+    the whole `tc_sfq_qopt_v1`, as tc does: nlink's struct was short of its
+    stats, and `sfq_change()` takes depth and head drop only from one of
+    full size.
+  - `FqCodelConfig` has `drop_batch` and `ce_threshold_selector`.
+  - `TbfConfig` has `overhead`, `mpu` and `linklayer`, on both rate tables.
+    The bucket comparison and read-back model the kernel's framed
+    `psched_l2t_ns` (overhead, mpu, ATM cells).
+  - Each has its tc(8) tokens, a JSON form and `QdiscBuilder` setters, and
+    is compared when declared. A qdisc with them reads back whole, so its
+    replace's undo puts it back as it was. #783 had made that undo
+    irreversible.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
