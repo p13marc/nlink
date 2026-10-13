@@ -438,6 +438,12 @@ pub struct ConfigDiff {
     #[cfg_attr(feature = "serde", serde(skip))]
     #[cfg_attr(feature = "schemars", schemars(skip))]
     pub(crate) route_protocols: Vec<(DeclaredRoute, crate::netlink::types::route::RouteProtocol)>,
+    /// What each kernel route the diff read back has that its declaration
+    /// cannot say (#783), which leaves its step without an inverse. Not
+    /// counted or serialized.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) routes_lost: Vec<(DeclaredRoute, String)>,
     /// The addresses in `addresses_to_add` that are there now, and that a
     /// link change in this apply flushes, with why (#649):
     /// `(declared, reason)`. Not counted or serialized.
@@ -489,6 +495,11 @@ pub struct ConfigDiff {
 }
 
 impl ConfigDiff {
+    /// What a route the diff read back has that it cannot say (#783).
+    pub(crate) fn lost_of(&self, route: &DeclaredRoute) -> Option<String> {
+        self.routes_lost.iter().find(|(r, _)| r == route).map(|(_, w)| w.clone())
+    }
+
     /// The protocol a route the diff read back has (#783).
     pub(crate) fn protocol_of(&self, route: &DeclaredRoute) -> Option<crate::netlink::types::route::RouteProtocol> {
         self.route_protocols
@@ -3180,10 +3191,13 @@ fn diff_routes(
                     kernel_routes
                         .iter()
                         .find(|r| r.priority().unwrap_or(0) == slot && r.header.rtm_tos == 0)
-                        .and_then(|r| Some((declared_from_live(r, ifindex_to_name)?, r.protocol())))
+                        .and_then(|r| Some((declared_from_live(r, ifindex_to_name)?, r.protocol(), route_lost(r))))
                 });
-                if let Some((replaced, protocol)) = replaced {
+                if let Some((replaced, protocol, lost)) = replaced {
                     diff.route_protocols.push((replaced.clone(), protocol));
+                    if let Some(lost) = lost {
+                        diff.routes_lost.push((replaced.clone(), lost));
+                    }
                     diff.routes_replaced.push((declared.clone(), replaced));
                 }
                 diff.routes_to_add.push(declared.clone());
@@ -3288,9 +3302,59 @@ fn diff_routes(
         }
         if let Some(route) = declared_from_live(r, ifindex_to_name) {
             diff.route_protocols.push((route.clone(), r.protocol()));
+            if let Some(lost) = route_lost(r) {
+                diff.routes_lost.push((route.clone(), lost));
+            }
             diff.routes_to_remove.push(route);
         }
     }
+}
+
+/// What a kernel route has that its declaration cannot say (#783): a
+/// metric past the six a declaration has, locked metrics, a congestion
+/// control, realms, an encap other than MPLS, an IPv6 router preference or
+/// expiry. Read back without it, the route is put back as another; a
+/// replace that sends none of it drops it. `None` when there is nothing.
+pub(crate) fn route_lost(r: &RouteMessage) -> Option<String> {
+    let mut what: Vec<&str> = Vec::new();
+    if let Some(m) = r.metrics() {
+        for (name, v) in [
+            ("rtt", m.rtt),
+            ("rttvar", m.rttvar),
+            ("ssthresh", m.ssthresh),
+            ("cwnd", m.cwnd),
+            ("rto_min", m.rto_min),
+            ("quickack", m.quickack),
+            ("reordering", m.reordering),
+            ("features", m.features),
+        ] {
+            if v.is_some() {
+                what.push(name);
+            }
+        }
+    }
+    if r.metrics_lock().is_some_and(|l| l != 0) {
+        what.push("locked metrics");
+    }
+    if r.congctl().is_some() {
+        what.push("a congestion control");
+    }
+    if r.flow().is_some_and(|f| f != 0) {
+        what.push("realms");
+    }
+    // Through a nexthop object, the encap dumped is the object's (#769).
+    const LWTUNNEL_ENCAP_MPLS: u16 = 1;
+    if r.nh_id().is_none() && r.encap_type().is_some_and(|t| t != LWTUNNEL_ENCAP_MPLS) {
+        what.push("an encap other than MPLS");
+    }
+    // `ICMPV6_ROUTER_PREF_MEDIUM` is 0, and every IPv6 route reports one.
+    if r.pref().is_some_and(|p| p != 0) {
+        what.push("a router preference");
+    }
+    if r.expires().is_some_and(|e| e != 0) {
+        what.push("an expiry");
+    }
+    (!what.is_empty()).then(|| format!("it has {}, which no declaration has", what.join(", ")))
 }
 
 /// A kernel route as the declaration that would install it; `None` for a
@@ -3466,6 +3530,9 @@ fn route_attrs_match(declared: &DeclaredRoute, r: &RouteMessage) -> bool {
     // object's, echoed (#769).
     let own = r.nh_id().is_none();
     a.prefsrc.as_ref() == r.prefsrc()
+        // What a declaration cannot carry makes another route; a replace
+        // drops it (#783).
+        && route_lost(r).is_none()
         && (!own || a.mpls_encap.as_slice() == r.mpls_encap_labels().unwrap_or_default())
         && (!own || a.onlink == r.is_onlink())
         && a.scope.is_none_or(|s| s == r.scope())

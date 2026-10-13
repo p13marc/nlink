@@ -79,7 +79,9 @@ const AF_INET: u8 = 2;
 const AF_INET6: u8 = 10;
 
 /// Route metrics attributes (RTAX_*)
-mod rtax {
+pub(crate) mod rtax {
+    /// The metrics locked against path discovery, a bit per `RTAX_*`.
+    pub const LOCK: u16 = 1;
     pub const MTU: u16 = 2;
     pub const WINDOW: u16 = 3;
     pub const RTT: u16 = 4;
@@ -94,6 +96,8 @@ mod rtax {
     pub const RTO_MIN: u16 = 13;
     pub const INITRWND: u16 = 14;
     pub const QUICKACK: u16 = 15;
+    /// The congestion control, a string.
+    pub const CC_ALGO: u16 = 16;
 }
 
 /// Nexthop flags (RTNH_F_*)

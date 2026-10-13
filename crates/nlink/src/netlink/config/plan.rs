@@ -156,6 +156,11 @@ pub enum Step {
         )]
         #[cfg_attr(feature = "schemars", schemars(with = "Option<u8>"))]
         before_protocol: Option<RouteProtocol>,
+        /// What the route it overwrites has that `before` cannot say (a
+        /// metric past the six a declaration has, realms, a non-MPLS
+        /// encap, …), which leaves the step without an inverse (#783).
+        #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+        lost: Option<String>,
     },
     /// Delete a route.
     DeleteRoute {
@@ -168,6 +173,10 @@ pub enum Step {
         )]
         #[cfg_attr(feature = "schemars", schemars(with = "Option<u8>"))]
         protocol: Option<RouteProtocol>,
+        /// What the route has that `route` cannot say, which leaves the
+        /// step without an inverse (#783).
+        #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+        lost: Option<String>,
     },
     /// Install a neighbour with `NLM_F_REPLACE` (#516): added, or
     /// overwriting the entry in its place.
@@ -299,6 +308,10 @@ impl Step {
                 address: address.clone(),
                 reason: None,
             },
+            // What a declaration cannot say is not put back (#783).
+            Self::ReplaceRoute { lost: Some(_), .. } | Self::DeleteRoute { lost: Some(_), .. } => {
+                return None;
+            }
             Self::ReplaceRoute {
                 before,
                 after,
@@ -312,18 +325,21 @@ impl Step {
                     reason: None,
                     protocol: *before_protocol,
                     before_protocol: *protocol,
+                    lost: None,
                 },
                 None => Self::DeleteRoute {
                     route: after.clone(),
                     protocol: *protocol,
+                    lost: None,
                 },
             },
-            Self::DeleteRoute { route, protocol } => Self::ReplaceRoute {
+            Self::DeleteRoute { route, protocol, .. } => Self::ReplaceRoute {
                 before: None,
                 after: route.clone(),
                 reason: None,
                 protocol: *protocol,
                 before_protocol: None,
+                lost: None,
             },
             Self::AddQdisc(q) => Self::DeleteQdisc {
                 qdisc: q.clone(),
@@ -841,6 +857,7 @@ impl super::ConfigDiff {
                 .map(|(_, before)| before.clone());
             steps.push(Step::ReplaceRoute {
                 before_protocol: before.as_ref().and_then(|b| self.protocol_of(b)),
+                lost: before.as_ref().and_then(|b| self.lost_of(b)),
                 before,
                 protocol: None,
                 after: route.clone(),
@@ -890,6 +907,7 @@ impl super::ConfigDiff {
         steps.extend(self.routes_to_remove.iter().map(|route| Step::DeleteRoute {
             route: route.clone(),
             protocol: self.protocol_of(route),
+            lost: self.lost_of(route),
         }));
         steps.extend(self.nexthops_to_remove.iter().cloned().map(Step::DeleteNexthop));
         steps.extend(
@@ -979,6 +997,7 @@ mod tests {
                 reason: Some("re-add: flushed when d0 goes down".into()),
                 protocol: None,
                 before_protocol: None,
+                lost: None,
             },
             Step::SetVrfStrictMode { on: true },
         ]);
@@ -1194,12 +1213,13 @@ mod tests {
             reason: None,
             protocol: None,
             before_protocol: Some(RouteProtocol::Static),
+            lost: None,
         })
         .inverse() else {
             panic!("a replace's inverse is a replace");
         };
         // The route it overwrote goes back with its own protocol (#783).
-        assert_eq!((before, after, protocol), (Some(r.clone()), old, Some(RouteProtocol::Static)));
+        assert_eq!((before, after, protocol), (Some(r.clone()), old.clone(), Some(RouteProtocol::Static)));
         assert!(matches!(
             Step::ReplaceRoute {
                 before: None,
@@ -1207,14 +1227,30 @@ mod tests {
                 reason: None,
                 protocol: None,
                 before_protocol: None,
+                lost: None,
             }
             .inverse(),
             Some(Step::DeleteRoute { route: x, .. }) if x == r
         ));
         assert!(matches!(
-            Step::DeleteRoute { route: r.clone(), protocol: Some(RouteProtocol::Zebra) }.inverse(),
+            Step::DeleteRoute { route: r.clone(), protocol: Some(RouteProtocol::Zebra), lost: None }.inverse(),
             Some(Step::ReplaceRoute { protocol: Some(RouteProtocol::Zebra), .. })
         ));
+        // What a declaration cannot say leaves no inverse (#783).
+        let lost = Some("it has rto_min, which no declaration has".to_string());
+        assert!(Step::DeleteRoute { route: r.clone(), protocol: None, lost: lost.clone() }.inverse().is_none());
+        assert!(
+            Step::ReplaceRoute {
+                before: Some(old.clone()),
+                after: r.clone(),
+                reason: None,
+                protocol: None,
+                before_protocol: None,
+                lost,
+            }
+            .inverse()
+            .is_none()
+        );
         assert!(matches!(
             Step::AddAddress { address: addr("d0", "10.0.0.1", 24), reason: None }.inverse(),
             Some(Step::DeleteAddress { .. })

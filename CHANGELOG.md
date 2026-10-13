@@ -1000,6 +1000,20 @@ All notable changes to this project will be documented in this file.
   declared nexthop with an encap is replaced, and the restore refuses one
   with the reason.
 
+- **A route with what a declaration cannot say is not the declared one
+  (#783).** The comparison and the read-back held a route's prefsrc, scope,
+  on-link flag, MPLS encap and six metrics. A live route with any other
+  metric (`rtt`, `ssthresh`, `rto_min`, `quickack`, …), locked metrics, a
+  congestion control, realms, a non-MPLS encap (seg6, ip, bpf, …), or an
+  IPv6 router preference or expiry passed for its declaration. The undo of
+  its replace or removal then put back a route without them, and #745's
+  restore did the same. Such a route now differs from its declaration, and
+  the replace that sends none of it converges. Its replace or removal has
+  no inverse (`ReplaceRoute`/`DeleteRoute` carry `lost`), and the restore
+  refuses it with the reason. `RouteMessage` reads `RTA_FLOW`,
+  `RTAX_LOCK` and `RTAX_CC_ALGO` (`flow()`, `metrics_lock()`,
+  `congctl()`).
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
