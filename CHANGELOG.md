@@ -864,6 +864,14 @@ All notable changes to this project will be documented in this file.
   leaves the step without an inverse. `Step::DeleteQdisc` is a struct
   variant now, `{ qdisc, underneath }`; `Step` is new in this release.
 
+- **An IPv4 multipath hop keeps its IPv6 gateway (#786).**
+  `Ipv4Route::multipath` with `NextHop::gateway_v6` dropped the gateway
+  and installed the hop through its bare device. Such a hop's gateway now
+  goes out as `RTA_VIA` (RFC 5549), as a single-gateway route's already
+  did. And `RouteMessage::multipath()` reads `RTA_VIA` back, so a route
+  `ip` made through IPv6 gateways is no longer read, undone or restored
+  without them.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

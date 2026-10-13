@@ -1470,11 +1470,16 @@ fn write_multipath_v4(
     for (i, nh) in nexthops.iter().enumerate() {
         let ifindex = resolved_indices.get(i).copied().flatten().unwrap_or(0);
 
-        // Calculate the length of this nexthop entry
-        // rtnexthop (8 bytes) + optional RTA_GATEWAY (4 + 4 bytes for IPv4)
+        // Calculate the length of this nexthop entry: rtnexthop (8 bytes),
+        // then RTA_GATEWAY for an IPv4 gateway (4 + 4 bytes) or RTA_VIA for
+        // an IPv6 one (`struct rtvia`: 4 + 2 + 16 bytes, padded to 24; RFC
+        // 5549, #786). An IPv6 gateway used to go nowhere: the hop was
+        // installed through its bare device.
         let mut nh_len: u16 = 8; // sizeof(rtnexthop)
         if nh.gateway_v4.is_some() {
             nh_len += 8; // NLA header (4) + IPv4 address (4)
+        } else if nh.gateway_v6.is_some() {
+            nh_len += 24;
         }
 
         // Write rtnexthop header
@@ -1490,6 +1495,13 @@ fn write_multipath_v4(
             mp_data.extend_from_slice(&nla_len.to_ne_bytes());
             mp_data.extend_from_slice(&(RtaAttr::Gateway as u16).to_ne_bytes());
             mp_data.extend_from_slice(&gw.octets());
+        } else if let Some(gw) = nh.gateway_v6 {
+            let nla_len: u16 = 4 + 2 + 16;
+            mp_data.extend_from_slice(&nla_len.to_ne_bytes());
+            mp_data.extend_from_slice(&(RtaAttr::Via as u16).to_ne_bytes());
+            mp_data.extend_from_slice(&(libc::AF_INET6 as u16).to_ne_bytes());
+            mp_data.extend_from_slice(&gw.octets());
+            mp_data.extend_from_slice(&[0, 0]); // pad to 4
         }
     }
 
