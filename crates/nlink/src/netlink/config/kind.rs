@@ -98,6 +98,29 @@ use crate::netlink::{
     },
 };
 
+/// A veth's or netkit's peer the apply renames to the name its pair
+/// declares (#804). The peer is down for the rename, which the kernel
+/// refuses on a running device, and comes back up after it.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LinkRename {
+    /// The name it has.
+    pub from: String,
+    /// The name it is given.
+    pub to: String,
+    /// The veth or netkit link whose peer it is.
+    pub peer_of: String,
+}
+
+impl std::fmt::Display for LinkRename {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "~ link {} -> {} (peer of {})", self.from, self.to, self.peer_of)
+    }
+}
+
 /// A link the apply deletes and creates again, because a declared
 /// parameter cannot be changed on a live link.
 ///
@@ -1863,6 +1886,8 @@ pub(crate) struct KindPlan {
     /// Links the previous config declared and this one does not, and the
     /// ones stacked on them, in deletion order; and the ones refused (#512).
     pub(crate) remove: Vec<LinkRemoval>,
+    /// Peers here renamed to the name their pair declares (#804).
+    pub(crate) renames: Vec<LinkRename>,
 }
 
 /// What hangs off the links beyond the four dumps every diff takes (links,
@@ -2324,10 +2349,10 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
                 d.recreate.push(format!("veth peer {} -> in {want}", here(have)));
             }
         }
-        // The peer's name, when the peer is here (#793). Nothing renames
-        // it, so a pair whose peer has another name never converged: the
-        // check above looks at the namespace alone. A peer elsewhere may
-        // have been renamed there, by a CNI for one, and is left alone.
+        // The peer's name, when the peer is here (#793): renamed in place
+        // (#804), unless another link has the name, when the pair is made
+        // again. A peer elsewhere may have been renamed there, by a CNI for
+        // one, and is left alone.
         if let DeclaredLinkType::Veth { peer, .. } | DeclaredLinkType::Netkit { peer, .. } =
             &link.link_type
             && link.peer_netns().is_none_or(|n| n.is_default())
@@ -2335,7 +2360,15 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
             && let Some(have) = live.link().and_then(|i| names.get(&i))
             && *have != peer.as_str()
         {
-            d.recreate.push(format!("peer {have} -> {peer}"));
+            if by_name.contains_key(peer.as_str()) {
+                d.recreate.push(format!("peer {have} -> {peer}"));
+            } else {
+                plan.renames.push(LinkRename {
+                    from: have.to_string(),
+                    to: peer.clone(),
+                    peer_of: link.name.clone(),
+                });
+            }
         }
         if !d.recreate.is_empty() || !d.refuse.is_empty() {
             let mut reasons = d.refuse.clone();
