@@ -161,9 +161,11 @@ impl NetlinkSocket {
         let worker = std::thread::Builder::new().name("nlink-netns".into());
         let thread_result = worker
             .spawn(move || -> Result<(Socket, u32)> {
+                let _home = crate::netlink::namespace::ReturnHome::new();
                 // SAFETY: libc::setns switches this worker thread to the namespace
                 // specified by ns_fd, a valid namespace-file descriptor. Only this
-                // freshly-spawned thread is affected, and it exits right after.
+                // freshly-spawned thread is affected, and it leaves again before
+                // it returns (#797).
                 let ret = unsafe { libc::setns(ns_fd, libc::CLONE_NEWNET) };
                 if ret < 0 {
                     return Err(Error::from(std::io::Error::last_os_error()));

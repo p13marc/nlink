@@ -782,3 +782,37 @@ async fn a_process_in_a_vrf_routes_through_its_table() -> nlink::Result<()> {
     let _ = std::fs::remove_dir(dir.parent().unwrap());
     Ok(())
 }
+
+/// What enters a namespace on a worker thread has left it when it returns
+/// (#797): `run`, a connection made through a name (a handle's worker, on a
+/// handle dropped straight after) or a path, a sysctl read through a path.
+/// Each worker used to exit inside the namespace, and the kernel lets
+/// `join` return before it releases the thread's namespaces (the TID is
+/// cleared in `exit_mm`, ahead of `exit_task_namespaces`), so for a moment
+/// afterwards the namespace still held this process: `pids` listed it,
+/// and a `delete_and_wait` could find it held. One integration run in
+/// three failed on it under load.
+#[tokio::test]
+async fn workers_leave_the_namespace_before_they_return() -> nlink::Result<()> {
+    nlink::require_root!();
+    let ns = TestNamespace::new("netns-run-leaves")?;
+    let netns = Netns::open(ns.name())?;
+    let path = format!("/var/run/netns/{}", ns.name());
+    let nobody_left = |what: &str, i: usize| -> nlink::Result<()> {
+        let pids = netns.pids()?;
+        assert!(pids.is_empty(), "after {what} #{i}: {pids:?} still inside");
+        Ok(())
+    };
+    for i in 0..2000 {
+        netns.run(|| ())?;
+        nobody_left("run", i)?;
+        drop(Connection::<Route>::new_in(ns.name())?);
+        nobody_left("new_in(name)", i)?;
+        #[allow(deprecated)]
+        drop(Connection::<Route>::new_in_namespace_path(&path)?);
+        nobody_left("new_in_namespace_path", i)?;
+        namespace::get_sysctl_path(&path, "net.ipv4.ip_forward")?;
+        nobody_left("get_sysctl_path", i)?;
+    }
+    Ok(())
+}
