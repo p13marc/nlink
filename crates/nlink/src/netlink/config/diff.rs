@@ -2063,7 +2063,17 @@ pub(crate) fn rule_from_live(r: &RuleMessage) -> Option<DeclaredRule> {
         A::Prohibit => RuleAction::Prohibit,
         _ => return None,
     };
-    if r.goto().is_some() || r.tun_id().is_some() || r.uid_range().is_some() || r.l3mdev().is_some() {
+    // What a declaration has no word for makes another rule (#793): a TOS,
+    // realms (`FRA_FLOW`) or a suppressed interface group read back
+    // without it would pass for the declared rule, which does not exist.
+    if r.goto().is_some()
+        || r.tun_id().is_some()
+        || r.uid_range().is_some()
+        || r.l3mdev().is_some()
+        || r.header.tos != 0
+        || r.flow().is_some_and(|f| f != 0)
+        || r.suppress_ifgroup().is_some_and(|g| g != u32::MAX)
+    {
         return None;
     }
     let prefix = |addr: Option<IpAddr>, len: u8| addr.map(|a| (a, len));
@@ -2087,26 +2097,42 @@ pub(crate) fn rule_from_live(r: &RuleMessage) -> Option<DeclaredRule> {
     })
 }
 
+/// The kernel's rules with protocol `ours`, as declarations.
+fn live_rules(rules: &[RuleMessage], ours: u8) -> Vec<DeclaredRule> {
+    rules
+        .iter()
+        .filter(|r| r.protocol() == Some(ours))
+        .filter_map(rule_from_live)
+        .collect()
+}
+
+/// A declared rule as it reads back: a mask of all ones is none.
+fn normal_rule(r: &DeclaredRule) -> DeclaredRule {
+    let mut r = r.clone();
+    if r.fwmask == Some(u32::MAX) {
+        r.fwmask = None;
+    }
+    r.ipv6 = r.is_ipv6();
+    r
+}
+
+/// Whether the kernel has `rule`, with protocol `ours`, exactly (#793).
+pub(crate) async fn rule_present(
+    conn: &Connection<Route>,
+    rule: &DeclaredRule,
+    ours: u8,
+) -> Result<bool> {
+    let rules = conn.get_rules().await?;
+    Ok(live_rules(&rules, ours).contains(&normal_rule(rule)))
+}
+
 /// The declared rules against the kernel's (#516). Only a rule with the
 /// config's protocol is the config's: one another tool added — `ip rule
 /// add` leaves it `unspec` — is another rule to the kernel, however alike.
 fn diff_rules(config: &NetworkConfig, snapshot: &Snapshot, opts: &PlanOptions, diff: &mut ConfigDiff) {
     let ours = u8::from(config.routes_protocol());
-    let live: Vec<DeclaredRule> = snapshot
-        .rules
-        .iter()
-        .filter(|r| r.protocol() == Some(ours))
-        .filter_map(rule_from_live)
-        .collect();
-    // A declared rule with a mask of all ones is the one without.
-    let normal = |r: &DeclaredRule| {
-        let mut r = r.clone();
-        if r.fwmask == Some(u32::MAX) {
-            r.fwmask = None;
-        }
-        r.ipv6 = r.is_ipv6();
-        r
-    };
+    let live = live_rules(&snapshot.rules, ours);
+    let normal = normal_rule;
     for r in &config.rules {
         if !live.contains(&normal(r)) {
             diff.rules_to_add.push(r.clone());
@@ -3381,6 +3407,9 @@ fn route_matches(
     // apply.
     route_matches_but_metric(declared, declared_oif, resolve, r)
         && kernel_metric(declared) == r.priority().unwrap_or(0)
+        // A declared route has no TOS, so it is installed with 0; one with
+        // a TOS routes only that traffic, and is another route (#793).
+        && r.header.rtm_tos == 0
         && route_attrs_match(declared, r)
 }
 

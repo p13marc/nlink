@@ -2032,6 +2032,48 @@ async fn an_htb_classs_quantum_and_overhead_are_compared() -> Result<()> {
     .await
 }
 
+/// A route or rule with a TOS is not the declared one (#793). A
+/// declaration has no TOS, so it is installed with 0, but the comparison
+/// ignored the TOS: a live `tos 0x10` route or rule at the declared key
+/// passed for it, and the declared one, for all other traffic, was never
+/// added.
+#[tokio::test]
+async fn a_route_or_rule_with_a_tos_is_another() -> Result<()> {
+    use std::net::Ipv4Addr;
+    nlink::require_root!();
+    nlink::require_modules!("dummy");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("route-tos")?;
+        let conn = conn_in_ns(&ns)?;
+        let cfg = NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .address("d0", "10.65.0.1/24")?
+            .route("10.66.0.0/16", |r| r.via("10.65.0.2").dev("d0"))?
+            .rule(100, |r| r.from(Ipv4Addr::new(10, 87, 0, 0), 16).table(100));
+        let applied = NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .address("d0", "10.65.0.1/24")?
+            .apply(&conn)
+            .await?;
+        assert!(applied.is_success(), "{applied:?}");
+        ns.exec("ip", &["route", "add", "10.66.0.0/16", "via", "10.65.0.2", "dev", "d0", "tos", "0x10", "proto", "boot"])?;
+        ns.exec("ip", &["rule", "add", "pref", "100", "from", "10.87.0.0/16", "tos", "0x10", "table", "100", "proto", "boot"])?;
+
+        let diff = cfg.diff(&conn).await?;
+        assert_eq!((diff.routes_to_add.len(), diff.rules_to_add.len()), (1, 1), "{diff}");
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let routes = ns.exec("ip", &["route", "show", "10.66.0.0/16"])?;
+        assert_eq!(routes.lines().count(), 2, "the TOS route and the declared one: {routes}");
+        let rules = ns.exec("ip", &["rule", "show", "pref", "100"])?;
+        assert_eq!(rules.lines().count(), 2, "the TOS rule and the declared one: {rules}");
+        assert!(cfg.diff(&conn).await?.is_empty(), "did not converge");
+        Ok(())
+    })
+    .await
+}
+
 /// A declared filter's chain is compared, and a filter of its name in
 /// another chain goes (#793). The live lookup was by parent, priority and
 /// protocol and the comparison left the chain out, so a filter in chain 0
