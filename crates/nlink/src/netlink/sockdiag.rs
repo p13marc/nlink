@@ -1583,6 +1583,32 @@ fn parse_tcp_info(data: &[u8]) -> TcpInfo {
         info.snd_wnd = u32::from_ne_bytes([data[228], data[229], data[230], data[231]]);
     }
 
+    // What later kernels append (offsets from `offsetof` against the uapi
+    // header; 6.18's AccECN block against its `include/uapi/linux/tcp.h`),
+    // each read only when the kernel sent it (#166).
+    let u16_at = |at: usize| u16::from_ne_bytes([data[at], data[at + 1]]);
+    let u32_at = |at: usize| u32::from_ne_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]);
+    if data.len() >= 240 {
+        info.rcv_wnd = u32_at(232);
+        info.rehash = u32_at(236);
+    }
+    if data.len() >= 248 {
+        info.total_rto = u16_at(240);
+        info.total_rto_recoveries = u16_at(242);
+        info.total_rto_time = u32_at(244);
+    }
+    if data.len() >= 280 {
+        info.received_ce = u32_at(248);
+        info.delivered_e1_bytes = u32_at(252);
+        info.delivered_e0_bytes = u32_at(256);
+        info.delivered_ce_bytes = u32_at(260);
+        info.received_e1_bytes = u32_at(264);
+        info.received_e0_bytes = u32_at(268);
+        info.received_ce_bytes = u32_at(272);
+        info.accecn_fail_mode = u16_at(276);
+        info.accecn_opt_seen = u16_at(278);
+    }
+
     info
 }
 
@@ -1942,6 +1968,46 @@ mod tcp_info_tests {
         assert_eq!(info.reord_seen, 77);
         assert_eq!(info.rcv_ooopack, 88);
         assert_eq!(info.snd_wnd, 99);
+    }
+
+    /// The fields kernels appended after `snd_wnd`, at the offsets
+    /// `offsetof` gives against the uapi header (6.18's AccECN block against
+    /// its `tcp.h`), each read only when the kernel sent it (#166).
+    #[test]
+    fn parse_tcp_info_reads_the_rto_and_accecn_fields() {
+        let mut buf = vec![0u8; 280];
+        put_u32(&mut buf, 232, 65_536); // rcv_wnd
+        put_u32(&mut buf, 236, 2); // rehash
+        buf[240..242].copy_from_slice(&3u16.to_ne_bytes()); // total_rto
+        buf[242..244].copy_from_slice(&4u16.to_ne_bytes()); // total_rto_recoveries
+        put_u32(&mut buf, 244, 500); // total_rto_time
+        for (i, at) in (248..276).step_by(4).enumerate() {
+            put_u32(&mut buf, at, 10 + i as u32); // received_ce .. received_ce_bytes
+        }
+        buf[276..278].copy_from_slice(&1u16.to_ne_bytes()); // accecn_fail_mode
+        buf[278..280].copy_from_slice(&2u16.to_ne_bytes()); // accecn_opt_seen
+
+        let info = parse_tcp_info(&buf);
+        assert_eq!((info.rcv_wnd, info.rehash), (65_536, 2));
+        assert_eq!((info.total_rto, info.total_rto_recoveries, info.total_rto_time), (3, 4, 500));
+        assert_eq!(
+            [
+                info.received_ce,
+                info.delivered_e1_bytes,
+                info.delivered_e0_bytes,
+                info.delivered_ce_bytes,
+                info.received_e1_bytes,
+                info.received_e0_bytes,
+                info.received_ce_bytes,
+            ],
+            [10, 11, 12, 13, 14, 15, 16]
+        );
+        assert_eq!((info.accecn_fail_mode, info.accecn_opt_seen), (1, 2));
+
+        // A 6.12 kernel stops at total_rto_time: no AccECN.
+        let info = parse_tcp_info(&buf[..248]);
+        assert_eq!(info.total_rto_time, 500);
+        assert_eq!((info.received_ce, info.accecn_opt_seen), (0, 0));
     }
 
     /// Rule 1 (accept-larger + graceful-shorter): older-kernel sizes
