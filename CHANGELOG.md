@@ -872,6 +872,15 @@ All notable changes to this project will be documented in this file.
   `ip` made through IPv6 gateways is no longer read, undone or restored
   without them.
 
+- **An undo puts a route back with its protocol (#783).** A config owns
+  `static` routes as well as `boot` ones by default, so it replaces and
+  purges `proto static` routes, systemd-networkd's among them. The undo put
+  them back with the plan's protocol, `boot`. `Step::ReplaceRoute` now
+  carries `protocol` (what `after` is installed with; the plan's when
+  unset) and `before_protocol` (what the replaced route had).
+  `Step::DeleteRoute` becomes `{ route, protocol }`. The inverses put
+  routes back as they were. `Step` is new in this release.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
