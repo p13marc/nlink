@@ -836,6 +836,11 @@ impl std::fmt::Display for NexthopConflict {
 /// An FDB entry the apply installs, as the diff and the plan print it.
 pub(crate) fn fdb_line(e: &DeclaredFdb, replaced: &[(DeclaredFdb, DeclaredFdb)]) -> String {
     match replaced.iter().find(|(d, _)| d == e) {
+        Some((_, before)) if before.dev != e.dev => format!("~ {e} (was on {})", before.dev),
+        Some((_, before)) if before.dst != e.dst => match before.dst {
+            Some(dst) => format!("~ {e} (was dst {dst})"),
+            None => format!("~ {e}"),
+        },
         Some((_, before)) if before.local != e.local => {
             format!("~ {e} (was {})", if before.local { "local" } else { "static" })
         }
@@ -1950,6 +1955,40 @@ fn diff_fdb(
                 });
         Some((have, kept(state), kept(state) && all_vlans))
     };
+    // Where the entry is now, when setting it moves it (#783): a bridge
+    // keeps one entry per MAC and VLAN, so a replace on this port takes it
+    // from another, and a VXLAN device one remote per unicast MAC, which a
+    // replace swaps. It is what an undo puts back.
+    let elsewhere = |d: &DeclaredFdb| -> Option<DeclaredFdb> {
+        let link = link_by_name.get(d.dev.as_str())?;
+        let ifindex = link.ifindex();
+        let msg = snapshot.fdb.iter().find(|m| {
+            m.lladdr() == Some(&d.mac[..])
+                && m.vlan() == d.vlan
+                && m.header.ndm_state & (nud::PERMANENT | nud::NOARP) != 0
+                && match d.dst {
+                    None => m.ifindex() != ifindex && m.master().is_some() && m.master() == link.master(),
+                    Some(dst) => {
+                        !d.floods()
+                            && m.ifindex() == ifindex
+                            && m.master().is_none()
+                            && m.destination().is_some_and(|x| *x != dst)
+                    }
+                }
+        })?;
+        let mut before = d.clone();
+        match d.dst {
+            None => {
+                before.dev = link_by_name
+                    .iter()
+                    .find(|(_, l)| l.ifindex() == msg.ifindex())
+                    .map(|(name, _)| name.to_string())?;
+                before.local = msg.header.ndm_state & nud::PERMANENT != 0;
+            }
+            Some(_) => before.dst = msg.destination().copied(),
+        }
+        Some(before)
+    };
     for e in &config.fdb {
         match live(e) {
             Some((have, _, true)) if have == *e => {}
@@ -1957,8 +1996,14 @@ fn diff_fdb(
                 diff.fdb_replaced.push((e.clone(), have));
                 diff.fdb_to_set.push(e.clone());
             }
-            // Missing, learned, or short of an entry for a VLAN.
-            _ => diff.fdb_to_set.push(e.clone()),
+            // Missing, learned, or short of an entry for a VLAN; set where
+            // it is now, a move.
+            _ => {
+                if let Some(before) = elsewhere(e) {
+                    diff.fdb_replaced.push((e.clone(), before));
+                }
+                diff.fdb_to_set.push(e.clone());
+            }
         }
     }
     for prev in opts.previous.iter().flat_map(|p| p.fdb.iter()) {

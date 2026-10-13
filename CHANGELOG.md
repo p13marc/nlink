@@ -1024,6 +1024,15 @@ All notable changes to this project will be documented in this file.
   already stuck as a blackhole through an object that is not one is not
   the declared route, and the apply replaces it.
 
+- **An FDB entry the apply moves is moved back by its undo (#783).** A
+  bridge keeps one entry per MAC and VLAN, so setting one on a port takes
+  it from another port. A VXLAN device keeps one remote per unicast MAC,
+  which a replace swaps. The diff looked for the entry on the declared port
+  or remote alone, so it recorded no `before`, and the undo deleted the
+  entry instead of moving it back. It now finds the entry where it is and
+  records it: the plan shows `~ fdb … (was on p0)` or `(was dst …)`, and
+  the undo puts the entry back.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
