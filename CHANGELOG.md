@@ -1096,6 +1096,24 @@ All notable changes to this project will be documented in this file.
   installed `0x3eed`, and `use mark 5` installed mark `5 << 24`. A sweep of
   every action kind's tc(8) lines against `tc` found it.
 
+- **Action lines take tc(8)'s own words (#817).** Seven kinds' `parse_params`
+  refused, or read differently, what tc writes for what they set:
+  - vlan's `push id 100` / `modify id 200` (the `id` keyword was read as
+    the id);
+  - skbedit's `priority`, a class id in hex (`10` is 0x10, `1:10` is
+    0x10010), its `mark 1/0xff`, `ptype` and `inheritdsfield`;
+  - csum's `iph and tcp`;
+  - tunnel_key's `unset`, `csum`, `nocsum` and `nofrag`;
+  - ct's `mark 7` and `mark 7/0xff`;
+  - ctinfo's `dscp 0xfc 0x01`;
+  - and a pedit line's verdict, which tc makes `pass` and nlink made
+    `pipe`.
+
+  Marks and masks read in any base, as tc's `get_u32(.., 0)` does, and
+  skbedit's and ct's `to_params` write `mark V/M`, which tc reads. A sweep
+  installing every action kind's lines through `tc` and through nlink
+  found them.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
