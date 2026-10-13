@@ -1878,6 +1878,54 @@ async fn a_route_through_a_blackhole_nexthop_is_unicast() -> Result<()> {
     .await
 }
 
+/// A multipath hop's weight of 256, its encap and its realms are read
+/// (#783). The weight was a `u8`, so 256 read back as 255 and passed for a
+/// declared 255. A hop's encap and realms were not read, so a route whose
+/// hop had them passed for its declaration.
+#[tokio::test]
+async fn a_multipath_hops_weight_encap_and_realms_are_read() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "mpls_router", "mpls_iptunnel");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("mp-hops")?;
+        let conn = conn_in_ns(&ns)?;
+        let cfg = |w: u16| -> Result<NetworkConfig> {
+            Ok(NetworkConfig::new()
+                .link("d0", |l| l.dummy().up())
+                .address("d0", "10.89.0.1/24")?
+                .route("10.88.0.0/16", move |r| {
+                    r.nexthop(move |h| h.via("10.89.0.2").dev("d0").weight(w))
+                        .nexthop(|h| h.via("10.89.0.3").dev("d0"))
+                })?)
+        };
+        let applied = cfg(255)?.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let replace = |hop: &[&str]| -> Result<String> {
+            let mut args = vec!["route", "replace", "10.88.0.0/16", "proto", "boot", "nexthop", "via", "10.89.0.2", "dev", "d0", "weight", "256"];
+            args.extend(hop);
+            args.extend(["nexthop", "via", "10.89.0.3", "dev", "d0"]);
+            ns.exec("ip", &args)
+        };
+        replace(&[])?;
+        assert!(!cfg(255)?.diff(&conn).await?.is_empty(), "a weight of 256 passed for 255");
+        assert!(cfg(256)?.diff(&conn).await?.is_empty(), "a declared 256 did not match");
+
+        for hop in [&["encap", "mpls", "100"][..], &["realm", "5"][..]] {
+            replace(hop)?;
+            let diff = cfg(256)?.diff(&conn).await?;
+            assert!(!diff.is_empty(), "a hop with {hop:?} passed for one without");
+            let applied = cfg(256)?.apply(&conn).await?;
+            assert!(applied.is_success(), "{applied:?}");
+            let shown = ns.exec("ip", &["route", "show", "10.88.0.0/16"])?;
+            assert!(!shown.contains(hop[0]), "{hop:?}: {shown}");
+            assert!(cfg(256)?.diff(&conn).await?.is_empty(), "{hop:?}: did not converge");
+        }
+        Ok(())
+    })
+    .await
+}
+
 /// A nexthop with an encap is not a declared one (#783). A declaration has
 /// no encap, and the diff did not read the kernel's: `ip nexthop add id 7
 /// encap mpls 100 via …` passed for a declared nexthop 7 via the same

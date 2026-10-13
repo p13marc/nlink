@@ -366,8 +366,8 @@ pub struct NextHop {
     gateway_v6: Option<Ipv6Addr>,
     /// Output interface reference
     dev: Option<InterfaceRef>,
-    /// Weight (for ECMP)
-    weight: u8,
+    /// Weight (for ECMP), 1 to 256
+    weight: u16,
     /// Flags
     flags: u8,
 }
@@ -415,9 +415,10 @@ impl NextHop {
         self.dev.as_ref()
     }
 
-    /// Set weight (1-256).
-    pub fn weight(mut self, weight: u8) -> Self {
-        self.weight = weight.max(1);
+    /// Set weight, 1 to 256 (a `u16` since 0.32, #783); one past 256 is
+    /// written as 256.
+    pub fn weight(mut self, weight: u16) -> Self {
+        self.weight = weight.clamp(1, 256);
         self
     }
 
@@ -1489,7 +1490,7 @@ fn write_multipath_v4(
         // Write rtnexthop header
         mp_data.extend_from_slice(&nh_len.to_ne_bytes());
         mp_data.push(nh.flags);
-        mp_data.push(nh.weight.saturating_sub(1)); // hops = weight - 1
+        mp_data.push((nh.weight.clamp(1, 256) - 1) as u8); // hops = weight - 1
         mp_data.extend_from_slice(&ifindex.to_ne_bytes());
 
         // Write RTA_GATEWAY if present
@@ -1531,7 +1532,7 @@ fn write_multipath_v6(
         // Write rtnexthop header
         mp_data.extend_from_slice(&nh_len.to_ne_bytes());
         mp_data.push(nh.flags);
-        mp_data.push(nh.weight.saturating_sub(1));
+        mp_data.push((nh.weight.clamp(1, 256) - 1) as u8);
         mp_data.extend_from_slice(&ifindex.to_ne_bytes());
 
         // Write RTA_GATEWAY if present
