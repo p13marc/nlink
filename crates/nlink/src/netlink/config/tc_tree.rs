@@ -458,6 +458,9 @@ pub struct DeclaredFilter {
 /// A filter's kind, keys and actions.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
+// A flower's keys make its variant the largest by far (#827); a tree
+// declares a handful of filters, so boxing one would buy nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum FilterSpec {
     /// A flower filter.
     Flower(FlowerFilter),
@@ -946,6 +949,40 @@ fn value_keys(kind: &str) -> Vec<u16> {
         "flower" => {
             let mut keys = RECIPE_FLOWER_VALUE_KEYS.to_vec();
             keys.extend([flower::TCA_FLOWER_CLASSID, flower::TCA_FLOWER_INDEV]);
+            // The keys #827 added: a live filter with one the declaration
+            // does not write matches less than declared.
+            keys.extend([
+                flower::TCA_FLOWER_KEY_ICMPV4_TYPE,
+                flower::TCA_FLOWER_KEY_ICMPV4_CODE,
+                flower::TCA_FLOWER_KEY_ICMPV6_TYPE,
+                flower::TCA_FLOWER_KEY_ICMPV6_CODE,
+                flower::TCA_FLOWER_KEY_FLAGS,
+                flower::TCA_FLOWER_KEY_CT_STATE,
+                flower::TCA_FLOWER_KEY_CT_ZONE,
+                flower::TCA_FLOWER_KEY_CT_MARK,
+                flower::TCA_FLOWER_KEY_CT_LABELS,
+                flower::TCA_FLOWER_KEY_VLAN_ETH_TYPE,
+                flower::TCA_FLOWER_KEY_CVLAN_ID,
+                flower::TCA_FLOWER_KEY_CVLAN_PRIO,
+                flower::TCA_FLOWER_KEY_CVLAN_ETH_TYPE,
+                flower::TCA_FLOWER_KEY_MPLS_LABEL,
+                flower::TCA_FLOWER_KEY_MPLS_TC,
+                flower::TCA_FLOWER_KEY_MPLS_BOS,
+                flower::TCA_FLOWER_KEY_MPLS_TTL,
+                flower::TCA_FLOWER_KEY_ARP_OP,
+                flower::TCA_FLOWER_KEY_ARP_SIP,
+                flower::TCA_FLOWER_KEY_ARP_TIP,
+                flower::TCA_FLOWER_KEY_ARP_SHA,
+                flower::TCA_FLOWER_KEY_ARP_THA,
+                flower::TCA_FLOWER_KEY_ENC_KEY_ID,
+                flower::TCA_FLOWER_KEY_ENC_IPV4_SRC,
+                flower::TCA_FLOWER_KEY_ENC_IPV4_DST,
+                flower::TCA_FLOWER_KEY_ENC_IPV6_SRC,
+                flower::TCA_FLOWER_KEY_ENC_IPV6_DST,
+                flower::TCA_FLOWER_KEY_ENC_UDP_DST_PORT,
+                flower::TCA_FLOWER_KEY_ENC_IP_TOS,
+                flower::TCA_FLOWER_KEY_ENC_IP_TTL,
+            ]);
             keys
         }
         "matchall" => vec![matchall::TCA_MATCHALL_CLASSID],
@@ -985,8 +1022,17 @@ impl DeclaredFilter {
         if cfg.write(&mut b).is_err() {
             return false;
         }
-        let (want_attrs, want_actions) = split_filter(kind, &b.as_bytes()[start..]);
+        let (mut want_attrs, want_actions) = split_filter(kind, &b.as_bytes()[start..]);
         let (have_attrs, have_actions) = split_filter(kind, live.raw_options().unwrap_or(&[]));
+        if kind == "flower" {
+            use crate::netlink::{filter::flower_dumped_eth_type, types::tc::filter::flower::TCA_FLOWER_KEY_ETH_TYPE};
+            let echo = flower_dumped_eth_type(|id| want_attrs.get(&id).and_then(|v| v.get(..2)?.try_into().ok()));
+            match echo {
+                Some(Some(t)) => _ = want_attrs.insert(TCA_FLOWER_KEY_ETH_TYPE, t.to_vec()),
+                Some(None) => _ = want_attrs.remove(&TCA_FLOWER_KEY_ETH_TYPE),
+                None => {}
+            }
+        }
         want_attrs
             .iter()
             .all(|(id, want)| have_attrs.get(id) == Some(want))

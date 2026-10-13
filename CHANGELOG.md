@@ -3406,6 +3406,26 @@ All notable changes to this project will be documented in this file.
   (#821)**, and `parse_params` reads them, with tc's `horizon_cap`. tc's
   `defrate` is refused with a reason, since the kernel ignores it.
 
+- **Flower takes the rest of tc-flower(8)'s keys (#827)**, in `parse_params`
+  and as builder setters:
+  - ICMP `type`/`code`, as ICMPv4 or ICMPv6 by the network protocol;
+  - `ip_flags`;
+  - `ct_state`, `ct_zone`, `ct_mark` and `ct_label`;
+  - `indev`;
+  - `vlan_ethtype`, and QinQ's `cvlan_id`, `cvlan_prio` and
+    `cvlan_ethtype`;
+  - `mpls_label`, `mpls_tc`, `mpls_bos` and `mpls_ttl`;
+  - masked MACs, a MAC or a bit count after `/`;
+  - `arp_op`, `arp_sip`, `arp_tip`, `arp_sha` and `arp_tha`;
+  - the tunnel keys `enc_key_id`, `enc_src_ip`, `enc_dst_ip`,
+    `enc_dst_port`, `enc_tos` and `enc_ttl`.
+
+  Under a VLAN tag the L3 keys follow `vlan_ethtype`, as the kernel reads
+  them, and ARP, MPLS and ICMP keys under any other protocol are refused
+  rather than installed as a match-all. A declared tree compares every new
+  key, including a live filter that matches on one more, and reads a VLAN
+  filter's ethertype as the kernel dumps it: the innermost protocol.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

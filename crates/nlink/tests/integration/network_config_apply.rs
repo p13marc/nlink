@@ -2778,6 +2778,89 @@ async fn every_action_kind_is_compared_and_converges() -> Result<()> {
     .await
 }
 
+/// #827: every flower key a tc(8) line can now say is written as the
+/// kernel echoes it, so a declaration converges, and is compared, so a
+/// filter whose key drifted, or that matches on one more key, is put back.
+#[tokio::test]
+async fn every_flower_key_is_compared_and_converges() -> Result<()> {
+    use nlink::netlink::filter::FlowerFilter;
+    use nlink::{EthProto, FilterPriority, TcHandle};
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "sch_ingress", "cls_flower");
+
+    // (protocol, line, drift)
+    let rows: &[(&str, &str, &str)] = &[
+        ("ip", "ip_proto icmp type 8 code 0", "ip_proto icmp type 0 code 0"),
+        ("ipv6", "ip_proto icmpv6 type 128", "ip_proto icmpv6 type 129"),
+        ("ip", "ip_flags frag/nofirstfrag", "ip_flags frag/firstfrag"),
+        ("ip", "ct_state +trk+est", "ct_state +trk+new"),
+        ("ip", "ct_zone 3 ct_mark 5/0xff", "ct_zone 3 ct_mark 6/0xff"),
+        ("ip", "ct_zone 3", "ct_zone 3 ct_mark 5"),
+        ("ip", "ct_label 01/ff", "ct_label 02/ff"),
+        ("ip", "enc_key_id 100 enc_dst_ip 10.0.0.1 enc_dst_port 4789", "enc_key_id 101 enc_dst_ip 10.0.0.1 enc_dst_port 4789"),
+        ("ip", "enc_src_ip fd00::/64 enc_tos 16/0xfc enc_ttl 64", "enc_src_ip fd00::/64 enc_tos 16/0xfc enc_ttl 63"),
+        ("mpls_uc", "mpls_label 100 mpls_tc 3", "mpls_label 101 mpls_tc 3"),
+        ("arp", "arp_op request arp_tip 10.0.0.0/24", "arp_op reply arp_tip 10.0.0.0/24"),
+        ("arp", "arp_sha 02:00:00:00:00:01", "arp_sha 02:00:00:00:00:02"),
+        ("802.1q", "vlan_id 10 vlan_ethtype ip src_ip 10.0.0.1", "vlan_id 10 vlan_ethtype ip src_ip 10.0.0.2"),
+        (
+            "802.1ad",
+            "vlan_id 10 vlan_ethtype 802.1q cvlan_id 20 cvlan_ethtype ip",
+            "vlan_id 10 vlan_ethtype 802.1q cvlan_id 21 cvlan_ethtype ip",
+        ),
+        ("ip", "dst_mac 02:00:00:00:00:00/ff:ff:ff:00:00:00", "dst_mac 02:00:00:00:00:00/ff:ff:00:00:00:00"),
+        ("ip", "indev d0", "indev lo"),
+    ];
+
+    with_timeout(async {
+        let ns = TestNamespace::new("flower-keys")?;
+        let conn = conn_in_ns(&ns)?;
+        let hook = TcHandle::CLSACT_INGRESS;
+        let parse = |line: &str| FlowerFilter::parse_params(&line.split_whitespace().collect::<Vec<_>>());
+        let mut failed = Vec::new();
+        for &(proto, line, drift) in rows {
+            let protocol: EthProto = proto.parse()?;
+            let flower = parse(line)?;
+            let cfg = NetworkConfig::new()
+                .link("d0", |l| l.dummy().up())
+                .qdisc("d0", |q| q.clsact())
+                .tc("d0", move |t| t.filter(hook, FilterPriority::new(1), protocol, flower.clone()));
+            match cfg.apply(&conn).await {
+                Ok(applied) if applied.is_success() => {}
+                Ok(applied) => {
+                    failed.push(format!("{proto} {line}: the apply failed: {applied:?}"));
+                    continue;
+                }
+                Err(e) => {
+                    failed.push(format!("{proto} {line}: the apply failed: {e}"));
+                    continue;
+                }
+            }
+            let again = cfg.diff(&conn).await?;
+            if !again.is_empty() {
+                failed.push(format!("{proto} {line}: did not converge:\n{again}"));
+                continue;
+            }
+            ns.exec("tc", &["filter", "del", "dev", "d0", "ingress", "prio", "1"])?;
+            if let Err(e) = conn.add_filter_full("d0", hook, None, protocol, FilterPriority::new(1), parse(drift)?).await {
+                failed.push(format!("{proto} {line}: `{drift}` would not install: {e}"));
+                continue;
+            }
+            if cfg.diff(&conn).await?.is_empty() {
+                failed.push(format!("{proto} {line}: `{drift}` compared equal to it"));
+            }
+            let applied = cfg.apply(&conn).await.map(|a| a.is_success()).unwrap_or(false);
+            let back = cfg.diff(&conn).await?;
+            if !applied || !back.is_empty() {
+                failed.push(format!("{proto} {line}: from `{drift}`, did not converge:\n{back}"));
+            }
+        }
+        assert!(failed.is_empty(), "{}", failed.join("\n"));
+        Ok(())
+    })
+    .await
+}
+
 /// A police action's conform verdict, peakrate and average rate, and a
 /// gact action's random verdict, are compared (#791). The comparison
 /// summarised a police by its rate, burst, mtu and exceed verdict and a
