@@ -175,7 +175,9 @@ impl Connection<Devlink> {
     // Health Reporters
     // =========================================================================
 
-    /// List all health reporters for a device.
+    /// List all health reporters for a device: its own, and its ports'
+    /// ([`HealthReporter::port`]). Only the device's: a kernel before
+    /// per-instance dump filtering answers for every device (#777).
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_health_reporters"))]
     pub async fn get_health_reporters(
         &self,
@@ -199,7 +201,9 @@ impl Connection<Devlink> {
         Ok(reporters)
     }
 
-    /// Get a specific health reporter by name.
+    /// Get a device's own health reporter by name; a port's of the same
+    /// name is in [`get_health_reporters`](Self::get_health_reporters),
+    /// with its [`port`](HealthReporter::port) (#777).
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_health_reporter"))]
     pub async fn get_health_reporter(
         &self,
@@ -208,7 +212,7 @@ impl Connection<Devlink> {
         name: &str,
     ) -> Result<Option<HealthReporter>> {
         let reporters = self.get_health_reporters(bus, device).await?;
-        Ok(reporters.into_iter().find(|r| r.name == name))
+        Ok(reporters.into_iter().find(|r| r.name == name && r.port.is_none()))
     }
 
     /// List health reporters that are in error state.
@@ -222,7 +226,8 @@ impl Connection<Devlink> {
     // Parameters
     // =========================================================================
 
-    /// List all parameters for a device.
+    /// List all parameters for a device: only its own, where a kernel
+    /// before per-instance dump filtering answers for every device (#777).
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_params"))]
     pub async fn get_params(&self, bus: &str, device: &str) -> Result<Vec<DevlinkParam>> {
         let responses = self
@@ -1132,10 +1137,47 @@ fn parse_port(data: &[u8]) -> Option<DevlinkPort> {
     if has_index { Some(port) } else { None }
 }
 
+/// The device and port a reply names (#777).
+struct ReplyHandle {
+    bus: Option<String>,
+    device: Option<String>,
+    port: Option<u32>,
+}
+
+impl ReplyHandle {
+    fn of(data: &[u8]) -> Self {
+        let mut h = Self { bus: None, device: None, port: None };
+        for (attr_type, payload) in AttrIter::new(data) {
+            match attr_type {
+                DEVLINK_ATTR_BUS_NAME => h.bus = attr_str(payload),
+                DEVLINK_ATTR_DEV_NAME => h.device = attr_str(payload),
+                DEVLINK_ATTR_PORT_INDEX if payload.len() >= 4 => {
+                    h.port = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+                }
+                _ => {}
+            }
+        }
+        h
+    }
+
+    /// Whether it is `bus`/`device`'s. A dump that names a device answers
+    /// for every device on a kernel before per-instance filtering, and the
+    /// requested names used to be stamped on each reply.
+    fn is(&self, bus: &str, device: &str) -> bool {
+        self.bus.as_deref().is_none_or(|b| b == bus) && self.device.as_deref().is_none_or(|d| d == device)
+    }
+}
+
 fn parse_health_response(bus: &str, device: &str, data: &[u8]) -> Option<HealthReporter> {
+    let handle = ReplyHandle::of(data);
+    if !handle.is(bus, device) {
+        return None;
+    }
     for (attr_type, payload) in AttrIter::new(data) {
         if attr_type == DEVLINK_ATTR_HEALTH_REPORTER {
-            return parse_health_reporter(bus, device, payload);
+            let mut reporter = parse_health_reporter(bus, device, payload)?;
+            reporter.port = handle.port;
+            return Some(reporter);
         }
     }
     None
@@ -1153,6 +1195,7 @@ fn parse_health_reporter(bus: &str, device: &str, data: &[u8]) -> Option<HealthR
         auto_dump: false,
         graceful_period_ms: None,
         dump_ts_jiffies: None,
+        port: None,
     };
 
     for (attr_type, payload) in AttrIter::new(data) {
@@ -1195,6 +1238,9 @@ fn parse_health_reporter(bus: &str, device: &str, data: &[u8]) -> Option<HealthR
 }
 
 fn parse_param_response(bus: &str, device: &str, data: &[u8]) -> Option<DevlinkParam> {
+    if !ReplyHandle::of(data).is(bus, device) {
+        return None;
+    }
     for (attr_type, payload) in AttrIter::new(data) {
         if attr_type == DEVLINK_ATTR_PARAM {
             return parse_param(bus, device, payload);
@@ -1311,6 +1357,41 @@ mod read_parse_tests {
         build(&mut b);
         // Strip the 16-byte nlmsghdr the builder prepends.
         b.as_bytes()[16..].to_vec()
+    }
+
+    /// #777: a reply for another device is not this one's, whatever the
+    /// request named, and a port's reporter says which port.
+    #[test]
+    fn replies_are_the_requested_devices_and_reporters_know_their_port() {
+        let reply = |dev: &str, port: Option<u32>, name: &str| {
+            attrs(|b| {
+                b.append_attr_str(DEVLINK_ATTR_BUS_NAME, "netdevsim");
+                b.append_attr_str(DEVLINK_ATTR_DEV_NAME, dev);
+                if let Some(p) = port {
+                    b.append_attr(DEVLINK_ATTR_PORT_INDEX, &p.to_ne_bytes());
+                }
+                let nest = b.nest_start(DEVLINK_ATTR_HEALTH_REPORTER);
+                b.append_attr_str(DEVLINK_ATTR_HEALTH_REPORTER_NAME, name);
+                b.nest_end(nest);
+            })
+        };
+        let mine = parse_health_response("netdevsim", "netdevsim1", &reply("netdevsim1", None, "fw")).unwrap();
+        assert_eq!((mine.name.as_str(), mine.port), ("fw", None));
+        let port = parse_health_response("netdevsim", "netdevsim1", &reply("netdevsim1", Some(3), "tx")).unwrap();
+        assert_eq!((port.name.as_str(), port.port), ("tx", Some(3)));
+        assert!(parse_health_response("netdevsim", "netdevsim1", &reply("netdevsim2", None, "fw")).is_none());
+
+        let param = |dev: &str| {
+            attrs(|b| {
+                b.append_attr_str(DEVLINK_ATTR_BUS_NAME, "netdevsim");
+                b.append_attr_str(DEVLINK_ATTR_DEV_NAME, dev);
+                let nest = b.nest_start(DEVLINK_ATTR_PARAM);
+                b.append_attr_str(DEVLINK_ATTR_PARAM_NAME, "max_macs");
+                b.nest_end(nest);
+            })
+        };
+        assert!(parse_param_response("netdevsim", "netdevsim1", &param("netdevsim1")).is_some());
+        assert!(parse_param_response("netdevsim", "netdevsim1", &param("netdevsim2")).is_none());
     }
 
     #[test]

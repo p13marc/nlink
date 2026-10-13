@@ -274,6 +274,9 @@ pub struct HealthReporter {
     pub graceful_period_ms: Option<u64>,
     /// Timestamp of last dump (jiffies).
     pub dump_ts_jiffies: Option<u64>,
+    /// The port whose reporter it is (`DEVLINK_ATTR_PORT_INDEX`); `None`
+    /// for the device's own (#777).
+    pub port: Option<u32>,
 }
 
 impl HealthReporter {

@@ -1043,6 +1043,18 @@ All notable changes to this project will be documented in this file.
   hop with an encap or realms is something a declaration cannot say: the
   route differs from its declaration and is not put back.
 
+- **Devlink health reporters and parameters are the requested device's
+  (#777).** `get_health_reporters` and `get_params` (and
+  `get_health_reporter`, `get_health_errors` and `get_param` on top of them)
+  stamped the requested bus and device on every reply and read neither
+  from the reply. On a kernel whose devlink dumps ignore the device named
+  (before per-instance filtering), they returned every instance's
+  reporters or parameters as the requested one's. And a reporter dump's
+  port reporters came back as the device's, so `get_health_reporter(name)`
+  could return a port's. Replies for another device are dropped now.
+  `HealthReporter::port` says which port a reporter is on, and
+  `get_health_reporter` returns the device's own.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
