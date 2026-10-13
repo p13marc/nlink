@@ -1190,12 +1190,17 @@ fn full_prefix(addr: &std::net::IpAddr) -> u8 {
 /// `unix_diag_req` has a `udiag_states` mask and an `udiag_ino`, and that is
 /// all — there is no type mask and no path filter on the wire. Both builders
 /// were therefore silently doing nothing: `.unix().stream().path("/run/foo")`
-/// returned every unix socket of every type.
+/// returned every unix socket of every type. Nor does a dump read
+/// `udiag_ino`: only the exact lookup does (`unix_diag_get_exact`, which also
+/// needs the cookie), so `.inode(n)` returned every socket too (#776).
 ///
 /// `path_pattern` is a substring match, matched against the filesystem path or,
 /// for an abstract socket, its `@name`.
 fn matches_unix_filter(sock: &UnixSocket, filter: &UnixFilter) -> bool {
     if filter.socket_types & (1 << (sock.socket_type as u32)) == 0 {
+        return false;
+    }
+    if filter.inode.is_some_and(|ino| ino != sock.inode) {
         return false;
     }
     if let Some(pattern) = &filter.path_pattern {
