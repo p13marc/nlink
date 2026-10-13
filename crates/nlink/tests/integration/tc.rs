@@ -3250,6 +3250,25 @@ async fn a_police_avrate_installs_with_an_estimator() -> Result<()> {
     Ok(())
 }
 
+/// #811: a tunnel_key action's key id is the one asked for. nlink sent it as
+/// 8 bytes where the kernel reads a `__be32`, so it installed key id 0.
+#[tokio::test]
+async fn a_tunnel_keys_id_is_installed_as_tc_installs_it() -> Result<()> {
+    use nlink::netlink::action::{ActionList, TunnelKeyAction};
+    require_root!();
+    nlink::require_modules!("dummy", "sch_ingress", "cls_matchall", "act_tunnel_key");
+
+    let (ns, conn, d0) = clsact_d0("tc-tunkey").await?;
+    // tc reads `src` as an abbreviation of `src_ip`, its own word (#811).
+    for line in ["set src 10.0.0.1 dst 10.0.0.2 id 100 dst_port 4789", "set dst_ip 10.0.0.2 src_ip 10.0.0.1 id 4096"] {
+        same_as_tc(&ns, "tunnel_key", line, async |a| matchall_at_prio_2(&conn, d0, a).await, |w| {
+            Ok(ActionList::new().with(TunnelKeyAction::parse_params(w)?))
+        })
+        .await?;
+    }
+    Ok(())
+}
+
 /// #751: a gate's bare times are nanoseconds and a ct `nat` is spelled
 /// with `addr`, as tc(8) reads them. nlink read a bare gate time as
 /// microseconds, and refused the `addr` keyword.

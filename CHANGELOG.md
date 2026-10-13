@@ -1055,6 +1055,16 @@ All notable changes to this project will be documented in this file.
   `HealthReporter::port` says which port a reporter is on, and
   `get_health_reporter` returns the device's own.
 
+- **A tunnel_key action installs the key id it is given (#811).**
+  `TunnelKeyAction` wrote `TCA_TUNNEL_KEY_ENC_KEY_ID` as 8 bytes, following
+  the header's `/* be64 */` comment. The kernel reads a `__be32`
+  (`nla_get_be32()` in `tunnel_key_init()`), so it took the first four
+  bytes, always zero. Every `tunnel_key set … id N` nlink installed carried
+  key id 0, and the traffic it encapsulated went out with VNI or key 0.
+  `parse_params` also takes tc-tunnel_key(8)'s own `src_ip`/`dst_ip`, for
+  either family. It took only `src`/`dst`, which tc accepts as
+  abbreviations, and nlink's `src6`/`dst6`.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
