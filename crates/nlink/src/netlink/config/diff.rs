@@ -3174,12 +3174,18 @@ pub(super) fn declared_from_live(
             IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
         }
     });
+    // A route through a nexthop object is dumped with the nexthop's gateway
+    // and device as well (`nexthop_compat_mode`, on by default). Read back
+    // with them, its delete matched no route and its re-add was refused:
+    // a request may not name both (#769).
+    let through_object = r.nh_id().is_some();
     Some(DeclaredRoute {
         destination,
         prefix_len: r.dst_len(),
-        gateway: r.gateway().or(r.via()).copied(),
+        gateway: r.gateway().or(r.via()).copied().filter(|_| !through_object),
         dev: r
             .oif()
+            .filter(|_| !through_object)
             .and_then(|idx| ifindex_to_name.get(&idx))
             .map(|n| n.to_string()),
         metric: r.priority(),
@@ -3194,6 +3200,7 @@ pub(super) fn declared_from_live(
             mpls_encap: r.mpls_encap_labels().unwrap_or_default().to_vec(),
             multipath: r
                 .multipath()
+                .filter(|_| !through_object)
                 .unwrap_or_default()
                 .iter()
                 .map(|h| super::types::RouteNexthop {

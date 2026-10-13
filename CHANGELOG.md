@@ -804,6 +804,15 @@ All notable changes to this project will be documented in this file.
   `u64` fields required 8. So a net_shaper bandwidth or burst, or an ovpn
   counter, under 2³² failed to decode with `Truncated`.
 
+- **A route through a nexthop object is removed, and its replace undone
+  (#769).** The kernel dumps such a route with the nexthop's gateway and
+  device as well as its id (`nexthop_compat_mode`), and the diff read it
+  back with all three. So when the previous config declared the route and
+  this one does not, the delete matched no route and the route stayed,
+  listed by every diff. And undoing a replace of one sent the id with the
+  gateway, which the kernel refuses. The read-back now keeps the id alone,
+  and a delete names the nexthop object.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

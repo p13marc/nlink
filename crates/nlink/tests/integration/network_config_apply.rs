@@ -1558,3 +1558,55 @@ async fn a_failed_step_names_its_object() -> Result<()> {
     }
     Ok(())
 }
+
+/// A route through a nexthop object with a gateway reads back as itself
+/// (#769): the kernel dumps the nexthop's gateway and device along with
+/// its id (`nexthop_compat_mode`), and read back with them, the route's
+/// delete matched no route, so a route the config stopped declaring stayed
+/// forever, and an undo that put it back sent both, which the kernel
+/// refuses ("Nexthop specification and nexthop id are mutually
+/// exclusive").
+#[tokio::test]
+async fn a_route_through_a_nexthop_reads_back_as_one() -> Result<()> {
+    use std::sync::Arc;
+    nlink::require_root!();
+    nlink::require_modules!("dummy");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("nhid-readback")?;
+        let conn = conn_in_ns(&ns)?;
+        let base = || -> Result<NetworkConfig> {
+            Ok(NetworkConfig::new()
+                .link("d0", |l| l.dummy().up())
+                .address("d0", "10.81.0.1/24")?
+                .nexthop(5, |n| n.via("10.81.0.2".parse().unwrap()).dev("d0")))
+        };
+        let routes = |ns: &TestNamespace| -> Result<serde_json::Value> {
+            crate::common::converge::ip_json(ns, &["route", "show", "10.82.0.0/16"])
+                .map_err(nlink::Error::invalid_message)
+        };
+        let a = Arc::new(base()?.route("10.82.0.0/16", |r| r.nhid(5))?);
+        let applied = a.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+
+        // Replaced by a route through a gateway, and the replace undone.
+        let b = base()?.route("10.82.0.0/16", |r| r.via("10.81.0.3").dev("d0"))?;
+        let applied = b.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        assert_eq!(routes(&ns)?[0]["gateway"], "10.81.0.3");
+        let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
+        assert!(undone.is_success(), "{undone:?}");
+        assert_eq!(routes(&ns)?[0]["nhid"], 5, "{}", routes(&ns)?);
+        let back = a.diff(&conn).await?;
+        assert!(back.is_empty(), "the undo left:\n{back}");
+
+        // Removed: the previous config declared it, this one does not.
+        let applied = base()?
+            .apply_with_options(&conn, ApplyOptions::default().with_previous(a.clone()))
+            .await?;
+        assert!(applied.is_success(), "{applied:?}");
+        assert_eq!(routes(&ns)?, serde_json::json!([]), "the route stayed");
+        Ok(())
+    })
+    .await
+}

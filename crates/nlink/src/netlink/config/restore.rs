@@ -282,20 +282,10 @@ pub(super) fn capture(
             continue;
         }
         match super::diff::declared_from_live(r, names) {
-            Some(mut route) => {
-                // A route through a nexthop object dumps the nexthop's
-                // gateway and device as well (`nexthop_compat_mode`),
-                // which a request may not send with it.
-                if route.attrs.nhid.is_some() {
-                    route.gateway = None;
-                    route.dev = None;
-                    route.attrs.multipath.clear();
-                }
-                restore.routes.push(RestoredRoute {
-                    route,
-                    protocol: r.protocol(),
-                });
-            }
+            Some(route) => restore.routes.push(RestoredRoute {
+                route,
+                protocol: r.protocol(),
+            }),
             None => why.push(format!("route {text}, of a type no declaration has")),
         }
     }
