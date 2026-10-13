@@ -332,6 +332,19 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **nftables commits no longer time out before Linux 6.10.** A batch
+  waited for the ACK of its `BATCH_END`, which the kernel only sends from
+  6.10 ("netfilter: nfnetlink: Handle ACK flags for batch messages").
+  Before, every `Transaction::commit()` and every imperative nftables
+  write (`add_table`, `add_set_elements`, ...) failed with
+  `Error::timeout()` after 30 s, although the kernel had applied the
+  batch: Ubuntu 24.04's 6.8, for one. Every release from 0.17.0 to 0.31.0
+  waits this way. The batch now asks the ACK of its last operation and
+  ends on it; the kernel sends it after the commit, once every error is
+  out, on every kernel. A refused batch is decided by the last
+  operation's answer too, so on a `with_dispatcher()` connection its
+  error no longer leaves out operations the driver had not routed yet.
+
 - **`NetworkConfig::validate()` refuses what the apply would fail on
   (#518).** It runs before every diff and apply, so these are refused
   before anything changes. Before, each failed mid-apply, after earlier
