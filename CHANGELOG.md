@@ -1199,6 +1199,15 @@ All notable changes to this project will be documented in this file.
   only an unsigned number, in decimal or `0x` hex; they read any base now
   too.
 
+- **A sockdiag filter reads ss's host conditions (#838).** `FilterExpr`
+  refused a bracketed IPv6 address (`src [::1]`) and an address with a port
+  (`src 127.0.0.1:8001`, `dst [::1]:443`, `src *:22`), which ss(8) reads.
+  It reads them now as ss's `parse_hostcond()` does, the port folded in as
+  `sport`/`dport`. A parse error says where it stopped, where it printed
+  an empty `ContextError`. A sweep putting each ss expression through `ss`
+  and through nlink's query, on the same sockets, found them; everything
+  else agreed.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
