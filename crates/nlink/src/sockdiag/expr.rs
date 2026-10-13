@@ -97,7 +97,10 @@ impl FilterExpr {
     /// spellings are `and` / `or`.)
     pub fn parse(input: &str) -> Result<Self, String> {
         let mut rest = input.trim();
-        let expr = parse_or_expr(&mut rest).map_err(|e| format!("filter parse error: {e}"))?;
+        // winnow's error carries no context: say where it stopped.
+        let expr = parse_or_expr(&mut rest).map_err(|_| {
+            format!("filter parse error: cannot read `{}` in `{input}`", rest.trim())
+        })?;
         let rest = rest.trim();
         if !rest.is_empty() {
             return Err(format!(
@@ -251,18 +254,16 @@ fn parse_primary(input: &mut &str) -> PResult<FilterExpr> {
         return parse_port_expr(input);
     }
 
-    // src/dst address match
+    // src/dst host condition
     if input.starts_with("src") {
         let _ = "src".parse_next(input)?;
         let _ = multispace1.parse_next(input)?;
-        let (addr, prefix) = parse_ip_prefix(input)?;
-        return Ok(FilterExpr::Src(addr, prefix));
+        return parse_hostcond(input, true);
     }
     if input.starts_with("dst") {
         let _ = "dst".parse_next(input)?;
         let _ = multispace1.parse_next(input)?;
-        let (addr, prefix) = parse_ip_prefix(input)?;
-        return Ok(FilterExpr::Dst(addr, prefix));
+        return parse_hostcond(input, false);
     }
 
     // state match
@@ -348,30 +349,61 @@ fn parse_port_value(input: &mut &str) -> PResult<u16> {
         .map_err(|_| ErrMode::Cut(ContextError::new()))
 }
 
-fn parse_ip_prefix(input: &mut &str) -> PResult<(IpAddr, u8)> {
-    let addr_str: &str = take_while(1.., |c: char| c.is_ascii_hexdigit() || c == '.' || c == ':')
-        .parse_next(input)?;
-
-    let addr: IpAddr = addr_str
-        .parse()
-        .map_err(|_| ErrMode::Cut(ContextError::new()))?;
-
-    let default_prefix = match addr {
-        IpAddr::V4(_) => 32,
-        IpAddr::V6(_) => 128,
-    };
-
-    let prefix = if input.starts_with('/') {
-        let _ = "/".parse_next(input)?;
-        let digits: &str = digit1.parse_next(input)?;
-        digits
-            .parse::<u8>()
-            .map_err(|_| ErrMode::Cut(ContextError::new()))?
+/// An ss(8) host condition, as its `parse_hostcond()` reads one (#838):
+/// `ADDR[/PREFIX][:PORT]`, `[ADDR[/PREFIX]][:PORT]` or `*[:PORT]`, where
+/// the port follows the last `:` past any `/`. A bare IPv6 address, which
+/// ss would split at its last colon, reads whole. A port folds in as
+/// `sport`/`dport = :PORT`, which is what ss matches it as.
+fn parse_hostcond(input: &mut &str, is_src: bool) -> PResult<FilterExpr> {
+    let cut = || ErrMode::Cut(ContextError::new());
+    let token: &str = take_while(1.., |c: char| !c.is_whitespace() && c != '(' && c != ')').parse_next(input)?;
+    // What follows an address: nothing, or `:PORT`.
+    fn tail(after: &str) -> PResult<Option<&str>> {
+        match after {
+            "" => Ok(None),
+            p => p.strip_prefix(':').map(Some).ok_or_else(|| ErrMode::Cut(ContextError::new())),
+        }
+    }
+    let bare_v6 = |t: &str| t.split_once('/').map_or(t, |(a, _)| a).parse::<std::net::Ipv6Addr>().is_ok();
+    let (addr, port) = if let Some(rest) = token.strip_prefix('[') {
+        let (addr, after) = rest.split_once(']').ok_or_else(cut)?;
+        (Some(addr), tail(after)?)
+    } else if let Some(after) = token.strip_prefix('*') {
+        (None, tail(after)?)
+    } else if bare_v6(token) {
+        (Some(token), None)
     } else {
-        default_prefix
+        let from = token.find('/').unwrap_or(0);
+        match token[from..].rfind(':') {
+            Some(at) => (Some(&token[..from + at]), Some(&token[from + at + 1..])),
+            None => (Some(token), None),
+        }
     };
-
-    Ok((addr, prefix))
+    let addr = match addr.filter(|a| !a.is_empty() && *a != "*") {
+        Some(a) => {
+            let (ip, prefix) = a.split_once('/').map_or((a, None), |(ip, p)| (ip, Some(p)));
+            let ip: IpAddr = ip.parse().map_err(|_| cut())?;
+            let prefix = match prefix {
+                Some(p) => p.parse::<u8>().map_err(|_| cut())?,
+                None if ip.is_ipv4() => 32,
+                None => 128,
+            };
+            Some((ip, prefix))
+        }
+        None => None,
+    };
+    let port = match port.filter(|p| !p.is_empty() && *p != "*") {
+        Some(p) => Some(p.parse::<u16>().map_err(|_| cut())?),
+        None => None,
+    };
+    let host = addr.map(|(ip, prefix)| if is_src { FilterExpr::Src(ip, prefix) } else { FilterExpr::Dst(ip, prefix) });
+    let port = port.map(|p| if is_src { FilterExpr::Sport(Comparison::Eq, p) } else { FilterExpr::Dport(Comparison::Eq, p) });
+    match (host, port) {
+        (Some(h), Some(p)) => Ok(FilterExpr::And(Box::new(h), Box::new(p))),
+        (Some(e), None) | (None, Some(e)) => Ok(e),
+        // `*` alone matches every socket: nothing to filter on.
+        (None, None) => Err(cut()),
+    }
 }
 
 fn parse_state(input: &mut &str) -> PResult<SocketState> {
@@ -397,6 +429,23 @@ fn parse_state(input: &mut &str) -> PResult<SocketState> {
 
 #[cfg(test)]
 mod tests {
+
+    /// ss(8)'s host conditions: `[v6]`, `addr:port`, `*:port` (#838).
+    #[test]
+    fn host_conditions_read_as_ss_reads_them() {
+        let show = |s: &str| format!("{:?}", FilterExpr::parse(s).unwrap());
+        assert_eq!(show("src [::1]"), show("src ::1"));
+        assert_eq!(show("src 127.0.0.1:8001"), show("src 127.0.0.1 and sport = :8001"));
+        assert_eq!(show("dst [fd00::/64]:443"), show("dst fd00::/64 and dport = :443"));
+        assert_eq!(show("src 10.0.0.0/8:22"), show("src 10.0.0.0/8 and sport = :22"));
+        assert_eq!(show("src *:22"), show("sport = :22"));
+        assert_eq!(show("src 10.0.0.1:*"), show("src 10.0.0.1"));
+        for bad in ["src *", "src [::1", "src [::1]x", "src 10.0.0.1:http", "src 10.0.0.300"] {
+            let err = FilterExpr::parse(bad).unwrap_err();
+            assert!(err.contains("cannot read"), "{bad}: {err}");
+        }
+    }
+
     use std::net::SocketAddr;
 
     use super::*;
