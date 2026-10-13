@@ -1149,6 +1149,40 @@ All notable changes to this project will be documented in this file.
     `conservative`, `pppoe-ptm`, `bridged-llcsnap`, …). cake's `raw` now
     also sets overhead 0 and no ATM framing, as tc's does.
 
+- **A route filter and a mark-only u32 filter install (#825).** The kernel
+  refused every `RouteFilter` ("Creating with handle of 0 is invalid"):
+  a route filter's handle is its key, which tc(8) computes from `to`,
+  `from`, `fromif` and `order`, and nlink sent 0. The new
+  `FilterConfig::default_handle()` lets a kind supply the handle when the
+  caller gives none, and `RouteFilter` gives tc's. A u32 whose only match
+  was `mark` was refused for want of a selector ("Selector not
+  specified"); nlink now sends one, as tc does for every `match`.
+
+- **u32 values read as tc(8) reads them (#831).** A raw match's value
+  (`match u16 80 0xffff at 22`) was read as hex, so it matched port 128;
+  it is read in any base now, with masks in hex, as tc reads them. `match
+  mark` reads both numbers in any base and refuses a value outside its
+  mask. An IPv4 `/0` panicked in a debug build and matched one address in
+  release; it is mask 0. And keys at one offset merge into one, as tc's
+  `pack_key()` merges them, so two matches that disagree on the same bits
+  are refused.
+
+- **Class and filter lines take tc(8)'s own words (#826, #829).** A sweep
+  installing each class and filter kind's tc lines through `tc` and
+  through nlink found these refused:
+  - htb's `linklayer` (`HtbClassConfig::linklayer`, which the declarative
+    diff compares);
+  - hfsc's `umax`/`dmax`/`rate` curves, turned into `m1`/`d`/`m2` as tc
+    turns them;
+  - qfq's `maxpkt`, which `to_params` writes now in place of `lmax`;
+  - u32's `ip tos`/`dsfield`/`precedence`/`ihl`/`nofrag`/`firstfrag`/
+    `df`/`mf`/`icmp_type`/`icmp_code`, `ip6 …`, `icmp type|code` and
+    `ether src|dst`;
+  - fw's `indev` (`FwFilter::indev`);
+  - route's `fromif` and `order` (`RouteFilter::order`);
+  - flow's `key` and its `and`/`or`/`xor`, folded into one mask and xor
+    in order as tc folds them.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

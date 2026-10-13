@@ -92,7 +92,7 @@ jobs:
                    act_vlan act_mpls act_skbmod act_skbedit act_connmark act_csum act_nat act_pedit \
                    act_simple act_sample act_ctinfo act_ife \
                    sch_multiq sch_red sch_choke sch_gred sch_sfb sch_codel sch_fq sch_hhf sch_etf sch_cbs \
-                   sch_skbprio sch_ets sch_mqprio sch_taprio; do
+                   sch_skbprio sch_ets sch_mqprio sch_taprio cls_route cls_basic cls_flow; do
             if [ -d "/sys/module/$m" ] || grep -qE "(^|/)$m\.ko" $idx 2>/dev/null; then
               continue
             fi
@@ -134,7 +134,7 @@ jobs:
             act_vlan,act_mpls,act_skbmod,act_skbedit,act_connmark,act_csum,act_nat,act_pedit,
             act_simple,act_sample,act_ctinfo,act_ife,
             sch_multiq,sch_red,sch_choke,sch_gred,sch_sfb,sch_codel,sch_fq,sch_hhf,sch_etf,sch_cbs,
-            sch_skbprio,sch_ets,sch_mqprio,sch_taprio
+            sch_skbprio,sch_ets,sch_mqprio,sch_taprio,cls_route,cls_basic,cls_flow
           # NLINK_TEST_STRICT_HOST_ROOT is deliberately NOT set. This
           # lane's containers are rootless: uid 0 here is the runner's
           # unprivileged user wearing a mapping, and six tests need root

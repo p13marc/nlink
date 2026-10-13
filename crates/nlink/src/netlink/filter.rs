@@ -136,6 +136,17 @@ pub trait FilterConfig: Send + Sync {
         None
     }
 
+    /// The handle to install the filter under when the caller gives none:
+    /// one the kind derives from what it matches, as tc(8) does. A route
+    /// filter's is its key, and the kernel refuses it without one (#825).
+    ///
+    /// Called after [`resolve_devices`](Self::resolve_devices). `None`
+    /// leaves the kernel to choose. Defaulted so external impls stay
+    /// source-compatible.
+    fn default_handle(&self) -> Option<TcHandle> {
+        None
+    }
+
     /// The devices the filter names rather than indexes — a
     /// [`MirredAction::to_dev`](super::action::MirredAction::to_dev)
     /// target, a [`RouteFilter::from_if`] — which the connection that
@@ -325,11 +336,8 @@ impl U32Filter {
 
     /// Match source IPv4 address with prefix length.
     pub fn match_src_ipv4(mut self, addr: Ipv4Addr, prefix_len: u8) -> Self {
-        let mask = if prefix_len >= 32 {
-            0xFFFFFFFF
-        } else {
-            !((1u32 << (32 - prefix_len)) - 1)
-        };
+        // A /0 is mask 0, as tc makes it (#831): `1 << 32` overflowed.
+        let mask = u32::MAX.checked_shl(32 - u32::from(prefix_len.min(32))).unwrap_or(0);
         let val = u32::from_be_bytes(addr.octets());
         // IP source address is at offset 12 in IP header
         self.keys.push(u32_mod::pack_key32(val, mask, 12));
@@ -338,11 +346,7 @@ impl U32Filter {
 
     /// Match destination IPv4 address with prefix length.
     pub fn match_dst_ipv4(mut self, addr: Ipv4Addr, prefix_len: u8) -> Self {
-        let mask = if prefix_len >= 32 {
-            0xFFFFFFFF
-        } else {
-            !((1u32 << (32 - prefix_len)) - 1)
-        };
+        let mask = u32::MAX.checked_shl(32 - u32::from(prefix_len.min(32))).unwrap_or(0);
         let val = u32::from_be_bytes(addr.octets());
         // IP destination address is at offset 16 in IP header
         self.keys.push(u32_mod::pack_key32(val, mask, 16));
@@ -604,13 +608,20 @@ impl U32Filter {
                         "mark" => {
                             let val = need_value(params, i + 1, "u32", "match mark")?;
                             let mask = need_value(params, i + 2, "u32", "match mark VAL")?;
-                            f = f.match_mark(
-                                parse_hex_u32("u32", "mark", val)?,
-                                parse_hex_u32("u32", "mark mask", mask)?,
+                            // Both in any base, as tc reads them (#831).
+                            let (val, mask) = (
+                                parse_u32_any("u32", "mark", val)?,
+                                parse_u32_any("u32", "mark mask", mask)?,
                             );
+                            if val & mask != val {
+                                return Err(Error::invalid_message(format!(
+                                    "u32: mark {val:#x} has bits outside its mask {mask:#x}"
+                                )));
+                            }
+                            f = f.match_mark(val, mask);
                             i += 4;
                         }
-                        "ip" | "tcp" | "udp" => {
+                        "ip" | "tcp" | "udp" | "ip6" | "ether" | "icmp" => {
                             let consumed;
                             (f, consumed) = apply_named_match(f, params, i, width)?;
                             i += consumed;
@@ -618,7 +629,7 @@ impl U32Filter {
                         other => {
                             return Err(Error::invalid_message(format!(
                                 "u32: unknown match width `{other}` \
-                                 (expected u32, u16, u8, mark, ip, tcp, or udp)"
+                                 (expected u32, u16, u8, mark, ip, ip6, tcp, udp, icmp or ether)"
                             )));
                         }
                     }
@@ -779,6 +790,8 @@ impl U32Filter {
                 }
             }
         }
+        // Keys at the same offset are one key, as tc's pack_key() makes them.
+        f.keys = merge_u32_keys(std::mem::take(&mut f.keys))?;
         Ok(f)
     }
 
@@ -936,10 +949,12 @@ impl FilterConfig for U32Filter {
             builder.append_attr(u32_mod::TCA_U32_MARK, mark.as_bytes());
         }
 
-        // Build and add selector if we have keys or a hashkey
-        // configured. Divisor-only filters (which create the hash
-        // table itself) emit just TCA_U32_DIVISOR — no selector.
-        if !self.keys.is_empty() || self.hashkey.is_some() || self.offset.flags != 0 {
+        // Build and add selector if we have keys, a hashkey or a mark
+        // configured: tc sends one for every `match`, and the kernel
+        // refuses a mark-only filter without it (#825). Divisor-only
+        // filters (which create the hash table itself) emit just
+        // TCA_U32_DIVISOR — no selector.
+        if !self.keys.is_empty() || self.hashkey.is_some() || self.offset.flags != 0 || self.mark.is_some() {
             let mut sel = u32_mod::TcU32Sel::new();
             sel.set_terminal();
             for key in &self.keys {
@@ -1069,12 +1084,12 @@ fn parse_u32_raw_match(params: &[&str], i: usize, width: &str) -> Result<U32Matc
     let offset = parse_offset("u32", off_s)?;
     let mut key = match width {
         "u32" => {
-            let val = parse_hex_u32("u32", "VAL", val_s)?;
+            let val = parse_u32_any("u32", "VAL", val_s)?;
             let mask = parse_hex_u32("u32", "MASK", mask_s)?;
             u32_mod::pack_key32(val, mask, offset)
         }
         "u16" => {
-            let val = parse_hex_u32("u32", "VAL", val_s)?;
+            let val = parse_u32_any("u32", "VAL", val_s)?;
             let mask = parse_hex_u32("u32", "MASK", mask_s)?;
             if val > 0xFFFF || mask > 0xFFFF {
                 return Err(Error::invalid_message(format!(
@@ -1084,7 +1099,7 @@ fn parse_u32_raw_match(params: &[&str], i: usize, width: &str) -> Result<U32Matc
             u32_mod::pack_key16(val as u16, mask as u16, offset)
         }
         "u8" => {
-            let val = parse_hex_u32("u32", "VAL", val_s)?;
+            let val = parse_u32_any("u32", "VAL", val_s)?;
             let mask = parse_hex_u32("u32", "MASK", mask_s)?;
             if val > 0xFF || mask > 0xFF {
                 return Err(Error::invalid_message(format!(
@@ -1109,12 +1124,11 @@ fn parse_u32_raw_match(params: &[&str], i: usize, width: &str) -> Result<U32Matc
     })
 }
 
-/// Apply a named-match shortcut (`match ip src ADDR/PREFIX`,
-/// `match tcp dport PORT`, etc.) by routing through the existing
-/// typed setters. Returns the mutated filter; caller advances `i` by
-/// 4 (the shortcut is always exactly `match LAYER FIELD VALUE`).
-/// Apply `match ip|tcp|udp FIELD VALUE [MASK]`; returns the filter and
-/// the number of tokens consumed.
+/// Apply `match ip|ip6|tcp|udp|icmp|ether FIELD VALUE [MASK]`, as tc(8)'s
+/// `parse_ip`, `parse_ip6`, `parse_icmp` and `parse_ether` do; returns the
+/// filter and the number of tokens consumed. Values read in any base and
+/// masks in hex, as tc reads them; a mask tc requires is optional here and
+/// defaults to all of the field.
 fn apply_named_match(
     filter: U32Filter,
     params: &[&str],
@@ -1125,36 +1139,50 @@ fn apply_named_match(
         .get(i + 2)
         .copied()
         .ok_or_else(|| Error::invalid_message(format!("u32: `match {layer}` requires FIELD")))?;
+    let mut filter = filter;
+
+    // The IPv4 fragment fields take no value.
+    let frag = match (layer, field) {
+        ("ip", "nofrag") => Some((0, 0x3FFF)),
+        ("ip", "firstfrag") => Some((0x2000, 0x3FFF)),
+        ("ip", "df") => Some((0x4000, 0x4000)),
+        ("ip", "mf") => Some((0x2000, 0x2000)),
+        _ => None,
+    };
+    if let Some((val, mask)) = frag {
+        filter.keys.push(u32_mod::pack_key16(val, mask, 6));
+        return Ok((filter, 3));
+    }
+
     let value = params.get(i + 3).copied().ok_or_else(|| {
         Error::invalid_message(format!("u32: `match {layer} {field}` requires VALUE"))
     })?;
-
-    // tc(8) writes a port match with a hex mask: `match ip dport 80 0xffff`.
-    // Taken when the next token is one; the mask was not accepted at all
-    // before (#492).
-    let port_match = |off: i32, nexthdr: bool| -> Result<(U32Filter, usize)> {
-        let port = parse_port(field, layer, value)?;
-        let (mask, consumed) = match params
-            .get(i + 4)
-            .and_then(|s| parse_hex_u32("u32", "port mask", s).ok())
-        {
-            Some(mask) => {
-                let mask = u16::try_from(mask).map_err(|_| {
-                    Error::invalid_message(format!(
-                        "u32: `match {layer} {field}` mask `{}` is wider than 16 bits",
-                        params[i + 4]
-                    ))
-                })?;
-                (mask, 5)
-            }
-            None => (0xFFFF, 4),
+    // `VALUE [MASK]`: the mask is taken when the next token is hex.
+    let masked = |width: u32| -> Result<(u32, u32, usize)> {
+        let full = if width == 32 { u32::MAX } else { (1u32 << width) - 1 };
+        let val = parse_u32_any("u32", &format!("{layer} {field}"), value)?;
+        let (mask, consumed) = match params.get(i + 4).and_then(|s| parse_hex_u32("u32", "mask", s).ok()) {
+            Some(mask) => (mask, 5),
+            None => (full, 4),
         };
-        let key = if nexthdr {
-            u32_mod::pack_key16_nexthdr(port & mask, mask, off)
-        } else {
-            u32_mod::pack_key16(port & mask, mask, off)
-        };
-        let mut filter = filter.clone();
+        if val > full || mask > full {
+            return Err(Error::invalid_message(format!(
+                "u32: `match {layer} {field}` value or mask is wider than {width} bits"
+            )));
+        }
+        Ok((val, mask, consumed))
+    };
+    let u8_at = |mut filter: U32Filter, off: i32, offmask: i32| -> Result<(U32Filter, usize)> {
+        let (val, mask, consumed) = masked(8)?;
+        let mut key = u32_mod::pack_key8((val & mask) as u8, mask as u8, off);
+        key.offmask = offmask;
+        filter.keys.push(key);
+        Ok((filter, consumed))
+    };
+    let u16_at = |mut filter: U32Filter, off: i32, offmask: i32| -> Result<(U32Filter, usize)> {
+        let (val, mask, consumed) = masked(16)?;
+        let mut key = u32_mod::pack_key16((val & mask) as u16, mask as u16, off);
+        key.offmask = offmask;
         filter.keys.push(key);
         Ok((filter, consumed))
     };
@@ -1169,7 +1197,8 @@ fn apply_named_match(
             Ok((filter.match_dst_ipv4(addr, prefix), 4))
         }
         ("ip", "protocol") => {
-            // tc(8) writes it with a mask too: `match ip protocol 6 0xff`.
+            // tc(8) writes it with a mask too: `match ip protocol 6 0xff`;
+            // nlink also takes a protocol name.
             let proto = parse_ip_proto_name_or_num(value)?;
             match params
                 .get(i + 4)
@@ -1182,27 +1211,119 @@ fn apply_named_match(
                             params[i + 4]
                         ))
                     })?;
-                    let mut filter = filter;
                     filter.keys.push(u32_mod::pack_key8(proto & mask, mask, 9));
                     Ok((filter, 5))
                 }
                 None => Ok((filter.match_ip_proto(proto), 4)),
             }
         }
+        ("ip", "tos" | "dsfield" | "precedence") => u8_at(filter, 1, 0),
+        ("ip", "ihl") => u8_at(filter, 0, 0),
+        ("ip", "icmp_type") => u8_at(filter, 20, 0),
+        ("ip", "icmp_code") => u8_at(filter, 21, 0),
         // Fixed offsets past a 20-byte IPv4 header, as tc's `ip sport|dport`.
         // `tcp|udp sport|dport` are nlink's aliases for them.
-        ("ip" | "tcp" | "udp", "sport") => port_match(20, false),
-        ("ip" | "tcp" | "udp", "dport") => port_match(22, false),
-        // tc's `tcp|udp src|dst`: relative to the next header, which a
-        // linking filter's `offset` sets.
-        ("tcp" | "udp", "src") => port_match(0, true),
-        ("tcp" | "udp", "dst") => port_match(2, true),
+        ("ip" | "tcp" | "udp", "sport") => u16_at(filter, 20, 0),
+        ("ip" | "tcp" | "udp", "dport") => u16_at(filter, 22, 0),
+        // tc's `tcp|udp src|dst` and `icmp type|code`: relative to the next
+        // header, which a linking filter's `offset` sets.
+        ("tcp" | "udp", "src") => u16_at(filter, 0, -1),
+        ("tcp" | "udp", "dst") => u16_at(filter, 2, -1),
+        ("icmp", "type") => u8_at(filter, 0, -1),
+        ("icmp", "code") => u8_at(filter, 1, -1),
+        ("ip6", "src" | "dst") => {
+            let (addr, plen) = match value.split_once('/') {
+                Some((a, p)) => (a, p.parse::<u32>().ok().filter(|p| *p <= 128)),
+                None => (value, Some(128)),
+            };
+            let (addr, plen) = addr.parse::<std::net::Ipv6Addr>().ok().zip(plen).ok_or_else(|| {
+                Error::invalid_message(format!("u32: invalid IPv6 prefix `{value}`"))
+            })?;
+            let base = if field == "src" { 8 } else { 24 };
+            let octets = addr.octets();
+            for word in 0..4u32 {
+                let bits = plen.saturating_sub(word * 32).min(32);
+                if bits == 0 {
+                    break;
+                }
+                let n = word as usize * 4;
+                let val = u32::from_be_bytes([octets[n], octets[n + 1], octets[n + 2], octets[n + 3]]);
+                let mask = u32::MAX << (32 - bits);
+                filter.keys.push(u32_mod::pack_key32(val, mask, base + 4 * word as i32));
+            }
+            Ok((filter, 4))
+        }
+        // The traffic class: eight bits, 20 bits into the first word.
+        ("ip6", "priority") => {
+            let (val, mask, consumed) = masked(8)?;
+            filter.keys.push(u32_mod::pack_key32(val << 20, mask << 20, 0));
+            Ok((filter, consumed))
+        }
+        ("ip6", "protocol") => u8_at(filter, 6, 0),
+        ("ip6", "flowlabel") => {
+            let (val, mask, consumed) = masked(32)?;
+            filter.keys.push(u32_mod::pack_key32(val, mask, 0));
+            Ok((filter, consumed))
+        }
+        ("ip6", "sport") => u16_at(filter, 40, 0),
+        ("ip6", "dport") => u16_at(filter, 42, 0),
+        ("ip6", "icmp_type") => u8_at(filter, 40, 0),
+        // tc gives this one an offmask of 1; kept, so a line means here
+        // what it means there.
+        ("ip6", "icmp_code") => u8_at(filter, 41, 1),
+        // Before the network header: the destination at -14, the source
+        // at -8.
+        ("ether", "src" | "dst") => {
+            let mac = parse_mac(value)
+                .map_err(|_| Error::invalid_message(format!("u32: invalid MAC `{value}`")))?;
+            let base = if field == "src" { -8 } else { -14 };
+            for (n, byte) in mac.iter().enumerate() {
+                filter.keys.push(u32_mod::pack_key8(*byte, 0xFF, base + n as i32));
+            }
+            Ok((filter, 4))
+        }
         _ => Err(Error::invalid_message(format!(
-            "u32: unsupported `match {layer} {field}` \
-             (supported: ip src/dst/protocol/sport/dport, \
-             tcp/udp src/dst/sport/dport)"
+            "u32: unsupported `match {layer} {field}` (supported: ip src/dst/protocol/tos/dsfield/\
+             precedence/ihl/nofrag/firstfrag/df/mf/sport/dport/icmp_type/icmp_code, ip6 src/dst/\
+             priority/protocol/flowlabel/sport/dport/icmp_type/icmp_code, tcp/udp src/dst/sport/\
+             dport, icmp type/code, ether src/dst)"
         ))),
     }
+}
+
+/// Merge keys at the same offset into one, as tc's `pack_key()` does: a
+/// value both name the same bits of must agree (#831).
+fn merge_u32_keys(keys: Vec<u32_mod::TcU32Key>) -> Result<Vec<u32_mod::TcU32Key>> {
+    let mut out: Vec<u32_mod::TcU32Key> = Vec::with_capacity(keys.len());
+    for key in keys {
+        match out.iter_mut().find(|k| k.off == key.off && k.offmask == key.offmask) {
+            Some(k) => {
+                if (k.val ^ key.val) & k.mask & key.mask != 0 {
+                    return Err(Error::invalid_message(format!(
+                        "u32: two matches disagree at offset {}",
+                        key.off
+                    )));
+                }
+                k.val |= key.val;
+                k.mask |= key.mask;
+            }
+            None => out.push(key),
+        }
+    }
+    Ok(out)
+}
+
+/// A value as tc(8)'s `get_u32(.., 0)` reads it: decimal, `0x` hex or `0`
+/// octal (#831).
+fn parse_u32_any(kind: &str, key: &str, s: &str) -> Result<u32> {
+    let parsed = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16)
+    } else if s.len() > 1 && s.starts_with('0') {
+        u32::from_str_radix(&s[1..], 8)
+    } else {
+        s.parse::<u32>()
+    };
+    parsed.map_err(|_| Error::invalid_message(format!("{kind}: invalid {key} `{s}` (expected unsigned integer)")))
 }
 
 /// Parse a u32 handle in tc(8) notation — `htid[:[bucket[:node]]]`, hex,
@@ -1278,14 +1399,6 @@ fn parse_ip_proto_name_or_num(s: &str) -> Result<u8> {
     })
 }
 
-/// Parse a u16 port value with kind-prefixed error context.
-fn parse_port(field: &str, layer: &str, s: &str) -> Result<u16> {
-    s.parse::<u16>().map_err(|_| {
-        Error::invalid_message(format!(
-            "u32: invalid {layer} {field} `{s}` (expected port 0–65535)"
-        ))
-    })
-}
 
 // ============================================================================
 // FlowerFilter
@@ -2861,6 +2974,9 @@ pub struct FwFilter {
     classid: Option<u32>,
     /// Chain index for this filter.
     chain: Option<u32>,
+    /// Match only packets that arrived on this device (tc(8)'s `indev`,
+    /// #829); the kernel resolves the name in the filter's namespace.
+    indev: Option<String>,
 }
 
 impl FwFilter {
@@ -2873,6 +2989,7 @@ impl FwFilter {
             mask: 0xFFFFFFFF,
             classid: None,
             chain: None,
+            indev: None,
         }
     }
 
@@ -2897,6 +3014,12 @@ impl FwFilter {
         self
     }
 
+    /// Match only packets that arrived on `dev`.
+    pub fn indev(mut self, dev: impl Into<String>) -> Self {
+        self.indev = Some(dev.into());
+        self
+    }
+
     /// Build the filter configuration.
     pub fn build(self) -> Self {
         self
@@ -2908,6 +3031,7 @@ impl FwFilter {
     ///
     /// - `classid <handle>` (alias `flowid`) — target class id.
     /// - `mask <hex|dec>` — mask for the firewall mark.
+    /// - `indev <dev>` — the device packets arrived on (#829).
     /// - `chain <n>` — chain index.
     ///
     /// Stricter than the legacy parser: unknown tokens, missing
@@ -2960,6 +3084,10 @@ impl FwFilter {
                         })?);
                     i += 2;
                 }
+                "indev" => {
+                    f = f.indev(need_value()?);
+                    i += 2;
+                }
                 other => {
                     return Err(Error::invalid_message(format!(
                         "fw: unknown token `{other}`"
@@ -2979,6 +3107,9 @@ impl FwFilter {
         }
         if self.mask != 0xFFFF_FFFF {
             out.extend(["mask".to_string(), format!("0x{:x}", self.mask)]);
+        }
+        if let Some(dev) = &self.indev {
+            out.extend(["indev".to_string(), dev.clone()]);
         }
         if let Some(c) = self.chain {
             out.extend(["chain".to_string(), c.to_string()]);
@@ -3017,6 +3148,10 @@ impl FilterConfig for FwFilter {
 
         if self.mask != 0xFFFFFFFF {
             builder.append_attr_u32(fw::TCA_FW_MASK, self.mask);
+        }
+
+        if let Some(dev) = &self.indev {
+            builder.append_attr_str(fw::TCA_FW_INDEV, dev);
         }
 
         Ok(())
@@ -4155,6 +4290,9 @@ pub struct RouteFilter {
     actions: Option<super::action::ActionList>,
     /// Chain index for this filter.
     chain: Option<u32>,
+    /// The filter's order among route filters, bits 8–14 of its handle
+    /// (tc(8)'s `order`, #829).
+    order: Option<u32>,
 }
 
 impl RouteFilter {
@@ -4188,6 +4326,13 @@ impl RouteFilter {
     /// name here could not be installed at all.
     pub fn from_if(mut self, dev: impl Into<String>) -> Self {
         self.from_if = Some(InterfaceRef::Name(dev.into()));
+        self
+    }
+
+    /// Set the filter's order among route filters (tc(8)'s `order`), which
+    /// goes in its handle.
+    pub fn order(mut self, order: u32) -> Self {
+        self.order = Some(order);
         self
     }
 
@@ -4236,9 +4381,10 @@ impl RouteFilter {
     /// - `classid <handle>` (alias `flowid`) — target class id.
     /// - `to <realm>` — match destination routing realm.
     /// - `from <realm>` — match source routing realm.
-    /// - `iif <dev>` — match input interface by name. Resolved at
-    ///   filter-add time; for namespace operations prefer setting
-    ///   `from_if_index()` on the typed builder directly.
+    /// - `fromif <dev>` (or `iif`) — match input interface by name.
+    ///   Resolved at filter-add time; for namespace operations prefer
+    ///   setting `from_if_index()` on the typed builder directly.
+    /// - `order <n>` — the filter's order, which goes in its handle.
     /// - `chain <n>` — chain index.
     ///
     /// Action attachment is not parsed here; build the filter typed
@@ -4282,9 +4428,17 @@ impl RouteFilter {
                     })?);
                     i += 2;
                 }
-                "iif" => {
+                // tc(8) says `fromif`; `iif` is nlink's (#829).
+                "fromif" | "iif" => {
                     let s = need_value()?;
                     f = f.from_if(s);
+                    i += 2;
+                }
+                "order" => {
+                    let s = need_value()?;
+                    f = f.order(s.parse().map_err(|_| {
+                        Error::invalid_message(format!("route: invalid order `{s}`"))
+                    })?);
                     i += 2;
                 }
                 "chain" => {
@@ -4317,6 +4471,30 @@ impl FilterConfig for RouteFilter {
         };
         names.extend(self.actions.as_ref().map(ActionList::device_names).unwrap_or_default());
         names
+    }
+
+    /// tc(8)'s: `to`'s realm in the low byte, `from`'s realm or
+    /// `0x8000 | ifindex` for an input interface in the upper half, `order`
+    /// in bits 8–14, from `0xFFFF8000` (#825).
+    fn default_handle(&self) -> Option<TcHandle> {
+        let mut fh: u32 = 0xFFFF_8000;
+        if let Some(to) = self.to_realm {
+            fh &= !0x80FF;
+            fh |= to & 0xFF;
+        }
+        if let Some(from) = self.from_realm {
+            fh &= 0xFFFF;
+            fh |= from << 16;
+        }
+        if let Some(InterfaceRef::Index(ifindex)) = self.from_if {
+            fh &= 0xFFFF;
+            fh |= (0x8000 | ifindex) << 16;
+        }
+        if let Some(order) = self.order.filter(|o| *o != 0) {
+            fh &= !0x7F00;
+            fh |= (order << 8) & 0x7F00;
+        }
+        Some(TcHandle::from_raw(fh))
     }
 
     fn resolve_devices(&mut self, ifindexes: &HashMap<String, u32>) -> Result<()> {
@@ -4922,7 +5100,7 @@ impl FlowFilter {
     ///
     /// Recognised tokens:
     ///
-    /// - `keys <key1>,<key2>,...` — comma-separated list of flow
+    /// - `keys <key1>,<key2>,...` (or `key`) — comma-separated list of flow
     ///   keys (e.g. `src,dst,proto`, `nfct-src,nfct-dst`). Each key
     ///   is the lowercase tc-style name; supported names: `src`,
     ///   `dst`, `proto`, `proto-src`, `proto-dst`, `iif`, `priority`,
@@ -4935,8 +5113,8 @@ impl FlowFilter {
     /// - `perturb <seconds>` — hash perturbation interval.
     /// - `rshift <n>` — right-shift amount.
     /// - `addend <n>` — additive constant.
-    /// - `mask <hex>` — bitwise AND mask (0x-prefix or decimal).
-    /// - `xor <hex>` — bitwise XOR value.
+    /// - `and <n>` (or `mask`), `or <n>`, `xor <n>` — bit operations,
+    ///   folded into one mask and xor in order, as tc(8) folds them (#829).
     /// - `chain <n>` — chain index.
     ///
     /// **Net new CLI capability**: the legacy filter dispatcher's
@@ -4947,6 +5125,7 @@ impl FlowFilter {
     pub fn parse_params(params: &[&str]) -> crate::Result<Self> {
         use crate::Error;
         let mut f = Self::new();
+        let mut bitop = (u32::MAX, 0u32);
         let mut i = 0;
         while i < params.len() {
             let key = params[i];
@@ -4957,7 +5136,8 @@ impl FlowFilter {
                     .ok_or_else(|| Error::invalid_message(format!("flow: `{key}` requires a value")))
             };
             match key {
-                "keys" => {
+                // tc(8) matches a prefix: `key` is `keys` (#829).
+                "keys" | "key" => {
                     let s = need_value()?;
                     for k in s.split(',') {
                         f = f.key(parse_flow_key(k.trim())?);
@@ -5008,14 +5188,17 @@ impl FlowFilter {
                     })?);
                     i += 2;
                 }
-                "mask" => {
-                    let s = need_value()?;
-                    f = f.mask(parse_flow_u32_hex_or_dec(s, "mask")?);
-                    i += 2;
-                }
-                "xor" => {
-                    let s = need_value()?;
-                    f = f.xor(parse_flow_u32_hex_or_dec(s, "xor")?);
+                // tc(8)'s `and`, `or` and `xor`, folded into one mask and
+                // xor as its transfer_bitop() folds them (#829). `mask` is
+                // nlink's word for `and`.
+                "and" | "mask" | "or" | "xor" => {
+                    let v = parse_flow_u32_hex_or_dec(need_value()?, key)?;
+                    let (m, x) = match key {
+                        "or" => (!v, v),
+                        "xor" => (u32::MAX, v),
+                        _ => (v, 0),
+                    };
+                    bitop = (bitop.0 & m, x ^ (bitop.1 & m));
                     i += 2;
                 }
                 "chain" => {
@@ -5031,6 +5214,9 @@ impl FlowFilter {
                     )));
                 }
             }
+        }
+        if bitop != (u32::MAX, 0) {
+            f = f.mask(bitop.0).xor(bitop.1);
         }
         Ok(f)
     }
@@ -5227,7 +5413,7 @@ impl Connection<Route> {
         let names = self.ifindexes_of(&config.device_names()).await?;
         config.resolve_devices(&names)?;
         let parent_handle = parent.as_raw();
-        let filter_handle = handle.map(|h| h.as_raw()).unwrap_or(0);
+        let filter_handle = handle.or_else(|| config.default_handle()).map_or(0, |h| h.as_raw());
 
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
@@ -5358,7 +5544,7 @@ impl Connection<Route> {
         let names = self.ifindexes_of(&config.device_names()).await?;
         config.resolve_devices(&names)?;
         let parent_handle = parent.as_raw();
-        let filter_handle = handle.map(|h| h.as_raw()).unwrap_or(0);
+        let filter_handle = handle.or_else(|| config.default_handle()).map_or(0, |h| h.as_raw());
 
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
@@ -5470,7 +5656,7 @@ impl Connection<Route> {
         let names = self.ifindexes_of(&config.device_names()).await?;
         config.resolve_devices(&names)?;
         let parent_handle = parent.as_raw();
-        let filter_handle = handle.map(|h| h.as_raw()).unwrap_or(0);
+        let filter_handle = handle.or_else(|| config.default_handle()).map_or(0, |h| h.as_raw());
 
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
@@ -6785,7 +6971,37 @@ mod tests {
     fn u32_parse_params_match_invalid_hex_errors() {
         let err =
             U32Filter::parse_params(&["match", "u32", "notahex", "0xFF", "at", "0"]).unwrap_err();
-        assert!(err.to_string().contains("expected hex value"));
+        assert!(err.to_string().contains("expected unsigned integer"), "{err}");
+        let err = U32Filter::parse_params(&["match", "u32", "1", "notahex", "at", "0"]).unwrap_err();
+        assert!(err.to_string().contains("expected hex value"), "{err}");
+    }
+
+    /// A value in any base and a mask in hex, as tc's `get_u32(.., 0)` and
+    /// `get_u32(.., 16)` read them (#831): `80` is port 80, not 0x80.
+    #[test]
+    fn u32_values_read_as_tc_reads_them() {
+        let f = U32Filter::parse_params(&["match", "u16", "80", "ffff", "at", "22"]).unwrap();
+        assert_eq!(f.keys[0].val, 80u32.to_be());
+        let f = U32Filter::parse_params(&["match", "mark", "16", "255"]).unwrap();
+        assert_eq!(f.mark, Some((16, 255)));
+        assert!(U32Filter::parse_params(&["match", "mark", "0x100", "0xff"]).is_err());
+        // A /0 is mask 0.
+        let f = U32Filter::parse_params(&["match", "ip", "dst", "0.0.0.0/0"]).unwrap();
+        assert_eq!((f.keys[0].val, f.keys[0].mask), (0, 0));
+        // Keys at one offset merge, as tc's pack_key() merges them.
+        let f = U32Filter::parse_params(&["match", "ip", "sport", "80", "0xffff", "match", "ip", "dport", "443", "0xffff"]).unwrap();
+        assert_eq!(f.keys.len(), 1);
+        assert_eq!((f.keys[0].val, f.keys[0].mask), (((80u32 << 16) | 443).to_be(), u32::MAX));
+        assert!(U32Filter::parse_params(&["match", "ip", "dport", "80", "match", "ip", "dport", "81"]).is_err());
+        // ether dst spans -14..-9: two keys after merging.
+        let f = U32Filter::parse_params(&["match", "ether", "dst", "02:00:00:00:00:01"]).unwrap();
+        let offs: Vec<i32> = f.keys.iter().map(|k| k.off).collect();
+        assert_eq!(offs, [-16, -12]);
+        // ip6 src /40: a whole word and eight bits of the next.
+        let f = U32Filter::parse_params(&["match", "ip6", "src", "fd00:1::/40"]).unwrap();
+        assert_eq!((f.keys.len(), f.keys[1].off, f.keys[1].mask), (2, 12, 0xFF00_0000u32.to_be()));
+        let f = U32Filter::parse_params(&["match", "ip", "nofrag"]).unwrap();
+        assert_eq!((f.keys[0].off, f.keys[0].mask), (4, 0x3FFFu32.to_be()));
     }
 
     #[test]
@@ -7065,7 +7281,7 @@ mod tests {
     #[test]
     fn u32_parse_params_match_ip_dport_invalid_port_errors() {
         let err = U32Filter::parse_params(&["match", "ip", "dport", "70000"]).unwrap_err();
-        assert!(err.to_string().contains("expected port 0–65535"));
+        assert!(err.to_string().contains("wider than 16 bits"), "{err}");
     }
 
     #[test]

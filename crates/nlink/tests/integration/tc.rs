@@ -3636,6 +3636,236 @@ async fn every_qdisc_kinds_lines_install_as_tcs() -> Result<()> {
     Ok(())
 }
 
+/// tc(8) arguments from a line: words, but a parenthesised ematch
+/// (`cmp(u8 at 9 layer network eq 6)`) stays one, as the shell quotes it.
+fn tc_words(line: &str) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    let mut depth = 0usize;
+    for w in line.split_whitespace() {
+        match words.last_mut() {
+            Some(last) if depth > 0 => {
+                last.push(' ');
+                last.push_str(w);
+            }
+            _ => words.push(w.to_string()),
+        }
+        depth = (depth + w.matches('(').count()).saturating_sub(w.matches(')').count());
+    }
+    words
+}
+
+/// Every class kind's tc(8) lines make, through nlink's `parse_params`, the
+/// class tc makes of them: `tc -d class show` lists the same. The class
+/// side of the qdisc and action sweeps (#817, #820).
+#[tokio::test]
+async fn every_class_kinds_lines_install_as_tcs() -> Result<()> {
+    use nlink::netlink::tc::{DrrClassConfig, HfscClassConfig, HtbClassConfig, QfqClassConfig};
+    require_root!();
+    nlink::require_modules!("dummy", "sch_htb", "sch_hfsc", "sch_drr", "sch_qfq");
+
+    let rows: &[(&str, &str)] = &[
+        ("htb", "rate 1mbit"),
+        ("htb", "rate 1mbit ceil 2mbit burst 15k cburst 15k prio 1 quantum 1514"),
+        ("htb", "rate 1mbit linklayer atm overhead 10 mpu 64"),
+        ("htb", "rate 10mbit mtu 9000"),
+        ("hfsc", "sc rate 1mbit ul rate 2mbit"),
+        ("hfsc", "rt m1 2mbit d 10ms m2 1mbit"),
+        ("hfsc", "ls umax 1500b dmax 10ms rate 1mbit"),
+        ("hfsc", "sc umax 1500 dmax 50ms rate 10mbit ul m2 20mbit"),
+        ("drr", "quantum 1514"),
+        ("drr", ""),
+        ("qfq", "weight 10 maxpkt 2000"),
+        ("qfq", "weight 1"),
+    ];
+
+    let (ns, conn) = setup_tc_ns("tc-class-sweep").await?;
+    let shown = || ns.exec("tc", &["-d", "class", "show", "dev", "dummy0", "classid", "1:10"]);
+    let mut failed = Vec::new();
+    for &(kind, line) in rows {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        // A fresh qdisc each time: htb has no change operation.
+        let _ = ns.exec("tc", &["qdisc", "del", "dev", "dummy0", "root"]);
+        ns.exec("tc", &["qdisc", "add", "dev", "dummy0", "root", "handle", "1:", kind])?;
+        let mut args = vec!["class", "add", "dev", "dummy0", "parent", "1:", "classid", "1:10", kind];
+        args.extend(&words);
+        if let Err(e) = ns.exec("tc", &args) {
+            failed.push(format!("{kind} {line}: tc refused it: {e}"));
+            continue;
+        }
+        let theirs = shown()?;
+        ns.exec("tc", &["class", "del", "dev", "dummy0", "classid", "1:10"])?;
+        macro_rules! install {
+            ($ty:ty) => {
+                match <$ty>::parse_params(&words) {
+                    Ok(config) => conn.add_class("dummy0", TcHandle::major_only(1), TcHandle::new(1, 0x10), config).await,
+                    Err(e) => {
+                        failed.push(format!("{kind} {line}: nlink refused it: {e}"));
+                        continue;
+                    }
+                }
+            };
+        }
+        let added = match kind {
+            "htb" => install!(HtbClassConfig),
+            "hfsc" => install!(HfscClassConfig),
+            "drr" => install!(DrrClassConfig),
+            "qfq" => install!(QfqClassConfig),
+            other => panic!("no parser for {other}"),
+        };
+        if let Err(e) = added {
+            failed.push(format!("{kind} {line}: the kernel refused nlink's: {e}"));
+            continue;
+        }
+        let ours = shown()?;
+        ns.exec("tc", &["class", "del", "dev", "dummy0", "classid", "1:10"])?;
+        if theirs != ours {
+            failed.push(format!("{kind} {line}:\n  tc:    {}\n  nlink: {}", theirs.trim(), ours.trim()));
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+    Ok(())
+}
+
+/// Every filter kind's tc(8) lines make, through nlink's `parse_params`,
+/// the filter tc makes of them: `tc -d filter show` lists the same. The
+/// filter side of the qdisc and action sweeps (#817, #820); flower's
+/// ordinary lines are `flower_lines_install_the_same_through_tc_and_nlink`.
+#[tokio::test]
+async fn every_filter_kinds_lines_install_as_tcs() -> Result<()> {
+    require_root!();
+    nlink::require_modules!(
+        "dummy", "sch_htb", "cls_u32", "cls_fw", "cls_route", "cls_basic", "cls_matchall", "cls_flow"
+    );
+
+    // (kind, protocol, handle, line)
+    let rows: &[(&str, &str, Option<&str>, &str)] = &[
+        ("u32", "ip", None, "match ip dst 10.0.0.1/32 classid 1:10"),
+        ("u32", "ip", None, "match ip src 10.0.0.0/24 match ip dport 80 0xffff classid 1:10"),
+        ("u32", "ip", None, "match ip protocol 6 0xff match tcp dst 443 0xffff flowid 1:10"),
+        ("u32", "ip", None, "match u32 0x0a000001 0xffffffff at 16 classid 1:10"),
+        ("u32", "ip", None, "match u16 0x0050 0xffff at 22 classid 1:10"),
+        ("u32", "ip", None, "match u16 80 0xffff at 22 classid 1:10"),
+        ("u32", "ip", None, "match mark 16 255 classid 1:10"),
+        ("u32", "ip", None, "match ip dst 0.0.0.0/0 classid 1:10"),
+        ("u32", "ip", None, "match ip sport 80 0xffff match ip dport 443 0xffff classid 1:10"),
+        ("u32", "ip", None, "match ip nofrag match ip df classid 1:10"),
+        ("u32", "ip", None, "match ip ihl 5 0xf match ip dsfield 0x20 0xfc classid 1:10"),
+        ("u32", "ip", None, "match icmp type 8 0xff match icmp code 0 0xff classid 1:10"),
+        ("u32", "ip", None, "match u8 0x06 0xff at 9 classid 1:10"),
+        ("u32", "ip", None, "match mark 0x10 0xff classid 1:10"),
+        ("u32", "ip", None, "match ip tos 0x10 0xff classid 1:10"),
+        ("u32", "ip", None, "match ip icmp_type 8 0xff classid 1:10"),
+        ("u32", "ip", None, "match ip sport 1024 0xfc00 classid 1:10"),
+        ("u32", "ipv6", None, "match ip6 dst fd00::1/128 classid 1:10"),
+        ("u32", "ipv6", None, "match ip6 protocol 17 0xff match ip6 dport 53 0xffff classid 1:10"),
+        ("u32", "ipv6", None, "match ip6 src fd00:1::/40 match ip6 priority 0x10 0xff classid 1:10"),
+        ("u32", "ipv6", None, "match ip6 flowlabel 0x12345 0xfffff match ip6 icmp_type 128 0xff classid 1:10"),
+        ("u32", "all", None, "match ether dst 02:00:00:00:00:01 classid 1:10"),
+        ("u32", "all", None, "match ether src 02:00:00:00:00:02 classid 1:10"),
+        ("fw", "ip", Some("0x10"), "classid 1:10"),
+        ("fw", "ip", Some("0x10"), "indev lo classid 1:10"),
+        ("route", "ip", None, "to 10 classid 1:10"),
+        ("route", "ip", None, "from 5 classid 1:10"),
+        ("route", "ip", None, "to 10 from 5 classid 1:10"),
+        ("route", "ip", None, "fromif lo classid 1:10"),
+        ("route", "ip", None, "to 10 order 5 classid 1:10"),
+        ("basic", "ip", None, "classid 1:10"),
+        ("matchall", "all", None, "classid 1:10"),
+        ("flow", "ip", Some("1"), "map key mark and 0xff baseclass 1:1 divisor 16"),
+        ("flow", "ip", Some("1"), "map key priority or 0x10 xor 0x1 rshift 2 addend 3 baseclass 1:1 divisor 64"),
+    ];
+
+    filter_lines_same_as_tc("tc-filter-sweep", rows).await
+}
+
+/// flow's hash mode, which the kernel refuses in a user namespace other
+/// than the initial one (`EOPNOTSUPP`, rootless containers included).
+#[tokio::test]
+async fn flow_hash_lines_install_as_tcs() -> Result<()> {
+    require_root!();
+    nlink::require_host_root!();
+    nlink::require_modules!("dummy", "sch_htb", "cls_flow");
+    let rows: &[(&str, &str, Option<&str>, &str)] = &[
+        ("flow", "ip", Some("1"), "hash keys src,dst divisor 1024 baseclass 1:10"),
+        ("flow", "ip", Some("1"), "hash keys src,dst,proto,proto-src,proto-dst divisor 256 perturb 10 baseclass 1:1"),
+    ];
+    filter_lines_same_as_tc("tc-flow-hash", rows).await
+}
+
+/// Installs each `(kind, protocol, handle, line)` through `tc` and through
+/// nlink's `parse_params` on an HTB root, and fails with every line whose
+/// `tc -d filter show` differs.
+async fn filter_lines_same_as_tc(label: &str, rows: &[(&str, &str, Option<&str>, &str)]) -> Result<()> {
+    use nlink::netlink::filter::{BasicFilter, FlowFilter, FwFilter, MatchallFilter, RouteFilter, U32Filter};
+    let (ns, conn) = setup_tc_ns(label).await?;
+    ns.exec("tc", &["qdisc", "add", "dev", "dummy0", "root", "handle", "1:", "htb"])?;
+    for class in ["1:1", "1:10"] {
+        ns.exec("tc", &["class", "add", "dev", "dummy0", "parent", "1:", "classid", class, "htb", "rate", "10mbit"])?;
+    }
+    let shown = || ns.exec("tc", &["-d", "filter", "show", "dev", "dummy0", "parent", "1:"]);
+    let mut failed = Vec::new();
+    for &(kind, proto, handle, line) in rows {
+        let words = tc_words(line);
+        let words: Vec<&str> = words.iter().map(String::as_str).collect();
+        let mut args = vec!["filter", "add", "dev", "dummy0", "parent", "1:", "protocol", proto, "prio", "1"];
+        if let Some(handle) = handle {
+            args.extend(["handle", handle]);
+        }
+        args.push(kind);
+        args.extend(&words);
+        if let Err(e) = ns.exec("tc", &args) {
+            failed.push(format!("{kind} {line}: tc refused it: {e}"));
+            continue;
+        }
+        let theirs = shown()?;
+        ns.exec("tc", &["filter", "del", "dev", "dummy0", "parent", "1:"])?;
+        let protocol: nlink::EthProto = proto.parse()?;
+        let handle = handle.map(|h| TcHandle::from_raw(u32::from_str_radix(h.trim_start_matches("0x"), 16).expect("hex")));
+        macro_rules! install {
+            ($ty:ty) => {
+                match <$ty>::parse_params(&words) {
+                    Ok(config) => {
+                        conn.add_filter_full(
+                            "dummy0",
+                            TcHandle::major_only(1),
+                            handle,
+                            protocol,
+                            nlink::FilterPriority::new(1),
+                            config,
+                        )
+                        .await
+                    }
+                    Err(e) => {
+                        failed.push(format!("{kind} {line}: nlink refused it: {e}"));
+                        continue;
+                    }
+                }
+            };
+        }
+        let added = match kind {
+            "u32" => install!(U32Filter),
+            "fw" => install!(FwFilter),
+            "route" => install!(RouteFilter),
+            "basic" => install!(BasicFilter),
+            "matchall" => install!(MatchallFilter),
+            "flow" => install!(FlowFilter),
+            other => panic!("no parser for {other}"),
+        };
+        if let Err(e) = added {
+            failed.push(format!("{kind} {line}: the kernel refused nlink's: {e}"));
+            continue;
+        }
+        let ours = shown()?;
+        ns.exec("tc", &["filter", "del", "dev", "dummy0", "parent", "1:"])?;
+        if theirs != ours {
+            failed.push(format!("{kind} {line}:\n  tc:    {}\n  nlink: {}", theirs.trim(), ours.trim()));
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+    Ok(())
+}
+
+
 /// #819, #823: a red, a choke and a taprio from nlink's builders install.
 /// The kernel refused red and choke without their idle-damping table,
 /// which nlink did not send, and a taprio whose entries it skipped as the
