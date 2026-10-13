@@ -123,11 +123,31 @@ pub struct Netns {
     marker: Option<NamespaceMarker>,
     /// The thread that makes this namespace's sockets, started on first
     /// use and ended when the handle drops (#520).
-    worker: std::sync::Mutex<Option<std::sync::mpsc::Sender<Job>>>,
+    worker: std::sync::Mutex<Option<Worker>>,
 }
 
 /// A job for a namespace's worker thread.
 type Job = Box<dyn FnOnce() + Send + 'static>;
+
+/// A namespace's worker thread: its job queue, and the thread to join once
+/// the queue is closed.
+#[derive(Debug)]
+struct Worker {
+    jobs: Option<std::sync::mpsc::Sender<Job>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        // Closing the queue ends the thread, which leaves the namespace on
+        // its way out. Joining it makes that part of dropping the handle: a
+        // detached thread held the namespace for a moment after (#797).
+        drop(self.jobs.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
 
 impl Netns {
     /// Open the namespace `ip netns` knows as `name` (`/var/run/netns/<name>`).
@@ -307,11 +327,14 @@ impl Netns {
                     // A new thread starts in its creator's namespace, and
                     // setns refuses even that one without CAP_SYS_ADMIN.
                     let here = Netns::current().map(|n| n.id).ok();
-                    // SAFETY: setns switches only this thread, which exits
-                    // when `f` returns.
-                    if here != Some(target)
-                        && unsafe { libc::setns(fd.as_raw_fd(), libc::CLONE_NEWNET) } < 0
-                    {
+                    if here == Some(target) {
+                        return Ok(f());
+                    }
+                    // Leave before returning, panic or not (#797): see
+                    // `ReturnHome`.
+                    let _home = super::ReturnHome::new();
+                    // SAFETY: setns switches only this thread.
+                    if unsafe { libc::setns(fd.as_raw_fd(), libc::CLONE_NEWNET) } < 0 {
                         return Err(Error::from(std::io::Error::last_os_error()));
                     }
                     Ok(f())
@@ -442,7 +465,8 @@ impl Netns {
     ///
     /// One thread per handle makes all of its sockets, where
     /// `NetlinkSocket::new_in_namespace` spawns and joins one per socket
-    /// (#520). The thread ends when the handle drops.
+    /// (#520). The thread has left the namespace and ended by the time the
+    /// handle's drop returns (#797).
     fn on_worker<T: Send + 'static>(&self, f: impl FnOnce() -> T + Send + 'static) -> Result<T> {
         let mut worker = self.worker.lock().unwrap_or_else(|e| e.into_inner());
         if worker.is_none() {
@@ -452,7 +476,8 @@ impl Netns {
         let job: Job = Box::new(move || {
             let _ = tx.send(f());
         });
-        if worker.as_ref().is_some_and(|w| w.send(job).is_err()) {
+        let jobs = worker.as_ref().and_then(|w| w.jobs.as_ref());
+        if jobs.is_some_and(|jobs| jobs.send(job).is_err()) {
             *worker = None;
             return Err(Error::internal(format!(
                 "namespace {}: the worker thread has gone",
@@ -465,17 +490,20 @@ impl Netns {
         })
     }
 
-    fn start_worker(&self) -> Result<std::sync::mpsc::Sender<Job>> {
+    fn start_worker(&self) -> Result<Worker> {
         let fd = self.fd.try_clone().map_err(Error::from)?;
         let target = self.id;
         let (jobs, inbox) = std::sync::mpsc::channel::<Job>();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<()>>();
-        std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name("nlink-netns".into())
             .spawn(move || {
                 let here = Netns::current().map(|n| n.id).ok();
-                // SAFETY: setns switches only this thread, which lives as
-                // long as the handle's sender and never leaves.
+                // Leave again once the queue closes, before the thread ends
+                // (#797): see `ReturnHome`.
+                let _home = (here != Some(target)).then(super::ReturnHome::new);
+                // SAFETY: setns switches only this thread, which stays as
+                // long as the handle's queue is open.
                 if here != Some(target)
                     && unsafe { libc::setns(fd.as_raw_fd(), libc::CLONE_NEWNET) } < 0
                 {
@@ -490,10 +518,11 @@ impl Netns {
                 }
             })
             .map_err(Error::from)?;
+        let worker = Worker { jobs: Some(jobs), thread: Some(thread) };
         ready_rx.recv().map_err(|_| {
             Error::internal(format!("namespace {}: the worker thread died", self.label))
         })??;
-        Ok(jobs)
+        Ok(worker)
     }
 
     /// A netlink socket made in the namespace by its worker, carrying the

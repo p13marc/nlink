@@ -146,7 +146,9 @@ pub(crate) fn ifindex_in(ns: BorrowedFd<'_>, name: &str) -> Result<u32> {
     let name = CString::new(name).map_err(|_| Error::invalid_message("null byte in a VRF name"))?;
     let shown = name.to_string_lossy().into_owned();
     let index = std::thread::spawn(move || -> std::io::Result<u32> {
-        // SAFETY: `ns` is an open nsfs fd; the thread is ours and ends here.
+        // Leave again before the thread ends (#797): see `ReturnHome`.
+        let _home = super::ReturnHome::new();
+        // SAFETY: `ns` is an open nsfs fd; the thread is ours.
         if unsafe { libc::setns(ns.as_raw_fd(), libc::CLONE_NEWNET) } != 0 {
             return Err(std::io::Error::last_os_error());
         }

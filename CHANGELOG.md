@@ -375,6 +375,21 @@ All notable changes to this project will be documented in this file.
     joined the new one. Now it fails with `NamespaceDeleted`. A root
     test recreates a pool's namespace and fails without the fix.
 
+- **What enters a namespace has left it when it returns (#797).** Several
+  calls `setns` a thread of their own: `Netns::run`, a `Netns` handle's
+  socket worker (behind `Connection::new_in`, `Netns::socket` and
+  `Netns::sysctl`), `NetlinkSocket::new_in_namespace`, the
+  `*_sysctl*_path` helpers and `vrf exec`'s interface lookup. Each let its
+  thread exit inside the namespace,
+  and the handle's worker was not even joined. The kernel lets `join`
+  return before it releases an exiting thread's namespaces. So for a
+  moment, and longer after `Connection::new_in("name")`, which drops its
+  handle at once, the namespace still held the caller. `Netns::pids`
+  listed it, and `delete_and_wait` could find the namespace held. Each
+  thread now goes back before it ends, panics included, and dropping a
+  `Netns` joins its worker. This was the integration flake on
+  `netns::pids_names_what_is_inside`.
+
 - **fq_pie's `ecn_prob` is a percentage (#631).** `FqPieConfig::ecn_prob`
   sent `TCA_FQ_PIE_ECN_PROB` per-mille, so `ecn_prob 20` installed 200.
   That is above the kernel's maximum probability, so ECN marking applied
