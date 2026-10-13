@@ -1441,10 +1441,14 @@ impl ActionConfig for VlanAction {
             builder.append_attr(vlan::TCA_VLAN_PUSH_VLAN_PRIORITY, &[prio]);
         }
 
-        builder.append_attr(
-            vlan::TCA_VLAN_PUSH_VLAN_PROTOCOL,
-            &self.vlan_proto.to_be_bytes(),
-        );
+        // A push's or modify's alone, as tc(8) sends it: a pop has none,
+        // and the kernel neither reads nor reports one (#791).
+        if matches!(self.v_action, vlan::TCA_VLAN_ACT_PUSH | vlan::TCA_VLAN_ACT_MODIFY) {
+            builder.append_attr(
+                vlan::TCA_VLAN_PUSH_VLAN_PROTOCOL,
+                &self.vlan_proto.to_be_bytes(),
+            );
+        }
 
         Ok(())
     }

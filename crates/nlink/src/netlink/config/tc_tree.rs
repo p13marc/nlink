@@ -645,7 +645,114 @@ enum ActionSummary {
     /// Its rate, burst and mtu, its exceed and conform verdicts, peakrate
     /// and average rate (#791).
     Police { rate: u64, burst: u32, mtu: u32, action: i32, conform: u32, peakrate: u32, avrate: u32 },
-    Other(String),
+    /// Any other kind (#791): its options' attributes, but for its
+    /// timestamps and padding and the bookkeeping at the head of its parms
+    /// (index, capabilities, references), which tell two installs of one
+    /// action apart. A kind [`action_layout`] does not know is its kind
+    /// alone.
+    Other { kind: String, attrs: BTreeMap<u16, Vec<u8>> },
+}
+
+/// How a kind's options read, for the kinds compared by their attributes
+/// (#791): what to leave out, its timestamps, padding and counters
+/// (`TCA_<KIND>_TM`, `_PAD`, ctinfo's `_STATS_*`), and its parms, the
+/// structs that start with `struct tc_gen`. Not `bpf`, which is sent a
+/// program's fd and reports the program's id, nor `gate`, whose echo
+/// fills each entry and the cycle in; those compare by kind.
+fn action_layout(kind: &str) -> Option<(&'static [u16], &'static [u16])> {
+    Some(match kind {
+        "vlan" => (&[1, 5], &[2]),
+        "mpls" => (&[1, 3], &[2]),
+        "skbmod" | "skbedit" | "sample" => (&[1, 6], &[2]),
+        "tunnel_key" => (&[1, 8], &[2]),
+        "nat" | "connmark" | "csum" => (&[2, 3], &[1]),
+        "ctinfo" => (&[1, 2, 8, 9, 10], &[3]),
+        "ife" => (&[2, 7], &[1]),
+        "ct" => (&[2, 15], &[1]),
+        // `TCA_PEDIT_PARMS_EX` carries the parms with the extended keys.
+        "pedit" => (&[1, 3], &[2, 4]),
+        // `TCA_DEF_*`.
+        "simple" => (&[1, 4], &[2]),
+        _ => return None,
+    })
+}
+
+/// An action's attributes, as [`ActionSummary::Other`] compares them.
+fn action_attrs(kind: &str, opts: &[u8]) -> BTreeMap<u16, Vec<u8>> {
+    let Some((skip, parms)) = action_layout(kind) else {
+        return BTreeMap::new();
+    };
+    AttrIter::new(opts)
+        .map(|(t, p)| (t & 0x7FFF, p))
+        .filter(|(t, _)| !skip.contains(t))
+        .map(|(t, p)| {
+            let mut v = unflag_nests(p);
+            // `struct tc_gen`: index, capab, action, refcnt, bindcnt.
+            if parms.contains(&t) && v.len() >= 20 {
+                v[..8].fill(0);
+                v[12..20].fill(0);
+            }
+            (t, v)
+        })
+        .collect()
+}
+
+/// A payload with `NLA_F_NESTED` cleared on every attribute in it that
+/// carries the flag, and in theirs: nlink sets it on the nests it sends
+/// (a pedit's extended keys), and the kernel does not on the ones it
+/// reports. A payload that does not walk as attributes is kept as it is.
+fn unflag_nests(payload: &[u8]) -> Vec<u8> {
+    const NLA_F_NESTED: u16 = 0x8000;
+    let mut out = payload.to_vec();
+    let mut at = 0;
+    while at + 4 <= out.len() {
+        let len = usize::from(u16::from_ne_bytes([out[at], out[at + 1]]));
+        let ty = u16::from_ne_bytes([out[at + 2], out[at + 3]]);
+        if len < 4 || at + len > out.len() {
+            return payload.to_vec();
+        }
+        if ty & NLA_F_NESTED != 0 {
+            out[at + 2..at + 4].copy_from_slice(&(ty & !NLA_F_NESTED).to_ne_bytes());
+            let inner = unflag_nests(&out[at + 4..at + len]);
+            out[at + 4..at + len].copy_from_slice(&inner);
+        }
+        at += (len + 3) & !3;
+    }
+    out
+}
+
+/// What the kernel reports for an attribute a request leaves out, by kind
+/// (#791): the default it gives one not sent, which is not a difference.
+/// Each is what a sweep of every kind, applied twice, read back.
+fn kernel_default(kind: &str, id: u16, value: &[u8]) -> bool {
+    match (kind, id) {
+        // `TCA_VLAN_PUSH_VLAN_PRIORITY`: 0.
+        ("vlan", 6) => value == [0],
+        // `TCA_MPLS_PROTO` of a push: `ETH_P_MPLS_UC`.
+        ("mpls", 4) => value == 0x8847u16.to_be_bytes(),
+        // `TCA_CT_ZONE`: 0.
+        ("ct", 4) => value == [0, 0],
+        // `TCA_IFE_TYPE`: `ETH_P_IFE`.
+        ("ife", 5) => value == 0xED3Eu16.to_ne_bytes(),
+        _ => false,
+    }
+}
+
+/// Whether a live action is the declared one (#791). For a kind read as
+/// attributes: every attribute the declaration sends, as sent, and any
+/// other the kernel reports at the default it gives one not sent.
+fn action_matches(want: &ActionSummary, have: &ActionSummary) -> bool {
+    match (want, have) {
+        (
+            ActionSummary::Other { kind: wk, attrs: wa },
+            ActionSummary::Other { kind: hk, attrs: ha },
+        ) => {
+            wk == hk
+                && wa.iter().all(|(id, v)| ha.get(id) == Some(v))
+                && ha.iter().all(|(id, v)| wa.contains_key(id) || kernel_default(wk, *id, v))
+        }
+        _ => want == have,
+    }
 }
 
 /// The attribute that carries a filter kind's actions.
@@ -736,7 +843,10 @@ fn split_filter(kind: &str, options: &[u8]) -> (BTreeMap<u16, Vec<u8>>, Vec<Acti
                     }),
                 _ => None,
             };
-            actions.push(summary.unwrap_or(ActionSummary::Other(kind)));
+            actions.push(summary.unwrap_or_else(|| ActionSummary::Other {
+                attrs: action_attrs(&kind, opts),
+                kind,
+            }));
         }
     }
     (attrs, actions)
@@ -801,7 +911,8 @@ impl DeclaredFilter {
             && value_keys(kind)
                 .iter()
                 .all(|id| !have_attrs.contains_key(id) || want_attrs.contains_key(id))
-            && want_actions == have_actions
+            && want_actions.len() == have_actions.len()
+            && want_actions.iter().zip(&have_actions).all(|(w, h)| action_matches(w, h))
     }
 }
 

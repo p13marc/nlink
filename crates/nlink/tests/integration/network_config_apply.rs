@@ -2587,6 +2587,128 @@ async fn a_police_from_tcs_words_is_tcs_and_converges() -> Result<()> {
     .await
 }
 
+/// Every action kind is compared by what it does (#791), and converges.
+/// Only mirred, gact and police were; every other kind was compared by its
+/// kind alone, so a filter whose vlan action pushed another id, or whose
+/// skbedit set another mark, matched its declaration and was never put
+/// right. Each row declares a filter with the action, applies twice, then
+/// replaces the filter with a drifted action, which the diff must see and
+/// the apply must put back. `gate` and `bpf` still compare by kind: the
+/// kernel fills a gate's entries and cycle in, and a bpf action is sent a
+/// program's fd and reports its id.
+#[tokio::test]
+async fn every_action_kind_is_compared_and_converges() -> Result<()> {
+    use nlink::netlink::action::{
+        ActionList, ConnmarkAction, CsumAction, CtAction, CtinfoAction, GateAction, IfeAction, MplsAction,
+        NatAction, PeditAction, SampleAction, SimpleAction, SkbeditAction, SkbmodAction, TunnelKeyAction,
+        VlanAction,
+    };
+    use nlink::netlink::filter::MatchallFilter;
+    use nlink::{EthProto, FilterPriority, TcHandle};
+    nlink::require_root!();
+    nlink::require_modules!(
+        "dummy", "sch_ingress", "cls_matchall", "act_vlan", "act_mpls", "act_skbmod", "act_skbedit", "act_connmark",
+        "act_csum", "act_nat", "act_tunnel_key", "act_ct", "act_pedit", "act_simple", "act_sample", "act_gate",
+        "act_ctinfo", "act_ife"
+    );
+
+    fn list(kind: &str, line: &str) -> nlink::Result<ActionList> {
+        let w: Vec<&str> = line.split_whitespace().collect();
+        Ok(match kind {
+            "vlan" => ActionList::new().with(VlanAction::parse_params(&w)?),
+            "mpls" => ActionList::new().with(MplsAction::parse_params(&w)?),
+            "skbmod" => ActionList::new().with(SkbmodAction::parse_params(&w)?),
+            "skbedit" => ActionList::new().with(SkbeditAction::parse_params(&w)?),
+            "connmark" => ActionList::new().with(ConnmarkAction::parse_params(&w)?),
+            "csum" => ActionList::new().with(CsumAction::parse_params(&w)?),
+            "nat" => ActionList::new().with(NatAction::parse_params(&w)?),
+            "tunnel_key" => ActionList::new().with(TunnelKeyAction::parse_params(&w)?),
+            "ct" => ActionList::new().with(CtAction::parse_params(&w)?),
+            "pedit" => ActionList::new().with(PeditAction::parse_params(&w)?),
+            "simple" => ActionList::new().with(SimpleAction::parse_params(&w)?),
+            "sample" => ActionList::new().with(SampleAction::parse_params(&w)?),
+            "gate" => ActionList::new().with(GateAction::parse_params(&w)?),
+            "ctinfo" => ActionList::new().with(CtinfoAction::parse_params(&w)?),
+            "ife" => ActionList::new().with(IfeAction::parse_params(&w)?),
+            other => panic!("no row for {other}"),
+        })
+    }
+    let rows: &[(&str, &str, &str)] = &[
+        ("vlan", "pop", "push 100"),
+        ("vlan", "push 100", "push 200"),
+        ("vlan", "push 100 priority 3", "push 100 priority 4"),
+        ("vlan", "modify 200 protocol 802.1ad", "modify 200"),
+        ("mpls", "push label 100 ttl 64 tc 3", "push label 101 ttl 64 tc 3"),
+        ("mpls", "pop protocol ipv4", "pop protocol ipv6"),
+        ("skbmod", "set dmac 02:00:00:00:00:01", "set dmac 02:00:00:00:00:02"),
+        ("skbedit", "priority 7", "priority 8"),
+        ("skbedit", "mark 42", "mark 43"),
+        ("skbedit", "mark 1 mask 255", "mark 1 mask 15"),
+        ("connmark", "zone 5", "zone 6"),
+        ("csum", "iph", "iph tcp"),
+        ("nat", "egress 10.0.0.1 192.168.0.1", "egress 10.0.0.1 192.168.0.2"),
+        ("tunnel_key", "set src 10.0.0.1 dst 10.0.0.2 id 100 dst_port 4789", "set src 10.0.0.1 dst 10.0.0.2 id 101 dst_port 4789"),
+        ("tunnel_key", "release", "set src 10.0.0.1 dst 10.0.0.2 id 1"),
+        ("ct", "commit", "commit zone 5"),
+        ("pedit", "ex munge ip ttl set 5", "ex munge ip ttl set 6"),
+        ("simple", "sdata hello", "sdata world"),
+        ("sample", "rate 100 group 5", "rate 200 group 5"),
+        ("ctinfo", "cpmark zone 1", "cpmark zone 2"),
+        ("ife", "encode allow mark", "encode allow prio"),
+    ];
+
+    with_timeout(async {
+        let ns = TestNamespace::new("action-kinds")?;
+        let conn = conn_in_ns(&ns)?;
+        // On the clsact ingress hook: `ct` attaches nowhere else.
+        let hook = TcHandle::CLSACT_INGRESS;
+        let filter = |actions: ActionList| MatchallFilter::new().actions(actions);
+        let mut failed = Vec::new();
+        for (kind, line, drift) in rows {
+            let actions = list(kind, line)?;
+            let cfg = NetworkConfig::new()
+                .link("d0", |l| l.dummy().up())
+                .qdisc("d0", |q| q.clsact())
+                .tc("d0", move |t| t.filter(hook, FilterPriority::new(1), EthProto::ALL, filter(actions.clone())));
+            match cfg.apply(&conn).await {
+                Ok(applied) if applied.is_success() => {}
+                Ok(applied) => {
+                    failed.push(format!("{kind} {line}: the apply failed: {applied:?}"));
+                    continue;
+                }
+                Err(e) => {
+                    failed.push(format!("{kind} {line}: the apply failed: {e}"));
+                    continue;
+                }
+            }
+            let again = cfg.diff(&conn).await?;
+            if !again.is_empty() {
+                failed.push(format!("{kind} {line}: did not converge:\n{again}"));
+                continue;
+            }
+            ns.exec("tc", &["filter", "del", "dev", "d0", "ingress", "prio", "1"])?;
+            if let Err(e) = conn
+                .add_filter_full("d0", hook, None, EthProto::ALL, FilterPriority::new(1), filter(list(kind, drift)?))
+                .await
+            {
+                failed.push(format!("{kind} {line}: `{drift}` would not install: {e}"));
+                continue;
+            }
+            if cfg.diff(&conn).await?.is_empty() {
+                failed.push(format!("{kind} {line}: `{drift}` compared equal to it"));
+            }
+            let applied = cfg.apply(&conn).await.map(|a| a.is_success()).unwrap_or(false);
+            let back = cfg.diff(&conn).await?;
+            if !applied || !back.is_empty() {
+                failed.push(format!("{kind} {line}: from `{drift}`, did not converge:\n{back}"));
+            }
+        }
+        assert!(failed.is_empty(), "{}", failed.join("\n"));
+        Ok(())
+    })
+    .await
+}
+
 /// A police action's conform verdict, peakrate and average rate, and a
 /// gact action's random verdict, are compared (#791). The comparison
 /// summarised a police by its rate, burst, mtu and exceed verdict and a
