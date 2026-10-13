@@ -1257,8 +1257,9 @@ impl VlanAction {
     ///
     /// Operation (one required):
     /// - `pop` — strip the outer VLAN tag.
-    /// - `push <id>` — push a new tag with VLAN ID `<id>`.
-    /// - `modify <id>` — overwrite the existing tag's ID.
+    /// - `push id <id>` — push a new tag with VLAN ID `<id>`, as
+    ///   tc-vlan(8) spells it; `push <id>` reads too (#817).
+    /// - `modify id <id>` — overwrite the existing tag's ID.
     ///
     /// Optional modifiers:
     /// - `priority <p>` — set the VLAN PCP bits (0–7).
@@ -1267,6 +1268,15 @@ impl VlanAction {
     /// - A verdict (`pass`, `drop`, `pipe`, `reclassify`, `stolen`,
     ///   `continue`); `pipe` without one.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let vlan_vid = |s: &str| -> Result<u16> {
+            let id = action_parse_u32("vlan", "id", s)?;
+            if id > 4095 {
+                return Err(Error::invalid_message(format!(
+                    "vlan: VLAN ID `{id}` out of range (0–4095)"
+                )));
+            }
+            Ok(id as u16)
+        };
         // Parse the operation first (it determines the entry-point
         // constructor that supplies vlan_id), then walk for modifiers.
         let mut op: Option<&str> = None;
@@ -1287,28 +1297,19 @@ impl VlanAction {
                     op = Some("pop");
                     i += 1;
                 }
-                "push" => {
-                    op = Some("push");
-                    let s = action_need_value(params, i, "vlan", key)?;
-                    let id = action_parse_u32("vlan", "push id", s)?;
-                    if id > 4095 {
-                        return Err(Error::invalid_message(format!(
-                            "vlan: VLAN ID `{id}` out of range (0–4095)"
-                        )));
+                word @ ("push" | "modify") => {
+                    op = Some(word);
+                    i += 1;
+                    // The id right after the operation, as nlink took it;
+                    // tc-vlan(8) spells it `id <vid>`, below (#817).
+                    if let Some(s) = params.get(i).filter(|s| s.parse::<u32>().is_ok()) {
+                        vlan_id = Some(vlan_vid(s)?);
+                        i += 1;
                     }
-                    vlan_id = Some(id as u16);
-                    i += 2;
                 }
-                "modify" => {
-                    op = Some("modify");
+                "id" => {
                     let s = action_need_value(params, i, "vlan", key)?;
-                    let id = action_parse_u32("vlan", "modify id", s)?;
-                    if id > 4095 {
-                        return Err(Error::invalid_message(format!(
-                            "vlan: VLAN ID `{id}` out of range (0–4095)"
-                        )));
-                    }
-                    vlan_id = Some(id as u16);
+                    vlan_id = Some(vlan_vid(s)?);
                     i += 2;
                 }
                 "priority" => {
@@ -1990,6 +1991,10 @@ pub struct SkbeditAction {
     mark: Option<u32>,
     /// Mark mask.
     mark_mask: Option<u32>,
+    /// The packet type (`TCA_SKBEDIT_PTYPE`, a `PACKET_*`), #817.
+    ptype: Option<u16>,
+    /// Take the skb priority from the DS field (`inheritdsfield`), #817.
+    inherit_dsfield: bool,
     /// Action result.
     action: i32,
 }
@@ -2000,7 +2005,37 @@ mod skbedit {
     pub const TCA_SKBEDIT_PRIORITY: u16 = 3;
     pub const TCA_SKBEDIT_QUEUE_MAPPING: u16 = 4;
     pub const TCA_SKBEDIT_MARK: u16 = 5;
+    pub const TCA_SKBEDIT_PTYPE: u16 = 7;
     pub const TCA_SKBEDIT_MASK: u16 = 8;
+    pub const TCA_SKBEDIT_FLAGS: u16 = 9;
+    pub const SKBEDIT_F_INHERITDSFIELD: u64 = 0x20;
+}
+
+/// tc(8)'s names for the packet types skbedit sets (`PACKET_*`), #817.
+const SKBEDIT_PTYPES: [(&str, u16); 4] = [("host", 0), ("broadcast", 1), ("multicast", 2), ("otherhost", 3)];
+
+/// A class id as tc(8)'s `get_tc_classid()` reads it (#817): `root`,
+/// `none`, a hex major, or `major:minor` in hex. skbedit's `priority`
+/// is one.
+fn tc_classid(kind: &str, key: &str, s: &str) -> Result<u32> {
+    let hex = |v: &str| u32::from_str_radix(v.trim_start_matches("0x"), 16);
+    let id = match s {
+        "root" => Ok(u32::MAX),
+        "none" => Ok(0),
+        _ => match s.split_once(':') {
+            Some((maj, min)) => (|| {
+                let maj = if maj.is_empty() { 0 } else { hex(maj)? };
+                let min = if min.is_empty() { 0 } else { hex(min)? };
+                Ok::<u32, std::num::ParseIntError>(maj << 16 | (min & 0xFFFF))
+            })(),
+            None => hex(s),
+        },
+    };
+    id.map_err(|_| {
+        Error::invalid_message(format!(
+            "{kind}: invalid {key} `{s}` (expected a class id: hex, or major:minor in hex)"
+        ))
+    })
 }
 
 impl SkbeditAction {
@@ -2037,6 +2072,19 @@ impl SkbeditAction {
         self
     }
 
+    /// Set the packet type, a `PACKET_*`: 0 host, 1 broadcast, 2 multicast,
+    /// 3 other host (#817).
+    pub fn ptype(mut self, ptype: u16) -> Self {
+        self.ptype = Some(ptype);
+        self
+    }
+
+    /// Take the skb priority from the packet's DS field (#817).
+    pub fn inherit_dsfield(mut self) -> Self {
+        self.inherit_dsfield = true;
+        self
+    }
+
     /// Set the action result.
     pub fn action(mut self, action: i32) -> Self {
         self.action = action;
@@ -2048,10 +2096,13 @@ impl SkbeditAction {
     ///
     /// # Recognised tokens (any order)
     ///
-    /// - `priority <u32>` — set the skb priority.
-    /// - `mark <u32>` — set the skb mark.
+    /// - `priority <classid>` — set the skb priority, a class id as tc(8)
+    ///   reads it: hex, or `major:minor` in hex (#817).
+    /// - `mark <u32>[/<mask>]` — set the skb mark.
     /// - `mask <u32>` — combine with `mark` for masked update.
     /// - `queue_mapping <u16>` — set the queue mapping index.
+    /// - `ptype host|otherhost|broadcast|multicast`, `inheritdsfield`
+    ///   (#817).
     /// - A verdict (`pass`, `drop`, `pipe`, `reclassify`, `stolen`,
     ///   `continue`); `pipe` without one.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
@@ -2068,17 +2119,38 @@ impl SkbeditAction {
                 }
                 "priority" => {
                     let s = action_need_value(params, i, "skbedit", key)?;
-                    act = act.priority(action_parse_u32("skbedit", "priority", s)?);
+                    act = act.priority(tc_classid("skbedit", "priority", s)?);
                     i += 2;
                 }
                 "mark" => {
                     let s = action_need_value(params, i, "skbedit", key)?;
-                    mark = Some(action_parse_u32("skbedit", "mark", s)?);
+                    let (m, mk) = match s.split_once('/') {
+                        Some((m, mk)) => (m, Some(mk)),
+                        None => (s, None),
+                    };
+                    mark = Some(action_parse_u32_any("skbedit", "mark", m)?);
+                    if let Some(mk) = mk {
+                        mask = Some(action_parse_u32_any("skbedit", "mask", mk)?);
+                    }
                     i += 2;
+                }
+                "ptype" => {
+                    let s = action_need_value(params, i, "skbedit", key)?;
+                    let ptype = SKBEDIT_PTYPES.iter().find(|(name, _)| *name == s).map(|(_, v)| *v).ok_or_else(|| {
+                        Error::invalid_message(format!(
+                            "skbedit: invalid ptype `{s}` (expected host, otherhost, broadcast or multicast)"
+                        ))
+                    })?;
+                    act = act.ptype(ptype);
+                    i += 2;
+                }
+                "inheritdsfield" => {
+                    act = act.inherit_dsfield();
+                    i += 1;
                 }
                 "mask" => {
                     let s = action_need_value(params, i, "skbedit", key)?;
-                    mask = Some(action_parse_u32("skbedit", "mask", s)?);
+                    mask = Some(action_parse_u32_any("skbedit", "mask", s)?);
                     i += 2;
                 }
                 "queue_mapping" => {
@@ -2094,7 +2166,7 @@ impl SkbeditAction {
                 }
                 other => {
                     return Err(Error::invalid_message(format!(
-                        "skbedit: unknown token `{other}` (recognised: priority, mark, mask, queue_mapping, a verdict)"
+                        "skbedit: unknown token `{other}` (recognised: priority, mark, mask, queue_mapping, ptype, inheritdsfield, a verdict)"
                     )));
                 }
             }
@@ -2127,16 +2199,14 @@ impl ActionConfig for SkbeditAction {
 
     fn to_params(&self) -> Result<Vec<String>> {
         let mut out = Vec::new();
+        // A class id, as `parse_params` reads it (#817).
         if let Some(prio) = self.priority {
-            out.extend(kv("priority", prio));
+            out.extend(kv("priority", format!("{:x}:{:x}", prio >> 16, prio & 0xFFFF)));
         }
         match (self.mark, self.mark_mask) {
-            (Some(mark), mask) => {
-                out.extend(kv("mark", mark));
-                if let Some(mask) = mask {
-                    out.extend(kv("mask", mask));
-                }
-            }
+            // tc(8)'s `MARK[/MASK]`: it has no `mask` keyword (#817).
+            (Some(mark), None) => out.extend(kv("mark", mark)),
+            (Some(mark), Some(mask)) => out.extend(kv("mark", format!("{mark}/{mask:#x}"))),
             (None, None) => {}
             (None, Some(_)) => {
                 return Err(Error::not_supported(
@@ -2146,6 +2216,15 @@ impl ActionConfig for SkbeditAction {
         }
         if let Some(queue) = self.queue_mapping {
             out.extend(kv("queue_mapping", queue));
+        }
+        if let Some(ptype) = self.ptype {
+            let name = SKBEDIT_PTYPES.iter().find(|(_, v)| *v == ptype).map(|(n, _)| *n).ok_or_else(|| {
+                Error::not_supported(format!("skbedit: ptype {ptype} has no token"))
+            })?;
+            out.extend(kv("ptype", name));
+        }
+        if self.inherit_dsfield {
+            out.push("inheritdsfield".to_string());
         }
         push_verdict(&mut out, "skbedit", self.action, action::TC_ACT_PIPE)?;
         Ok(out)
@@ -2169,6 +2248,14 @@ impl ActionConfig for SkbeditAction {
 
         if let Some(mask) = self.mark_mask {
             builder.append_attr(skbedit::TCA_SKBEDIT_MASK, &mask.to_ne_bytes());
+        }
+
+        if let Some(ptype) = self.ptype {
+            builder.append_attr(skbedit::TCA_SKBEDIT_PTYPE, &ptype.to_ne_bytes());
+        }
+
+        if self.inherit_dsfield {
+            builder.append_attr(skbedit::TCA_SKBEDIT_FLAGS, &skbedit::SKBEDIT_F_INHERITDSFIELD.to_ne_bytes());
         }
 
         Ok(())
@@ -2598,7 +2685,8 @@ impl TunnelKeyAction {
         // Determine operation first (set vs release).
         let mut op: Option<&str> = None;
         for &t in params {
-            if matches!(t, "set" | "release") {
+            // tc-tunnel_key(8) says `unset` for `release` (#817).
+            if matches!(t, "set" | "release" | "unset") {
                 if op.is_some() {
                     return Err(Error::invalid_message(
                         "tunnel_key: only one of `set` / `release` may be specified".to_string(),
@@ -2609,7 +2697,7 @@ impl TunnelKeyAction {
         }
         let mut act = match op {
             Some("set") => Self::set(),
-            Some("release") => Self::release(),
+            Some("release" | "unset") => Self::release(),
             _ => {
                 return Err(Error::invalid_message(
                     "tunnel_key: missing operation (`set` or `release`)".to_string(),
@@ -2622,11 +2710,13 @@ impl TunnelKeyAction {
         while i < params.len() {
             let key = params[i];
             match key {
-                "set" | "release" => i += 1,
+                "set" | "release" | "unset" => i += 1,
                 v if is_verdict(v) => {
                     act = act.action(parse_gact_verdict(v)?);
                     i += 1;
                 }
+                // tc's default, said: the UDP checksum on (#817).
+                "csum" if is_set => i += 1,
                 // tc-tunnel_key(8)'s own words, for either family (#811).
                 "src_ip" | "dst_ip" => {
                     let s = action_need_value(params, i, "tunnel_key", key)?;
@@ -2757,7 +2847,8 @@ impl TunnelKeyAction {
                     act = act.ttl(v as u8);
                     i += 2;
                 }
-                "no_csum" => {
+                // `nocsum` and `nofrag` are tc's spelling (#817).
+                "no_csum" | "nocsum" => {
                     if !is_set {
                         return Err(Error::invalid_message(
                             "tunnel_key: no_csum only valid with `set`".to_string(),
@@ -2766,7 +2857,7 @@ impl TunnelKeyAction {
                     act = act.no_csum();
                     i += 1;
                 }
-                "no_frag" => {
+                "no_frag" | "nofrag" => {
                     if !is_set {
                         return Err(Error::invalid_message(
                             "tunnel_key: no_frag only valid with `set`".to_string(),
@@ -3138,10 +3229,19 @@ impl CtinfoAction {
                 }
                 "dscp" => {
                     let s = action_need_value(params, i, "ctinfo", "dscp")?;
-                    let (mask_s, state_s) = match s.split_once('/') {
+                    // tc-ctinfo(8) gives the statemask as its own word;
+                    // `MASK/STATEMASK` reads too (#817).
+                    let (mask_s, mut state_s) = match s.split_once('/') {
                         Some((m, st)) => (m, Some(st)),
                         None => (s, None),
                     };
+                    let mut used = 2;
+                    if state_s.is_none()
+                        && let Some(next) = params.get(i + 2).filter(|n| ctinfo_parse_u32("dscp statemask", n).is_ok())
+                    {
+                        state_s = Some(next);
+                        used = 3;
+                    }
                     let mask = ctinfo_parse_u32("dscp mask", mask_s)?;
                     let statemask = match state_s {
                         Some(st) => ctinfo_parse_u32("dscp statemask", st)?,
@@ -3149,7 +3249,7 @@ impl CtinfoAction {
                     };
                     a = a.dscp(mask, statemask);
                     any = true;
-                    i += 2;
+                    i += used;
                 }
                 "cpmark" => {
                     // Optional mask: consume the next token only if it
@@ -4067,7 +4167,10 @@ impl CsumAction {
         let mut act = Self::new();
         for &t in params {
             act = match t {
-                "iph" => act.iph(),
+                // tc separates targets with `and`, and spells `iph`
+                // `ip4h` too (#817).
+                "and" => act,
+                "iph" | "ip4h" => act.iph(),
                 "icmp" => act.icmp(),
                 "igmp" => act.igmp(),
                 "tcp" => act.tcp(),
@@ -4588,13 +4691,21 @@ impl CtAction {
                 }
                 "mark" => {
                     let mark_s = action_need_value(params, i, "ct", key)?;
-                    let mask_s = params.get(i + 2).copied().ok_or_else(|| {
-                        Error::invalid_message("ct: `mark` requires `<value> <mask>`".to_string())
-                    })?;
-                    let m = action_parse_u32("ct", "mark", mark_s)?;
-                    let mk = action_parse_u32("ct", "mark mask", mask_s)?;
+                    // tc-ct(8)'s `MARK[/MASK]`; nlink's `<value> <mask>`
+                    // reads too (#817). Without a mask, all of the mark.
+                    let (m, mk, used) = match mark_s.split_once('/') {
+                        Some((m, mk)) => (
+                            action_parse_u32_any("ct", "mark", m)?,
+                            action_parse_u32_any("ct", "mark mask", mk)?,
+                            2,
+                        ),
+                        None => match params.get(i + 2).filter(|s| action_parse_u32_any("ct", "mark mask", s).is_ok()) {
+                            Some(mk) => (action_parse_u32_any("ct", "mark", mark_s)?, action_parse_u32_any("ct", "mark mask", mk)?, 3),
+                            None => (action_parse_u32_any("ct", "mark", mark_s)?, u32::MAX, 2),
+                        },
+                    };
                     act = act.mark(m, mk);
-                    i += 3;
+                    i += used;
                 }
                 "nat" => {
                     // tc-ct(8): `nat [src|dst addr <addr>[-<addr>]]`. The
@@ -4731,7 +4842,7 @@ impl ActionConfig for CtAction {
         }
         match (self.mark, self.mark_mask) {
             (Some(mark), Some(mask)) => {
-                out.extend(["mark".to_string(), mark.to_string(), mask.to_string()]);
+                out.extend(kv("mark", format!("{mark}/{mask:#x}")));
             }
             (None, None) => {}
             _ => return Err(no_token("a mark without its mask")),
@@ -5169,7 +5280,7 @@ impl PeditAction {
     /// [`PeditAction::set_raw`] / [`add_raw`](PeditAction::add_raw)
     /// rather than being skipped.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
-        let mut a = Self::new();
+        let mut a = Self::new().action(action::TC_ACT_OK);
         let mut any = false;
         let mut i = 0;
         while i < params.len() {
@@ -5395,7 +5506,8 @@ impl ActionConfig for PeditAction {
             out.extend(tokens);
             keys = &keys[used..];
         }
-        push_verdict(&mut out, "pedit", self.action, action::TC_ACT_PIPE)?;
+        // Against what `parse_params` starts from, tc's `pass` (#817).
+        push_verdict(&mut out, "pedit", self.action, action::TC_ACT_OK)?;
         Ok(out)
     }
 
@@ -6422,6 +6534,24 @@ fn action_parse_u32(kind: &str, key: &str, s: &str) -> Result<u32> {
     s.parse::<u32>().map_err(|_| {
         Error::invalid_message(format!(
             "{kind}: invalid {key} `{s}` (expected unsigned integer)"
+        ))
+    })
+}
+
+/// Parse a `u32` as tc(8)'s `get_u32(.., 0)` does: `strtoul` base 0, so
+/// `0x` hex, a leading `0` octal, or decimal (#817). Marks and masks are
+/// read this way.
+fn action_parse_u32_any(kind: &str, key: &str, s: &str) -> Result<u32> {
+    let parsed = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16)
+    } else if s.len() > 1 && s.starts_with('0') {
+        u32::from_str_radix(&s[1..], 8)
+    } else {
+        s.parse::<u32>()
+    };
+    parsed.map_err(|_| {
+        Error::invalid_message(format!(
+            "{kind}: invalid {key} `{s}` (expected unsigned integer: decimal, 0x-hex or 0-octal)"
         ))
     })
 }
@@ -7563,13 +7693,28 @@ mod tests {
 
     #[test]
     fn skbedit_parse_params_mark_with_mask_any_order() {
-        let a = SkbeditAction::parse_params(&["mark", "1", "mask", "0xff"]).unwrap_err();
-        // 0xff is hex; our parser only accepts decimal u32 — verify error
-        assert!(a.to_string().contains("expected unsigned integer"));
-
-        let b = SkbeditAction::parse_params(&["mark", "1", "mask", "255"]).unwrap();
+        // tc(8) reads marks in any base and writes the mask after a
+        // slash (#817); nlink's `mask` keyword reads too.
+        let a = SkbeditAction::parse_params(&["mark", "1/0xff"]).unwrap();
+        let b = SkbeditAction::parse_params(&["mark", "1", "mask", "0xff"]).unwrap();
         let c = SkbeditAction::parse_params(&["mask", "255", "mark", "1"]).unwrap();
+        let d = SkbeditAction::parse_params(&["mark", "01/0377"]).unwrap();
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
         assert_eq!(write_options_bytes(&b), write_options_bytes(&c));
+        assert_eq!(write_options_bytes(&c), write_options_bytes(&d));
+        assert!(SkbeditAction::parse_params(&["mark", "1/0xfg"]).is_err());
+    }
+
+    #[test]
+    fn skbedit_priority_is_a_class_id() {
+        // tc(8)'s get_tc_classid(): hex, or major:minor in hex (#817).
+        for (word, prio) in [("10", 0x10), ("1:10", 0x1_0010), (":7", 7), ("ff:", 0xff_0000), ("none", 0)] {
+            let a = SkbeditAction::parse_params(&["priority", word]).unwrap();
+            let b = SkbeditAction::new().priority(prio);
+            assert_eq!(write_options_bytes(&a), write_options_bytes(&b), "{word}");
+        }
+        assert!(SkbeditAction::parse_params(&["priority", "1:2:3"]).is_err());
+        assert!(SkbeditAction::parse_params(&["priority", "x"]).is_err());
     }
 
     #[test]
@@ -8265,9 +8410,16 @@ mod tests {
     }
 
     #[test]
-    fn ct_parse_params_mark_requires_two_values() {
-        let err = CtAction::parse_params(&["mark", "1"]).unwrap_err();
-        assert!(err.to_string().contains("`<value> <mask>`"));
+    fn ct_parse_params_mark_reads_tcs_forms() {
+        // tc-ct(8)'s `mark MARK[/MASK]`; without a mask, all of the mark
+        // (#817). nlink's `<value> <mask>` still reads.
+        let all = CtAction::new().mark(1, u32::MAX);
+        for words in [&["mark", "1"][..], &["mark", "1/0xffffffff"], &["mark", "1", "4294967295"]] {
+            let a = CtAction::parse_params(words).unwrap();
+            assert_eq!(write_options_bytes(&a), write_options_bytes(&all), "{words:?}");
+        }
+        let a = CtAction::parse_params(&["mark", "7/0xff"]).unwrap();
+        assert_eq!(write_options_bytes(&a), write_options_bytes(&CtAction::new().mark(7, 0xff)));
     }
 
     /// #751: `nat` reads as tc-ct(8) writes it — `nat src addr <range>`,
@@ -8297,8 +8449,9 @@ mod tests {
 
     #[test]
     fn pedit_parse_ip_src_matches_builder() {
+        // A pedit line's verdict is tc(8)'s `pass` (#817).
         let parsed = PeditAction::parse_params(&["munge", "ip", "src", "set", "10.0.0.1"]).unwrap();
-        let built = PeditAction::new().set_ipv4_src("10.0.0.1".parse().unwrap());
+        let built = PeditAction::new().set_ipv4_src("10.0.0.1".parse().unwrap()).action(action::TC_ACT_OK);
         assert_eq!(write_options_bytes(&parsed), write_options_bytes(&built));
     }
 
@@ -8363,19 +8516,18 @@ mod tests {
             "0xffffffff",
         ])
         .unwrap();
-        let built = PeditAction::new().set_raw(
-            pedit::TCA_PEDIT_KEY_EX_HDR_TYPE_NETWORK,
-            12,
-            0x0a00_0001,
-            0xffff_ffff,
-        );
+        let built = PeditAction::new()
+            .set_raw(pedit::TCA_PEDIT_KEY_EX_HDR_TYPE_NETWORK, 12, 0x0a00_0001, 0xffff_ffff)
+            .action(action::TC_ACT_OK);
         assert_eq!(write_options_bytes(&parsed), write_options_bytes(&built));
     }
 
     #[test]
     fn pedit_parse_raw_offset_add_defaults_mask_zero() {
         let parsed = PeditAction::parse_params(&["munge", "offset", "8", "add", "1"]).unwrap();
-        let built = PeditAction::new().add_raw(pedit::TCA_PEDIT_KEY_EX_HDR_TYPE_NETWORK, 8, 1, 0);
+        let built = PeditAction::new()
+            .add_raw(pedit::TCA_PEDIT_KEY_EX_HDR_TYPE_NETWORK, 8, 1, 0)
+            .action(action::TC_ACT_OK);
         assert_eq!(write_options_bytes(&parsed), write_options_bytes(&built));
     }
 
@@ -8623,7 +8775,10 @@ mod params_tests {
 
     #[test]
     fn skbedit_round_trips() {
-        assert_eq!(round_trips(SkbeditAction::new().priority(7)), ["priority", "7"]);
+        assert_eq!(round_trips(SkbeditAction::new().priority(7)), ["priority", "0:7"]);
+        assert_eq!(round_trips(SkbeditAction::new().priority(0x1_0010)), ["priority", "1:10"]);
+        assert_eq!(round_trips(SkbeditAction::new().mark_with_mask(1, 0xff)), ["mark", "1/0xff"]);
+        round_trips(SkbeditAction::new().ptype(3).inherit_dsfield());
         for a in [
             SkbeditAction::new(),
             SkbeditAction::new().mark(100),
@@ -8634,7 +8789,7 @@ mod params_tests {
         }
         assert_eq!(
             round_trips(SkbeditAction::new().mark_with_mask(1, 255).action(action::TC_ACT_SHOT)),
-            ["mark", "1", "mask", "255", "drop"]
+            ["mark", "1/0xff", "drop"]
         );
     }
 
@@ -8831,7 +8986,7 @@ mod params_tests {
         let (tcp, udp) = (libc::IPPROTO_TCP as u8, libc::IPPROTO_UDP as u8);
         assert_eq!(
             round_trips(CtAction::commit().zone(1).mark(0x100, 0xffff_ffff)),
-            ["commit", "zone", "1", "mark", "256", "4294967295"]
+            ["commit", "zone", "1", "mark", "256/0xffffffff"]
         );
         assert_eq!(
             round_trips(
@@ -8909,11 +9064,11 @@ mod params_tests {
                     .set_ipv4_src(Ipv4Addr::new(10, 0, 0, 1))
                     .set_tcp_dport(8080)
             ),
-            ["munge", "ip", "src", "set", "10.0.0.1", "munge", "tcp", "dport", "set", "8080"]
+            ["munge", "ip", "src", "set", "10.0.0.1", "munge", "tcp", "dport", "set", "8080", "pipe"]
         );
         assert_eq!(
             round_trips(PeditAction::new().add_raw(network, 8, 0xff00_0000, 0x00ff_ffff)),
-            ["munge", "offset", "8", "add", "0xff000000", "retain", "0xffffff"]
+            ["munge", "offset", "8", "add", "0xff000000", "retain", "0xffffff", "pipe"]
         );
         for a in [
             PeditAction::new()

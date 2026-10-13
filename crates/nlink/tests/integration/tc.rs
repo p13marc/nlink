@@ -3448,6 +3448,123 @@ async fn skbmod_and_ife_values_install_as_tcs() -> Result<()> {
     Ok(())
 }
 
+/// Every action kind's tc(8) lines make, through nlink's `parse_params`,
+/// the action tc makes of them. A sweep: the kinds were checked one at a
+/// time, as each bug came, and a tunnel_key key id was 0 for every
+/// release (#811), and seven kinds' parsers did not take tc's own words
+/// for what they set (#817).
+#[tokio::test]
+async fn every_action_kinds_lines_install_as_tcs() -> Result<()> {
+    use nlink::netlink::action::*;
+    require_root!();
+    nlink::require_modules!(
+        "dummy", "sch_ingress", "cls_matchall", "act_gact", "act_mirred", "act_vlan", "act_mpls", "act_skbmod",
+        "act_skbedit", "act_connmark", "act_csum", "act_nat", "act_tunnel_key", "act_ct", "act_pedit",
+        "act_simple", "act_sample", "act_gate", "act_ctinfo", "act_ife"
+    );
+
+    fn list(kind: &str, w: &[&str]) -> Result<ActionList> {
+        Ok(match kind {
+            "gact" => ActionList::new().with(GactAction::parse_params(w)?),
+            "vlan" => ActionList::new().with(VlanAction::parse_params(w)?),
+            "mpls" => ActionList::new().with(MplsAction::parse_params(w)?),
+            "skbmod" => ActionList::new().with(SkbmodAction::parse_params(w)?),
+            "skbedit" => ActionList::new().with(SkbeditAction::parse_params(w)?),
+            "connmark" => ActionList::new().with(ConnmarkAction::parse_params(w)?),
+            "csum" => ActionList::new().with(CsumAction::parse_params(w)?),
+            "nat" => ActionList::new().with(NatAction::parse_params(w)?),
+            "tunnel_key" => ActionList::new().with(TunnelKeyAction::parse_params(w)?),
+            "ct" => ActionList::new().with(CtAction::parse_params(w)?),
+            "pedit" => ActionList::new().with(PeditAction::parse_params(w)?),
+            "simple" => ActionList::new().with(SimpleAction::parse_params(w)?),
+            "sample" => ActionList::new().with(SampleAction::parse_params(w)?),
+            "gate" => ActionList::new().with(GateAction::parse_params(w)?),
+            "ctinfo" => ActionList::new().with(CtinfoAction::parse_params(w)?),
+            "ife" => ActionList::new().with(IfeAction::parse_params(w)?),
+            other => panic!("no parser for {other}"),
+        })
+    }
+    let rows: &[(&str, &str)] = &[
+        ("gact", "drop"),
+        ("gact", "pass random determ drop 10"),
+        ("vlan", "pop"),
+        ("vlan", "push id 100"),
+        ("vlan", "push id 100 protocol 802.1ad priority 3"),
+        ("vlan", "modify id 200"),
+        ("mpls", "push label 100 ttl 64 tc 3"),
+        ("mpls", "pop protocol ipv4"),
+        ("mpls", "modify label 200"),
+        ("mpls", "dec_ttl"),
+        ("skbmod", "set dmac 02:00:00:00:00:01"),
+        ("skbmod", "set smac 02:00:00:00:00:02 set etype 0x88b5"),
+        ("skbmod", "swap mac"),
+        ("skbedit", "priority 7"),
+        ("skbedit", "priority 10"),
+        ("skbedit", "priority 1:10"),
+        ("skbedit", "inheritdsfield"),
+        ("skbedit", "mark 42"),
+        ("skbedit", "mark 1/0xff"),
+        ("skbedit", "ptype host"),
+        ("connmark", "zone 5"),
+        ("csum", "iph"),
+        ("csum", "iph and tcp and udp"),
+        ("nat", "egress 10.0.0.1 192.168.0.1"),
+        ("nat", "ingress 10.0.0.0/24 192.168.0.0"),
+        ("tunnel_key", "set src_ip 10.0.0.1 dst_ip 10.0.0.2 id 100 dst_port 4789 tos 4 ttl 64"),
+        ("tunnel_key", "set src_ip fd00::1 dst_ip fd00::2 id 7 nocsum"),
+        ("tunnel_key", "set src_ip 10.0.0.1 dst_ip 10.0.0.2 id 9 csum"),
+        ("tunnel_key", "unset"),
+        ("ct", "commit"),
+        ("ct", "commit mark 7"),
+        ("ct", "commit zone 5 mark 7/0xff"),
+        ("ct", "clear"),
+        ("pedit", "ex munge ip ttl set 5"),
+        ("pedit", "ex munge ip dst set 10.0.0.9"),
+        ("pedit", "ex munge tcp dport set 8080"),
+        ("pedit", "ex munge eth dst set 02:00:00:00:00:09"),
+        ("simple", "sdata hello"),
+        ("sample", "rate 100 group 5"),
+        ("sample", "rate 100 group 5 trunc 128"),
+        ("gate", "base-time 1000 sched-entry open 2000"),
+        ("gate", "priority 1 clockid CLOCK_TAI base-time 1000 sched-entry open 2000 sched-entry close 3000"),
+        ("ctinfo", "cpmark zone 1"),
+        ("ctinfo", "dscp 0xfc 0x01 zone 5"),
+        ("ife", "encode allow mark"),
+        ("ife", "encode type 0xed3e use mark 5"),
+    ];
+
+    let (ns, conn, d0) = clsact_d0("tc-act-sweep").await?;
+    let mut failed = Vec::new();
+    for (kind, line) in rows {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let parsed = match list(kind, &words) {
+            Ok(list) => list,
+            Err(e) => {
+                failed.push(format!("{kind} {line}: nlink refused it: {e}"));
+                continue;
+            }
+        };
+        let mut args = vec!["filter", "add", "dev", "d0", "ingress", "prio", "1", "matchall", "action", kind];
+        args.extend(&words);
+        if let Err(e) = ns.exec("tc", &args) {
+            failed.push(format!("{kind} {line}: tc refused it: {e}"));
+            continue;
+        }
+        if let Err(e) = matchall_at_prio_2(&conn, d0, parsed).await {
+            failed.push(format!("{kind} {line}: the kernel refused nlink's: {e}"));
+            ns.exec("tc", &["filter", "del", "dev", "d0", "ingress"])?;
+            continue;
+        }
+        let listed = filter_actions(&ns, "d0")?;
+        if listed.len() != 2 || listed[0].1 != listed[1].1 {
+            failed.push(format!("{kind} {line}:\n  tc:    {}\n  nlink: {}", listed[0].1, listed.get(1).map_or("-".into(), |l| l.1.to_string())));
+        }
+        ns.exec("tc", &["filter", "del", "dev", "d0", "ingress"])?;
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+    Ok(())
+}
+
 /// #751: a gate's bare times are nanoseconds and a ct `nat` is spelled
 /// with `addr`, as tc(8) reads them. nlink read a bare gate time as
 /// microseconds, and refused the `addr` keyword.
