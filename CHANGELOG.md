@@ -1114,6 +1114,41 @@ All notable changes to this project will be documented in this file.
   installing every action kind's lines through `tc` and through nlink
   found them.
 
+- **A red or choke qdisc installs (#819).** The kernel refused both with
+  `EINVAL`, whatever the configuration, because nlink never sent their
+  idle-damping table (`TCA_RED_STAB`, `TCA_CHOKE_STAB`). `RedConfig` and
+  `ChokeConfig` now derive the EWMA weight, the probability's log and the
+  table as tc(8) does (`tc_red.c`), from the thresholds, `burst`, `avpkt`
+  and `bandwidth`, and fill in what is left out with tc's defaults. They
+  also read tc's words: `avpkt`, `burst` and `bandwidth`, which were
+  refused, and `probability` as a fraction (`0.02` is 2%), where nlink
+  read a percentage. red also gets `nodrop`, and sends its flags in
+  `TCA_RED_FLAGS` as tc does.
+
+- **A taprio's schedule reaches the kernel (#823).** Its entries were
+  nested as `TCA_TAPRIO_ATTR_SCHED_SINGLE_ENTRY`, a top-level attribute,
+  where the kernel reads `TCA_TAPRIO_SCHED_ENTRY`. The kernel skipped every
+  entry, then refused the empty schedule, so no taprio from nlink ever
+  installed.
+
+- **Qdisc lines take tc(8)'s own words (#820).** A sweep installing every
+  qdisc kind's tc lines through `tc` and through nlink found these refused
+  or misread:
+  - gred's `vqs` and its setup `ecn` and `harddrop`;
+  - sfb's `increment` and `decrement`, which tc reads as probabilities,
+    and `rehash` and `db`, which tc reads as milliseconds where nlink read
+    a bare number as microseconds. An `SfbConfig` field left unset is now
+    tc's default where it was 0: a 0 increment never marks, and a 0 rehash
+    interval rehashes on every packet;
+  - hhf's `non_hh_weight`;
+  - a mqprio or taprio `map` shorter than 16 entries (the rest are 0),
+    their `queues`, which neither parsed, and mqprio's `hw 0` / `hw 1`;
+  - tbf's `latency`, from which tc computes the limit;
+  - pie's `dq_rate_estimator`;
+  - cake's link framings (`ethernet`, `docsis`, `ether-vlan`,
+    `conservative`, `pppoe-ptm`, `bridged-llcsnap`, …). cake's `raw` now
+    also sets overhead 0 and no ATM framing, as tc's does.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
@@ -3332,6 +3367,10 @@ All notable changes to this project will be documented in this file.
   renames it back, and the rest of the diff is against the renamed link. A
   recreate is still planned when another link already has the declared
   name.
+
+- **`FqConfig` has `buckets`, `horizon`, `horizon_drop` and `timer_slack`
+  (#821)**, and `parse_params` reads them, with tc's `horizon_cap`. tc's
+  `defrate` is refused with a reason, since the kernel ignores it.
 
 ## [0.31.0] - 2026-10-11
 
