@@ -201,6 +201,9 @@ pub mod output;
 #[cfg(feature = "lab")]
 pub mod lab;
 
+#[cfg(feature = "replay")]
+pub mod replay;
+
 // Re-export common types at crate root for convenience
 // Namespace types
 // Event types

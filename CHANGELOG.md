@@ -2944,6 +2944,23 @@ All notable changes to this project will be documented in this file.
   with `offsetof` against the uapi headers, 6.18's against its source. The
   AccECN block is unit-pinned: no kernel here sends it.
 
+
+- **Record and replay (#168).** The new feature `replay` (not in `full`) adds
+  `nlink::replay`, for testing code that drives nlink without root, a
+  namespace or a particular kernel:
+  - `Recorder` hands out connections whose traffic it keeps, in a namespace
+    or not, a GENL family's id resolution included;
+  - `Fixture` (a text file, one hex datagram per line) hands out connections
+    that answer from the recording.
+
+  A replayed send must match the recorded one, its sequence numbers and port
+  id aside. The answers carry the live sequence numbers, multicast replays
+  as recorded, and a replay past its end is an error, not a hang. The recipe
+  is `replay-testing`. nlink's own unit tests replay a committed recording
+  (`scripts/regen-replay-fixtures.sh` refreshes it), and
+  `scripts/audit-socket-io.sh` keeps every send and receive in
+  `NetlinkSocket`, where the hook is.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that

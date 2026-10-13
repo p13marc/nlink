@@ -323,6 +323,11 @@ mod stack_plan;
 #[path = "integration/genl_netdev.rs"]
 mod genl_netdev;
 
+// Record a connection's traffic in a namespace, replay it without one (#168).
+#[cfg(feature = "replay")]
+#[path = "integration/replay.rs"]
+mod replay;
+
 // The helpers in `common/` checked against themselves, including where
 // each must fail: a helper that cannot fail turns every test built on it
 // into a pass.
