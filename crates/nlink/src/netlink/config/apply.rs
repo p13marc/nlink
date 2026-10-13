@@ -2181,6 +2181,9 @@ fn address_config(addr: &DeclaredAddress) -> AddressConfigOf {
             if let Some(label) = &t.label {
                 c = c.label(label.clone());
             }
+            if let Some(broadcast) = t.broadcast {
+                c = c.broadcast(broadcast);
+            }
             if let Some(metric) = t.metric {
                 c = c.metric(metric);
             }

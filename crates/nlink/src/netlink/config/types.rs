@@ -3967,6 +3967,9 @@ pub(crate) struct AddressAttrs {
     pub(crate) peer: Option<IpAddr>,
     /// The IPv4 label (`eth0:1`); the kernel's default is the device name.
     pub(crate) label: Option<String>,
+    /// The IPv4 broadcast address (`IFA_BROADCAST`, `ip addr add … brd`);
+    /// none unless declared (#783).
+    pub(crate) broadcast: Option<std::net::Ipv4Addr>,
     /// The metric of the prefix route (`IFA_RT_PRIORITY`).
     pub(crate) metric: Option<u32>,
     /// `IFA_F_NODAD`: skip duplicate address detection (IPv6).
@@ -4055,6 +4058,21 @@ impl AddressBuilder {
         self
     }
 
+    /// The IPv4 broadcast address (`ip addr add … brd 10.0.0.255`), which
+    /// the kernel also routes as broadcast in the local table (#783). Left
+    /// undeclared, an address's broadcast is not compared, since the tools
+    /// that add addresses set one (`brd +`, DHCP clients).
+    pub fn broadcast(mut self, broadcast: &str) -> Self {
+        match broadcast.parse::<std::net::Ipv4Addr>() {
+            Ok(b) if self.address.address.is_ipv4() => self.address.attrs.broadcast = Some(b),
+            Ok(_) => self.errors.push("a broadcast address is IPv4 only".into()),
+            Err(_) => self
+                .errors
+                .push(format!("broadcast {broadcast:?} is not an IPv4 address")),
+        }
+        self
+    }
+
     /// The metric of the prefix route the address installs.
     pub fn metric(mut self, metric: u32) -> Self {
         self.address.attrs.metric = Some(metric);
@@ -4133,6 +4151,9 @@ struct AddressRepr {
     /// The IPv4 label (`eth0:1`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     label: Option<String>,
+    /// The IPv4 broadcast address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    broadcast: Option<String>,
     /// The metric of the prefix route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     metric: Option<u32>,
@@ -4200,6 +4221,7 @@ impl From<DeclaredAddress> for AddressRepr {
             address: format!("{}/{}", a.address, a.prefix_len),
             peer: t.peer.map(|p| p.to_string()),
             label: t.label.clone(),
+            broadcast: t.broadcast.map(|b| b.to_string()),
             metric: t.metric,
             flags,
             valid_lft: t.lifetimes.map(|(v, _)| v),
@@ -4220,6 +4242,9 @@ impl TryFrom<AddressRepr> for DeclaredAddress {
         }
         if let Some(label) = &r.label {
             b = b.label(label);
+        }
+        if let Some(broadcast) = &r.broadcast {
+            b = b.broadcast(broadcast);
         }
         if let Some(metric) = r.metric {
             b = b.metric(metric);
@@ -4310,6 +4335,11 @@ impl DeclaredAddress {
     /// The declared metric of its prefix route.
     pub fn metric(&self) -> Option<u32> {
         self.attrs.metric
+    }
+
+    /// The declared IPv4 broadcast address (#783).
+    pub fn broadcast(&self) -> Option<std::net::Ipv4Addr> {
+        self.attrs.broadcast
     }
 
     /// The `IFA_F_*` flags declared (`nodad`, `optimistic`,

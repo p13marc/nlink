@@ -1736,7 +1736,7 @@ async fn a_route_through_an_encap_nexthop_reads_back_as_one() -> Result<()> {
 }
 
 /// An address the apply removes comes back from its undo with what it had
-/// (#781): its label, metric and `noprefixroute`. The diff read a live
+/// (#781): its label, metric, `noprefixroute` and broadcast (#783). The diff read a live
 /// address back bare, so the undo put back a plain address: no label, a
 /// metric-0 prefix route where there had been none.
 #[tokio::test]
@@ -1750,7 +1750,10 @@ async fn an_undo_puts_back_an_address_with_its_attributes() -> Result<()> {
         let cfg = NetworkConfig::new().link("d0", |l| l.dummy().up());
         let applied = cfg.apply(&conn).await?;
         assert!(applied.is_success(), "{applied:?}");
-        ns.exec("ip", &["addr", "add", "10.87.0.5/24", "dev", "d0", "label", "d0:x", "metric", "50", "noprefixroute"])?;
+        ns.exec(
+            "ip",
+            &["addr", "add", "10.87.0.5/24", "brd", "10.87.0.255", "dev", "d0", "label", "d0:x", "metric", "50", "noprefixroute"],
+        )?;
         let shown = |ns: &TestNamespace| -> Result<String> {
             let addr = crate::common::converge::ip_json(ns, &["addr", "show", "dev", "d0"])
                 .map_err(nlink::Error::invalid_message)?;
@@ -1761,7 +1764,7 @@ async fn an_undo_puts_back_an_address_with_its_attributes() -> Result<()> {
                 .unwrap()
                 .iter()
                 .filter(|a| a["family"] == "inet")
-                .map(|a| format!("{} {} {} {}", a["local"], a["label"], a["metric"], a["noprefixroute"]))
+                .map(|a| format!("{} {} {} {} {}", a["local"], a["broadcast"], a["label"], a["metric"], a["noprefixroute"]))
                 .collect();
             Ok(format!("{a:?} {routes}"))
         };
@@ -1773,6 +1776,53 @@ async fn an_undo_puts_back_an_address_with_its_attributes() -> Result<()> {
         let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
         assert!(undone.is_success(), "{undone:?}");
         assert_eq!(shown(&ns)?, before);
+        Ok(())
+    })
+    .await
+}
+
+/// A declared IPv4 broadcast is installed and compared (#783), and one not
+/// declared is left alone. `DeclaredAddress` had no broadcast, so an undo or
+/// a #745 restore put an address back without the one it had, and without
+/// the broadcast route the kernel makes for it in the local table.
+#[tokio::test]
+async fn an_addresss_broadcast_is_declared_and_compared() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("addr-brd")?;
+        let conn = conn_in_ns(&ns)?;
+        let cfg = NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .address_with("d0", "10.87.1.5/24", |a| a.broadcast("10.87.1.255"))?;
+        let brd = || -> Result<String> {
+            let addr = crate::common::converge::ip_json(&ns, &["addr", "show", "dev", "d0"])
+                .map_err(nlink::Error::invalid_message)?;
+            Ok(addr[0]["addr_info"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|a| a["family"] == "inet")
+                .map(|a| a["broadcast"].to_string())
+                .collect())
+        };
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        assert_eq!(brd()?, "\"10.87.1.255\"");
+        assert!(cfg.diff(&conn).await?.is_empty(), "the declared broadcast converges");
+
+        ns.exec("ip", &["addr", "del", "10.87.1.5/24", "dev", "d0"])?;
+        ns.exec("ip", &["addr", "add", "10.87.1.5/24", "dev", "d0"])?;
+        assert!(!cfg.diff(&conn).await?.is_empty(), "an address without its broadcast compared equal");
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        assert_eq!(brd()?, "\"10.87.1.255\"");
+        assert!(cfg.diff(&conn).await?.is_empty(), "did not converge");
+
+        // Not declared, not compared: `brd +` and DHCP clients set one.
+        let plain = NetworkConfig::new().link("d0", |l| l.dummy().up()).address("d0", "10.87.1.5/24")?;
+        assert!(plain.diff(&conn).await?.is_empty(), "an undeclared broadcast was compared");
         Ok(())
     })
     .await
