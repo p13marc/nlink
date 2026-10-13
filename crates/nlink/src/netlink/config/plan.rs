@@ -63,6 +63,11 @@ pub enum Step {
         /// The link.
         name: String,
     },
+    /// Create a deleted link again as it was, with the links the kernel
+    /// deleted with it, and put back what was on them and the ports they
+    /// had (#745): the inverse of [`Self::DeleteForRecreate`] and
+    /// [`Self::RemoveLink`].
+    RestoreLink(Box<super::LinkRestore>),
     /// Raise a link's MTU before a link stacked on it is created: the
     /// kernel refuses an MTU above the lower device's at create (#473).
     RaiseMtuFirst {
@@ -190,6 +195,12 @@ pub enum Step {
     /// [`PlanOptions::preserve_undeclared_tc`](super::PlanOptions::preserve_undeclared_tc)
     /// (#645): after the declared qdiscs, before the declared trees.
     RestoreTc(super::preserve::PreservedTc),
+    /// Delete a device's root and ingress qdiscs, and with them its classes
+    /// and filters (#745): the inverse of [`Self::RestoreTc`].
+    ClearTc {
+        /// The device.
+        dev: String,
+    },
     /// Diff a declared TC tree again, against the device as the steps
     /// before left it, and apply the difference (#514).
     TcTree {
@@ -221,16 +232,23 @@ impl Step {
 
     /// The step that undoes this one, when it can be known from the plan:
     /// an address or route added or removed, a link created, a qdisc the
-    /// previous config declared, a link's state, MTU, master or MAC.
+    /// previous config declared, a link's state, MTU, master or MAC, a link
+    /// deleted and what went with it (#745).
     ///
     /// `None` for what cannot be put back from the plan alone: a deleted
-    /// link and everything that went with it, a kind parameter, a replaced
-    /// qdisc's old parameters, a TC tree, a refusal.
+    /// link with something no declaration can say
+    /// ([`LinkRecreate::unrestorable`](super::LinkRecreate::unrestorable)),
+    /// a kind parameter that had the kernel's default, a replaced qdisc
+    /// whose kind does not read back, a TC tree without the previous one,
+    /// a refusal.
     pub fn inverse(&self) -> Option<Step> {
         Some(match self {
             Self::CreateLink(link) => Self::DeleteLink {
                 name: link.name.clone(),
             },
+            Self::DeleteForRecreate(r) => Self::RestoreLink(r.restore.clone()?),
+            Self::RemoveLink(r) => Self::RestoreLink(r.restore.clone()?),
+            Self::RestoreTc(tc) => Self::ClearTc { dev: tc.dev.clone() },
             Self::ModifyLink { name, changes, .. } => Self::ModifyLink {
                 name: name.clone(),
                 changes: invert_link_changes(changes)?,
@@ -452,6 +470,8 @@ impl fmt::Display for Step {
             ),
             Self::RemoveLink(removal) => write!(f, "{removal}"),
             Self::DeleteLink { name } => write!(f, "- link {name}"),
+            Self::RestoreLink(restore) => write!(f, "+ link {restore}"),
+            Self::ClearTc { dev } => write!(f, "- tc {dev} (its qdiscs, classes and filters)"),
             Self::RaiseMtuFirst { link, mtu } => {
                 write!(f, "~ link {link} mtu {mtu} (before the links created on it)")
             }

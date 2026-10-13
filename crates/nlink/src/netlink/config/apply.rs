@@ -218,9 +218,13 @@ impl ApplyResult {
 
     /// The plan that undoes this apply as far as it can be undone (#518):
     /// the [journal](Self::journal)'s inverses, last step first. A step
-    /// with no inverse — a deleted link, a kind change, a replaced qdisc, a
-    /// TC tree — is left out; [`irreversible`](Self::irreversible) lists
-    /// them. Routes come back with protocol `boot`.
+    /// with no inverse is left out, and [`irreversible`](Self::irreversible)
+    /// lists it: a deleted link with something no declaration can put back
+    /// ([`LinkRecreate::unrestorable`](super::LinkRecreate::unrestorable)),
+    /// a kind parameter that had the kernel's default, a replaced qdisc
+    /// whose kind does not read back, a TC tree without the previous one.
+    /// The config's routes come back with protocol `boot`; a deleted link's
+    /// with the protocol they had (#745).
     pub fn undo(&self) -> Plan {
         Plan::new(
             self.journal
@@ -464,6 +468,8 @@ fn step_object(step: &Step) -> crate::netlink::ErrorObject {
     };
     match step {
         Step::MissingLink { name } | Step::DeleteLink { name } => link(name),
+        Step::RestoreLink(r) => link(r.links.first().map_or("?", |l| l.name.as_str())),
+        Step::ClearTc { dev } => ErrorObject::Tc { dev: dev.clone() },
         Step::RefuseRemoval(r) | Step::RemoveLink(r) => link(&r.name),
         Step::RefuseRecreate(r) | Step::DeleteForRecreate(r) => link(&r.name),
         Step::RaiseMtuFirst { link: name, .. } => link(name),
@@ -514,6 +520,8 @@ fn step_operation(step: &Step) -> String {
         }
         Step::RemoveLink(r) => format!("delete link {} ({})", r.name, r.link_kind),
         Step::DeleteLink { name } => format!("delete link {name}"),
+        Step::RestoreLink(r) => format!("restore link {r}"),
+        Step::ClearTc { dev } => format!("clear the TC tree on {dev}"),
         Step::RaiseMtuFirst { link, mtu } => format!("set link {link} mtu={mtu}"),
         Step::CreateLink(link) => format!("create link {}", link.name),
         Step::ModifyLink { name, changes, .. } => {
@@ -730,6 +738,109 @@ fn fdb_entry(e: &super::DeclaredFdb) -> crate::netlink::fdb::FdbEntryBuilder {
     }
 }
 
+/// Put back what deleting a link took (#745): the links, created again
+/// bare, lower devices first; then their master, state, MTU, MAC and the
+/// rest, and those of the ports they had; then what was on them. The
+/// number of objects put back.
+async fn restore_links(conn: &Connection<Route>, r: &super::LinkRestore) -> Result<usize> {
+    use std::collections::{HashMap, HashSet};
+    // A bridge's and a bond's MAC and a bridge's MTU follow their ports
+    // unless set: set once the ports are back, where they did not bring
+    // them back already.
+    let follows_ports =
+        |l: &DeclaredLink| matches!(l.link_type, DeclaredLinkType::Bridge | DeclaredLinkType::Bond { .. });
+    let mut count = 0;
+    // The second end of a pair comes back with the first.
+    for link in r.links.iter().filter(|l| l.link_type.kind().is_some()) {
+        let bare = DeclaredLink {
+            name: link.name.clone(),
+            link_type: link.link_type.clone(),
+            state: super::types::LinkState::Unchanged,
+            mtu: link.mtu,
+            master: super::types::MasterSpec::Unmanaged,
+            address: link.address.filter(|_| !follows_ports(link)),
+            attrs: super::types::LinkAttrs::default(),
+            bridge: link.bridge.clone(),
+            port: None,
+        };
+        create_link(conn, &bare, None).await?;
+        count += 1;
+    }
+    let live = conn.get_links().await?;
+    let names: HashMap<u32, &str> = live
+        .iter()
+        .filter_map(|l| Some((l.ifindex(), l.name.as_deref()?)))
+        .collect();
+    let bonds: HashSet<&str> = live
+        .iter()
+        .filter(|l| l.kind() == Some("bond"))
+        .filter_map(|l| l.name.as_deref())
+        .collect();
+    for link in r.links.iter().chain(&r.ports) {
+        let have = live
+            .iter()
+            .find(|l| l.name.as_deref() == Some(link.name.as_str()))
+            .ok_or_else(|| conn.interface_not_found(link.name.as_str()))?;
+        let mut changes = super::diff::compute_link_changes(link, have, &names, &bonds);
+        if follows_ports(link) {
+            changes.set_address = None;
+        }
+        changes.port_vlans = link.port.as_ref().and_then(|p| p.vlans.clone());
+        if !changes.is_empty() {
+            modify_link(conn, &link.name, &changes, false).await?;
+        }
+    }
+    for link in r.links.iter().filter(|l| follows_ports(l)) {
+        let Some(now) = conn.get_link_by_name(link.name.as_str()).await? else {
+            continue;
+        };
+        if let Some(mtu) = link.mtu.filter(|m| now.mtu != Some(*m)) {
+            conn.set_link_mtu(link.name.as_str(), mtu).await?;
+        }
+        if let Some(mac) = link.address.filter(|m| now.address() != Some(&m[..])) {
+            conn.set_link_address(link.name.as_str(), mac).await?;
+        }
+    }
+    // Addresses before nexthops and routes: a gateway has to be on a
+    // subnet the link has.
+    for a in &r.addresses {
+        match add_address(conn, a).await {
+            Ok(()) => count += 1,
+            // An address a link brings with it: the kernel's own, there.
+            Err(e) if e.is_already_exists() && address_present(conn, a).await? => {}
+            Err(e) => return Err(e),
+        }
+    }
+    for n in &r.nexthops {
+        set_nexthop(conn, &n.nexthop, n.protocol).await?;
+        count += 1;
+    }
+    for route in &r.routes {
+        match add_route(conn, &route.route, route.protocol).await {
+            Ok(()) => count += 1,
+            Err(e) if e.is_already_exists() => {}
+            Err(e) => return Err(e),
+        }
+    }
+    for n in &r.neighbours {
+        conn.replace_neighbor(neighbour_config(n)).await?;
+        count += 1;
+    }
+    for e in &r.fdb {
+        let entry = fdb_entry(e);
+        if e.dst.is_some() && e.floods() {
+            conn.append_fdb(entry).await?;
+        } else {
+            conn.replace_fdb(entry).await?;
+        }
+        count += 1;
+    }
+    for tc in &r.tc {
+        count += super::preserve::restore(conn, tc).await?;
+    }
+    Ok(count)
+}
+
 /// Run one step against the kernel.
 async fn run_step(
     step: &Step,
@@ -781,6 +892,21 @@ async fn run_step(
                 return Ok(Outcome::Unchanged(None));
             }
             Outcome::Changed(format!("Deleted link {name}"), 1)
+        }
+        Step::RestoreLink(restore) => {
+            let n = restore_links(conn, restore).await?;
+            Outcome::Changed(format!("Restored {restore}"), n)
+        }
+        // The kernel's defaults come back.
+        Step::ClearTc { dev } => {
+            let mut n = 0;
+            for parent in [crate::TcHandle::ROOT, crate::TcHandle::INGRESS] {
+                n += usize::from(conn.del_qdisc_if_exists(dev.as_str(), parent).await?);
+            }
+            match n {
+                0 => Outcome::Unchanged(None),
+                n => Outcome::Changed(format!("Cleared the TC tree on {dev}"), n),
+            }
         }
         // `vlan_newlink` / `macvlan_common_newlink` refuse an MTU above
         // the lower device's, so its raise cannot wait for the modify
