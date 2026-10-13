@@ -853,6 +853,17 @@ All notable changes to this project will be documented in this file.
   matched its declaration and was never put right. Both are compared now,
   and an apply makes them the declared key.
 
+- **An undo puts back the tree under a qdisc the apply took away (#783).**
+  Replacing a root or hook qdisc with another kind or handle (a graft), or
+  deleting one the previous config declared, destroys the classes, the
+  qdiscs in them and the filters under it. The undo added the bare qdisc
+  back and said nothing was lost. The diff now reads that tree back and
+  records it on `Step::ReplaceQdisc`/`Step::DeleteQdisc` as `underneath`
+  (`Underneath::{Nothing, Tree, Lost}`), and the inverse is a `RestoreTc`
+  of it, the qdisc first. A tree that cannot be replayed (a BPF filter)
+  leaves the step without an inverse. `Step::DeleteQdisc` is a struct
+  variant now, `{ qdisc, underneath }`; `Step` is new in this release.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
