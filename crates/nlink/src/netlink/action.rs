@@ -1952,8 +1952,10 @@ impl ActionConfig for SkbmodAction {
         if let Some(smac) = self.smac {
             builder.append_attr(skbmod::TCA_SKBMOD_SMAC, &smac);
         }
+        // Host order: `tcf_skbmod_init()` reads `nla_get_u16()` and
+        // converts it itself (#816).
         if let Some(etype) = self.etype {
-            builder.append_attr(skbmod::TCA_SKBMOD_ETYPE, &etype.to_be_bytes());
+            builder.append_attr(skbmod::TCA_SKBMOD_ETYPE, &etype.to_ne_bytes());
         }
         Ok(())
     }
@@ -3524,8 +3526,9 @@ impl ActionConfig for IfeAction {
         if let Some(smac) = self.smac {
             builder.append_attr(ife::TCA_IFE_SMAC, &smac);
         }
+        // Host order, as `tcf_ife_init()` reads it (#816).
         if let Some(etype) = self.etype {
-            builder.append_attr(ife::TCA_IFE_TYPE, &etype.to_be_bytes());
+            builder.append_attr(ife::TCA_IFE_TYPE, &etype.to_ne_bytes());
         }
 
         if !self.metadata.is_empty() {
@@ -3539,10 +3542,11 @@ impl ActionConfig for IfeAction {
                 match entry.value {
                     // `allow`: empty payload.
                     None => builder.append_attr(attr, &[]),
-                    // `use`: explicit override value, network byte order.
+                    // `use`: the value, in host order: the metadata ops keep
+                    // and report it as a `u32` (tcindex a `u16`), #816.
                     Some(v) => match entry.kind {
-                        IfeMeta::TcIndex => builder.append_attr(attr, &(v as u16).to_be_bytes()),
-                        _ => builder.append_attr(attr, &v.to_be_bytes()),
+                        IfeMeta::TcIndex => builder.append_attr(attr, &(v as u16).to_ne_bytes()),
+                        _ => builder.append_attr(attr, &v.to_ne_bytes()),
                     },
                 }
             }

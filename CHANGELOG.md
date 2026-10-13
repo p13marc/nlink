@@ -1089,6 +1089,13 @@ All notable changes to this project will be documented in this file.
   program by fd and a dump by id, so the fd is read as its program's id
   (`BPF_OBJ_GET_INFO_BY_FD`).
 
+- **An skbmod ethertype and an ife type and `use` value install as given
+  (#816).** nlink sent them big-endian, but the kernel reads them in host
+  order (`nla_get_u16()`, and the ife metadata ops' raw `u32`). On a
+  little-endian host, `set etype 0x88b5` installed `0xb588`, `type 0xed3e`
+  installed `0x3eed`, and `use mark 5` installed mark `5 << 24`. A sweep of
+  every action kind's tc(8) lines against `tc` found it.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
