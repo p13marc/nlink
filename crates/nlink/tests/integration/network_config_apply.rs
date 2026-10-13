@@ -2031,3 +2031,71 @@ async fn an_htb_classs_quantum_and_overhead_are_compared() -> Result<()> {
     })
     .await
 }
+
+/// A police action's conform verdict and peakrate, and a gact action's
+/// random verdict, are compared (#791). The comparison
+/// summarised a police by its rate, burst, mtu and exceed verdict and a
+/// gact by its verdict alone, so a filter whose action drifted in any of
+/// the rest matched its declaration.
+#[tokio::test]
+async fn a_filters_police_and_gact_parameters_are_compared() -> Result<()> {
+    use nlink::netlink::action::{ActionList, GactAction, PoliceAction};
+    use nlink::netlink::filter::MatchallFilter;
+    use nlink::netlink::tc::HtbClassConfig;
+    use nlink::{Bytes, EthProto, FilterPriority, Rate, TcHandle};
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "sch_htb", "cls_matchall", "act_police", "act_gact");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("action-fields")?;
+        let conn = conn_in_ns(&ns)?;
+        let h = |m: u16, n: u16| TcHandle::new(m, n);
+        // A peakrate needs an mtu; declared here, so the drift below
+        // changes the peakrate alone.
+        let police = || {
+            PoliceAction::new()
+                .rate(Rate::mbit(1))
+                .burst(Bytes::kib(32))
+                .mtu(Bytes::new(2048))
+                .exceed_drop()
+        };
+        let filter = |police: PoliceAction, gact: GactAction| {
+            MatchallFilter::new()
+                .classid(h(1, 0x10))
+                .actions(ActionList::new().with(police).with(gact))
+        };
+        let cfg = NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .qdisc("d0", |q| q.htb().default_class(0x10))
+            .tc("d0", move |t| {
+                t.class(h(1, 0), h(1, 0x10), HtbClassConfig::new(Rate::mbit(10))).filter(
+                    h(1, 0),
+                    FilterPriority::new(1),
+                    EthProto::IP,
+                    filter(police(), GactAction::pass()),
+                )
+            });
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        assert!(cfg.diff(&conn).await?.is_empty(), "the declared filter converges");
+        // `avrate` is compared too, but the kernel takes it only with a rate
+        // estimator, which nlink does not attach (#792).
+        let drifts: [(&str, PoliceAction, GactAction); 3] = [
+            ("conform pipe", police().conform_pipe(), GactAction::pass()),
+            ("peakrate", police().peakrate(Rate::mbit(2)), GactAction::pass()),
+            ("gact random", police(), GactAction::pass().random(10, 2 /* TC_ACT_SHOT */)),
+        ];
+        for (what, p, g) in drifts {
+            ns.exec("tc", &["filter", "del", "dev", "d0", "parent", "1:", "prio", "1"])?;
+            conn.add_filter_full("d0", h(1, 0), None, EthProto::IP, FilterPriority::new(1), filter(p, g))
+                .await?;
+            let diff = cfg.diff(&conn).await?;
+            assert!(!diff.is_empty(), "{what} compared equal to the declaration");
+            let applied = cfg.apply(&conn).await?;
+            assert!(applied.is_success(), "{what}: {applied:?}");
+            assert!(cfg.diff(&conn).await?.is_empty(), "{what}: did not converge");
+        }
+        Ok(())
+    })
+    .await
+}
