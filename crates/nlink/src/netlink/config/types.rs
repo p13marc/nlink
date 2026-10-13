@@ -5602,9 +5602,31 @@ impl QdiscBuilder {
     /// The kernel sizes the flow table in `fq_codel_init` and will not
     /// resize it, so a different one replaces the qdisc, which drops its
     /// queue and resets its statistics (#361, #596).
+    ///
+    /// On sfq, the most flows (`SfqConfig::flows`, #806).
     pub fn flows(mut self, flows: u32) -> Self {
-        with_kind!(self, "flows", "fq_codel", FqCodel, |c| c.flows =
-            Some(flows))
+        match &mut self.qdisc_type {
+            Some(QdiscSpec::FqCodel(c)) => c.flows = Some(flows),
+            Some(QdiscSpec::Sfq(c)) => c.flows = flows,
+            _ => self.wrong_kind("flows", "fq_codel or sfq"),
+        }
+        self
+    }
+
+    /// Set sfq's hash buckets (`SfqConfig::divisor`, #806).
+    pub fn divisor(mut self, buckets: u32) -> Self {
+        with_kind!(self, "divisor", "sfq", Sfq, |c| c.divisor = buckets)
+    }
+
+    /// Set the most packets an sfq flow queues (`SfqConfig::depth`, #806).
+    pub fn depth(mut self, packets: u32) -> Self {
+        with_kind!(self, "depth", "sfq", Sfq, |c| c.depth = packets)
+    }
+
+    /// Drop from the head of a full sfq flow's queue
+    /// (`SfqConfig::headdrop`, #806).
+    pub fn headdrop(mut self, on: bool) -> Self {
+        with_kind!(self, "headdrop", "sfq", Sfq, |c| c.headdrop = on)
     }
 
     /// Set the bytes dequeued per round — fq_codel's and sfq's
@@ -5623,6 +5645,20 @@ impl QdiscBuilder {
     /// negotiated it (`FqCodelConfig::ecn`) (#361).
     pub fn ecn(mut self, enabled: bool) -> Self {
         with_kind!(self, "ecn", "fq_codel", FqCodel, |c| c.ecn = Some(enabled))
+    }
+
+    /// Set the most packets fq_codel drops at once when full
+    /// (`FqCodelConfig::drop_batch`, #806).
+    pub fn drop_batch(mut self, packets: u32) -> Self {
+        with_kind!(self, "drop_batch", "fq_codel", FqCodel, |c| c.drop_batch = Some(packets))
+    }
+
+    /// Apply fq_codel's CE threshold to the packets whose DS field, masked
+    /// with `mask`, equals `value` (`FqCodelConfig::ce_threshold_selector`,
+    /// #806).
+    pub fn ce_threshold_selector(mut self, value: u8, mask: u8) -> Self {
+        with_kind!(self, "ce_threshold_selector", "fq_codel", FqCodel, |c| c.ce_threshold_selector =
+            Some((value, mask)))
     }
 
     /// Set the sfq hash-perturbation period (`SfqConfig::perturb`).
@@ -5745,6 +5781,24 @@ impl QdiscBuilder {
     /// packet. netem's packet limit is [`limit`](Self::limit).
     pub fn limit_bytes(mut self, limit: crate::util::Bytes) -> Self {
         with_kind!(self, "limit_bytes", "tbf", Tbf, |c| c.limit = limit)
+    }
+
+    /// Set the bytes a TBF adds to each packet's size when it charges its
+    /// rates (`TbfConfig::overhead`, #806).
+    pub fn overhead(mut self, bytes: u16) -> Self {
+        with_kind!(self, "overhead", "tbf", Tbf, |c| c.overhead = bytes)
+    }
+
+    /// Set the least size a TBF charges a packet as (`TbfConfig::mpu`,
+    /// #806).
+    pub fn mpu(mut self, bytes: u16) -> Self {
+        with_kind!(self, "mpu", "tbf", Tbf, |c| c.mpu = bytes)
+    }
+
+    /// Set the link layer a TBF's rate tables are for
+    /// (`TbfConfig::linklayer`, #806).
+    pub fn linklayer(mut self, linklayer: crate::netlink::psched::LinkLayer) -> Self {
+        with_kind!(self, "linklayer", "tbf", Tbf, |c| c.linklayer = linklayer)
     }
 
     /// Configure as SFQ qdisc.

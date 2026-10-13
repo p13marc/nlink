@@ -608,7 +608,14 @@ pub mod qdisc {
             pub scell_log: u8,
             pub flags: u8,
             pub max_p: u32,
-            // ... additional fields omitted for simplicity
+            /// `struct tc_sfqred_stats`. Without it the struct is short of
+            /// `sizeof(tc_sfq_qopt_v1)`, and `sfq_change()` reads it as the
+            /// v0 struct, ignoring depth and head drop (#806).
+            pub stats: [u32; 6],
+        }
+
+        impl TcSfqQoptV1 {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
         }
 
         /// SFQ basic parameters (struct tc_sfq_qopt).

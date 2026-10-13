@@ -340,6 +340,12 @@ pub(super) struct FqCodelRepr {
     ce_threshold: Option<Duration>,
     #[serde(skip_serializing_if = "Option::is_none")]
     memory_limit: Option<Bytes>,
+    /// Packets (#806).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    drop_batch: Option<u32>,
+    /// `[value, mask]` (#806).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ce_threshold_selector: Option<[u8; 2]>,
     #[serde(skip_serializing)]
     target_us: Option<u32>,
     #[serde(skip_serializing)]
@@ -357,6 +363,8 @@ impl From<&FqCodelConfig> for FqCodelRepr {
             ecn: c.ecn,
             ce_threshold: c.ce_threshold,
             memory_limit: c.memory_limit.map(|m| Bytes::new(u64::from(m))),
+            drop_batch: c.drop_batch,
+            ce_threshold_selector: c.ce_threshold_selector.map(|(v, m)| [v, m]),
             ..FqCodelRepr::default()
         }
     }
@@ -375,6 +383,8 @@ impl TryFrom<FqCodelRepr> for FqCodelConfig {
         c.ecn = r.ecn;
         c.ce_threshold = r.ce_threshold;
         c.memory_limit = r.memory_limit.map(Bytes::as_u32_saturating);
+        c.drop_batch = r.drop_batch;
+        c.ce_threshold_selector = r.ce_threshold_selector.map(|[v, m]| (v, m));
         Ok(c)
     }
 }
@@ -393,6 +403,15 @@ pub(super) struct TbfRepr {
     peakrate: Option<Rate>,
     #[serde(skip_serializing_if = "Option::is_none")]
     mtu: Option<Bytes>,
+    /// Bytes added to each packet's size (#806).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    overhead: Option<u16>,
+    /// The least size a packet is charged as (#806).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mpu: Option<u16>,
+    /// `ethernet` (the default) or `atm` (#806).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    linklayer: Option<String>,
     /// Bytes per second, as 0.31 had it.
     #[serde(skip_serializing)]
     rate_bps: Option<u64>,
@@ -412,6 +431,13 @@ impl From<&TbfConfig> for TbfRepr {
             limit: (c.limit != Bytes::ZERO).then_some(c.limit),
             peakrate: c.peakrate,
             mtu: (c.mtu != TbfConfig::new().mtu).then(|| Bytes::new(u64::from(c.mtu))),
+            overhead: (c.overhead != 0).then_some(c.overhead),
+            mpu: (c.mpu != 0).then_some(c.mpu),
+            linklayer: match c.linklayer {
+                crate::netlink::psched::LinkLayer::Ethernet => None,
+                crate::netlink::psched::LinkLayer::Atm => Some("atm".into()),
+                _ => Some("unaware".into()),
+            },
             ..TbfRepr::default()
         }
     }
@@ -443,6 +469,14 @@ impl TryFrom<TbfRepr> for TbfConfig {
         if let Some(mtu) = r.mtu {
             c.mtu = mtu.as_u32_saturating();
         }
+        c.overhead = r.overhead.unwrap_or(0);
+        c.mpu = r.mpu.unwrap_or(0);
+        c.linklayer = match r.linklayer.as_deref() {
+            None | Some("ethernet") => crate::netlink::psched::LinkLayer::Ethernet,
+            Some("atm" | "adsl") => crate::netlink::psched::LinkLayer::Atm,
+            Some("unaware") => crate::netlink::psched::LinkLayer::Unaware,
+            Some(other) => return Err(format!("tbf `linklayer` {other:?} (expected ethernet or atm)")),
+        };
         Ok(c)
     }
 }
@@ -463,6 +497,18 @@ pub(super) struct SfqRepr {
     limit: Option<Packets>,
     #[serde(skip_serializing_if = "Option::is_none")]
     quantum: Option<Bytes>,
+    /// Hash buckets, a power of two (#806).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    divisor: Option<u32>,
+    /// The most flows (#806).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    flows: Option<u32>,
+    /// The most packets a flow queues (#806).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    depth: Option<u32>,
+    /// Drop from the head of a full flow's queue (#806).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    headdrop: bool,
     #[serde(skip_serializing)]
     perturb_secs: Option<u32>,
 }
@@ -474,6 +520,10 @@ impl From<&SfqConfig> for SfqRepr {
                 .then(|| Duration::from_secs(u64::from(c.perturb.unsigned_abs()))),
             limit: nonzero(c.limit),
             quantum: (c.quantum != 0).then(|| Bytes::new(u64::from(c.quantum))),
+            divisor: (c.divisor != 0).then_some(c.divisor),
+            flows: (c.flows != 0).then_some(c.flows),
+            depth: (c.depth != 0).then_some(c.depth),
+            headdrop: c.headdrop,
             perturb_secs: None,
         }
     }
@@ -491,6 +541,10 @@ impl TryFrom<SfqRepr> for SfqConfig {
         }
         c.limit = r.limit.unwrap_or_default();
         c.quantum = r.quantum.map_or(0, Bytes::as_u32_saturating);
+        c.divisor = r.divisor.unwrap_or(0);
+        c.flows = r.flows.unwrap_or(0);
+        c.depth = r.depth.unwrap_or(0);
+        c.headdrop = r.headdrop;
         Ok(c)
     }
 }

@@ -301,11 +301,11 @@ async fn qdisc_text_reinstalls_the_same_qdisc() -> Result<()> {
     Ok(())
 }
 
-/// A value the typed config cannot set prints when it is not the kernel's
-/// default; tc takes the text, and `parse_params` refuses it rather than
-/// installing something else.
+/// A value that is not the kernel's default prints, and the text reads
+/// back as the same qdisc (#806). The typed configs could not carry these,
+/// so `parse_params` refused them; they can now.
 #[tokio::test]
-async fn qdisc_text_the_typed_config_cannot_carry_is_refused() -> Result<()> {
+async fn qdisc_text_with_values_off_the_default_round_trips() -> Result<()> {
     nlink::require_root!();
     nlink::require_modules!("sch_sfq", "sch_fq_codel");
 
@@ -325,15 +325,11 @@ async fn qdisc_text_the_typed_config_cannot_carry_is_refused() -> Result<()> {
             "{kind}: `{printed}` not in `{text}`"
         );
         let words: Vec<&str> = text.split_whitespace().collect();
-        let err = add_parsed(&conn, "dummy1", kind, &words)
-            .await
-            .expect_err("parse_params took what it cannot carry");
-        assert!(err.to_string().contains(&format!("{kind}: ")), "{err}");
-        tc_add(&ns, "dummy2", kind, &text)?;
+        add_parsed(&conn, "dummy1", kind, &words).await?;
         assert_eq!(
-            line(&ns, "dummy2")?,
+            line(&ns, "dummy1")?,
             line(&ns, "dummy0")?,
-            "{kind}: tc took `{text}`"
+            "{kind}: `{text}` read back as another qdisc"
         );
     }
     Ok(())

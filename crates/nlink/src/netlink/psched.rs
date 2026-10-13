@@ -308,12 +308,21 @@ fn kernel_ratecfg(rate_bytes_per_sec: u64) -> (u32, u32) {
     }
 }
 
-/// The kernel's `psched_l2t_ns()` for the rate specs nlink writes
-/// (Ethernet link layer, no overhead, no mpu): nanoseconds to send `len`
-/// bytes at `rate_bytes_per_sec`.
-fn kernel_l2t_ns(rate_bytes_per_sec: u64, len: u32) -> u64 {
+/// A rate's framing: the overhead added to each packet, the least size it
+/// is charged as, and its link layer (#806).
+pub(crate) type Framing = (u16, u16, LinkLayer);
+
+/// No framing: what nlink wrote before #806.
+pub(crate) const UNFRAMED: Framing = (0, 0, LinkLayer::Ethernet);
+
+/// The kernel's `psched_l2t_ns()`: nanoseconds to send `len` bytes at
+/// `rate_bytes_per_sec`, the overhead added, raised to the mpu, and for
+/// ATM rounded up to whole 53-byte cells of 48 (#806).
+fn kernel_l2t_ns(rate_bytes_per_sec: u64, len: u32, (overhead, mpu, linklayer): Framing) -> u64 {
     let (mult, shift) = kernel_ratecfg(rate_bytes_per_sec);
-    (u64::from(len) * u64::from(mult)) >> shift
+    let len = (u64::from(len) + u64::from(overhead)).max(u64::from(mpu));
+    let len = if linklayer == LinkLayer::Atm { len.div_ceil(48) * 53 } else { len };
+    (len * u64::from(mult)) >> shift
 }
 
 /// The byte count a TBF bucket handed to the kernel in **bytes** reads
@@ -329,9 +338,33 @@ fn kernel_l2t_ns(rate_bytes_per_sec: u64, len: u32) -> u64 {
 /// Comparing a declared bucket against the dump has to go through the
 /// same round trip.
 pub(crate) fn tbf_bucket_round_trip(rate_bytes_per_sec: u64, bytes: u32) -> u32 {
+    tbf_bucket_round_trip_framed(rate_bytes_per_sec, bytes, UNFRAMED)
+}
+
+/// [`tbf_bucket_round_trip`] for a rate with framing, which the kernel
+/// charges each packet with (#806).
+pub(crate) fn tbf_bucket_round_trip_framed(rate_bytes_per_sec: u64, bytes: u32, framing: Framing) -> u32 {
     // `opt.buffer = PSCHED_NS2TICKS(q->buffer)` assigns into a __u32.
-    let ticks = (kernel_l2t_ns(rate_bytes_per_sec, bytes) >> PSCHED_SHIFT) as u32;
+    let ticks = (kernel_l2t_ns(rate_bytes_per_sec, bytes, framing) >> PSCHED_SHIFT) as u32;
     tc_calc_xmitsize(rate_bytes_per_sec, ticks)
+}
+
+/// The bytes to send for a bucket a dump reads as `dumped`, so that it
+/// reads as `dumped` again: the inverse of
+/// [`tbf_bucket_round_trip_framed`] (#806). Framing makes the dumped bytes
+/// the framed size, so the overhead comes off and ATM cells go back to
+/// their payload; the largest such byte count is taken, near the estimate.
+pub(crate) fn tbf_bucket_declared(rate_bytes_per_sec: u64, dumped: u32, framing: Framing) -> u32 {
+    if framing == UNFRAMED || rate_bytes_per_sec == 0 {
+        return dumped;
+    }
+    let (overhead, _, linklayer) = framing;
+    let payload = if linklayer == LinkLayer::Atm { dumped / 53 * 48 } else { dumped };
+    let estimate = payload.saturating_sub(u32::from(overhead));
+    (estimate.saturating_sub(256)..=estimate.saturating_add(256))
+        .rev()
+        .find(|b| tbf_bucket_round_trip_framed(rate_bytes_per_sec, *b, framing) == dumped)
+        .unwrap_or(estimate)
 }
 
 /// [`Psched::calc_rtable`] against the running kernel's clock.
@@ -430,7 +463,7 @@ mod tests {
         assert_eq!(kernel_ratecfg(1_250_000_000), (3_435_973_836, 32));
         assert_eq!(kernel_ratecfg(0), (1, 0));
         // 1514 bytes at 2 gbit: 1514 * 2^31 >> 29 = 6056 ns.
-        assert_eq!(kernel_l2t_ns(250_000_000, 1514), 6056);
+        assert_eq!(kernel_l2t_ns(250_000_000, 1514, UNFRAMED), 6056);
     }
 
     /// The values a live 6.12 kernel dumped for buckets nlink sent in
