@@ -3278,7 +3278,7 @@ async fn gate_and_ct_lines_read_as_tc_reads_them() -> Result<()> {
 
 /// #751: `conform-exceed` is exceed first, as tc-police(8) reads it.
 /// nlink read it conform first, so `drop/pipe` dropped the traffic that
-/// conformed. The police rate table needs root in the initial user
+/// conformed. #800: what a line leaves out is what tc leaves out. The police rate table needs root in the initial user
 /// namespace.
 #[tokio::test]
 async fn police_conform_exceed_reads_as_tc_reads_it() -> Result<()> {
@@ -3288,7 +3288,15 @@ async fn police_conform_exceed_reads_as_tc_reads_it() -> Result<()> {
     nlink::require_modules!("dummy", "sch_ingress", "cls_matchall", "act_police");
 
     let (ns, conn, d0) = clsact_d0("tc-police").await?;
-    for line in ["rate 1mbit burst 32k conform-exceed drop/pipe", "rate 2mbit burst 64k conform-exceed reclassify"] {
+    // The last three leave out what tc fills in: the exceed verdict and the
+    // mtu (#800).
+    for line in [
+        "rate 1mbit burst 32k conform-exceed drop/pipe",
+        "rate 2mbit burst 64k conform-exceed reclassify",
+        "rate 1mbit burst 32k",
+        "rate 1mbit burst 32k conform-exceed pipe",
+        "rate 1mbit burst 32k mtu 9000",
+    ] {
         same_as_tc(&ns, "police", line, async |a| matchall_at_prio_2(&conn, d0, a).await, |w| {
             Ok(ActionList::new().with(PoliceAction::parse_params(w)?))
         })

@@ -2032,6 +2032,55 @@ async fn an_htb_classs_quantum_and_overhead_are_compared() -> Result<()> {
     .await
 }
 
+/// A police action read from tc(8)'s words makes what tc makes of them,
+/// and a declaration of it converges (#800). `parse_params` started from
+/// nlink's own defaults: what exceeded was dropped where tc reclassifies
+/// it, and the mtu was 2047 where tc leaves it to the kernel, which a
+/// rate-less policer then held every larger packet to.
+#[tokio::test]
+async fn a_police_from_tcs_words_is_tcs_and_converges() -> Result<()> {
+    use nlink::netlink::action::{ActionList, Estimator, PoliceAction};
+    use nlink::netlink::filter::MatchallFilter;
+    use nlink::netlink::tc::HtbClassConfig;
+    use nlink::{EthProto, FilterPriority, Rate, TcHandle};
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "sch_htb", "cls_matchall", "act_police");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("police-tc-words")?;
+        let conn = conn_in_ns(&ns)?;
+        let h = |m: u16, n: u16| TcHandle::new(m, n);
+        // The kernel's mtu: `255 << cell_log` with a rate table, none without.
+        for (line, mtu) in [("rate 1mbit burst 32k", "mtu 2Kb"), ("avrate 1mbit", "mtu 4096Mb")] {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            let police = PoliceAction::parse_params(&words)?;
+            let estimator = Estimator::parse_params(&["1sec", "8sec"])?;
+            let cfg = NetworkConfig::new()
+                .link("d0", |l| l.dummy().up())
+                .qdisc("d0", |q| q.htb().default_class(0x10))
+                .tc("d0", move |t| {
+                    t.class(h(1, 0), h(1, 0x10), HtbClassConfig::new(Rate::mbit(10))).filter(
+                        h(1, 0),
+                        FilterPriority::new(1),
+                        EthProto::IP,
+                        MatchallFilter::new()
+                            .classid(h(1, 0x10))
+                            .actions(ActionList::new().with_estimator(estimator).with(police.clone())),
+                    )
+                });
+            let applied = cfg.apply(&conn).await?;
+            assert!(applied.is_success(), "{line}: {applied:?}");
+            let shown = ns.exec("tc", &["filter", "show", "dev", "d0", "parent", "1:"])?;
+            assert!(shown.contains("action reclassify") && shown.contains(mtu), "{line}: {shown}");
+            let diff = cfg.diff(&conn).await?;
+            assert!(diff.is_empty(), "{line}: the declaration did not converge: {diff:?}");
+            ns.exec("tc", &["filter", "del", "dev", "d0", "parent", "1:"])?;
+        }
+        Ok(())
+    })
+    .await
+}
+
 /// A police action's conform verdict, peakrate and average rate, and a
 /// gact action's random verdict, are compared (#791). The comparison
 /// summarised a police by its rate, burst, mtu and exceed verdict and a

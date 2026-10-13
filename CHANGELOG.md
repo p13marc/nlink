@@ -916,6 +916,18 @@ All notable changes to this project will be documented in this file.
   declarative comparison of a police's `avrate` (#791) now has policers to
   compare.
 
+- **A police from tc(8)'s words is what tc makes of them (#800).**
+  `PoliceAction::parse_params` started from `PoliceAction::new()`'s
+  defaults. Those drop what exceeds, where tc reclassifies it, and send an
+  mtu of 2047, where tc sends 0 and the kernel picks: `255 << cell_log`
+  with a rate, no limit without one. So `police rate 1mbit burst 32k`
+  dropped traffic tc would have passed on, and a rate-less (`avrate`)
+  policer held every packet over 2047 bytes to its limit. That includes
+  every GRO-aggregated packet on an ingress hook. `parse_params` now starts
+  from tc's defaults, and `to_params` leaves out what equals them. The
+  declarative comparison takes a sent mtu of 0 as the kernel's choice, so
+  such a police converges. `PoliceAction::new()` is unchanged.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

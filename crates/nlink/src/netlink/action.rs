@@ -915,15 +915,19 @@ impl PoliceAction {
     /// - `burst <bytes>` (required) — bucket size in `tc(8)` byte
     ///   syntax (`32k`, `1m`, etc.).
     /// - `peakrate <tc-rate>` — optional peak rate.
-    /// - `mtu <bytes>` — optional MTU (default 2047).
+    /// - `mtu <bytes>` — optional MTU. Without it, 0, as tc(8) sends: the
+    ///   kernel takes that as `255 << cell_log` with a rate and as no limit
+    ///   without one (#800).
     /// - `avrate <tc-rate>` — optional stateful average rate.
     /// - `conform-exceed <exceed>[/<conform>]` — as tc-police(8) reads
     ///   it, the exceed action first (`drop/pipe` drops what exceeds and
     ///   pipes what conforms; it was read the other way round until
     ///   0.32, #751). Each side accepts the same verdict keywords as
     ///   `gact`. `conform <verdict>` and `exceed <verdict>` set one each.
+    ///   Without them, what exceeds is reclassified, as tc(8) does, not
+    ///   dropped as [`new`](Self::new)'s default is (#800).
     pub fn parse_params(params: &[&str]) -> Result<Self> {
-        let mut act = Self::new();
+        let mut act = Self::tc_defaults();
         let mut i = 0;
         while i < params.len() {
             let key = params[i];
@@ -1040,6 +1044,19 @@ impl PoliceAction {
         Ok(act)
     }
 
+    /// What tc(8) sends for the words it is not given (#800): an exceed
+    /// verdict of `reclassify`, and an mtu of 0, which the kernel takes as
+    /// `255 << cell_log` with a rate table and as no limit without one.
+    /// [`parse_params`](Self::parse_params) starts here, and
+    /// [`to_params`](ActionConfig::to_params) leaves out what equals it.
+    fn tc_defaults() -> Self {
+        Self {
+            mtu: 0,
+            exceed_action: action::TC_ACT_RECLASSIFY,
+            ..Self::new()
+        }
+    }
+
     /// Build the action configuration.
     pub fn build(self) -> Self {
         self
@@ -1052,7 +1069,7 @@ impl ActionConfig for PoliceAction {
     }
 
     fn to_params(&self) -> Result<Vec<String>> {
-        let default = Self::new();
+        let default = Self::tc_defaults();
         let mut out = Vec::new();
         out.extend(kv("rate", rate_param("police", "rate", self.rate)?));
         out.extend(kv("burst", size_param("police", "burst", self.burst.into())?));
@@ -8073,12 +8090,16 @@ mod tests {
 
     // ---- PoliceAction ----
 
+    /// #800: what a line leaves out is what tc(8) leaves out: an mtu of 0,
+    /// for the kernel to pick, and `reclassify` for what exceeds.
     #[test]
     fn police_parse_params_rate_and_burst() {
         let a = PoliceAction::parse_params(&["rate", "1mbit", "burst", "32k"]).unwrap();
         let b = PoliceAction::new()
             .rate(crate::util::Rate::mbit(1))
-            .burst(crate::util::Bytes::kib(32));
+            .burst(crate::util::Bytes::kib(32))
+            .mtu(crate::util::Bytes::new(0))
+            .exceed_reclassify();
         assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
     }
 
@@ -8116,6 +8137,7 @@ mod tests {
             PoliceAction::new()
                 .rate(crate::util::Rate::mbit(1))
                 .burst(crate::util::Bytes::kib(32))
+                .mtu(crate::util::Bytes::new(0))
         };
         assert_eq!(
             write_options_bytes(&police("drop/pipe")),
@@ -8143,6 +8165,7 @@ mod tests {
         let b = PoliceAction::new()
             .rate(crate::util::Rate::mbit(1))
             .burst(crate::util::Bytes::kib(32))
+            .mtu(crate::util::Bytes::new(0))
             .conform(action::TC_ACT_PIPE)
             .exceed(action::TC_ACT_RECLASSIFY);
         assert_eq!(write_options_bytes(&a), write_options_bytes(&b));
@@ -8483,7 +8506,11 @@ mod params_tests {
     fn police_round_trips() {
         use crate::util::{Bytes, Rate};
         let p = || PoliceAction::new().rate(Rate::mbit(8)).burst(Bytes::kib(32));
-        assert_eq!(round_trips(p()), ["rate", "8mbit", "burst", "32kib"]);
+        // What differs from tc(8)'s defaults is written (#800): the
+        // builder's mtu and exceed verdict are not tc's.
+        assert_eq!(round_trips(p()), ["rate", "8mbit", "burst", "32kib", "mtu", "2047b", "exceed", "drop"]);
+        let words = ["rate", "8mbit", "burst", "32kib"];
+        assert_eq!(round_trips(PoliceAction::parse_params(&words).unwrap()), words);
         for a in [
             PoliceAction::new(),
             p().peakrate(Rate::mbit(16)).mtu(Bytes::new(9000)),
@@ -8498,8 +8525,8 @@ mod params_tests {
         // `conform` and `exceed` each by name, never as tc(8)'s
         // exceed-first `conform-exceed` pair.
         assert_eq!(
-            round_trips(p().conform_pipe().exceed_reclassify()),
-            ["rate", "8mbit", "burst", "32kib", "conform", "pipe", "exceed", "reclassify"]
+            round_trips(p().conform_pipe()),
+            ["rate", "8mbit", "burst", "32kib", "mtu", "2047b", "conform", "pipe", "exceed", "drop"]
         );
         assert!(ActionConfig::to_params(&p().exceed(action::tc_act_goto_chain(1))).is_err());
     }

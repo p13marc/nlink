@@ -707,7 +707,14 @@ fn split_filter(kind: &str, options: &[u8]) -> (BTreeMap<u16, Vec<u8>>, Vec<Acti
                         ActionSummary::Police {
                             rate: rate64.unwrap_or(u64::from(p.rate.rate)),
                             burst: p.burst,
-                            mtu: p.mtu,
+                            // An mtu of 0 is the kernel's to pick, as tc(8)
+                            // leaves it (#800): `255 << cell_log` from the
+                            // rate table, no limit without one.
+                            mtu: match p.mtu {
+                                0 if p.rate.rate > 0 => 255 << p.rate.cell_log,
+                                0 => u32::MAX,
+                                mtu => mtu,
+                            },
                             action: p.action,
                             // Absent is 0: the kernel dumps each only when set.
                             conform: u32_of(police::TCA_POLICE_RESULT).unwrap_or(0),
