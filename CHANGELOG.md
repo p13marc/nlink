@@ -951,6 +951,15 @@ All notable changes to this project will be documented in this file.
   exact rule, and if it is absent, adds the declared one without
   `NLM_F_EXCL`.
 
+- **A bridge FDB entry declared without a VLAN is one per port VLAN too
+  (#793).** `br_fdb_add` makes the untagged entry and one for each VLAN on
+  the port: VLAN 1 by default, with or without VLAN filtering. The diff
+  compared the untagged entry only, so a deleted per-VLAN entry went
+  unseen, and so did the traffic in that VLAN it was for. The diff now
+  expects one static entry per VLAN of the port, and re-adds the
+  declaration when one is missing or learned. It reads the ports' VLANs
+  whenever a config declares FDB entries.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

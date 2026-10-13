@@ -1378,6 +1378,11 @@ impl Snapshot {
         }
         if !config.fdb.is_empty() || opts.previous.as_ref().is_some_and(|p| !p.fdb.is_empty()) {
             snapshot.fdb = conn.get_bridge_neighbors().await?;
+            // A port's VLANs: an entry declared without one has one for
+            // each (#793).
+            if snapshot.bridge_vlans.is_empty() {
+                snapshot.bridge_vlans = conn.get_bridge_vlans_dump().await?;
+            }
         }
         if !config.rules.is_empty() || opts.previous.as_ref().is_some_and(|p| !p.rules.is_empty()) {
             snapshot.rules = conn.get_rules().await?;
@@ -1892,9 +1897,10 @@ fn diff_fdb(
     diff: &mut ConfigDiff,
 ) {
     use crate::netlink::types::neigh::nud;
-    // The entry the kernel has for a declaration, as one, and whether it is
-    // static or permanent rather than learned.
-    let live = |d: &DeclaredFdb| -> Option<(DeclaredFdb, bool)> {
+    // The entry the kernel has for a declaration, as one; whether it is
+    // static or permanent rather than learned; and whether every entry it
+    // makes is (#793).
+    let live = |d: &DeclaredFdb| -> Option<(DeclaredFdb, bool, bool)> {
         let ifindex = link_by_name.get(d.dev.as_str())?.ifindex();
         if d.dst.is_none() && moved.contains(&ifindex) {
             return None;
@@ -1910,16 +1916,35 @@ fn diff_fdb(
         let state = msg.header.ndm_state;
         let mut have = d.clone();
         have.local = d.dst.is_none() && state & nud::PERMANENT != 0;
-        Some((have, state & (nud::PERMANENT | nud::NOARP) != 0))
+        let kept = |state: u16| state & (nud::PERMANENT | nud::NOARP) != 0;
+        // A bridge entry declared without a VLAN is one per VLAN of the
+        // port as well (#793): `br_fdb_add` makes them all, and an apply
+        // that left one missing or learned has not converged.
+        let per_vlan = d.vlan.is_none() && d.dst.is_none();
+        let all_vlans = !per_vlan
+            || snapshot
+                .bridge_vlans
+                .iter()
+                .filter(|v| v.ifindex() == ifindex)
+                .all(|v| {
+                    snapshot.fdb.iter().any(|m| {
+                        m.ifindex() == ifindex
+                            && m.lladdr() == Some(&d.mac[..])
+                            && m.vlan() == Some(v.vid())
+                            && m.master().is_some()
+                            && kept(m.header.ndm_state)
+                    })
+                });
+        Some((have, kept(state), kept(state) && all_vlans))
     };
     for e in &config.fdb {
         match live(e) {
-            Some((have, true)) if have == *e => {}
-            Some((have, true)) => {
+            Some((have, _, true)) if have == *e => {}
+            Some((have, true, _)) if have != *e => {
                 diff.fdb_replaced.push((e.clone(), have));
                 diff.fdb_to_set.push(e.clone());
             }
-            // Missing, or learned.
+            // Missing, learned, or short of an entry for a VLAN.
             _ => diff.fdb_to_set.push(e.clone()),
         }
     }
@@ -1933,7 +1958,7 @@ fn diff_fdb(
         if kept {
             continue;
         }
-        if let Some((have, true)) = live(prev) {
+        if let Some((have, true, _)) = live(prev) {
             diff.fdb_to_remove.push(have);
         }
     }
