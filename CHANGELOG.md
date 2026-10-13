@@ -981,6 +981,16 @@ All notable changes to this project will be documented in this file.
   not declared is not compared: the tools that add addresses set one
   (`brd +`, DHCP clients).
 
+- **A replaced qdisc whose spec cannot hold its settings is not put back
+  as another (#783).** `QdiscSpec::from_live` read back only what a spec
+  carries. An sfq with another divisor, flow count or depth, or with head
+  drop, read back as a plain sfq. So did an fq_codel with another drop
+  batch or a CE threshold selector, and a TBF whose rate had an overhead,
+  an mpu or an ATM link layer. Its replace's undo then put back a qdisc
+  with the kernel's defaults and reported it as the one it replaced. Such
+  a replace is irreversible now, and so is the removal of such a root. An
+  undeclared tree holding one refuses the recreate that would lose it.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

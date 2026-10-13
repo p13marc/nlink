@@ -111,7 +111,39 @@ const FQ_CODEL_MIN_QUANTUM: u32 = 256;
 /// The largest limit sfq keeps when neither depth nor flows is set, which
 /// nlink never does: `sfq_change()` caps `limit` at `maxdepth * maxflows`,
 /// `SFQ_MAX_DEPTH` (127) times `SFQ_DEFAULT_FLOWS` (128) by default.
-const SFQ_MAX_LIMIT: u32 = 127 * 128;
+const SFQ_MAX_LIMIT: u32 = SFQ_MAX_DEPTH * SFQ_DEFAULT_FLOWS;
+
+/// sfq's defaults, which an `SfqConfig` leaves it (`sch_sfq.c`):
+/// `SFQ_DEFAULT_HASH_DIVISOR`, `SFQ_DEFAULT_FLOWS`, `SFQ_MAX_DEPTH`.
+const SFQ_DEFAULT_DIVISOR: u32 = 1024;
+const SFQ_DEFAULT_FLOWS: u32 = 128;
+const SFQ_MAX_DEPTH: u32 = 127;
+
+/// fq_codel's drop batch, which an `FqCodelConfig` leaves it
+/// (`fq_codel_init()`).
+const FQ_CODEL_DEFAULT_DROP_BATCH: u32 = 64;
+
+/// Whether a qdisc reports the attribute `id` in its options.
+fn has_option(live: &TcMessage, id: u16) -> bool {
+    crate::netlink::attr::AttrIter::new(live.raw_options().unwrap_or(&[])).any(|(t, _)| t & 0x7FFF == id)
+}
+
+/// Whether a TBF's rates have no overhead, mpu or link layer other than
+/// Ethernet, which a `TbfConfig` sends and cannot say otherwise (#783).
+fn tbf_rates_plain(live: &TcMessage) -> bool {
+    use crate::netlink::types::tc::qdisc::tbf::{TCA_TBF_PARMS, TcTbfQopt};
+    use zerocopy::FromBytes;
+    let parms = crate::netlink::attr::AttrIter::new(live.raw_options().unwrap_or(&[]))
+        .find(|(t, _)| t & 0x7FFF == TCA_TBF_PARMS)
+        .and_then(|(_, p)| TcTbfQopt::read_from_prefix(p).ok());
+    parms.is_some_and(|(q, _)| {
+        [q.rate, q.peakrate].iter().all(|r| {
+            r.overhead == 0
+                && r.mpu == 0
+                && (r.rate == 0 || r.linklayer & 0x0F == psched::LinkLayer::Ethernet as u8)
+        })
+    })
+}
 
 impl QdiscSpec {
     /// The config to install, or `None` for the kernel default.
@@ -142,12 +174,20 @@ impl QdiscSpec {
     /// [`matches`](Self::matches) reads, from their parsed options, and the
     /// kernel's default root. `None` for another kind; the spec read back
     /// [`matches`](Self::matches) the qdisc it came from.
+    ///
+    /// `None` too for one set in a way its spec cannot say (#783): an sfq
+    /// with another divisor, flow count or depth, or head drop; an fq_codel
+    /// with another drop batch or a CE threshold selector; a TBF whose rate
+    /// has an overhead, an mpu or a link layer other than Ethernet. Put
+    /// back as its spec, it would come back otherwise; an undo says it
+    /// cannot, rather than restore another qdisc.
     pub(crate) fn from_live(live: &TcMessage) -> Option<Self> {
         use crate::netlink::tc_options::QdiscOptions as O;
         use crate::util::{Bytes, Packets, Rate};
         if live.handle().as_raw() == 0 {
             return Some(Self::KernelDefault);
         }
+        use crate::netlink::types::tc::qdisc::fq_codel;
         let us = |v: u32| Duration::from_micros(u64::from(v));
         Some(match (live.kind()?, live.options()) {
             ("ingress", _) => Self::Ingress,
@@ -156,7 +196,11 @@ impl QdiscSpec {
             ("drr", _) => Self::Drr(DrrConfig::new()),
             ("qfq", _) => Self::Qfq(QfqConfig::new()),
             (_, Some(O::Netem(o))) => Self::Netem(NetemConfig::from(&o)),
-            (_, Some(O::FqCodel(o))) => Self::FqCodel(FqCodelConfig {
+            (_, Some(O::FqCodel(o)))
+                if o.drop_batch_size.is_none_or(|b| b == FQ_CODEL_DEFAULT_DROP_BATCH)
+                    && !has_option(live, fq_codel::TCA_FQ_CODEL_CE_THRESHOLD_SELECTOR) =>
+            {
+                Self::FqCodel(FqCodelConfig {
                 target: Some(us(o.target_us)),
                 interval: Some(us(o.interval_us)),
                 limit: Some(Packets::new(o.limit)),
@@ -165,24 +209,32 @@ impl QdiscSpec {
                 ecn: Some(o.ecn),
                 ce_threshold: o.ce_threshold_us.map(us),
                 memory_limit: o.memory_limit,
-            }),
+            })
+            }
             (_, Some(O::Htb(o))) => Self::Htb(HtbQdiscConfig {
                 default_class: o.default_class,
                 r2q: o.rate2quantum,
                 direct_qlen: o.direct_qlen.map(Packets::new),
             }),
-            (_, Some(O::Tbf(o))) => Self::Tbf(TbfConfig {
+            (_, Some(O::Tbf(o))) if tbf_rates_plain(live) => Self::Tbf(TbfConfig {
                 rate: Rate::bytes_per_sec(o.rate),
                 peakrate: (o.peakrate != 0).then(|| Rate::bytes_per_sec(o.peakrate)),
                 burst: Bytes::new(u64::from(o.burst)),
                 mtu: o.mtu,
                 limit: Bytes::new(u64::from(o.limit)),
             }),
-            (_, Some(O::Sfq(o))) => Self::Sfq(SfqConfig {
+            (_, Some(O::Sfq(o)))
+                if o.divisor == SFQ_DEFAULT_DIVISOR
+                    && o.flows == SFQ_DEFAULT_FLOWS
+                    && o.depth.is_none_or(|d| d == SFQ_MAX_DEPTH)
+                    && o.headdrop != Some(true) =>
+            {
+                Self::Sfq(SfqConfig {
                 perturb: o.perturb_period,
                 limit: Packets::new(o.limit),
                 quantum: o.quantum,
-            }),
+            })
+            }
             (_, Some(O::Prio(o))) => Self::Prio(PrioConfig {
                 bands: o.bands,
                 priomap: o.priomap,
