@@ -1655,3 +1655,46 @@ async fn a_route_through_an_encap_nexthop_reads_back_as_one() -> Result<()> {
     })
     .await
 }
+
+/// An address the apply removes comes back from its undo with what it had
+/// (#781): its label, metric and `noprefixroute`. The diff read a live
+/// address back bare, so the undo put back a plain address: no label, a
+/// metric-0 prefix route where there had been none.
+#[tokio::test]
+async fn an_undo_puts_back_an_address_with_its_attributes() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("addr-undo")?;
+        let conn = conn_in_ns(&ns)?;
+        let cfg = NetworkConfig::new().link("d0", |l| l.dummy().up());
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        ns.exec("ip", &["addr", "add", "10.87.0.5/24", "dev", "d0", "label", "d0:x", "metric", "50", "noprefixroute"])?;
+        let shown = |ns: &TestNamespace| -> Result<String> {
+            let addr = crate::common::converge::ip_json(ns, &["addr", "show", "dev", "d0"])
+                .map_err(nlink::Error::invalid_message)?;
+            let routes = crate::common::converge::ip_json(ns, &["route", "show", "dev", "d0"])
+                .map_err(nlink::Error::invalid_message)?;
+            let a: Vec<String> = addr[0]["addr_info"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|a| a["family"] == "inet")
+                .map(|a| format!("{} {} {} {}", a["local"], a["label"], a["metric"], a["noprefixroute"]))
+                .collect();
+            Ok(format!("{a:?} {routes}"))
+        };
+        let before = shown(&ns)?;
+
+        let applied = cfg.apply_with_options(&conn, ApplyOptions::default().with_purge(true)).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        assert!(!shown(&ns)?.contains("10.87.0.5"), "the purge removed it");
+        let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
+        assert!(undone.is_success(), "{undone:?}");
+        assert_eq!(shown(&ns)?, before);
+        Ok(())
+    })
+    .await
+}

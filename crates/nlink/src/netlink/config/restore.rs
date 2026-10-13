@@ -821,10 +821,6 @@ fn kind_from_live(l: &LinkMessage, names: &HashMap<u32, &str>) -> Result<Declare
 /// from a router advertisement, and one with a scope other than global
 /// has no declaration; an IPv6 link-local address the kernel makes itself.
 fn address_from_live(a: &AddressMessage, dev: &str, why: &mut Vec<String>) -> Option<DeclaredAddress> {
-    const IFA_F_NODAD: u32 = 0x02;
-    const IFA_F_HOMEADDRESS: u32 = 0x10;
-    const IFA_F_MANAGETEMPADDR: u32 = 0x100;
-    const IFA_F_NOPREFIXROUTE: u32 = 0x200;
     let addr = *a.primary_address()?;
     if let IpAddr::V6(v6) = addr
         && v6.segments()[0] & 0xffc0 == 0xfe80
@@ -840,17 +836,7 @@ fn address_from_live(a: &AddressMessage, dev: &str, why: &mut Vec<String>) -> Op
         why.push(format!("{text}, of a scope no declaration has"));
         return None;
     }
-    let mut d = DeclaredAddress::plain(dev, addr, a.prefix_len());
-    let flags = a.flags();
-    d.attrs.peer = a.peer().copied();
-    d.attrs.label = a.label().filter(|l| *l != dev).map(str::to_string);
-    d.attrs.metric = a.metric();
-    d.attrs.nodad = flags & IFA_F_NODAD != 0;
-    d.attrs.optimistic = a.is_optimistic();
-    d.attrs.noprefixroute = flags & IFA_F_NOPREFIXROUTE != 0;
-    d.attrs.home = flags & IFA_F_HOMEADDRESS != 0;
-    d.attrs.mngtmpaddr = flags & IFA_F_MANAGETEMPADDR != 0;
-    Some(d)
+    super::diff::address_from_live(dev, a)
 }
 
 /// The nexthop objects deleting `gone` takes: the ones on it, and every
