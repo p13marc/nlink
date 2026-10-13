@@ -3046,6 +3046,7 @@ pub struct VtiLink {
     ikey: Option<u32>,
     okey: Option<u32>,
     link: Option<InterfaceRef>,
+    mtu: Option<u32>,
 }
 
 /// VTI-specific attributes (IFLA_VTI_*)
@@ -3069,6 +3070,7 @@ impl VtiLink {
             ikey: None,
             okey: None,
             link: None,
+            mtu: None,
         }
     }
 
@@ -3114,6 +3116,12 @@ impl VtiLink {
         self.link = Some(InterfaceRef::Index(index));
         self
     }
+
+    /// Set the MTU, sent at create (#788).
+    pub fn mtu(mut self, mtu: u32) -> Self {
+        self.mtu = Some(mtu);
+        self
+    }
 }
 
 impl LinkConfig for VtiLink {
@@ -3132,6 +3140,9 @@ impl LinkConfig for VtiLink {
     fn write_to(&self, builder: &mut MessageBuilder, parent_index: Option<u32>) {
         // Add interface name
         write_ifname(builder, &self.name);
+        if let Some(mtu) = self.mtu {
+            builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
 
         // Set underlying link if specified
         if let Some(idx) = parent_index {
@@ -3606,6 +3617,7 @@ pub struct Ip6GretapLink {
     flowinfo: Option<u32>,
     key: Option<u32>,
     mtu: Option<u32>,
+    address: Option<[u8; 6]>,
     link: Option<InterfaceRef>,
 }
 
@@ -3621,6 +3633,7 @@ impl Ip6GretapLink {
             flowinfo: None,
             key: None,
             mtu: None,
+            address: None,
             link: None,
         }
     }
@@ -3654,6 +3667,12 @@ impl Ip6GretapLink {
     /// The MTU (#516).
     pub fn mtu(mut self, mtu: u32) -> Self {
         self.mtu = Some(mtu);
+        self
+    }
+
+    /// Set the MAC address, sent at create (#788).
+    pub fn address(mut self, addr: [u8; 6]) -> Self {
+        self.address = Some(addr);
         self
     }
 
@@ -3708,6 +3727,9 @@ impl LinkConfig for Ip6GretapLink {
 
         if let Some(mtu) = self.mtu {
             builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+        if let Some(addr) = &self.address {
+            builder.append_attr(IflaAttr::Address as u16, addr);
         }
 
         // IFLA_LINKINFO
@@ -3851,6 +3873,7 @@ pub struct ErspanLink {
     ttl: Option<u8>,
     version: ErspanVersion,
     mtu: Option<u32>,
+    address: Option<[u8; 6]>,
     link: Option<InterfaceRef>,
 }
 
@@ -3866,6 +3889,7 @@ impl ErspanLink {
             ttl: None,
             version: ErspanVersion::default(),
             mtu: None,
+            address: None,
             link: None,
         }
     }
@@ -3900,6 +3924,12 @@ impl ErspanLink {
         self
     }
 
+    /// Set the MAC address, sent at create (#788).
+    pub fn address(mut self, addr: [u8; 6]) -> Self {
+        self.address = Some(addr);
+        self
+    }
+
     /// Set the underlay interface by name.
     pub fn link(mut self, iface: impl Into<String>) -> Self {
         self.link = Some(InterfaceRef::Name(iface.into()));
@@ -3930,6 +3960,9 @@ impl LinkConfig for ErspanLink {
         write_ifname(builder, &self.name);
         if let Some(mtu) = self.mtu {
             builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+        if let Some(addr) = &self.address {
+            builder.append_attr(IflaAttr::Address as u16, addr);
         }
         if let Some(idx) = parent_index {
             builder.append_attr_u32(IflaAttr::Link as u16, idx);
@@ -3967,6 +4000,7 @@ pub struct Ip6ErspanLink {
     hoplimit: Option<u8>,
     version: ErspanVersion,
     mtu: Option<u32>,
+    address: Option<[u8; 6]>,
     link: Option<InterfaceRef>,
 }
 
@@ -3981,6 +4015,7 @@ impl Ip6ErspanLink {
             hoplimit: None,
             version: ErspanVersion::default(),
             mtu: None,
+            address: None,
             link: None,
         }
     }
@@ -4015,6 +4050,12 @@ impl Ip6ErspanLink {
         self
     }
 
+    /// Set the MAC address, sent at create (#788).
+    pub fn address(mut self, addr: [u8; 6]) -> Self {
+        self.address = Some(addr);
+        self
+    }
+
     /// Set the underlay interface by name.
     pub fn link(mut self, iface: impl Into<String>) -> Self {
         self.link = Some(InterfaceRef::Name(iface.into()));
@@ -4045,6 +4086,9 @@ impl LinkConfig for Ip6ErspanLink {
         write_ifname(builder, &self.name);
         if let Some(mtu) = self.mtu {
             builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+        if let Some(addr) = &self.address {
+            builder.append_attr(IflaAttr::Address as u16, addr);
         }
         let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);
         builder.append_attr_str(IflaInfo::Kind as u16, "ip6erspan");
@@ -5066,6 +5110,7 @@ pub struct GretapLink {
     pmtudisc: Option<bool>,
     fwmark: Option<u32>,
     mtu: Option<u32>,
+    address: Option<[u8; 6]>,
     link: Option<InterfaceRef>,
 }
 
@@ -5083,6 +5128,7 @@ impl GretapLink {
             pmtudisc: None,
             fwmark: None,
             mtu: None,
+            address: None,
             link: None,
         }
     }
@@ -5146,6 +5192,12 @@ impl GretapLink {
         self
     }
 
+    /// Set the MAC address, sent at create (#788).
+    pub fn address(mut self, addr: [u8; 6]) -> Self {
+        self.address = Some(addr);
+        self
+    }
+
     /// Set the underlay interface by name.
     pub fn link(mut self, iface: impl Into<String>) -> Self {
         self.link = Some(InterfaceRef::Name(iface.into()));
@@ -5177,6 +5229,9 @@ impl LinkConfig for GretapLink {
 
         if let Some(mtu) = self.mtu {
             builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+        if let Some(addr) = &self.address {
+            builder.append_attr(IflaAttr::Address as u16, addr);
         }
         if let Some(idx) = parent_index {
             builder.append_attr_u32(IflaAttr::Link as u16, idx);
@@ -5931,6 +5986,7 @@ pub struct MacsecLink {
     name: String,
     parent: InterfaceRef,
     mtu: Option<u32>,
+    address: Option<[u8; 6]>,
     sci: Option<u64>,
     port: Option<u16>,
     encrypt: Option<bool>,
@@ -5951,6 +6007,7 @@ impl MacsecLink {
             name: name.into(),
             parent: InterfaceRef::Name(parent.into()),
             mtu: None,
+            address: None,
             sci: None,
             port: None,
             encrypt: None,
@@ -5971,6 +6028,7 @@ impl MacsecLink {
             name: name.into(),
             parent: InterfaceRef::Index(parent_index),
             mtu: None,
+            address: None,
             sci: None,
             port: None,
             encrypt: None,
@@ -5987,6 +6045,12 @@ impl MacsecLink {
     /// Set the MTU.
     pub fn mtu(mut self, mtu: u32) -> Self {
         self.mtu = Some(mtu);
+        self
+    }
+
+    /// Set the MAC address, sent at create (#788).
+    pub fn address(mut self, addr: [u8; 6]) -> Self {
+        self.address = Some(addr);
         self
     }
 
@@ -6078,6 +6142,9 @@ impl LinkConfig for MacsecLink {
 
         if let Some(mtu) = self.mtu {
             builder.append_attr_u32(IflaAttr::Mtu as u16, mtu);
+        }
+        if let Some(addr) = &self.address {
+            builder.append_attr(IflaAttr::Address as u16, addr);
         }
 
         let linkinfo = builder.nest_start(IflaAttr::Linkinfo as u16);

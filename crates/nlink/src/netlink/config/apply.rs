@@ -1353,6 +1353,10 @@ pub(crate) fn link_config(
             if let Some(mtu) = link.mtu {
                 c = c.mtu(mtu);
             }
+            // A MAC goes out at create, so one apply converges (#788).
+            if let Some(addr) = link.address {
+                c = c.address(addr);
+            }
             Box::new(c)
         }
         DeclaredLinkType::Ipip(p) => {
@@ -1406,6 +1410,10 @@ pub(crate) fn link_config(
             }
             if let Some(v) = &p.underlay_dev {
                 c = c.link(v.as_str());
+            }
+            // At create, so one apply converges (#788).
+            if let Some(mtu) = link.mtu {
+                c = c.mtu(mtu);
             }
             Box::new(c)
         }
@@ -1479,6 +1487,10 @@ pub(crate) fn link_config(
             if let Some(mtu) = link.mtu {
                 c = c.mtu(mtu);
             }
+            // A MAC goes out at create, so one apply converges (#788).
+            if let Some(addr) = link.address {
+                c = c.address(addr);
+            }
             Box::new(c)
         }
         DeclaredLinkType::Vti6(p) => {
@@ -1518,6 +1530,10 @@ pub(crate) fn link_config(
             if let Some(mtu) = link.mtu {
                 c = c.mtu(mtu);
             }
+            // A MAC goes out at create, so one apply converges (#788).
+            if let Some(addr) = link.address {
+                c = c.address(addr);
+            }
             Box::new(c)
         }
         DeclaredLinkType::Ip6erspan(p) => {
@@ -1537,6 +1553,10 @@ pub(crate) fn link_config(
             }
             if let Some(mtu) = link.mtu {
                 c = c.mtu(mtu);
+            }
+            // A MAC goes out at create, so one apply converges (#788).
+            if let Some(addr) = link.address {
+                c = c.address(addr);
             }
             Box::new(c)
         }
@@ -1610,6 +1630,10 @@ pub(crate) fn link_config(
             }
             if let Some(mtu) = link.mtu {
                 c = c.mtu(mtu);
+            }
+            // A MAC goes out at create, so one apply converges (#788).
+            if let Some(addr) = link.address {
+                c = c.address(addr);
             }
             Box::new(c)
         }

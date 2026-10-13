@@ -881,6 +881,13 @@ All notable changes to this project will be documented in this file.
   `Step::DeleteRoute` becomes `{ route, protocol }`. The inverses put
   routes back as they were. `Step` is new in this release.
 
+- **One apply converges a tunnel's MAC and a vti's MTU (#788).** A MAC
+  declared on a gretap, ip6gretap, erspan, ip6erspan or macsec link, and an
+  MTU on a vti, were not sent when the link was created. The next diff
+  found them, and a second apply set them. They go out at create now:
+  `GretapLink`, `Ip6GretapLink`, `ErspanLink`, `Ip6ErspanLink` and
+  `MacsecLink` gain `address()`, and `VtiLink` gains `mtu()`.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
