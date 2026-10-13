@@ -45,7 +45,7 @@ use std::{
 
 use super::{
     Connection,
-    action::ActionList,
+    action::{ActionList, Estimator},
     builder::MessageBuilder,
     connection::{ack_request, create_request, replace_request},
     error::{Error, Result},
@@ -150,12 +150,23 @@ pub trait FilterConfig: Send + Sync {
         let _ = ifindexes;
         Ok(())
     }
+
+    /// The rate estimator for the filter's actions, sent as `TCA_RATE`
+    /// (#792): its [`ActionList::with_estimator`]. None by default.
+    fn estimator(&self) -> Option<Estimator> {
+        None
+    }
 }
 
-/// [`FilterConfig::device_names`] and [`FilterConfig::resolve_devices`]
-/// for a filter that names devices only in its `actions`.
-macro_rules! action_devices {
+/// [`FilterConfig::device_names`], [`FilterConfig::resolve_devices`] and
+/// [`FilterConfig::estimator`] for a filter that names devices only in its
+/// `actions`.
+macro_rules! from_actions {
     () => {
+        fn estimator(&self) -> Option<Estimator> {
+            self.actions.as_ref().and_then(ActionList::estimator)
+        }
+
         fn device_names(&self) -> Vec<&str> {
             self.actions
                 .as_ref()
@@ -170,6 +181,15 @@ macro_rules! action_devices {
             }
         }
     };
+}
+
+/// The filter's [`FilterConfig::estimator`] as `TCA_RATE`, which the kernel
+/// hands to every action the filter creates (#792).
+fn write_estimator(builder: &mut MessageBuilder, config: &impl FilterConfig) {
+    use zerocopy::IntoBytes;
+    if let Some(estimator) = config.estimator() {
+        builder.append_attr(TcaAttr::Rate as u16, estimator.parms().as_bytes());
+    }
 }
 
 /// The ethertype `add_filter` falls back to when a [`FilterConfig`] leaves
@@ -2197,7 +2217,7 @@ fn ipv6_mask(prefix_len: u8) -> Ipv6Addr {
 }
 
 impl FilterConfig for FlowerFilter {
-    action_devices!();
+    from_actions!();
 
     fn kind(&self) -> &'static str {
         "flower"
@@ -2737,7 +2757,7 @@ impl MatchallFilter {
 }
 
 impl FilterConfig for MatchallFilter {
-    action_devices!();
+    from_actions!();
 
     fn kind(&self) -> &'static str {
         "matchall"
@@ -4063,7 +4083,7 @@ impl CgroupFilter {
 }
 
 impl FilterConfig for CgroupFilter {
-    action_devices!();
+    from_actions!();
 
     fn kind(&self) -> &'static str {
         "cgroup"
@@ -4286,6 +4306,10 @@ impl RouteFilter {
 }
 
 impl FilterConfig for RouteFilter {
+    fn estimator(&self) -> Option<Estimator> {
+        self.actions.as_ref().and_then(ActionList::estimator)
+    }
+
     fn device_names(&self) -> Vec<&str> {
         let mut names = match &self.from_if {
             Some(InterfaceRef::Name(name)) => vec![name.as_str()],
@@ -4578,7 +4602,7 @@ impl RsvpFilter {
 }
 
 impl FilterConfig for RsvpFilter {
-    action_devices!();
+    from_actions!();
 
     fn kind(&self) -> &'static str {
         if self.is_v6() { "rsvp6" } else { "rsvp" }
@@ -5018,7 +5042,7 @@ impl FlowFilter {
 }
 
 impl FilterConfig for FlowFilter {
-    action_devices!();
+    from_actions!();
 
     fn kind(&self) -> &'static str {
         "flow"
@@ -5220,6 +5244,7 @@ impl Connection<Route> {
         if let Some(chain) = config.chain() {
             builder.append_attr_u32(TcaAttr::Chain as u16, chain);
         }
+        write_estimator(&mut builder, &config);
 
         let options_token = builder.nest_start(TcaAttr::Options as u16);
         config.write_options(&mut builder)?;
@@ -5350,6 +5375,7 @@ impl Connection<Route> {
         if let Some(chain) = config.chain() {
             builder.append_attr_u32(TcaAttr::Chain as u16, chain);
         }
+        write_estimator(&mut builder, &config);
 
         let options_token = builder.nest_start(TcaAttr::Options as u16);
         config.write_options(&mut builder)?;
@@ -5461,6 +5487,7 @@ impl Connection<Route> {
         if let Some(chain) = config.chain() {
             builder.append_attr_u32(TcaAttr::Chain as u16, chain);
         }
+        write_estimator(&mut builder, &config);
 
         let options_token = builder.nest_start(TcaAttr::Options as u16);
         config.write_options(&mut builder)?;

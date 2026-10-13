@@ -2032,14 +2032,14 @@ async fn an_htb_classs_quantum_and_overhead_are_compared() -> Result<()> {
     .await
 }
 
-/// A police action's conform verdict and peakrate, and a gact action's
-/// random verdict, are compared (#791). The comparison
+/// A police action's conform verdict, peakrate and average rate, and a
+/// gact action's random verdict, are compared (#791). The comparison
 /// summarised a police by its rate, burst, mtu and exceed verdict and a
 /// gact by its verdict alone, so a filter whose action drifted in any of
 /// the rest matched its declaration.
 #[tokio::test]
 async fn a_filters_police_and_gact_parameters_are_compared() -> Result<()> {
-    use nlink::netlink::action::{ActionList, GactAction, PoliceAction};
+    use nlink::netlink::action::{ActionList, Estimator, GactAction, PoliceAction};
     use nlink::netlink::filter::MatchallFilter;
     use nlink::netlink::tc::HtbClassConfig;
     use nlink::{Bytes, EthProto, FilterPriority, Rate, TcHandle};
@@ -2059,10 +2059,12 @@ async fn a_filters_police_and_gact_parameters_are_compared() -> Result<()> {
                 .mtu(Bytes::new(2048))
                 .exceed_drop()
         };
-        let filter = |police: PoliceAction, gact: GactAction| {
+        // An average rate needs the actions' rate estimator (#792).
+        let estimator = Estimator::new(std::time::Duration::from_secs(1), std::time::Duration::from_secs(8))?;
+        let filter = move |police: PoliceAction, gact: GactAction| {
             MatchallFilter::new()
                 .classid(h(1, 0x10))
-                .actions(ActionList::new().with(police).with(gact))
+                .actions(ActionList::new().with_estimator(estimator).with(police).with(gact))
         };
         let cfg = NetworkConfig::new()
             .link("d0", |l| l.dummy().up())
@@ -2078,11 +2080,10 @@ async fn a_filters_police_and_gact_parameters_are_compared() -> Result<()> {
         let applied = cfg.apply(&conn).await?;
         assert!(applied.is_success(), "{applied:?}");
         assert!(cfg.diff(&conn).await?.is_empty(), "the declared filter converges");
-        // `avrate` is compared too, but the kernel takes it only with a rate
-        // estimator, which nlink does not attach (#792).
-        let drifts: [(&str, PoliceAction, GactAction); 3] = [
+        let drifts: [(&str, PoliceAction, GactAction); 4] = [
             ("conform pipe", police().conform_pipe(), GactAction::pass()),
             ("peakrate", police().peakrate(Rate::mbit(2)), GactAction::pass()),
+            ("avrate", police().avrate(Rate::mbit(1)), GactAction::pass()),
             ("gact random", police(), GactAction::pass().random(10, 2 /* TC_ACT_SHOT */)),
         ];
         for (what, p, g) in drifts {

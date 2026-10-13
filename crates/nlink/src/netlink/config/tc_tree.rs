@@ -46,7 +46,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crate::netlink::{
-    action::{ActionList, MirredAction},
+    action::{ActionList, Estimator, MirredAction},
     attr::AttrIter,
     builder::MessageBuilder,
     connection::Connection,
@@ -491,7 +491,9 @@ impl PartialEq for FilterSpec {
                     .zip(1..)
                     .map(|(n, i)| (n.to_string(), i))
                     .collect();
-                a.kind() == b.kind() && a.options_bytes(&stand_in) == b.options_bytes(&stand_in)
+                a.kind() == b.kind()
+                    && a.estimator() == b.estimator()
+                    && a.options_bytes(&stand_in) == b.options_bytes(&stand_in)
             }
         }
     }
@@ -516,6 +518,17 @@ impl FilterSpec {
             Self::Matchall(_) | Self::RedirectTo(_) => "matchall",
             Self::Fw(_) => "fw",
             Self::U32(_) => "u32",
+        }
+    }
+
+    /// Its actions' rate estimator (#792), which goes on the request
+    /// rather than in `TCA_OPTIONS`. The kernel does not report it, so a
+    /// diff cannot compare it.
+    pub(crate) fn estimator(&self) -> Option<Estimator> {
+        match self {
+            Self::Flower(f) => f.estimator(),
+            Self::Matchall(f) => f.estimator(),
+            Self::Fw(_) | Self::U32(_) | Self::RedirectTo(_) => None,
         }
     }
 
