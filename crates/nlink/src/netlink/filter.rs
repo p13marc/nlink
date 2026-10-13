@@ -1034,18 +1034,27 @@ fn parse_hex_u32(kind: &str, key: &str, s: &str) -> Result<u32> {
     })
 }
 
-/// Parse an offset (decimal first, hex if prefixed). Negative offsets
-/// are valid in the kernel API (signed) but rare in user input;
-/// reject them at the parser level for now.
+/// Parse an offset as tc(8)'s `get_integer(.., 0)` does: a sign, then
+/// decimal, `0x` hex or `0` octal. The kernel's offsets are signed: a
+/// negative one reaches back before the network header (#835).
 fn parse_offset(kind: &str, s: &str) -> Result<i32> {
-    let v: u32 = if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        u32::from_str_radix(rest, 16)
-            .map_err(|_| Error::invalid_message(format!("{kind}: invalid offset `{s}`")))?
-    } else {
-        s.parse::<u32>()
-            .map_err(|_| Error::invalid_message(format!("{kind}: invalid offset `{s}`")))?
+    let invalid = || Error::invalid_message(format!("{kind}: invalid offset `{s}`"));
+    let (negative, digits) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
     };
-    Ok(v as i32)
+    if digits.starts_with(['+', '-']) {
+        return Err(invalid());
+    }
+    let magnitude = if let Some(hex) = digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")) {
+        i64::from_str_radix(hex, 16)
+    } else if digits.len() > 1 && digits.starts_with('0') {
+        i64::from_str_radix(&digits[1..], 8)
+    } else {
+        digits.parse::<i64>()
+    }
+    .map_err(|_| invalid())?;
+    i32::try_from(if negative { -magnitude } else { magnitude }).map_err(|_| invalid())
 }
 
 /// Result of parsing one `match WIDTH VAL MASK at OFFSET` triple.
@@ -8102,6 +8111,22 @@ mod tests {
         assert!(err.to_string().contains("expected unsigned integer"), "{err}");
         let err = U32Filter::parse_params(&["match", "u32", "1", "notahex", "at", "0"]).unwrap_err();
         assert!(err.to_string().contains("expected hex value"), "{err}");
+    }
+
+    /// An offset with a sign, in any base, as tc's `get_integer(.., 0)`
+    /// reads it (#835): before the network header for a negative one.
+    #[test]
+    fn u32_offsets_take_a_sign() {
+        let f = U32Filter::parse_params(&["match", "u16", "0x0800", "0xffff", "at", "-2"]).unwrap();
+        assert_eq!((f.keys[0].off, f.keys[0].mask), (-4, 0xffffu32.to_be()));
+        let f = U32Filter::parse_params(&["match", "u8", "2", "0xff", "at", "-0xe"]).unwrap();
+        assert_eq!(f.keys[0].off, -16);
+        for (s, want) in [("010", 8), ("+4", 4), ("-0", 0)] {
+            assert_eq!(parse_offset("u32", s).unwrap(), want, "{s}");
+        }
+        for bad in ["--2", "-+2", "x", "-"] {
+            assert!(parse_offset("u32", bad).is_err(), "{bad}");
+        }
     }
 
     /// A value in any base and a mask in hex, as tc's `get_u32(.., 0)` and

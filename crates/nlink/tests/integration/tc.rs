@@ -3762,6 +3762,9 @@ async fn every_filter_kinds_lines_install_as_tcs() -> Result<()> {
         ("u32", "ipv6", None, "match ip6 src fd00:1::/40 match ip6 priority 0x10 0xff classid 1:10"),
         ("u32", "ipv6", None, "match ip6 flowlabel 0x12345 0xfffff match ip6 icmp_type 128 0xff classid 1:10"),
         ("u32", "all", None, "match ether dst 02:00:00:00:00:01 classid 1:10"),
+        // Before the network header: the ethertype (#835).
+        ("u32", "all", None, "match u16 0x0800 0xffff at -2 classid 1:10"),
+        ("u32", "all", None, "match u8 0x02 0xff at -0xe classid 1:10"),
         ("u32", "all", None, "match ether src 02:00:00:00:00:02 classid 1:10"),
         ("fw", "ip", Some("0x10"), "classid 1:10"),
         ("fw", "ip", Some("0x10"), "indev lo classid 1:10"),

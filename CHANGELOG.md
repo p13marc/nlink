@@ -1193,6 +1193,12 @@ All notable changes to this project will be documented in this file.
   tc_u32_key`. It also sent the key's word in host order, where the
   packet's word is big-endian. Both are tc's now.
 
+- **A u32 offset takes a sign (#835)**, as tc(8)'s `get_integer(.., 0)`
+  reads one: `match u16 0x0800 0xffff at -2` matches the ethertype before
+  the network header. `at`, `offset plus`/`at` and `hashkey … at` took
+  only an unsigned number, in decimal or `0x` hex; they read any base now
+  too.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
