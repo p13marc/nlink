@@ -1200,6 +1200,42 @@ async fn the_previous_config_removes_its_neighbours() -> Result<()> {
     .await
 }
 
+/// A bridge FDB entry declared without a VLAN is also one per VLAN of its
+/// port, and the diff sees one of those go (#793). `br_fdb_add` makes the
+/// untagged entry and one for each VLAN on the port, VLAN 1 by default,
+/// with or without VLAN filtering. The diff compared the untagged one only,
+/// so a deleted per-VLAN entry, and the traffic in that VLAN it was for,
+/// went unseen.
+#[tokio::test]
+async fn an_fdb_entry_without_a_vlan_is_one_per_port_vlan() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "bridge");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("fdb-vlans")?;
+        let conn = conn_in_ns(&ns)?;
+        let cfg = NetworkConfig::new()
+            .link("br0", |l| l.bridge().up())
+            .link("p0", |l| l.dummy().master("br0").up())
+            .fdb("p0", [0x02, 0, 0, 0, 0x93, 1], |e| e);
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        assert!(cfg.diff(&conn).await?.is_empty(), "the entry converges");
+        let fdb = || ns.exec("bridge", &["fdb", "show", "dev", "p0"]);
+        assert!(fdb()?.contains("02:00:00:00:93:01 vlan 1 master br0 static"), "{}", fdb()?);
+
+        ns.exec("bridge", &["fdb", "del", "02:00:00:00:93:01", "dev", "p0", "vlan", "1", "master"])?;
+        let diff = cfg.diff(&conn).await?;
+        assert_eq!(diff.fdb_to_set.len(), 1, "the VLAN 1 entry went unseen: {diff}");
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        assert!(fdb()?.contains("02:00:00:00:93:01 vlan 1 master br0 static"), "{}", fdb()?);
+        assert!(cfg.diff(&conn).await?.is_empty(), "did not converge");
+        Ok(())
+    })
+    .await
+}
+
 /// FDB entries the previous config declared and this one does not are
 /// removed — one remote of a VXLAN flood entry, not the entry — and one
 /// nothing declared stays, even under a purge (#516). An entry moved to
