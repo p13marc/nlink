@@ -80,8 +80,8 @@ pub use plan::{JournalEntry, Plan, Step};
 pub use preserve::{PreservedTc, TcObject, Underneath};
 pub use restore::{LinkRestore, RestoredNexthop, RestoredRoute};
 pub use tc_tree::{
-    ClassSpec, DeclaredClass, DeclaredFilter, DeclaredLeaf, DeclaredTc, FilterSpec, TcBuilder,
-    TcTreeDiff,
+    ClassSpec, DeclaredClass, DeclaredFilter, DeclaredLeaf, DeclaredTc, FilterKey, FilterSpec,
+    TcBuilder, TcTreeDiff,
 };
 pub use types::*;
 

@@ -5568,6 +5568,33 @@ impl Connection<Route> {
         }))
     }
 
+    /// Delete a filter in a chain by interface index (tc(8)
+    /// `chain N`, #793). [`del_filter_by_index`](Self::del_filter_by_index)
+    /// deletes in chain 0, and a filter in another chain at the same
+    /// priority and protocol is a different filter.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_filter_in_chain_by_index"))]
+    pub async fn del_filter_in_chain_by_index(
+        &self,
+        ifindex: u32,
+        parent: TcHandle,
+        chain: u32,
+        protocol: EthProto,
+        priority: FilterPriority,
+    ) -> Result<()> {
+        let tcmsg = TcMsg::new()
+            .with_ifindex(ifindex as i32)
+            .with_parent(parent.as_raw())
+            .with_filter_info(protocol.as_u16(), priority.as_u16());
+
+        let mut builder = create_request(NlMsgType::RTM_DELTFILTER);
+        builder.append(&tcmsg);
+        builder.append_attr_u32(TcaAttr::Chain as u16, chain);
+
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("del_filter"))
+    }
+
     /// Delete a filter by interface index.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_filter_by_index"))]
     pub async fn del_filter_by_index(

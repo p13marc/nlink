@@ -521,6 +521,18 @@ impl FilterSpec {
         }
     }
 
+    /// Its chain (tc(8) `chain`), 0 unless set (#793).
+    pub(crate) fn chain(&self) -> u32 {
+        match self {
+            Self::Flower(f) => f.chain(),
+            Self::Matchall(f) => f.chain(),
+            Self::Fw(f) => f.chain(),
+            Self::U32(f) => f.chain(),
+            Self::RedirectTo(_) => None,
+        }
+        .unwrap_or(0)
+    }
+
     /// Its actions' rate estimator (#792), which goes on the request
     /// rather than in `TCA_OPTIONS`. The kernel does not report it, so a
     /// diff cannot compare it.
@@ -766,7 +778,10 @@ impl DeclaredFilter {
     /// not exist matches nothing.
     pub(crate) fn matches(&self, live: &TcMessage, ifindexes: &HashMap<String, u32>) -> bool {
         let kind = self.spec.kind();
-        if live.kind() != Some(kind) || live.protocol() != self.protocol {
+        if live.kind() != Some(kind)
+            || live.protocol() != self.protocol
+            || live.chain().unwrap_or(0) != self.spec.chain()
+        {
             return false;
         }
         let Some(mut cfg) = self.spec.resolve(ifindexes) else {
@@ -809,9 +824,48 @@ pub struct TcTreeDiff {
     pub leaves_to_remove: Vec<(TcHandle, TcHandle)>,
     /// Filters to add, or replace one of the same name that differs.
     pub filters_to_set: Vec<DeclaredFilter>,
-    /// Filters at a parent the tree owns that it does not declare:
-    /// `(parent, priority, protocol)`.
-    pub filters_to_remove: Vec<(TcHandle, FilterPriority, EthProto)>,
+    /// Filters to remove: at a parent the tree owns, ones it does not
+    /// declare, and ones of a declared filter's name in another chain.
+    pub filters_to_remove: Vec<FilterKey>,
+}
+
+/// A live filter's name: where it hangs, its chain, its priority and
+/// protocol (#793). A declared filter is named by the three without the
+/// chain; one of that name in another chain is a different filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FilterKey {
+    /// The qdisc or hook it hangs off.
+    pub parent: TcHandle,
+    /// tc(8) `chain`; 0 unless set.
+    pub chain: u32,
+    /// Its priority.
+    pub priority: FilterPriority,
+    /// Its protocol.
+    pub protocol: EthProto,
+}
+
+impl FilterKey {
+    /// A live filter's.
+    fn of(live: &TcMessage) -> Self {
+        Self {
+            parent: live.parent(),
+            chain: live.chain().unwrap_or(0),
+            priority: live.priority(),
+            protocol: live.protocol(),
+        }
+    }
+}
+
+impl std::fmt::Display for FilterKey {
+    /// tc(8)'s words: `1: chain 5 prio 1 ip`, without a chain 0.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.parent)?;
+        if self.chain != 0 {
+            write!(f, " chain {}", self.chain)?;
+        }
+        write!(f, " prio {} {}", self.priority, self.protocol)
+    }
 }
 
 impl TcTreeDiff {
@@ -843,8 +897,8 @@ impl std::fmt::Display for TcTreeDiff {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let dev = &self.dev;
         let mut lines = Vec::new();
-        for (parent, priority, protocol) in &self.filters_to_remove {
-            lines.push(format!("- filter at {parent} prio {priority} {protocol} on {dev}"));
+        for key in &self.filters_to_remove {
+            lines.push(format!("- filter at {key} on {dev}"));
         }
         for (class, handle) in &self.leaves_to_remove {
             lines.push(format!("- qdisc {handle} in class {class} on {dev}"));
@@ -1018,23 +1072,34 @@ pub(crate) fn diff_tree(
         .collect();
     let recreated_major = |parent: TcHandle| destroyed.contains(&parent.major());
     for f in &tree.filters {
-        let live = live_filters.iter().find(|l| {
+        let chain = f.spec.chain();
+        let named = |l: &&TcMessage| {
             l.parent() == f.parent && l.priority() == f.priority && l.protocol() == f.protocol
-        });
+        };
+        // One of its name in another chain is another filter, and goes
+        // (#793): the lookup used to take it for this one.
+        for l in live_filters.iter().filter(named) {
+            if l.chain().unwrap_or(0) != chain {
+                diff.filters_to_remove.push(FilterKey::of(l));
+            }
+        }
+        let live = live_filters
+            .iter()
+            .filter(named)
+            .find(|l| l.chain().unwrap_or(0) == chain);
         if let Some(l) = live
             && recreated_major(f.parent)
         {
-            diff.filters_to_remove
-                .push((l.parent(), l.priority(), l.protocol()));
+            diff.filters_to_remove.push(FilterKey::of(l));
             diff.filters_to_set.push(f.clone());
         } else if live.is_none_or(|l| !f.matches(l, ifindexes)) {
             diff.filters_to_set.push(f.clone());
         }
     }
     for l in live_filters {
-        let key = (l.parent(), l.priority(), l.protocol());
+        let key = FilterKey::of(l);
         if (tree.owns_filter(l.parent()) || previous.is_some_and(|p| p.owns_filter(l.parent())))
-            && !tree.declares_filter(key.0, key.1, key.2)
+            && !tree.declares_filter(key.parent, key.priority, key.protocol)
             && !diff.filters_to_remove.contains(&key)
         {
             diff.filters_to_remove.push(key);
@@ -1143,14 +1208,14 @@ async fn apply_tree(
     };
     let mut changes = 0;
 
-    for (parent, priority, protocol) in &diff.filters_to_remove {
+    for k in &diff.filters_to_remove {
         gone_is_ok(
-            conn.del_filter_by_index(ifindex, *parent, *protocol, *priority)
+            conn.del_filter_in_chain_by_index(ifindex, k.parent, k.chain, k.protocol, k.priority)
                 .await,
         )
         .map_err(|e| {
             e.with_context(format!("tc {}: remove filter", diff.dev))
-                .with_object(filter(*parent, *priority, *protocol))
+                .with_object(filter(k.parent, k.priority, k.protocol))
         })?;
         changes += 1;
     }
@@ -1242,7 +1307,7 @@ async fn apply_tree(
         // refuses another kind at a priority and protocol, and a replace
         // keeps what it is not sent.
         gone_is_ok(
-            conn.del_filter_by_index(ifindex, f.parent, f.protocol, f.priority)
+            conn.del_filter_in_chain_by_index(ifindex, f.parent, f.spec.chain(), f.protocol, f.priority)
                 .await,
         )
         .map_err(|e| e.with_object(filter(f.parent, f.priority, f.protocol)))?;
@@ -1497,14 +1562,18 @@ mod tests {
         let d = diff_tree(&t, None, &classes, &[], &filters, &HashMap::new());
         assert_eq!(d.classes_to_remove, vec![h(1, 0x20)]);
         assert!(d.classes_to_add.is_empty(), "{d}");
-        assert_eq!(d.filters_to_remove, vec![(h(1, 0), FilterPriority::new(2), EthProto::IP)]);
+        assert_eq!(
+            d.filters_to_remove,
+            vec![FilterKey { parent: h(1, 0), chain: 0, priority: FilterPriority::new(2), protocol: EthProto::IP }]
+        );
         assert!(d.filters_to_set.is_empty(), "{d}");
 
         // What the previous config owned and this one dropped goes too.
         let prev = tree(|t| t.class(h(2, 0), h(2, 1), HtbClassConfig::new(Rate::mbit(10))));
         let d = diff_tree(&t, Some(&prev), &classes, &[], &filters, &HashMap::new());
         assert!(d.classes_to_remove.contains(&h(2, 1)), "{d}");
-        assert!(d.filters_to_remove.contains(&(h(2, 0), FilterPriority::new(1), EthProto::IP)), "{d}");
+        let key = FilterKey { parent: h(2, 0), chain: 0, priority: FilterPriority::new(1), protocol: EthProto::IP };
+        assert!(d.filters_to_remove.contains(&key), "{d}");
     }
 
     #[test]
@@ -1646,7 +1715,10 @@ mod tests {
         assert_eq!(added, vec![h(1, 1), h(1, 0x20)]);
         assert!(d.classes_to_change.is_empty(), "{d}");
         assert_eq!(d.leaves_to_set.len(), 1, "{d}");
-        assert_eq!(d.filters_to_remove, vec![(h(1, 0), FilterPriority::new(2), EthProto::IP)]);
+        assert_eq!(
+            d.filters_to_remove,
+            vec![FilterKey { parent: h(1, 0), chain: 0, priority: FilterPriority::new(2), protocol: EthProto::IP }]
+        );
         assert_eq!(d.filters_to_set.len(), 1, "{d}");
         assert!(d.to_string().contains("+ class hfsc 1:1 under 1: on d0"), "{d}");
     }

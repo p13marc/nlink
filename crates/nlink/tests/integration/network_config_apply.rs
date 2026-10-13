@@ -2032,6 +2032,72 @@ async fn an_htb_classs_quantum_and_overhead_are_compared() -> Result<()> {
     .await
 }
 
+/// A declared filter's chain is compared, and a filter of its name in
+/// another chain goes (#793). The live lookup was by parent, priority and
+/// protocol and the comparison left the chain out, so a filter in chain 0
+/// matched a declaration in chain 5. And the replace deleted in chain 0,
+/// whatever chain the filter it replaced was in.
+#[tokio::test]
+async fn a_filters_chain_is_compared() -> Result<()> {
+    use nlink::netlink::filter::MatchallFilter;
+    use nlink::netlink::tc::HtbClassConfig;
+    use nlink::{EthProto, FilterPriority, Rate, TcHandle};
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "sch_htb", "cls_matchall");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("filter-chain")?;
+        let conn = conn_in_ns(&ns)?;
+        let h = |m: u16, n: u16| TcHandle::new(m, n);
+        let cfg = |chain: Option<u32>| {
+            let filter = MatchallFilter::new().classid(h(1, 0x10));
+            let filter = match chain {
+                Some(c) => filter.chain(c),
+                None => filter,
+            };
+            NetworkConfig::new()
+                .link("d0", |l| l.dummy().up())
+                .qdisc("d0", |q| q.htb().default_class(0x10))
+                .tc("d0", move |t| {
+                    t.class(h(1, 0), h(1, 0x10), HtbClassConfig::new(Rate::mbit(10)))
+                        .filter(h(1, 0), FilterPriority::new(1), EthProto::IP, filter)
+                })
+        };
+        // The chains of the filters at 1:, as tc lists them.
+        let chains = || -> Result<Vec<u64>> {
+            let out = ns.exec("tc", &["-j", "filter", "show", "dev", "d0", "parent", "1:"])?;
+            let listed: serde_json::Value = serde_json::from_str(&out)
+                .map_err(|e| nlink::Error::invalid_message(format!("{e}: {out}")))?;
+            Ok(listed
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|f| f.get("options").is_some())
+                .map(|f| f["chain"].as_u64().unwrap_or(0))
+                .collect())
+        };
+        // Declared in chain 5, made in chain 0; then declared in chain 0,
+        // made in chain 5.
+        for (declared, made) in [(Some(5), "0"), (None, "5")] {
+            let applied = cfg(None).apply(&conn).await?;
+            assert!(applied.is_success(), "{applied:?}");
+            ns.exec("tc", &["filter", "del", "dev", "d0", "parent", "1:"])?;
+            ns.exec(
+                "tc",
+                &["filter", "add", "dev", "d0", "parent", "1:", "chain", made, "prio", "1", "protocol", "ip", "matchall", "classid", "1:10"],
+            )?;
+            let diff = cfg(declared).diff(&conn).await?;
+            assert!(!diff.is_empty(), "chain {made} compared equal to chain {declared:?}");
+            let applied = cfg(declared).apply(&conn).await?;
+            assert!(applied.is_success(), "{applied:?}");
+            assert_eq!(chains()?, [u64::from(declared.unwrap_or(0))], "after the apply");
+            assert!(cfg(declared).diff(&conn).await?.is_empty(), "chain {declared:?}: did not converge");
+        }
+        Ok(())
+    })
+    .await
+}
+
 /// A police action read from tc(8)'s words makes what tc makes of them,
 /// and a declaration of it converges (#800). `parse_params` started from
 /// nlink's own defaults: what exceeded was dropped where tc reclassifies

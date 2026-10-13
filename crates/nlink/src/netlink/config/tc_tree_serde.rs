@@ -199,10 +199,17 @@ struct FilterKeyRepr {
     #[serde(with = "handle")]
     #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     parent: TcHandle,
+    /// tc(8) `chain`, when not 0 (#793).
+    #[serde(skip_serializing_if = "is_zero")]
+    chain: u32,
     priority: u16,
     #[serde(with = "proto")]
     #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     protocol: EthProto,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// A leaf's own key, for a removal.
@@ -499,10 +506,11 @@ impl TryFrom<&TcTreeDiff> for TcTreeDiffRepr {
             filters_to_remove: d
                 .filters_to_remove
                 .iter()
-                .map(|&(parent, priority, protocol)| FilterKeyRepr {
-                    parent,
-                    priority: priority.as_u16(),
-                    protocol,
+                .map(|k| FilterKeyRepr {
+                    parent: k.parent,
+                    chain: k.chain,
+                    priority: k.priority.as_u16(),
+                    protocol: k.protocol,
                 })
                 .collect(),
         })

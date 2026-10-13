@@ -928,6 +928,16 @@ All notable changes to this project will be documented in this file.
   declarative comparison takes a sent mtu of 0 as the kernel's choice, so
   such a police converges. `PoliceAction::new()` is unchanged.
 
+- **A declared filter's chain is compared (#793).** The live lookup went by
+  parent, priority and protocol, and the comparison left the chain out. A
+  filter in chain 0 so matched a declaration in chain 5, and was never
+  moved. The replace also deleted in chain 0, whatever chain the filter it
+  replaced was in, so a declaration that moved a filter out of chain 5 left
+  it there and added another. A filter of a declared filter's name in
+  another chain is now removed, with its chain: `TcTreeDiff::filters_to_remove`
+  holds `FilterKey`s (parent, chain, priority, protocol), and
+  `del_filter_in_chain_by_index` deletes one.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
