@@ -1279,6 +1279,60 @@ async fn an_fdb_entry_without_a_vlan_is_one_per_port_vlan() -> Result<()> {
     .await
 }
 
+/// An FDB entry the apply moves is moved back by its undo, not deleted
+/// (#783). A bridge keeps one entry per MAC and VLAN, so setting one on a
+/// port takes it from another; a VXLAN device keeps one remote per unicast
+/// MAC, which a replace swaps. The diff looked for the entry on the
+/// declared port or remote alone, found nothing to replace, and the undo
+/// deleted the entry.
+#[tokio::test]
+async fn an_undo_moves_an_fdb_entry_back() -> Result<()> {
+    use std::net::{IpAddr, Ipv4Addr};
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "bridge", "vxlan");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("fdb-move")?;
+        let conn = conn_in_ns(&ns)?;
+        let ip = |h: u8| IpAddr::V4(Ipv4Addr::new(10, 86, 1, h));
+        let links = move || {
+            NetworkConfig::new()
+                .link("br0", |l| l.bridge().up())
+                .link("p0", |l| l.dummy().master("br0").up())
+                .link("p1", |l| l.dummy().master("br0").up())
+                .link("vx0", move |l| l.vxlan(7).vxlan_local(ip(1)).vxlan_port(4789))
+        };
+        let applied = links().apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        ns.exec("bridge", &["fdb", "add", "02:00:00:00:87:01", "dev", "p0", "master", "static"])?;
+        ns.exec("bridge", &["fdb", "add", "02:00:00:00:87:02", "dev", "vx0", "dst", "10.86.1.2"])?;
+        let entries = || -> Result<Vec<String>> {
+            let out = ns.exec("bridge", &["fdb", "show"])?;
+            let mut lines: Vec<String> =
+                out.lines().filter(|l| l.contains("02:00:00:00:87:0")).map(str::to_string).collect();
+            lines.sort();
+            Ok(lines)
+        };
+        let before = entries()?;
+
+        let cfg = links()
+            .fdb("p1", [0x02, 0, 0, 0, 0x87, 1], |e| e)
+            .fdb("vx0", [0x02, 0, 0, 0, 0x87, 2], move |e| e.dst(ip(3)));
+        let shown = cfg.diff(&conn).await?.to_string();
+        assert!(shown.contains("(was on p0)") && shown.contains("(was dst 10.86.1.2)"), "{shown}");
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let moved = entries()?;
+        assert!(moved.iter().any(|l| l.contains("87:01 dev p1")), "{moved:?}");
+        assert!(moved.iter().any(|l| l.contains("87:02 dev vx0 dst 10.86.1.3")), "{moved:?}");
+        let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
+        assert!(undone.is_success(), "{undone:?}");
+        assert_eq!(entries()?, before, "the undo did not move them back");
+        Ok(())
+    })
+    .await
+}
+
 /// FDB entries the previous config declared and this one does not are
 /// removed — one remote of a VXLAN flood entry, not the entry — and one
 /// nothing declared stays, even under a purge (#516). An entry moved to
@@ -1321,7 +1375,8 @@ async fn the_previous_config_removes_its_fdb_entries() -> Result<()> {
         assert_eq!(diff.fdb_to_remove.len(), 2, "{shown}");
         assert!(shown.contains("- fdb 02:00:00:00:86:02 dev p0 static"), "{shown}");
         assert!(shown.contains("- fdb 00:00:00:00:00:00 dev vx0 dst 10.86.0.3"), "{shown}");
-        assert!(shown.contains("+ fdb 02:00:00:00:86:01 dev p1 static"), "{shown}");
+        // A move, which an undo moves back (#783).
+        assert!(shown.contains("~ fdb 02:00:00:00:86:01 dev p1 static (was on p0)"), "{shown}");
         assert!(!shown.contains("- fdb 02:00:00:00:86:01"), "a moved entry is not removed: {shown}");
 
         let applied = b
