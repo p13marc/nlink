@@ -3199,6 +3199,57 @@ async fn matchall_at_prio_2(
     .await
 }
 
+/// #792: a police action's average rate installs when the filter gives
+/// its actions a rate estimator, and makes what tc(8)'s
+/// `estimator 1sec 8sec` makes. The kernel takes `avrate` only with an
+/// estimator, which goes on the filter request as `TCA_RATE`; nlink could
+/// not send one, so every filter with an `avrate` police failed with a bare
+/// `EINVAL`.
+#[tokio::test]
+async fn a_police_avrate_installs_with_an_estimator() -> Result<()> {
+    use nlink::netlink::action::{ActionList, Estimator, PoliceAction};
+    use nlink::{Bytes, Rate};
+    require_root!();
+    nlink::require_modules!("dummy", "sch_ingress", "cls_matchall", "act_police");
+
+    let (ns, conn, d0) = clsact_d0("tc-avrate").await?;
+    let shaped = || PoliceAction::new().rate(Rate::mbit(1)).burst(Bytes::kib(32)).avrate(Rate::mbit(2));
+    let err = matchall_at_prio_2(&conn, d0, ActionList::new().with(shaped()))
+        .await
+        .expect_err("the kernel refuses an avrate without an estimator");
+    assert!(err.is_invalid_argument(), "{err}");
+
+    // iproute2 6.15 refuses `rate` with `avrate`, so the line tc and nlink
+    // both make has the average rate alone. Its mtu and verdict are given:
+    // nlink's defaults for them are not tc's (#800).
+    let line = "avrate 1mbit mtu 2047 conform-exceed drop";
+    let mut args = vec!["filter", "add", "dev", "d0", "ingress", "prio", "1", "estimator", "1sec", "8sec", "matchall", "action", "police"];
+    args.extend(line.split_whitespace());
+    ns.exec("tc", &args)?;
+    let estimator = Estimator::parse_params(&["1sec", "8sec"])?;
+    let alone = PoliceAction::parse_params(&line.split_whitespace().collect::<Vec<_>>())?;
+    matchall_at_prio_2(&conn, d0, ActionList::new().with_estimator(estimator).with(alone)).await?;
+    // The police lines without their index (`police 0x1`).
+    let police_lines = || -> Result<Vec<String>> {
+        let shown = ns.exec("tc", &["filter", "show", "dev", "d0", "ingress"])?;
+        Ok(shown
+            .lines()
+            .filter_map(|l| l.split_once(" police 0x").map(|(_, rest)| rest.split_once(' ').map_or("", |r| r.1).to_string()))
+            .collect())
+    };
+    let lines = police_lines()?;
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[0], lines[1], "tc's, then nlink's");
+    assert!(lines[0].contains("avrate 1Mbit"), "{lines:?}");
+
+    // The kernel takes a rate with it, which tc does not let it send.
+    ns.exec("tc", &["filter", "del", "dev", "d0", "ingress"])?;
+    matchall_at_prio_2(&conn, d0, ActionList::new().with_estimator(estimator).with(shaped())).await?;
+    let lines = police_lines()?;
+    assert!(lines.len() == 1 && lines[0].contains("rate 1Mbit") && lines[0].contains("avrate 2Mbit"), "{lines:?}");
+    Ok(())
+}
+
 /// #751: a gate's bare times are nanoseconds and a ct `nat` is spelled
 /// with `addr`, as tc(8) reads them. nlink read a bare gate time as
 /// microseconds, and refused the `addr` keyword.

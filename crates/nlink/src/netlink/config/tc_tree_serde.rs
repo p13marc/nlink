@@ -32,7 +32,7 @@ use super::tc_tree::{
     ClassSpec, DeclaredClass, DeclaredFilter, DeclaredLeaf, DeclaredTc, FilterSpec, TcTreeDiff,
 };
 use crate::netlink::{
-    action::{ActionList, action_from_params},
+    action::{ActionList, Estimator, action_from_params},
     error::{Error, Result},
     eth_proto::EthProto,
     filter::{FlowerFilter, FwFilter, MatchallFilter, U32Filter},
@@ -171,6 +171,10 @@ struct FilterRepr {
     /// A flower's or matchall's actions, in order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     actions: Vec<ActionRepr>,
+    /// The actions' rate estimator, tc(8)'s `<interval> <time constant>`
+    /// (`1s 8s`), which a police `avrate` needs (#792).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    estimator: Option<String>,
     /// Everything, redirected out of this device (the IFB redirect).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     redirect_to: Option<String>,
@@ -331,6 +335,7 @@ impl TryFrom<&DeclaredFilter> for FilterRepr {
             kind: Some(f.spec.kind().to_string()),
             params: None,
             actions: Vec::new(),
+            estimator: None,
             redirect_to: None,
         };
         let (words, actions) = match &f.spec {
@@ -346,6 +351,7 @@ impl TryFrom<&DeclaredFilter> for FilterRepr {
         };
         repr.params = Params::from_words(words.map_err(|e| e.with_context(at()))?);
         if let Some(list) = actions {
+            repr.estimator = list.estimator().map(|e| e.to_string());
             repr.actions = list
                 .to_params()
                 .map_err(|e| e.with_context(at()))?
@@ -367,22 +373,32 @@ impl TryFrom<FilterRepr> for DeclaredFilter {
         let words = Params::words(r.params.as_ref());
         let actions = || -> Result<Option<ActionList>> {
             if r.actions.is_empty() {
-                return Ok(None);
+                return match &r.estimator {
+                    Some(_) => Err(invalid(format!(
+                        "{at}: an `estimator` is for the filter's actions, and it has none"
+                    ))),
+                    None => Ok(None),
+                };
             }
+            let list = match &r.estimator {
+                Some(words) => ActionList::new()
+                    .with_estimator(Estimator::parse_params(&words.split_whitespace().collect::<Vec<_>>())?),
+                None => ActionList::new(),
+            };
             r.actions
                 .iter()
-                .try_fold(ActionList::new(), |list, a| {
+                .try_fold(list, |list, a| {
                     Ok(list.with_boxed(action_from_params(&a.kind, &Params::words(a.params.as_ref()))?))
                 })
                 .map(Some)
         };
         let spec = match (r.kind.as_deref(), &r.redirect_to) {
-            (None, Some(dev)) if r.params.is_none() && r.actions.is_empty() => {
+            (None, Some(dev)) if r.params.is_none() && r.actions.is_empty() && r.estimator.is_none() => {
                 FilterSpec::RedirectTo(dev.clone())
             }
             (Some(_), Some(_)) | (None, Some(_)) => {
                 return Err(invalid(format!(
-                    "{at}: `redirect-to` is a filter of its own, without kind, params or actions"
+                    "{at}: `redirect-to` is a filter of its own, without kind, params, actions or estimator"
                 )));
             }
             (None, None) => return Err(invalid(format!("{at}: a `kind` or a `redirect-to`"))),
@@ -401,7 +417,7 @@ impl TryFrom<FilterRepr> for DeclaredFilter {
                 })
             }
             (Some(kind @ ("fw" | "u32")), None) => {
-                if !r.actions.is_empty() {
+                if !r.actions.is_empty() || r.estimator.is_some() {
                     return Err(invalid(format!("{at}: a {kind} filter carries no actions")));
                 }
                 if kind == "fw" {
@@ -593,6 +609,33 @@ mod tests {
         assert_eq!(NetworkConfig::from_json_str(&listed).unwrap().tc_trees(), cfg.tc_trees());
     }
 
+    /// #792: an action list's rate estimator is written as tc(8)'s words
+    /// and reads back, and two filters that differ only in it differ.
+    #[test]
+    fn an_estimator_reads_back_as_written() {
+        use crate::netlink::action::{Estimator, PoliceAction};
+        use std::time::Duration;
+        let with = |estimator: Option<Estimator>| {
+            let police = PoliceAction::new().rate(Rate::mbit(1)).burst(crate::Bytes::kib(32)).avrate(Rate::mbit(1));
+            let list = ActionList::new().with(police);
+            let list = match estimator {
+                Some(e) => list.with_estimator(e),
+                None => list,
+            };
+            NetworkConfig::new().tc("d0", move |t| {
+                t.filter(h(1, 0), FilterPriority::new(1), EthProto::ALL, MatchallFilter::new().actions(list))
+            })
+        };
+        let estimator = Estimator::new(Duration::from_secs(1), Duration::from_secs(8)).unwrap();
+        let cfg = with(Some(estimator));
+        let json = cfg.to_json_string().unwrap();
+        assert!(json.contains(r#""estimator":"1s 8s""#), "{json}");
+        let back = NetworkConfig::from_json_str(&json).unwrap();
+        assert_eq!(back.tc_trees(), cfg.tc_trees());
+        assert_eq!(back.to_json_string().unwrap(), json);
+        assert_ne!(with(None).tc_trees(), cfg.tc_trees());
+    }
+
     #[test]
     fn hfsc_curves_and_by_name_targets_read_back() {
         let cfg = NetworkConfig::new().qdisc("d0", |q| q.hfsc()).tc("d0", |t| {
@@ -622,6 +665,10 @@ mod tests {
             (doc(r#""kind":"basic""#), "kind `basic`"),
             (doc(r#""kind":"flower","params":"dst_port""#), "requires a value"),
             (doc(r#""kind":"fw","actions":[{"kind":"gact","params":"drop"}]"#), "carries no actions"),
+            (doc(r#""kind":"fw","estimator":"1s 8s""#), "carries no actions"),
+            (doc(r#""kind":"matchall","estimator":"1s 8s""#), "it has none"),
+            (doc(r#""redirect-to":"ifb0","estimator":"1s 8s""#), "a filter of its own"),
+            (doc(r#""kind":"matchall","estimator":"9s 80s","actions":[{"kind":"gact","params":"pass"}]"#), "at most 8s"),
             (doc(r#""redirect-to":"ifb0","params":"x""#), "a filter of its own"),
             (doc(r#""kind":"matchall","actions":[{"kind":"frob"}]"#), "frob"),
             (doc(r#""kind":"matchall","colour":"red""#), "unknown field"),

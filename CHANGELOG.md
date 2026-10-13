@@ -905,6 +905,17 @@ All notable changes to this project will be documented in this file.
   declaration. Every other action kind is still compared by its kind
   alone; #791 stays open for that.
 
+- **A police action's average rate installs (#792).** The kernel takes
+  `avrate` only with a rate estimator, which tc(8) sends with the filter
+  (`estimator 1sec 8sec`, `TCA_RATE`). nlink had no way to send one, so
+  every filter with an `avrate` police failed with a bare `EINVAL`.
+  `ActionList::with_estimator(Estimator::new(interval, time_constant)?)`
+  gives a filter's actions one, computed as tc computes it; `Estimator` also
+  reads and prints tc's words. `FilterConfig::estimator` carries it to the
+  request, the tree document form has an `estimator` field, and the
+  declarative comparison of a police's `avrate` (#791) now has policers to
+  compare.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

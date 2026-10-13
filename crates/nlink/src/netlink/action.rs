@@ -894,7 +894,12 @@ impl PoliceAction {
         self
     }
 
-    /// Set the average rate for stateful policing.
+    /// Set the average rate for stateful policing: traffic above it
+    /// exceeds, measured by the filter's rate estimator.
+    ///
+    /// The kernel takes an average rate only with an estimator, and refuses
+    /// a filter whose policer has one without with a bare `EINVAL`. Give its
+    /// [`ActionList`] one with [`ActionList::with_estimator`] (#792).
     pub fn avrate(mut self, rate: crate::util::Rate) -> Self {
         self.avrate = Some(u32::try_from(rate.as_bytes_per_sec()).unwrap_or(u32::MAX));
         self
@@ -5393,6 +5398,132 @@ impl ActionConfig for PeditAction {
 }
 
 // ============================================================================
+// Estimator - the rate estimator a filter gives its actions
+// ============================================================================
+
+/// A rate estimator for a filter's actions (tc(8) `estimator <interval>
+/// <time constant>`, #792).
+///
+/// The kernel measures each action's rate with it, and a
+/// [`PoliceAction::avrate`] needs one: without it the kernel refuses the
+/// filter with a bare `EINVAL`. It travels on the filter request as
+/// `TCA_RATE`, and every action the filter creates gets one. Attach it with
+/// [`ActionList::with_estimator`].
+///
+/// ```no_run
+/// # async fn example() -> nlink::Result<()> {
+/// use std::time::Duration;
+///
+/// use nlink::netlink::action::{ActionList, Estimator, PoliceAction};
+/// use nlink::netlink::filter::MatchallFilter;
+/// use nlink::{Bytes, Connection, Rate, Route, TcHandle};
+///
+/// let conn = Connection::<Route>::new()?;
+/// let police = PoliceAction::new()
+///     .rate(Rate::mbit(10))
+///     .burst(Bytes::kib(64))
+///     .avrate(Rate::mbit(8));
+/// let actions = ActionList::new()
+///     .with_estimator(Estimator::new(Duration::from_secs(1), Duration::from_secs(8))?)
+///     .with(police);
+/// let filter = MatchallFilter::new().actions(actions);
+/// conn.add_filter("eth0", TcHandle::INGRESS, filter).await?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Estimator {
+    /// log2 of the interval in seconds, -2..=3.
+    interval: i8,
+    /// log2 of the time constant in intervals, 1..=30.
+    ewma_log: u8,
+}
+
+impl Estimator {
+    /// Sample every `interval` and average over about `time_constant`, as
+    /// tc(8) does: the interval is rounded up to a power of two from 250 ms
+    /// to 8 s, and the time constant down to the interval times the largest
+    /// power of two `2ⁿ` that fits it (`n` from 1 to 30).
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorDetail::InvalidMessage`](crate::ErrorDetail::InvalidMessage)
+    /// for an interval that is zero or over 8 s, or a time constant under
+    /// twice the interval or over 2³⁰ of them.
+    pub fn new(interval: std::time::Duration, time_constant: std::time::Duration) -> Result<Self> {
+        use crate::util::parse::format_time;
+        let a = interval.as_micros();
+        let step = (0..=5u32)
+            .find(|&i| a > 0 && a <= 250_000u128 << i)
+            .ok_or_else(|| {
+                Error::invalid_message(format!(
+                    "estimator: interval `{}` (expected over 0 and at most 8s)",
+                    format_time(interval)
+                ))
+            })?;
+        let constant = time_constant.as_micros();
+        // The first n with interval × 2ⁿ over the time constant, less one.
+        let ewma_log = (1..32u32).find(|&n| a << n > constant).unwrap_or(32) - 1;
+        if !(1..=30).contains(&ewma_log) {
+            return Err(Error::invalid_message(format!(
+                "estimator: time constant `{}` for interval `{}` (expected 2 to 2^30 intervals)",
+                format_time(time_constant),
+                format_time(interval)
+            )));
+        }
+        Ok(Self {
+            interval: step as i8 - 2,
+            ewma_log: ewma_log as u8,
+        })
+    }
+
+    /// The sampling interval: a power of two from 250 ms to 8 s.
+    pub fn interval(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(250 << (self.interval + 2))
+    }
+
+    /// The averaging time constant: the interval times a power of two.
+    pub fn time_constant(&self) -> std::time::Duration {
+        self.interval() * (1u32 << self.ewma_log)
+    }
+
+    /// Parse tc(8)'s words for one: `<interval> <time constant>`
+    /// (`1sec 8sec`).
+    pub fn parse_params(params: &[&str]) -> Result<Self> {
+        let time = |s: &str| {
+            crate::util::parse::get_time(s).map_err(|_| {
+                Error::invalid_message(format!(
+                    "estimator: invalid time `{s}` (expected tc-style time)"
+                ))
+            })
+        };
+        match params {
+            [interval, constant] => Self::new(time(interval)?, time(constant)?),
+            _ => Err(Error::invalid_message(format!(
+                "estimator: `{}` (expected `<interval> <time constant>`)",
+                params.join(" ")
+            ))),
+        }
+    }
+
+    /// The kernel's `struct tc_estimator`.
+    pub(crate) fn parms(&self) -> crate::netlink::types::tc::TcEstimator {
+        crate::netlink::types::tc::TcEstimator {
+            interval: self.interval,
+            ewma_log: self.ewma_log,
+        }
+    }
+}
+
+impl std::fmt::Display for Estimator {
+    /// tc(8)'s words, which [`parse_params`](Self::parse_params) reads back.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::util::parse::format_time;
+        write!(f, "{} {}", format_time(self.interval()), format_time(self.time_constant()))
+    }
+}
+
+// ============================================================================
 // ActionList - for building action chains
 // ============================================================================
 
@@ -5422,6 +5553,7 @@ impl ActionConfig for PeditAction {
 #[derive(Debug, Clone, Default)]
 pub struct ActionList {
     actions: Vec<Box<dyn ActionConfigDyn>>,
+    estimator: Option<Estimator>,
 }
 
 /// Trait for dynamic action dispatch.
@@ -5489,6 +5621,19 @@ impl ActionList {
     pub fn with<T: ActionConfig + Clone + std::fmt::Debug + 'static>(mut self, action: T) -> Self {
         self.actions.push(Box::new(action));
         self
+    }
+
+    /// Give the actions a rate estimator, which a
+    /// [`PoliceAction::avrate`] needs (#792). It goes on the filter request
+    /// as `TCA_RATE`; the kernel does not report it back.
+    pub fn with_estimator(mut self, estimator: Estimator) -> Self {
+        self.estimator = Some(estimator);
+        self
+    }
+
+    /// The rate estimator [`with_estimator`](Self::with_estimator) gave.
+    pub fn estimator(&self) -> Option<Estimator> {
+        self.estimator
     }
 
     /// Add an action already boxed: one read from a document (#645).
@@ -8834,5 +8979,57 @@ mod params_tests {
                 .contains("action `connmark2` has no document form (kinds: gact, mirred, police"),
             "{err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod estimator_tests {
+    use std::time::Duration;
+
+    use super::Estimator;
+
+    /// #792: an estimator is what tc(8) makes of the same words
+    /// (`tc_setup_estimator`): the interval rounded up to a power of two
+    /// from 250 ms, and the weight the first power of two that takes the
+    /// interval past the time constant, less one. It prints as the times
+    /// those stand for, which read back as the same estimator.
+    #[test]
+    fn an_estimator_is_what_tc_makes_of_its_words() {
+        for (words, interval, ewma_log, shown) in [
+            ("1sec 8sec", 0, 3, "1s 8s"),
+            ("250ms 2s", -2, 3, "250ms 2s"),
+            ("200ms 1s", -2, 2, "250ms 1s"),
+            ("3s 30s", 2, 3, "4s 32s"),
+            ("8s 16s", 3, 1, "8s 16s"),
+        ] {
+            let e = Estimator::parse_params(&words.split_whitespace().collect::<Vec<_>>()).unwrap();
+            let parms = e.parms();
+            assert_eq!((parms.interval, parms.ewma_log), (interval, ewma_log), "{words}");
+            assert_eq!(e.to_string(), shown, "{words}");
+            let back = Estimator::parse_params(&shown.split_whitespace().collect::<Vec<_>>()).unwrap();
+            assert_eq!(back, e, "{words}");
+        }
+        assert_eq!(
+            Estimator::new(Duration::from_secs(1), Duration::from_secs(8)).unwrap().time_constant(),
+            Duration::from_secs(8)
+        );
+    }
+
+    /// What tc(8) refuses is refused, saying why.
+    #[test]
+    fn an_estimator_out_of_range_is_refused() {
+        for (words, says) in [
+            ("9s 80s", "at most 8s"),
+            ("0 1s", "over 0"),
+            ("1s 1s", "2 to 2^30 intervals"),
+            ("1s 3000000000s", "2 to 2^30 intervals"),
+            ("1s", "expected `<interval> <time constant>`"),
+            ("1s 8x", "invalid time `8x`"),
+        ] {
+            let err = Estimator::parse_params(&words.split_whitespace().collect::<Vec<_>>())
+                .expect_err(words)
+                .to_string();
+            assert!(err.contains(says) && err.contains("estimator"), "{words}: {err}");
+        }
     }
 }
