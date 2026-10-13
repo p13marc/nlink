@@ -111,6 +111,16 @@ pub struct PlanOptions {
     /// State the caller manages itself: never a blocker, never purged, and
     /// reported when a recreate destroys it (#513).
     pub owned: Vec<super::Owned>,
+
+    /// Keep what a recreated link carries in TC that the config does not
+    /// declare — its qdiscs, classes and filters — and put it back once
+    /// the link is created again, instead of refusing the recreate (#645).
+    /// The diff snapshots each object as the kernel dumps it
+    /// ([`LinkRecreate::preserved_tc`](super::LinkRecreate::preserved_tc));
+    /// the apply replays them, a mirred action's target looked up again by
+    /// name. A BPF filter or action cannot be replayed from its dump, and
+    /// still refuses the recreate.
+    pub preserve_undeclared_tc: bool,
 }
 
 /// The name [`PlanOptions`] had before 0.32.
@@ -146,6 +156,13 @@ impl PlanOptions {
     /// config does not declare; see [`Self::recreate_policy`].
     pub fn recreate_policy(mut self, policy: super::RecreatePolicy) -> Self {
         self.recreate_policy = policy;
+        self
+    }
+
+    /// Keep a recreated link's undeclared TC tree; see
+    /// [`Self::preserve_undeclared_tc`].
+    pub fn preserve_undeclared_tc(mut self, on: bool) -> Self {
+        self.preserve_undeclared_tc = on;
         self
     }
 
@@ -252,6 +269,11 @@ pub struct ConfigDiff {
     /// [`links_to_add`](Self::links_to_add). A refused one
     /// ([`LinkRecreate::is_refused`]) makes the apply fail instead (#417).
     pub links_to_recreate: Vec<LinkRecreate>,
+    /// Peers of declared veth and netkit pairs to rename to the name their
+    /// pair declares (#804), before anything else: the rest of the diff
+    /// is against the renamed links.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Vec::is_empty"))]
+    pub links_to_rename: Vec<super::LinkRename>,
     /// Links to create.
     pub links_to_add: Vec<DeclaredLink>,
     /// Links to modify (name, changes).
@@ -415,6 +437,18 @@ pub struct ConfigDiff {
     #[cfg_attr(feature = "serde", serde(skip))]
     #[cfg_attr(feature = "schemars", schemars(skip))]
     pub(crate) routes_replaced: Vec<(DeclaredRoute, DeclaredRoute)>,
+    /// The protocol of each kernel route the diff read back (in
+    /// `routes_replaced` and `routes_to_remove`), which an undo puts it back
+    /// with (#783). Not counted or serialized.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) route_protocols: Vec<(DeclaredRoute, crate::netlink::types::route::RouteProtocol)>,
+    /// What each kernel route the diff read back has that its declaration
+    /// cannot say (#783), which leaves its step without an inverse. Not
+    /// counted or serialized.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) routes_lost: Vec<(DeclaredRoute, String)>,
     /// The addresses in `addresses_to_add` that are there now, and that a
     /// link change in this apply flushes, with why (#649):
     /// `(declared, reason)`. Not counted or serialized.
@@ -431,6 +465,11 @@ pub struct ConfigDiff {
     #[cfg_attr(feature = "serde", serde(skip))]
     #[cfg_attr(feature = "schemars", schemars(skip))]
     pub(crate) qdiscs_replaced: Vec<(DeclaredQdisc, DeclaredQdisc)>,
+    /// What each qdisc a replace or a removal takes has under it, by device
+    /// and slot (#783).
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) qdiscs_underneath: Vec<((String, QdiscParent), super::preserve::Underneath)>,
     /// The protocol the apply installs declared routes with: the config's
     /// [`routes_protocol`](super::NetworkConfig::routes_protocol) (#512).
     /// Not shown or serialized.
@@ -441,10 +480,8 @@ pub struct ConfigDiff {
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) owner: Option<String>,
     /// The declared TC trees that differ from the kernel's, one per device
-    /// (#514). Not serialized yet: a filter's actions have no document
-    /// form.
-    #[cfg_attr(feature = "serde", serde(skip))]
-    #[cfg_attr(feature = "schemars", schemars(skip))]
+    /// (#514).
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
     pub tc: Vec<super::tc_tree::TcTreeDiff>,
     /// Every declared tree, with the one the previous config declared on
     /// its device, which the apply diffs again after the qdisc step: a
@@ -463,6 +500,29 @@ pub struct ConfigDiff {
 }
 
 impl ConfigDiff {
+    /// What a route the diff read back has that it cannot say (#783).
+    pub(crate) fn lost_of(&self, route: &DeclaredRoute) -> Option<String> {
+        self.routes_lost.iter().find(|(r, _)| r == route).map(|(_, w)| w.clone())
+    }
+
+    /// The protocol a route the diff read back has (#783).
+    pub(crate) fn protocol_of(&self, route: &DeclaredRoute) -> Option<crate::netlink::types::route::RouteProtocol> {
+        self.route_protocols
+            .iter()
+            .find(|(r, _)| r == route)
+            .map(|(_, p)| *p)
+    }
+
+    /// What the qdisc a step replaces or deletes at `q`'s slot has under it
+    /// (#783).
+    pub(crate) fn underneath_of(&self, q: &DeclaredQdisc) -> super::preserve::Underneath {
+        self.qdiscs_underneath
+            .iter()
+            .find(|((dev, parent), _)| *dev == q.dev && *parent == q.effective_parent())
+            .map(|(_, u)| u.clone())
+            .unwrap_or_default()
+    }
+
     /// The JSON Schema (draft 7) of the JSON a `ConfigDiff` serializes to,
     /// pretty-printed. Requires the `schemars` feature. Publish it beside
     /// a `diff` output so a change to the diff's shape is a visible change
@@ -518,6 +578,7 @@ impl ConfigDiff {
     /// Check if no changes are needed.
     pub fn is_empty(&self) -> bool {
         self.links_to_recreate.is_empty()
+            && self.links_to_rename.is_empty()
             && self.links_to_add.is_empty()
             && self.links_to_modify.is_empty()
             && self.veth_peers_to_modify.is_empty()
@@ -548,6 +609,7 @@ impl ConfigDiff {
     /// Get the total number of changes.
     pub fn change_count(&self) -> usize {
         self.links_to_recreate.len()
+            + self.links_to_rename.len()
             + self.links_to_add.len()
             + self.links_to_modify.len()
             + self.veth_peers_to_modify.len()
@@ -589,6 +651,9 @@ impl ConfigDiff {
         let mut lines = Vec::new();
 
         // Links
+        for rename in &self.links_to_rename {
+            lines.push(rename.to_string());
+        }
         for recreate in &self.links_to_recreate {
             lines.push(recreate.to_string());
         }
@@ -781,6 +846,11 @@ impl std::fmt::Display for NexthopConflict {
 /// An FDB entry the apply installs, as the diff and the plan print it.
 pub(crate) fn fdb_line(e: &DeclaredFdb, replaced: &[(DeclaredFdb, DeclaredFdb)]) -> String {
     match replaced.iter().find(|(d, _)| d == e) {
+        Some((_, before)) if before.dev != e.dev => format!("~ {e} (was on {})", before.dev),
+        Some((_, before)) if before.dst != e.dst => match before.dst {
+            Some(dst) => format!("~ {e} (was dst {dst})"),
+            None => format!("~ {e}"),
+        },
         Some((_, before)) if before.local != e.local => {
             format!("~ {e} (was {})", if before.local { "local" } else { "static" })
         }
@@ -1289,17 +1359,36 @@ impl Snapshot {
         }
         // Every device a tree is declared on, by this config or the
         // previous one, whose tree's removal is this diff's.
-        let tree_links: Vec<u32> = super::tc_tree::with_previous(config, opts)
+        let ifindex_of = |dev: &str| {
+            snapshot
+                .links
+                .iter()
+                .find(|l| l.name() == Some(dev))
+                .map(|l| l.ifindex())
+        };
+        let mut tree_links: Vec<u32> = super::tc_tree::with_previous(config, opts)
             .iter()
-            .map(|(t, _)| t)
-            .filter_map(|t| {
+            .filter_map(|(t, _)| ifindex_of(&t.dev))
+            .collect();
+        // And every device whose root or hook a declared qdisc, this
+        // config's or the previous one's, takes the place of or removes:
+        // what is under the live one goes with it, and an undo puts it back
+        // (#783).
+        let qdisc_devs: Vec<u32> = config
+            .qdiscs
+            .iter()
+            .chain(opts.previous.iter().flat_map(|p| p.qdiscs.iter()))
+            .filter_map(|q| ifindex_of(&q.dev))
+            .filter(|i| {
                 snapshot
-                    .links
+                    .qdiscs
                     .iter()
-                    .find(|l| l.name() == Some(t.dev.as_str()))
-                    .map(|l| l.ifindex())
+                    .any(|q| q.ifindex() == *i && q.handle().major() != 0 && (q.is_root() || q.parent().is_ingress()))
             })
             .collect();
+        tree_links.extend(qdisc_devs);
+        tree_links.sort_unstable();
+        tree_links.dedup();
         snapshot.read_tc(conn, tree_links).await?;
         if config
             .links
@@ -1315,6 +1404,11 @@ impl Snapshot {
         }
         if !config.fdb.is_empty() || opts.previous.as_ref().is_some_and(|p| !p.fdb.is_empty()) {
             snapshot.fdb = conn.get_bridge_neighbors().await?;
+            // A port's VLANs: an entry declared without one has one for
+            // each (#793).
+            if snapshot.bridge_vlans.is_empty() {
+                snapshot.bridge_vlans = conn.get_bridge_vlans_dump().await?;
+            }
         }
         if !config.rules.is_empty() || opts.previous.as_ref().is_some_and(|p| !p.rules.is_empty()) {
             snapshot.rules = conn.get_rules().await?;
@@ -1409,7 +1503,7 @@ pub(crate) fn diff_snapshot(
     opts: &PlanOptions,
 ) -> Result<ConfigDiff> {
     let mut diff = ConfigDiff::default();
-    let current_links = snapshot.links.clone();
+    let mut current_links = snapshot.links.clone();
     let current_addresses = snapshot.addresses.clone();
     let current_routes = snapshot.routes.clone();
     let current_qdiscs = snapshot.qdiscs.clone();
@@ -1455,6 +1549,14 @@ pub(crate) fn diff_snapshot(
         },
     );
     diff.links_to_recreate = plan.recreate.clone();
+    // The rest of the diff is against the links as the renames leave them
+    // (#804): a renamed peer's own declaration, its addresses and routes.
+    diff.links_to_rename = plan.renames.clone();
+    for rename in &plan.renames {
+        if let Some(link) = current_links.iter_mut().find(|l| l.name.as_deref() == Some(&rename.from)) {
+            link.name = Some(rename.to.clone());
+        }
+    }
     diff.links_to_remove = plan.remove.clone();
     diff.routes_protocol = Some(config.routes_protocol());
     diff.owner = config.owner.clone();
@@ -1664,7 +1766,9 @@ pub(crate) fn diff_snapshot(
     );
 
     // Diff routes
-    diff_routes(config, &current_routes, &ifindex_to_name, opts, &mut diff);
+    let blackhole_nexthops: HashSet<u32> =
+        snapshot.nexthops.iter().filter(|n| n.is_blackhole()).map(|n| n.id()).collect();
+    diff_routes(config, &current_routes, &ifindex_to_name, &blackhole_nexthops, opts, &mut diff);
 
     // What is there now and goes with a flushed link is a re-add (#649).
     let cause_of = |dev: &str| {
@@ -1697,7 +1801,7 @@ pub(crate) fn diff_snapshot(
     }
 
     // Diff qdiscs
-    diff_qdiscs(config, &current_qdiscs, &ifindex_to_name, opts, &mut diff);
+    diff_qdiscs(config, &current_qdiscs, &ifindex_to_name, &snapshot.tc, opts, &mut diff);
 
     // Neighbours (#516), against what the link changes leave: a link
     // recreated, flushed or given another MAC has none.
@@ -1829,9 +1933,10 @@ fn diff_fdb(
     diff: &mut ConfigDiff,
 ) {
     use crate::netlink::types::neigh::nud;
-    // The entry the kernel has for a declaration, as one, and whether it is
-    // static or permanent rather than learned.
-    let live = |d: &DeclaredFdb| -> Option<(DeclaredFdb, bool)> {
+    // The entry the kernel has for a declaration, as one; whether it is
+    // static or permanent rather than learned; and whether every entry it
+    // makes is (#793).
+    let live = |d: &DeclaredFdb| -> Option<(DeclaredFdb, bool, bool)> {
         let ifindex = link_by_name.get(d.dev.as_str())?.ifindex();
         if d.dst.is_none() && moved.contains(&ifindex) {
             return None;
@@ -1847,17 +1952,76 @@ fn diff_fdb(
         let state = msg.header.ndm_state;
         let mut have = d.clone();
         have.local = d.dst.is_none() && state & nud::PERMANENT != 0;
-        Some((have, state & (nud::PERMANENT | nud::NOARP) != 0))
+        let kept = |state: u16| state & (nud::PERMANENT | nud::NOARP) != 0;
+        // A bridge entry declared without a VLAN is one per VLAN of the
+        // port as well (#793): `br_fdb_add` makes them all, and an apply
+        // that left one missing or learned has not converged.
+        let per_vlan = d.vlan.is_none() && d.dst.is_none();
+        let all_vlans = !per_vlan
+            || snapshot
+                .bridge_vlans
+                .iter()
+                .filter(|v| v.ifindex() == ifindex)
+                .all(|v| {
+                    snapshot.fdb.iter().any(|m| {
+                        m.ifindex() == ifindex
+                            && m.lladdr() == Some(&d.mac[..])
+                            && m.vlan() == Some(v.vid())
+                            && m.master().is_some()
+                            && kept(m.header.ndm_state)
+                    })
+                });
+        Some((have, kept(state), kept(state) && all_vlans))
+    };
+    // Where the entry is now, when setting it moves it (#783): a bridge
+    // keeps one entry per MAC and VLAN, so a replace on this port takes it
+    // from another, and a VXLAN device one remote per unicast MAC, which a
+    // replace swaps. It is what an undo puts back.
+    let elsewhere = |d: &DeclaredFdb| -> Option<DeclaredFdb> {
+        let link = link_by_name.get(d.dev.as_str())?;
+        let ifindex = link.ifindex();
+        let msg = snapshot.fdb.iter().find(|m| {
+            m.lladdr() == Some(&d.mac[..])
+                && m.vlan() == d.vlan
+                && m.header.ndm_state & (nud::PERMANENT | nud::NOARP) != 0
+                && match d.dst {
+                    None => m.ifindex() != ifindex && m.master().is_some() && m.master() == link.master(),
+                    Some(dst) => {
+                        !d.floods()
+                            && m.ifindex() == ifindex
+                            && m.master().is_none()
+                            && m.destination().is_some_and(|x| *x != dst)
+                    }
+                }
+        })?;
+        let mut before = d.clone();
+        match d.dst {
+            None => {
+                before.dev = link_by_name
+                    .iter()
+                    .find(|(_, l)| l.ifindex() == msg.ifindex())
+                    .map(|(name, _)| name.to_string())?;
+                before.local = msg.header.ndm_state & nud::PERMANENT != 0;
+            }
+            Some(_) => before.dst = msg.destination().copied(),
+        }
+        Some(before)
     };
     for e in &config.fdb {
         match live(e) {
-            Some((have, true)) if have == *e => {}
-            Some((have, true)) => {
+            Some((have, _, true)) if have == *e => {}
+            Some((have, true, _)) if have != *e => {
                 diff.fdb_replaced.push((e.clone(), have));
                 diff.fdb_to_set.push(e.clone());
             }
-            // Missing, or learned.
-            _ => diff.fdb_to_set.push(e.clone()),
+            // Missing, learned, or short of an entry for a VLAN; set where
+            // it is now, a move.
+            _ => {
+                if let Some(before) = elsewhere(e) {
+                    diff.fdb_replaced.push((e.clone(), before));
+                }
+                diff.fdb_to_set.push(e.clone());
+            }
         }
     }
     for prev in opts.previous.iter().flat_map(|p| p.fdb.iter()) {
@@ -1870,7 +2034,7 @@ fn diff_fdb(
         if kept {
             continue;
         }
-        if let Some((have, true)) = live(prev) {
+        if let Some((have, true, _)) = live(prev) {
             diff.fdb_to_remove.push(have);
         }
     }
@@ -1959,7 +2123,9 @@ fn diff_nexthops(
                     l.protocol()
                 ),
             });
-        } else if have == nexthop_normal(d) {
+        // A declaration has no encap, and one the kernel's nexthop has is
+        // not compared otherwise: it is another nexthop (#783).
+        } else if have == nexthop_normal(d) && l.encap_type().is_none() {
         } else if have.is_group() != d.is_group() {
             diff.nexthops_refused.push(NexthopConflict {
                 nexthop: d.clone(),
@@ -2000,7 +2166,17 @@ pub(crate) fn rule_from_live(r: &RuleMessage) -> Option<DeclaredRule> {
         A::Prohibit => RuleAction::Prohibit,
         _ => return None,
     };
-    if r.goto().is_some() || r.tun_id().is_some() || r.uid_range().is_some() || r.l3mdev().is_some() {
+    // What a declaration has no word for makes another rule (#793): a TOS,
+    // realms (`FRA_FLOW`) or a suppressed interface group read back
+    // without it would pass for the declared rule, which does not exist.
+    if r.goto().is_some()
+        || r.tun_id().is_some()
+        || r.uid_range().is_some()
+        || r.l3mdev().is_some()
+        || r.header.tos != 0
+        || r.flow().is_some_and(|f| f != 0)
+        || r.suppress_ifgroup().is_some_and(|g| g != u32::MAX)
+    {
         return None;
     }
     let prefix = |addr: Option<IpAddr>, len: u8| addr.map(|a| (a, len));
@@ -2024,26 +2200,42 @@ pub(crate) fn rule_from_live(r: &RuleMessage) -> Option<DeclaredRule> {
     })
 }
 
+/// The kernel's rules with protocol `ours`, as declarations.
+fn live_rules(rules: &[RuleMessage], ours: u8) -> Vec<DeclaredRule> {
+    rules
+        .iter()
+        .filter(|r| r.protocol() == Some(ours))
+        .filter_map(rule_from_live)
+        .collect()
+}
+
+/// A declared rule as it reads back: a mask of all ones is none.
+fn normal_rule(r: &DeclaredRule) -> DeclaredRule {
+    let mut r = r.clone();
+    if r.fwmask == Some(u32::MAX) {
+        r.fwmask = None;
+    }
+    r.ipv6 = r.is_ipv6();
+    r
+}
+
+/// Whether the kernel has `rule`, with protocol `ours`, exactly (#793).
+pub(crate) async fn rule_present(
+    conn: &Connection<Route>,
+    rule: &DeclaredRule,
+    ours: u8,
+) -> Result<bool> {
+    let rules = conn.get_rules().await?;
+    Ok(live_rules(&rules, ours).contains(&normal_rule(rule)))
+}
+
 /// The declared rules against the kernel's (#516). Only a rule with the
 /// config's protocol is the config's: one another tool added — `ip rule
 /// add` leaves it `unspec` — is another rule to the kernel, however alike.
 fn diff_rules(config: &NetworkConfig, snapshot: &Snapshot, opts: &PlanOptions, diff: &mut ConfigDiff) {
     let ours = u8::from(config.routes_protocol());
-    let live: Vec<DeclaredRule> = snapshot
-        .rules
-        .iter()
-        .filter(|r| r.protocol() == Some(ours))
-        .filter_map(rule_from_live)
-        .collect();
-    // A declared rule with a mask of all ones is the one without.
-    let normal = |r: &DeclaredRule| {
-        let mut r = r.clone();
-        if r.fwmask == Some(u32::MAX) {
-            r.fwmask = None;
-        }
-        r.ipv6 = r.is_ipv6();
-        r
-    };
+    let live = live_rules(&snapshot.rules, ours);
+    let normal = normal_rule;
     for r in &config.rules {
         if !live.contains(&normal(r)) {
             diff.rules_to_add.push(r.clone());
@@ -2514,7 +2706,7 @@ fn topo_sort_links_to_add(links: &mut Vec<DeclaredLink>) {
     );
 }
 
-fn compute_link_changes(
+pub(super) fn compute_link_changes(
     declared: &DeclaredLink,
     existing: &LinkMessage,
     ifindex_to_name: &HashMap<u32, &str>,
@@ -2701,14 +2893,12 @@ fn diff_addresses(
     // (`IFA_LOCAL`, or `IFA_ADDRESS` when there is no other), its prefix,
     // and a point-to-point peer (`IFA_ADDRESS` when it differs) — which,
     // for IPv4, makes another address, not a change of this one (#516).
+    // Read back whole (#781): what a removal deletes is what its undo adds
+    // again, so it carries the label, metric, flags and lifetimes too. The
+    // matching below looks at the address, prefix and peer alone.
     let live: Vec<(DeclaredAddress, &AddressMessage)> = current
         .iter()
-        .filter_map(|a| {
-            let dev = ifindex_to_name.get(&a.ifindex())?;
-            let mut declared = DeclaredAddress::plain(dev, *a.primary_address()?, a.prefix_len());
-            declared.attrs.peer = a.peer().copied();
-            Some((declared, a))
-        })
+        .filter_map(|a| Some((address_from_live(ifindex_to_name.get(&a.ifindex())?, a)?, a)))
         .collect();
     let same = |a: &DeclaredAddress, b: &DeclaredAddress| {
         a.dev == b.dev
@@ -2797,6 +2987,36 @@ fn diff_addresses(
     }
 }
 
+/// A kernel address as the declaration that adds it again (#781): its peer,
+/// a label other than the device's name, its metric, the flags a
+/// declaration has, and its lifetimes when it has them, as they stand.
+pub(super) fn address_from_live(dev: &str, a: &AddressMessage) -> Option<DeclaredAddress> {
+    use crate::netlink::types::addr::ifa_flags as f;
+    let mut d = DeclaredAddress::plain(dev, *a.primary_address()?, a.prefix_len());
+    let flags = a.flags();
+    d.attrs.peer = a.peer().copied();
+    d.attrs.label = a.label().filter(|l| *l != dev).map(str::to_string);
+    // Restored without it, an address lost the broadcast route the kernel
+    // makes for it in the local table (#783).
+    d.attrs.broadcast = match a.broadcast() {
+        Some(IpAddr::V4(b)) if !b.is_unspecified() => Some(*b),
+        _ => None,
+    };
+    d.attrs.metric = a.metric();
+    d.attrs.nodad = flags & f::NODAD != 0;
+    d.attrs.optimistic = flags & f::OPTIMISTIC != 0;
+    d.attrs.noprefixroute = flags & f::NOPREFIXROUTE != 0;
+    d.attrs.home = flags & f::HOMEADDRESS != 0;
+    d.attrs.mngtmpaddr = flags & f::MANAGETEMPADDR != 0;
+    if !a.is_permanent()
+        && let Some(c) = a.cache_info()
+    {
+        let secs = |s: u32| std::time::Duration::from_secs(u64::from(s));
+        d.attrs.lifetimes = Some((secs(c.valid), secs(c.preferred)));
+    }
+    Some(d)
+}
+
 /// How a live address differs from its declaration (#516).
 enum AddressDrift {
     None,
@@ -2820,9 +3040,17 @@ fn address_drift(declared: &DeclaredAddress, live: &AddressMessage) -> AddressDr
     let lifetimes = t.lifetimes.is_some() == live.is_permanent();
     let label = declared.address.is_ipv4()
         && t.label.as_deref().unwrap_or(&declared.dev) != live.label().unwrap_or(&declared.dev);
+    // A replace leaves an IPv4 address's broadcast as it was (#783). One
+    // not declared is not compared: the tools that add addresses set one
+    // (`brd +`, DHCP clients), and recreating an address drops it a moment.
+    let live_broadcast = match live.broadcast() {
+        Some(IpAddr::V4(b)) if !b.is_unspecified() => Some(*b),
+        _ => None,
+    };
+    let broadcast = t.broadcast.is_some_and(|b| live_broadcast != Some(b));
     let metric_to_none =
         declared.address.is_ipv6() && t.metric.unwrap_or(0) == 0 && live.metric().unwrap_or(0) != 0;
-    if (declared.address.is_ipv4() && (label || flags)) || metric_to_none {
+    if (declared.address.is_ipv4() && (label || flags || broadcast)) || metric_to_none {
         AddressDrift::Recreate
     } else if flags || metric || lifetimes {
         AddressDrift::InPlace
@@ -2904,6 +3132,7 @@ fn diff_routes(
     config: &NetworkConfig,
     current: &[RouteMessage],
     ifindex_to_name: &HashMap<u32, &str>,
+    blackhole_nexthops: &HashSet<u32>,
     opts: &PlanOptions,
     diff: &mut ConfigDiff,
 ) {
@@ -2928,6 +3157,14 @@ fn diff_routes(
         .map(|(idx, name)| (*name, *idx))
         .collect();
     let resolve = |name: &str| name_to_ifindex.get(name).copied();
+    // A route through a nexthop object dumps the object's type while the
+    // object is a blackhole, and its own otherwise. One added as a
+    // blackhole stays one whatever its object becomes (#783): that is not
+    // the declared route, which is unicast.
+    let stuck = |r: &RouteMessage| {
+        r.nh_id()
+            .is_some_and(|id| r.route_type() != RouteType::Unicast && !blackhole_nexthops.contains(&id))
+    };
 
     // Index current routes by (dst, prefix, table) for fast lookup
     // of every matching kernel route. ECMP / multi-metric setups
@@ -2997,7 +3234,7 @@ fn diff_routes(
             && current_by_key.get(&key).is_some_and(|kernel_routes| {
                 kernel_routes
                     .iter()
-                    .any(|r| route_matches(declared, declared_oif, &resolve, r))
+                    .any(|r| route_matches(declared, declared_oif, &resolve, r) && !stuck(r))
             });
 
         if matches_existing {
@@ -3028,9 +3265,13 @@ fn diff_routes(
                     kernel_routes
                         .iter()
                         .find(|r| r.priority().unwrap_or(0) == slot && r.header.rtm_tos == 0)
-                        .and_then(|r| declared_from_live(r, ifindex_to_name))
+                        .and_then(|r| Some((declared_from_live(r, ifindex_to_name)?, r.protocol(), route_lost(r))))
                 });
-                if let Some(replaced) = replaced {
+                if let Some((replaced, protocol, lost)) = replaced {
+                    diff.route_protocols.push((replaced.clone(), protocol));
+                    if let Some(lost) = lost {
+                        diff.routes_lost.push((replaced.clone(), lost));
+                    }
                     diff.routes_replaced.push((declared.clone(), replaced));
                 }
                 diff.routes_to_add.push(declared.clone());
@@ -3134,14 +3375,72 @@ fn diff_routes(
             continue;
         }
         if let Some(route) = declared_from_live(r, ifindex_to_name) {
+            diff.route_protocols.push((route.clone(), r.protocol()));
+            if let Some(lost) = route_lost(r) {
+                diff.routes_lost.push((route.clone(), lost));
+            }
             diff.routes_to_remove.push(route);
         }
     }
 }
 
+/// What a kernel route has that its declaration cannot say (#783): a
+/// metric past the six a declaration has, locked metrics, a congestion
+/// control, realms, an encap other than MPLS, an IPv6 router preference or
+/// expiry. Read back without it, the route is put back as another; a
+/// replace that sends none of it drops it. `None` when there is nothing.
+pub(crate) fn route_lost(r: &RouteMessage) -> Option<String> {
+    let mut what: Vec<&str> = Vec::new();
+    if let Some(m) = r.metrics() {
+        for (name, v) in [
+            ("rtt", m.rtt),
+            ("rttvar", m.rttvar),
+            ("ssthresh", m.ssthresh),
+            ("cwnd", m.cwnd),
+            ("rto_min", m.rto_min),
+            ("quickack", m.quickack),
+            ("reordering", m.reordering),
+            ("features", m.features),
+        ] {
+            if v.is_some() {
+                what.push(name);
+            }
+        }
+    }
+    if r.metrics_lock().is_some_and(|l| l != 0) {
+        what.push("locked metrics");
+    }
+    if r.congctl().is_some() {
+        what.push("a congestion control");
+    }
+    if r.flow().is_some_and(|f| f != 0) {
+        what.push("realms");
+    }
+    // Through a nexthop object, the encap dumped is the object's (#769).
+    const LWTUNNEL_ENCAP_MPLS: u16 = 1;
+    if r.nh_id().is_none() && r.encap_type().is_some_and(|t| t != LWTUNNEL_ENCAP_MPLS) {
+        what.push("an encap other than MPLS");
+    }
+    // `ICMPV6_ROUTER_PREF_MEDIUM` is 0, and every IPv6 route reports one.
+    if r.pref().is_some_and(|p| p != 0) {
+        what.push("a router preference");
+    }
+    if r.expires().is_some_and(|e| e != 0) {
+        what.push("an expiry");
+    }
+    let hops = r.multipath().unwrap_or_default();
+    if r.nh_id().is_none() && hops.iter().any(|h| h.encap_type.is_some()) {
+        what.push("a next hop with an encap");
+    }
+    if hops.iter().any(|h| h.flow.is_some_and(|f| f != 0)) {
+        what.push("a next hop with realms");
+    }
+    (!what.is_empty()).then(|| format!("it has {}, which no declaration has", what.join(", ")))
+}
+
 /// A kernel route as the declaration that would install it; `None` for a
 /// type no declaration has (local, broadcast, …).
-fn declared_from_live(
+pub(super) fn declared_from_live(
     r: &RouteMessage,
     ifindex_to_name: &HashMap<u32, &str>,
 ) -> Option<DeclaredRoute> {
@@ -3159,12 +3458,22 @@ fn declared_from_live(
             IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
         }
     });
+    // A route through a nexthop object is dumped with the nexthop's gateway,
+    // device, encap and onlink flag as well (`nexthop_compat_mode`, on by
+    // default). Read back with them, its delete matched no route and its
+    // re-add was refused: a request may not name both (#769).
+    let through_object = r.nh_id().is_some();
+    // Through an object, the type dumped is the object's while it is a
+    // blackhole; put back as one, the route stays a blackhole whatever the
+    // object becomes (#783). The route is unicast.
+    let route_type = if through_object { DeclaredRouteType::Unicast } else { route_type };
     Some(DeclaredRoute {
         destination,
         prefix_len: r.dst_len(),
-        gateway: r.gateway().or(r.via()).copied(),
+        gateway: r.gateway().or(r.via()).copied().filter(|_| !through_object),
         dev: r
             .oif()
+            .filter(|_| !through_object)
             .and_then(|idx| ifindex_to_name.get(&idx))
             .map(|n| n.to_string()),
         metric: r.priority(),
@@ -3174,11 +3483,16 @@ fn declared_from_live(
         attrs: super::types::RouteAttrs {
             prefsrc: r.prefsrc().copied(),
             scope: Some(r.scope()),
-            onlink: r.is_onlink(),
+            onlink: r.is_onlink() && !through_object,
             nhid: r.nh_id(),
-            mpls_encap: r.mpls_encap_labels().unwrap_or_default().to_vec(),
+            mpls_encap: r
+                .mpls_encap_labels()
+                .filter(|_| !through_object)
+                .unwrap_or_default()
+                .to_vec(),
             multipath: r
                 .multipath()
+                .filter(|_| !through_object)
                 .unwrap_or_default()
                 .iter()
                 .map(|h| super::types::RouteNexthop {
@@ -3283,6 +3597,9 @@ fn route_matches(
     // apply.
     route_matches_but_metric(declared, declared_oif, resolve, r)
         && kernel_metric(declared) == r.priority().unwrap_or(0)
+        // A declared route has no TOS, so it is installed with 0; one with
+        // a TOS routes only that traffic, and is another route (#793).
+        && r.header.rtm_tos == 0
         && route_attrs_match(declared, r)
 }
 
@@ -3294,9 +3611,15 @@ fn route_matches(
 fn route_attrs_match(declared: &DeclaredRoute, r: &RouteMessage) -> bool {
     let a = &declared.attrs;
     let live = super::types::RouteAttrs::default().with_metrics(r.metrics());
+    // Through a nexthop object, the encap and on-link flag dumped are the
+    // object's, echoed (#769).
+    let own = r.nh_id().is_none();
     a.prefsrc.as_ref() == r.prefsrc()
-        && a.mpls_encap.as_slice() == r.mpls_encap_labels().unwrap_or_default()
-        && a.onlink == r.is_onlink()
+        // What a declaration cannot carry makes another route; a replace
+        // drops it (#783).
+        && route_lost(r).is_none()
+        && (!own || a.mpls_encap.as_slice() == r.mpls_encap_labels().unwrap_or_default())
+        && (!own || a.onlink == r.is_onlink())
         && a.scope.is_none_or(|s| s == r.scope())
         && (a.mtu, a.advmss, a.window) == (live.mtu, live.advmss, live.window)
         && (a.initcwnd, a.initrwnd, a.hoplimit) == (live.initcwnd, live.initrwnd, live.hoplimit)
@@ -3356,9 +3679,31 @@ fn diff_qdiscs(
     config: &NetworkConfig,
     current: &[TcMessage],
     ifindex_to_name: &HashMap<u32, &str>,
+    tc: &HashMap<u32, super::tc_tree::TcLive>,
     opts: &PlanOptions,
     diff: &mut ConfigDiff,
 ) {
+    // What a live qdisc has under it, which taking it away destroys (#783).
+    // A device whose classes and filters were not read has nothing known
+    // under it: `read_for` reads them for every device whose root or hook
+    // a declaration changes.
+    let underneath = |live: &TcMessage| {
+        let dev = ifindex_to_name.get(&live.ifindex()).copied().unwrap_or("?");
+        let qdiscs: Vec<TcMessage> = current
+            .iter()
+            .filter(|q| q.ifindex() == live.ifindex())
+            .cloned()
+            .collect();
+        match tc.get(&live.ifindex()) {
+            Some(t) => super::preserve::underneath(dev, live, &qdiscs, t, ifindex_to_name),
+            None => super::preserve::Underneath::Nothing,
+        }
+    };
+    let record = |diff: &mut ConfigDiff, dev: &str, parent: QdiscParent, u: super::preserve::Underneath| {
+        if !u.is_nothing() {
+            diff.qdiscs_underneath.push(((dev.to_string(), parent), u));
+        }
+    };
     // Build map of current root qdiscs by device
     let mut current_root_qdisc: HashMap<&str, &TcMessage> = HashMap::new();
     let mut current_ingress_qdisc: HashMap<&str, &TcMessage> = HashMap::new();
@@ -3398,6 +3743,7 @@ fn diff_qdiscs(
                     },
                 );
                 diff.qdiscs_to_remove.push(removed);
+                record(diff, &declared.dev, declared.effective_parent(), underneath(live));
             }
             continue;
         }
@@ -3424,9 +3770,11 @@ fn diff_qdiscs(
             };
 
             if existing_kind != desired_kind {
-                // Different type, need to replace.
+                // Different type, need to replace: a graft, which destroys
+                // what is under the live one (#783).
                 diff.qdiscs_to_replace.push(declared.clone());
                 replaced(diff);
+                record(diff, &declared.dev, declared.effective_parent(), underneath(existing));
             } else if !declared.qdisc_type.matches(existing) {
                 // Same kind, different parameters — replace.
                 diff.qdiscs_to_replace.push(declared.clone());
@@ -3436,9 +3784,11 @@ fn diff_qdiscs(
                 .is_some_and(|h| h != existing.handle())
             {
                 // At another handle than the one declared, or than `1:`
-                // for a classful kind, which its classes name (#514).
+                // for a classful kind, which its classes name (#514): a
+                // graft too.
                 diff.qdiscs_to_replace.push(declared.clone());
                 replaced(diff);
+                record(diff, &declared.dev, declared.effective_parent(), underneath(existing));
             }
         } else {
             // No qdisc at this position, need to add.
@@ -3458,15 +3808,19 @@ fn diff_qdiscs(
             QdiscParent::Root => &current_root_qdisc,
             QdiscParent::Ingress => &current_ingress_qdisc,
         };
-        let live = current_map
+        let live_qdisc = current_map
             .get(prev.dev.as_str())
-            .is_some_and(|q| q.handle().major() != 0);
+            .filter(|q| q.handle().major() != 0);
+        let live = live_qdisc.is_some();
         let queued = diff
             .qdiscs_to_remove
             .iter()
             .any(|q| q.dev == prev.dev && q.effective_parent() == parent);
         if !still && live && !queued && !opts.owns_qdisc(&prev.dev, parent) {
             diff.qdiscs_to_remove.push(prev.clone());
+            if let Some(q) = live_qdisc {
+                record(diff, &prev.dev, parent, underneath(q));
+            }
         }
     }
 }
@@ -3841,7 +4195,7 @@ mod tests {
 
     fn purge_routes(config: &NetworkConfig, current: &[RouteMessage], opts: PlanOptions) -> Vec<(String, u32)> {
         let mut diff = ConfigDiff::default();
-        diff_routes(config, current, &HashMap::new(), &opts, &mut diff);
+        diff_routes(config, current, &HashMap::new(), &HashSet::new(), &opts, &mut diff);
         diff.routes_to_remove
             .iter()
             .map(|r| (format!("{}/{}", r.destination, r.prefix_len), r.table.unwrap()))
@@ -4009,6 +4363,7 @@ mod tests {
                 "links-to-modify",
                 "links-to-recreate",
                 "links-to-remove",
+                "links-to-rename",
                 "neighbours-to-remove",
                 "neighbours-to-set",
                 "nexthops-refused",
@@ -4022,6 +4377,7 @@ mod tests {
                 "routes-to-remove",
                 "rules-to-add",
                 "rules-to-remove",
+                "tc",
                 "veth-peers-to-modify",
                 "vrf-strict-mode",
             ]
@@ -4054,6 +4410,7 @@ mod tests {
                 "tables-to-add",
                 "tables-to-delete",
                 "tables-to-modify",
+                "tables-to-recreate",
             ]
         );
     }
@@ -4118,7 +4475,7 @@ mod tests {
         let run = |route: fn(RouteBuilder) -> RouteBuilder, current: &[RouteMessage]| {
             let config = NetworkConfig::new().route("10.0.0.0/24", route).unwrap();
             let mut diff = ConfigDiff::default();
-            diff_routes(&config, current, &names, &PlanOptions::default(), &mut diff);
+            diff_routes(&config, current, &names, &HashSet::new(), &PlanOptions::default(), &mut diff);
             (diff.routes_to_add.len(), diff.routes_refused)
         };
 

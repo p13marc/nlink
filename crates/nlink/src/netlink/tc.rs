@@ -1280,6 +1280,13 @@ pub struct FqCodelConfig {
     pub ce_threshold: Option<Duration>,
     /// Memory limit in bytes.
     pub memory_limit: Option<u32>,
+    /// The most packets dropped at once when the queue is full; the
+    /// kernel's is 64. tc(8) `drop_batch` (#806).
+    pub drop_batch: Option<u32>,
+    /// Which packets the CE threshold applies to: those whose DS field
+    /// (the TOS byte), masked with the second, equals the first. tc(8)
+    /// `ce_threshold_selector V/M` (#806).
+    pub ce_threshold_selector: Option<(u8, u8)>,
 }
 
 impl Default for FqCodelConfig {
@@ -1300,7 +1307,23 @@ impl FqCodelConfig {
             ecn: None,
             ce_threshold: None,
             memory_limit: None,
+            drop_batch: None,
+            ce_threshold_selector: None,
         }
+    }
+
+    /// Set the most packets dropped at once when the queue is full
+    /// (#806).
+    pub fn drop_batch(mut self, packets: u32) -> Self {
+        self.drop_batch = Some(packets);
+        self
+    }
+
+    /// Apply the CE threshold to the packets whose DS field, masked with
+    /// `mask`, equals `value` (#806).
+    pub fn ce_threshold_selector(mut self, value: u8, mask: u8) -> Self {
+        self.ce_threshold_selector = Some((value, mask));
+        self
     }
 
     /// Set the target delay (default: 5ms).
@@ -1446,6 +1469,35 @@ impl FqCodelConfig {
                     })?);
                     i += 2;
                 }
+                "drop_batch" => {
+                    let s = need_value()?;
+                    cfg.drop_batch = Some(s.parse().map_err(|_| {
+                        Error::invalid_message(format!(
+                            "fq_codel: invalid drop_batch `{s}` (expected unsigned integer packets)"
+                        ))
+                    })?);
+                    i += 2;
+                }
+                "ce_threshold_selector" => {
+                    let s = need_value()?;
+                    let byte = |v: &str| {
+                        match v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")) {
+                            Some(hex) => u8::from_str_radix(hex, 16),
+                            None => v.parse(),
+                        }
+                        .ok()
+                    };
+                    let (value, mask) = s
+                        .split_once('/')
+                        .and_then(|(v, m)| Some((byte(v)?, byte(m)?)))
+                        .ok_or_else(|| {
+                            Error::invalid_message(format!(
+                                "fq_codel: invalid ce_threshold_selector `{s}` (expected VALUE/MASK, bytes)"
+                            ))
+                        })?;
+                    cfg.ce_threshold_selector = Some((value, mask));
+                    i += 2;
+                }
                 "ecn" => {
                     cfg.ecn = Some(true);
                     i += 1;
@@ -1522,6 +1574,14 @@ impl FqCodelConfig {
         }
         if let Some(mem) = self.memory_limit {
             builder.append_attr_u32(fq_codel::TCA_FQ_CODEL_MEMORY_LIMIT, mem);
+        }
+        if let Some(batch) = self.drop_batch {
+            builder.append_attr_u32(fq_codel::TCA_FQ_CODEL_DROP_BATCH_SIZE, batch);
+        }
+        // The kernel takes the selector only with its mask.
+        if let Some((value, mask)) = self.ce_threshold_selector {
+            builder.append_attr_u8(fq_codel::TCA_FQ_CODEL_CE_THRESHOLD_SELECTOR, value);
+            builder.append_attr_u8(fq_codel::TCA_FQ_CODEL_CE_THRESHOLD_MASK, mask);
         }
         Ok(())
     }
@@ -1734,6 +1794,16 @@ pub struct FqConfig {
     pub ce_threshold: Option<Duration>,
     /// Enable/disable pacing (`Some(false)` = explicit nopacing).
     pub pacing: Option<bool>,
+    /// The flow table's size in buckets; the kernel takes its log2, rounded
+    /// up, as tc(8) does (#821).
+    pub buckets: Option<u32>,
+    /// How far ahead of now a packet's departure time may be (#821).
+    pub horizon: Option<Duration>,
+    /// Beyond the horizon, drop (`Some(true)`, tc's `horizon_drop`) or cap
+    /// the time to it (`Some(false)`, `horizon_cap`) (#821).
+    pub horizon_drop: Option<bool>,
+    /// The pacing timer's slack (#821).
+    pub timer_slack: Option<Duration>,
 }
 
 impl FqConfig {
@@ -1802,6 +1872,30 @@ impl FqConfig {
         self
     }
 
+    /// Set the flow table's size in buckets.
+    pub fn buckets(mut self, buckets: u32) -> Self {
+        self.buckets = Some(buckets);
+        self
+    }
+
+    /// Set the horizon.
+    pub fn horizon(mut self, horizon: Duration) -> Self {
+        self.horizon = Some(horizon);
+        self
+    }
+
+    /// Drop packets beyond the horizon (`true`), or cap their time to it.
+    pub fn horizon_drop(mut self, drop: bool) -> Self {
+        self.horizon_drop = Some(drop);
+        self
+    }
+
+    /// Set the pacing timer's slack.
+    pub fn timer_slack(mut self, slack: Duration) -> Self {
+        self.timer_slack = Some(slack);
+        self
+    }
+
     /// Terminal no-op for builder symmetry.
     pub fn build(self) -> Self {
         self
@@ -1812,9 +1906,12 @@ impl FqConfig {
     /// Recognised tokens: `limit <packets>`, `flow_limit <packets>`,
     /// `quantum <bytes>`, `initial_quantum <bytes>`, `maxrate <rate>`,
     /// `low_rate_threshold <rate>`, `refill_delay <time>`,
-    /// `orphan_mask <n>`, `ce_threshold <time>`, `pacing`/`nopacing`.
-    /// Strict: unknown tokens, missing values, and unparseable values
-    /// all error.
+    /// `orphan_mask <n>`, `ce_threshold <time>`, `pacing`/`nopacing`,
+    /// `buckets <n>`, `horizon <time>`, `horizon_drop`/`horizon_cap`,
+    /// `timer_slack <time>` (#821). Strict: unknown tokens, missing values,
+    /// and unparseable values all error. `defrate` is refused: the kernel
+    /// ignores it; the newer `bands`, `priomap`, `weights` and
+    /// `offload_horizon` are not modelled.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut cfg = Self::new();
         let mut i = 0;
@@ -1886,6 +1983,30 @@ impl FqConfig {
                     cfg.pacing = Some(false);
                     i += 1;
                 }
+                "buckets" => {
+                    cfg.buckets = Some(parse_u32(need_value()?, "buckets")?);
+                    i += 2;
+                }
+                "horizon" => {
+                    cfg.horizon = Some(parse_time(need_value()?, "horizon")?);
+                    i += 2;
+                }
+                "horizon_drop" | "horizon_cap" => {
+                    cfg.horizon_drop = Some(key == "horizon_drop");
+                    i += 1;
+                }
+                "timer_slack" => {
+                    cfg.timer_slack = Some(parse_time(need_value()?, "timer_slack")?);
+                    i += 2;
+                }
+                "defrate" => {
+                    return Err(Error::invalid_message(
+                        "fq: `defrate` is obsolete: the kernel ignores TCA_FQ_FLOW_DEFAULT_RATE".to_string(),
+                    ));
+                }
+                "bands" | "priomap" | "weights" | "offload_horizon" => {
+                    return Err(Error::invalid_message(format!("fq: `{key}` is not modelled by FqConfig")));
+                }
                 other => {
                     return Err(Error::invalid_message(format!("fq: unknown token `{other}`")));
                 }
@@ -1936,6 +2057,19 @@ impl QdiscConfig for FqConfig {
         }
         if let Some(pacing) = self.pacing {
             builder.append_attr_u32(fq::TCA_FQ_RATE_ENABLE, u32::from(pacing));
+        }
+        // log2 of the buckets, rounded up: tc's ilog2().
+        if let Some(buckets) = self.buckets.filter(|b| *b != 0) {
+            builder.append_attr_u32(fq::TCA_FQ_BUCKETS_LOG, u32::BITS - (buckets - 1).leading_zeros());
+        }
+        if let Some(slack) = self.timer_slack {
+            builder.append_attr_u32(fq::TCA_FQ_TIMER_SLACK, u32::try_from(slack.as_nanos()).unwrap_or(u32::MAX));
+        }
+        if let Some(horizon) = self.horizon {
+            builder.append_attr_u32(fq::TCA_FQ_HORIZON, u32::try_from(horizon.as_micros()).unwrap_or(u32::MAX));
+        }
+        if let Some(drop) = self.horizon_drop {
+            builder.append_attr(fq::TCA_FQ_HORIZON_DROP, &[u8::from(drop)]);
         }
         Ok(())
     }
@@ -2231,6 +2365,15 @@ pub struct TbfConfig {
     /// the qdisc is written, because the kernel installs a TBF with no
     /// limit with no queue at all and drops every packet.
     pub limit: crate::util::Bytes,
+    /// Bytes the kernel adds to each packet's size when it charges the
+    /// rates, for framing the device does not count. tc(8) `overhead`
+    /// (#806).
+    pub overhead: u16,
+    /// The least size a packet is charged as. tc(8) `mpu` (#806).
+    pub mpu: u16,
+    /// The link layer the rate tables are for: ATM rounds each packet up
+    /// to whole cells. tc(8) `linklayer` (#806).
+    pub linklayer: super::psched::LinkLayer,
 }
 
 impl Default for TbfConfig {
@@ -2248,7 +2391,28 @@ impl TbfConfig {
             burst: crate::util::Bytes::ZERO,
             mtu: 1514,
             limit: crate::util::Bytes::ZERO,
+            overhead: 0,
+            mpu: 0,
+            linklayer: super::psched::LinkLayer::Ethernet,
         }
+    }
+
+    /// Set the per-packet overhead the rates charge (#806).
+    pub fn overhead(mut self, bytes: u16) -> Self {
+        self.overhead = bytes;
+        self
+    }
+
+    /// Set the least size a packet is charged as (#806).
+    pub fn mpu(mut self, bytes: u16) -> Self {
+        self.mpu = bytes;
+        self
+    }
+
+    /// Set the link layer the rate tables are for (#806).
+    pub fn linklayer(mut self, linklayer: super::psched::LinkLayer) -> Self {
+        self.linklayer = linklayer;
+        self
     }
 
     /// Set the rate.
@@ -2304,11 +2468,10 @@ impl TbfConfig {
     /// - `peakrate <rate>` — optional secondary rate cap.
     /// - `mtu <bytes>` (alias `minburst`) — peak-burst MTU.
     ///
-    /// **Not yet typed-modelled** (returns `Error::invalid_message`):
-    /// `latency` — `tc(8)` accepts it as a way to specify `limit`
-    /// indirectly (`limit ≈ rate * latency`), but `TbfConfig` only
-    /// stores the raw `limit`. Compute the limit yourself or file
-    /// an issue if the latency form is important.
+    /// - `latency <time>` — instead of `limit`: the limit is computed as
+    ///   tc(8) computes it, `rate * latency + burst`, or with a
+    ///   `peakrate` the smaller of that and `peakrate * latency + mtu`
+    ///   (#820).
     ///
     /// Strict: unknown tokens, missing values, and unparseable
     /// rate/size values all return `Error::invalid_message`. Note:
@@ -2333,6 +2496,8 @@ impl TbfConfig {
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut cfg = Self::new();
         let mut i = 0;
+        // tc(8) takes one of `limit` and `latency`, once.
+        let (mut limit_given, mut latency) = (false, None);
         while i < params.len() {
             let key = params[i];
             let need_value = || {
@@ -2371,6 +2536,10 @@ impl TbfConfig {
                     i += 2;
                 }
                 "limit" => {
+                    if limit_given || latency.is_some() {
+                        return Err(Error::invalid_message("tbf: one `limit` or `latency`, once".to_string()));
+                    }
+                    limit_given = true;
                     let s = need_value()?;
                     let bytes = crate::util::parse::get_size(s).map_err(|_| {
                         Error::invalid_message(format!(
@@ -2393,9 +2562,41 @@ impl TbfConfig {
                     i += 2;
                 }
                 "latency" => {
-                    return Err(Error::invalid_message(
-                        "tbf: `latency` is a derived form (limit = rate * latency) and is not modelled by TbfConfig — compute the limit yourself",
-                    ));
+                    if limit_given || latency.is_some() {
+                        return Err(Error::invalid_message("tbf: one `limit` or `latency`, once".to_string()));
+                    }
+                    let s = need_value()?;
+                    latency = Some(crate::util::parse::get_time(s).map_err(|_| {
+                        Error::invalid_message(format!("tbf: invalid latency `{s}` (expected tc-style time)"))
+                    })?);
+                    i += 2;
+                }
+                "overhead" | "mpu" => {
+                    let s = need_value()?;
+                    let bytes = crate::util::parse::get_size(s).ok().and_then(|b| u16::try_from(b).ok()).ok_or_else(|| {
+                        Error::invalid_message(format!(
+                            "tbf: invalid {key} `{s}` (expected a size up to 65535 bytes)"
+                        ))
+                    })?;
+                    if key == "overhead" {
+                        cfg.overhead = bytes;
+                    } else {
+                        cfg.mpu = bytes;
+                    }
+                    i += 2;
+                }
+                "linklayer" => {
+                    let s = need_value()?;
+                    cfg.linklayer = match s {
+                        "ethernet" => super::psched::LinkLayer::Ethernet,
+                        "atm" | "adsl" => super::psched::LinkLayer::Atm,
+                        _ => {
+                            return Err(Error::invalid_message(format!(
+                                "tbf: invalid linklayer `{s}` (expected ethernet, atm or adsl)"
+                            )));
+                        }
+                    };
+                    i += 2;
                 }
                 other => {
                     return Err(Error::invalid_message(format!(
@@ -2403,6 +2604,15 @@ impl TbfConfig {
                     )));
                 }
             }
+        }
+        if let Some(latency) = latency {
+            // tc's arithmetic, in microseconds and bytes.
+            let us = latency.as_micros() as f64;
+            let mut limit = cfg.rate.as_bytes_per_sec() as f64 * us / 1e6 + cfg.burst.as_u64() as f64;
+            if let Some(peak) = cfg.peakrate {
+                limit = limit.min(peak.as_bytes_per_sec() as f64 * us / 1e6 + f64::from(cfg.mtu));
+            }
+            cfg.limit = crate::util::Bytes::new(u64::from(limit as u32));
         }
         Ok(cfg)
     }
@@ -2438,16 +2648,21 @@ impl QdiscConfig for TbfConfig {
         // tbf_change() runs both through PSCHED_TICKS2NS(). Writing the raw
         // byte count made the bucket drain ~125x too fast at 1 mbit, so
         // tbf_enqueue() dropped every packet over ~262 bytes (#192).
-        let mut rate = TcRateSpec {
-            rate: rate_bps.min(u32::MAX as u64) as u32,
+        // The overhead, mpu and link layer go on both rates, as tc(8) puts
+        // them (#806).
+        let spec = |rate: u32| TcRateSpec {
+            rate,
+            overhead: self.overhead,
+            mpu: self.mpu,
             ..Default::default()
         };
-        let rtab = psched::tc_calc_rtable(&mut rate, rate_bps, self.mtu, psched::LinkLayer::default());
+        let mut rate = spec(rate_bps.min(u32::MAX as u64) as u32);
+        let rtab = psched::tc_calc_rtable(&mut rate, rate_bps, self.mtu, self.linklayer);
 
         let mut peakrate = TcRateSpec::default();
         let ptab = peakrate_bps.map(|pr| {
-            peakrate.rate = pr.min(u32::MAX as u64) as u32;
-            psched::tc_calc_rtable(&mut peakrate, pr, self.mtu, psched::LinkLayer::default())
+            peakrate = spec(pr.min(u32::MAX as u64) as u32);
+            psched::tc_calc_rtable(&mut peakrate, pr, self.mtu, self.linklayer)
         });
 
         let qopt = tbf::TcTbfQopt {
@@ -2894,6 +3109,18 @@ pub struct SfqConfig {
     pub limit: crate::util::Packets,
     /// Quantum (bytes per round).
     pub quantum: u32,
+    /// The hash table's buckets, a power of two up to 65536; 0, the
+    /// default, leaves the kernel's (1024). tc(8) `divisor` (#806).
+    pub divisor: u32,
+    /// The most flows; 0 leaves the kernel's (128). A limit caps it.
+    /// tc(8) `flows` (#806).
+    pub flows: u32,
+    /// The most packets a flow queues, up to 127; 0 leaves the kernel's
+    /// (127). tc(8) `depth` (#806).
+    pub depth: u32,
+    /// Drop from the head of a full flow's queue, not its tail. tc(8)
+    /// `headdrop` (#806).
+    pub headdrop: bool,
 }
 
 impl Default for SfqConfig {
@@ -2909,7 +3136,35 @@ impl SfqConfig {
             perturb: 0,
             limit: crate::util::Packets::ZERO,
             quantum: 0,
+            divisor: 0,
+            flows: 0,
+            depth: 0,
+            headdrop: false,
         }
+    }
+
+    /// Set the hash table's buckets, a power of two up to 65536 (#806).
+    pub fn divisor(mut self, buckets: u32) -> Self {
+        self.divisor = buckets;
+        self
+    }
+
+    /// Set the most flows (#806).
+    pub fn flows(mut self, flows: u32) -> Self {
+        self.flows = flows;
+        self
+    }
+
+    /// Set the most packets a flow queues, up to 127 (#806).
+    pub fn depth(mut self, packets: u32) -> Self {
+        self.depth = packets;
+        self
+    }
+
+    /// Drop from the head of a full flow's queue (#806).
+    pub fn headdrop(mut self, on: bool) -> Self {
+        self.headdrop = on;
+        self
     }
 
     /// Set the perturbation period in seconds.
@@ -2942,10 +3197,12 @@ impl SfqConfig {
     /// - `quantum <bytes>` — bytes dequeued per round (tc-style size).
     /// - `perturb <seconds>` — hash perturbation interval.
     /// - `limit <packets>` — queue limit in packets.
+    /// - `divisor <buckets>`, `flows <n>`, `depth <packets>`, `headdrop`
+    ///   (#806).
     ///
-    /// **Not yet typed-modelled** (returns `Error::invalid_message`):
-    /// `divisor` — `SfqConfig` doesn't expose the hash-table divisor
-    /// field. File an issue if you need it.
+    /// **Not typed-modelled** (returns `Error::invalid_message`): the
+    /// SFQRED words (`redflowlimit`, `min`, `max`, `avpkt`, `burst`,
+    /// `probability`, `ecn`, `harddrop`).
     ///
     /// Strict: unknown tokens, missing values, and unparseable
     /// numbers all return an error.
@@ -2991,11 +3248,29 @@ impl SfqConfig {
                     })?;
                     i += 2;
                 }
-                "divisor" => {
-                    return Err(Error::invalid_message(
-                        "sfq: `divisor` is not modelled by SfqConfig — file an issue if you need it"
-                            ,
-                    ));
+                key @ ("divisor" | "flows" | "depth") => {
+                    let s = need_value()?;
+                    let v: u32 = s.parse().map_err(|_| {
+                        Error::invalid_message(format!(
+                            "sfq: invalid {key} `{s}` (expected unsigned integer)"
+                        ))
+                    })?;
+                    cfg = match key {
+                        "divisor" => cfg.divisor(v),
+                        "flows" => cfg.flows(v),
+                        _ => cfg.depth(v),
+                    };
+                    i += 2;
+                }
+                "headdrop" => {
+                    cfg.headdrop = true;
+                    i += 1;
+                }
+                red @ ("redflowlimit" | "min" | "max" | "avpkt" | "burst" | "probability" | "ecn"
+                | "harddrop") => {
+                    return Err(Error::invalid_message(format!(
+                        "sfq: `{red}` (SFQRED) is not modelled by SfqConfig"
+                    )));
                 }
                 other => {
                     return Err(Error::invalid_message(format!(
@@ -3019,13 +3294,21 @@ impl QdiscConfig for SfqConfig {
         InPlace::Recreate
     }
 
+    /// The v1 struct whole, as tc(8) sends it: `sfq_change()` takes depth
+    /// and head drop only from one of its full size (#806). Zero is the
+    /// kernel's default for each field, and no SFQRED.
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
-        let qopt = sfq::TcSfqQopt {
-            quantum: self.quantum,
-            perturb_period: self.perturb,
-            limit: self.limit.as_u32(),
-            divisor: 0,
-            flows: 0,
+        let qopt = sfq::TcSfqQoptV1 {
+            v0: sfq::TcSfqQopt {
+                quantum: self.quantum,
+                perturb_period: self.perturb,
+                limit: self.limit.as_u32(),
+                divisor: self.divisor,
+                flows: self.flows,
+            },
+            depth: self.depth,
+            headdrop: u32::from(self.headdrop),
+            ..Default::default()
         };
         builder.append(&qopt);
         Ok(())
@@ -3064,18 +3347,30 @@ impl QdiscConfig for SfqConfig {
 pub struct RedConfig {
     /// Queue limit in bytes.
     pub limit: u32,
-    /// Minimum threshold in bytes.
+    /// Minimum threshold in bytes. 0 is a third of `max`, as tc(8) makes it.
     pub min: u32,
-    /// Maximum threshold in bytes.
+    /// Maximum threshold in bytes. 0 is three times `min`, or a quarter of
+    /// `limit` without one, as tc(8) makes it.
     pub max: u32,
-    /// Maximum probability (0-255, default ~2%).
-    pub max_p: u8,
+    /// The average packet size in bytes (`avpkt`), 1000 by default (#819).
+    pub avpkt: u32,
+    /// The burst in packets. 0 derives it as tc(8) does:
+    /// `(2 * min + max) / (3 * avpkt)` (#819).
+    pub burst: u32,
+    /// The link's bandwidth, for the idle-time damping table; 10 Mbit by
+    /// default, as tc(8)'s (#819).
+    pub bandwidth: crate::util::Rate,
+    /// The maximum marking probability, a fraction from 0.0 to 1.0 (tc(8)'s
+    /// `probability`); 0.02 by default (#819).
+    pub probability: f64,
     /// Enable ECN marking.
     pub ecn: bool,
     /// Enable hard drop (drop all above max).
     pub harddrop: bool,
     /// Enable adaptive RED.
     pub adaptive: bool,
+    /// Never drop: mark what is ECN-capable, queue the rest (#819).
+    pub nodrop: bool,
 }
 
 impl Default for RedConfig {
@@ -3091,10 +3386,14 @@ impl RedConfig {
             limit: 0,
             min: 0,
             max: 0,
-            max_p: 5, // ~2% probability
+            avpkt: 1000,
+            burst: 0,
+            bandwidth: crate::util::Rate::mbit(10),
+            probability: 0.02,
             ecn: false,
             harddrop: false,
             adaptive: false,
+            nodrop: false,
         }
     }
 
@@ -3116,10 +3415,27 @@ impl RedConfig {
         self
     }
 
+    /// Set the average packet size.
+    pub fn avpkt(mut self, bytes: crate::util::Bytes) -> Self {
+        self.avpkt = bytes.as_u32_saturating();
+        self
+    }
+
+    /// Set the burst, in packets. 0 derives it.
+    pub fn burst(mut self, packets: u32) -> Self {
+        self.burst = packets;
+        self
+    }
+
+    /// Set the link's bandwidth.
+    pub fn bandwidth(mut self, rate: crate::util::Rate) -> Self {
+        self.bandwidth = rate;
+        self
+    }
+
     /// Set the maximum probability (0-100%).
     pub fn max_probability(mut self, percent: f64) -> Self {
-        // Convert percentage to 0-255 scale
-        self.max_p = ((percent / 100.0) * 255.0).clamp(0.0, 255.0) as u8;
+        self.probability = (percent / 100.0).clamp(0.0, 1.0);
         self
     }
 
@@ -3141,6 +3457,12 @@ impl RedConfig {
         self
     }
 
+    /// Enable or disable `nodrop`.
+    pub fn nodrop(mut self, enable: bool) -> Self {
+        self.nodrop = enable;
+        self
+    }
+
     /// Build the configuration.
     pub fn build(self) -> Self {
         self
@@ -3148,27 +3470,18 @@ impl RedConfig {
 
     /// Parse a tc-style red params slice into a typed `RedConfig`.
     ///
-    /// Recognised tokens:
+    /// Recognised tokens, as tc-red(8) reads them (#819):
     ///
-    /// - `limit <bytes>` — queue limit (tc-style size).
-    /// - `min <bytes>` — minimum threshold.
-    /// - `max <bytes>` — maximum threshold.
-    /// - `probability <pct>` — max probability as a percentage
-    ///   0-100 (converted internally to the kernel's 0-255 scale).
-    /// - `ecn` / `noecn` — ECN marking flag pair.
-    /// - `harddrop` / `noharddrop` — hard-drop flag pair.
-    /// - `adaptive` / `noadaptive` — adaptive RED flag pair.
+    /// - `limit <bytes>`, `min <bytes>`, `max <bytes>`, `avpkt <bytes>` —
+    ///   tc-style sizes.
+    /// - `burst <packets>`.
+    /// - `bandwidth <rate>`.
+    /// - `probability <fraction>` — 0.0 to 1.0: `0.02` is 2%.
+    /// - `ecn`, `harddrop`, `adaptive` (or `adaptative`), `nodrop`, and
+    ///   nlink's `noecn`, `noharddrop`, `noadaptive`.
     ///
-    /// **Not yet typed-modelled** (returns `Error::invalid_message`):
-    /// `avpkt`, `burst`, `bandwidth` — RedConfig doesn't model
-    /// those classic RED parameters. The library uses the bare
-    /// thresholds directly; if you need the avpkt-derived burst
-    /// computation, drop to a hand-rolled `MessageBuilder`.
-    ///
-    /// Stricter than the legacy parser (which doesn't recognise red
-    /// at all — it silently ignores unknown qdisc kinds in
-    /// `add_qdisc`): unknown tokens, missing values, and
-    /// unparseable values return `Error::invalid_message`.
+    /// A bandwidth in percent of the device's speed and `qevent` blocks
+    /// are not modelled.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut cfg = Self::new();
         let mut i = 0;
@@ -3181,7 +3494,7 @@ impl RedConfig {
                     .ok_or_else(|| Error::invalid_message(format!("red: `{key}` requires a value")))
             };
             match key {
-                "limit" | "min" | "max" => {
+                "limit" | "min" | "max" | "avpkt" => {
                     let s = need_value()?;
                     let bytes = crate::util::parse::get_size(s).map_err(|_| {
                         Error::invalid_message(format!(
@@ -3195,48 +3508,42 @@ impl RedConfig {
                         "limit" => cfg.limit = val,
                         "min" => cfg.min = val,
                         "max" => cfg.max = val,
-                        _ => unreachable!(),
+                        _ => cfg.avpkt = val,
                     }
                     i += 2;
                 }
-                "probability" => {
-                    let s = need_value()?;
-                    let pct: f64 = s.parse().map_err(|_| {
-                        Error::invalid_message(format!(
-                            "red: invalid probability `{s}` (expected percentage 0-100)"
-                        ))
-                    })?;
-                    cfg = cfg.max_probability(pct);
+                "burst" => {
+                    cfg.burst = tc_unsigned("red", key, need_value()?)?;
                     i += 2;
                 }
-                "ecn" => {
-                    cfg.ecn = true;
+                "bandwidth" => {
+                    cfg.bandwidth = red_parse_bandwidth("red", need_value()?)?;
+                    i += 2;
+                }
+                "probability" => {
+                    cfg.probability = red_parse_probability("red", need_value()?)?;
+                    i += 2;
+                }
+                "ecn" | "noecn" => {
+                    cfg.ecn = key == "ecn";
                     i += 1;
                 }
-                "noecn" => {
-                    cfg.ecn = false;
+                "harddrop" | "noharddrop" => {
+                    cfg.harddrop = key == "harddrop";
                     i += 1;
                 }
-                "harddrop" => {
-                    cfg.harddrop = true;
+                "adaptive" | "adaptative" | "noadaptive" => {
+                    cfg.adaptive = key != "noadaptive";
                     i += 1;
                 }
-                "noharddrop" => {
-                    cfg.harddrop = false;
+                "nodrop" => {
+                    cfg.nodrop = true;
                     i += 1;
                 }
-                "adaptive" => {
-                    cfg.adaptive = true;
-                    i += 1;
-                }
-                "noadaptive" => {
-                    cfg.adaptive = false;
-                    i += 1;
-                }
-                "avpkt" | "burst" | "bandwidth" => {
-                    return Err(Error::invalid_message(format!(
-                        "red: `{key}` is not modelled by RedConfig — drop to a hand-rolled MessageBuilder if needed"
-                    )));
+                "qevent" => {
+                    return Err(Error::invalid_message(
+                        "red: `qevent` is not modelled by RedConfig".to_string(),
+                    ));
                 }
                 other => {
                     return Err(Error::invalid_message(format!(
@@ -3249,6 +3556,116 @@ impl RedConfig {
     }
 }
 
+/// An unsigned value as tc(8)'s `get_unsigned(.., 0)` reads it: decimal,
+/// `0x` hex or `0` octal.
+fn tc_unsigned(kind: &str, key: &str, s: &str) -> Result<u32> {
+    let parsed = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16)
+    } else if s.len() > 1 && s.starts_with('0') {
+        u32::from_str_radix(&s[1..], 8)
+    } else {
+        s.parse::<u32>()
+    };
+    parsed.map_err(|_| Error::invalid_message(format!("{kind}: invalid {key} `{s}` (expected unsigned integer)")))
+}
+
+fn red_parse_bandwidth(kind: &str, s: &str) -> Result<crate::util::Rate> {
+    if s.ends_with('%') {
+        return Err(Error::invalid_message(format!(
+            "{kind}: a bandwidth in percent of the device's speed is not modelled; give a rate"
+        )));
+    }
+    s.parse::<crate::util::Rate>()
+        .map_err(|_| Error::invalid_message(format!("{kind}: invalid bandwidth `{s}` (expected a rate)")))
+}
+
+fn red_parse_probability(kind: &str, s: &str) -> Result<f64> {
+    match s.parse::<f64>() {
+        Ok(p) if (0.0..=1.0).contains(&p) => Ok(p),
+        _ => Err(Error::invalid_message(format!(
+            "{kind}: invalid probability `{s}` (expected a fraction from 0.0 to 1.0)"
+        ))),
+    }
+}
+
+/// What a red or choke qdisc derives from its parameters, as tc(8)
+/// computes it (`tc_red.c`): the EWMA weight's log, the probability's log,
+/// and the idle-time damping table with its cell log. The kernel refuses
+/// either kind without the table (#819).
+struct RedDerived {
+    wlog: u8,
+    plog: u8,
+    scell_log: u8,
+    stab: [u8; 256],
+    max_p: u32,
+}
+
+/// `qmin` and `qmax` are in bytes: choke's packets times `avpkt`.
+#[allow(clippy::too_many_arguments)]
+fn red_derive(
+    kind: &str,
+    psched: &super::psched::Psched,
+    qmin: u32,
+    qmax: u32,
+    burst: u32,
+    avpkt: u32,
+    bandwidth: crate::util::Rate,
+    probability: f64,
+) -> Result<RedDerived> {
+    let fail = |what: &str| Error::invalid_message(format!("{kind}: failed to calculate {what}"));
+    if avpkt == 0 {
+        return Err(Error::invalid_message(format!("{kind}: avpkt must not be 0")));
+    }
+    // tc_red_eval_ewma: the smallest Wlog with
+    // burst + 1 - qmin/avpkt <= (1 - (1 - W)^burst) / W.
+    let a = f64::from(burst) + 1.0 - f64::from(qmin) / f64::from(avpkt);
+    if a < 1.0 {
+        return Err(Error::invalid_message(format!(
+            "{kind}: burst {burst} is too small (try {})",
+            1 + qmin / avpkt
+        )));
+    }
+    let mut w: f64 = 0.5;
+    let mut wlog = None;
+    for log in 1..32u8 {
+        if a <= (1.0 - (1.0 - w).powf(f64::from(burst))) / w {
+            wlog = Some(log);
+            break;
+        }
+        w /= 2.0;
+    }
+    let wlog = wlog.ok_or_else(|| fail("the EWMA constant"))?;
+    // tc_red_eval_P: Plog = log2(1 / (prob / (qmax - qmin))).
+    let plog = match i64::from(qmax) - i64::from(qmin) {
+        0 => 0,
+        d if d < 0 => return Err(fail("the probability (max is below min)")),
+        d => {
+            let mut p = probability / d as f64;
+            (0..32u8)
+                .find(|_| {
+                    let above = p > 1.0;
+                    p *= 2.0;
+                    above
+                })
+                .ok_or_else(|| fail("the probability"))?
+        }
+    };
+    // tc_red_eval_idle_damping: Stab[t >> Scell_log] = -log(1 - W) * t / xmit_time.
+    let rate = bandwidth.as_bytes_per_sec().min(u64::from(u32::MAX));
+    let xmit_time = f64::from(psched.calc_xmittime(rate, avpkt));
+    let lw = -(1.0 - 1.0 / f64::from(1u32 << wlog)).ln() / xmit_time;
+    let maxtime = 31.0 / lw;
+    let scell_log = (0..32u8)
+        .find(|c| maxtime / ((1u64 << c) as f64) < 512.0)
+        .ok_or_else(|| fail("the idle damping table"))?;
+    let mut stab = [0u8; 256];
+    for (i, slot) in stab.iter_mut().enumerate().take(255).skip(1) {
+        *slot = (((i as u64) << scell_log) as f64 * lw).min(31.0) as u8;
+    }
+    stab[255] = 31;
+    Ok(RedDerived { wlog, plog, scell_log, stab, max_p: (probability * 4_294_967_296.0) as u32 })
+}
+
 impl QdiscConfig for RedConfig {
     fn kind(&self) -> &'static str {
         "red"
@@ -3257,32 +3674,60 @@ impl QdiscConfig for RedConfig {
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         use super::types::tc::qdisc::red;
 
-        let mut flags: u8 = 0;
-        if self.ecn {
-            flags |= red::TC_RED_ECN as u8;
-        }
-        if self.harddrop {
-            flags |= red::TC_RED_HARDDROP as u8;
-        }
-        if self.adaptive {
-            flags |= red::TC_RED_ADAPTATIVE as u8;
+        // tc(8)'s defaults, from Sally Floyd's recommendations.
+        let qmax = match (self.max, self.min) {
+            (0, 0) => self.limit / 4,
+            (0, min) => min.saturating_mul(3),
+            (max, _) => max,
+        };
+        let qmin = if self.min == 0 { qmax / 3 } else { self.min };
+        let burst = match self.burst {
+            0 => (2 * u64::from(qmin) + u64::from(qmax)) / (3 * u64::from(self.avpkt.max(1))),
+            b => u64::from(b),
+        } as u32;
+        let derived = red_derive(
+            "red",
+            &super::psched::psched(),
+            qmin,
+            qmax,
+            burst,
+            self.avpkt,
+            self.bandwidth,
+            self.probability,
+        )?;
+
+        let mut flags = 0;
+        for (on, flag) in [
+            (self.ecn, red::TC_RED_ECN),
+            (self.harddrop, red::TC_RED_HARDDROP),
+            (self.adaptive, red::TC_RED_ADAPTATIVE),
+            (self.nodrop, red::TC_RED_NODROP),
+        ] {
+            if on {
+                flags |= flag;
+            }
         }
 
+        // The flags go in TCA_RED_FLAGS, as tc sends them: the kernel
+        // refuses them in both places.
         let qopt = red::TcRedQopt {
             limit: self.limit,
-            qth_min: self.min,
-            qth_max: self.max,
-            wlog: 9,      // Weight log (default)
-            plog: 13,     // Probability log (default)
-            scell_log: 0, // Cell size log
-            flags,
+            qth_min: qmin,
+            qth_max: qmax,
+            wlog: derived.wlog,
+            plog: derived.plog,
+            scell_log: derived.scell_log,
+            flags: 0,
         };
-
         builder.append_attr(red::TCA_RED_PARMS, qopt.as_bytes());
-
-        // Add max probability
-        let max_p = (self.max_p as u32) << 24;
-        builder.append_attr_u32(red::TCA_RED_MAX_P, max_p);
+        builder.append_attr(red::TCA_RED_STAB, &derived.stab);
+        builder.append_attr_u32(red::TCA_RED_MAX_P, derived.max_p);
+        // struct nla_bitfield32 { value, selector }.
+        let supported = red::TC_RED_ECN | red::TC_RED_HARDDROP | red::TC_RED_ADAPTATIVE | red::TC_RED_NODROP;
+        let mut bitfield = [0u8; 8];
+        bitfield[..4].copy_from_slice(&flags.to_ne_bytes());
+        bitfield[4..].copy_from_slice(&supported.to_ne_bytes());
+        builder.append_attr(red::TCA_RED_FLAGS, &bitfield);
 
         Ok(())
     }
@@ -3317,15 +3762,26 @@ impl QdiscConfig for RedConfig {
 pub struct ChokeConfig {
     /// Queue limit in packets: `sch_choke` counts packets (#723).
     pub limit: crate::util::Packets,
-    /// Minimum threshold in packets.
+    /// Minimum threshold in packets. 0 is a third of `max`, as tc(8)
+    /// makes it.
     pub min: crate::util::Packets,
-    /// Maximum threshold in packets.
+    /// Maximum threshold in packets. 0 is a quarter of `limit`, as tc(8)
+    /// makes it.
     pub max: crate::util::Packets,
-    /// Maximum probability (0-255, default ~2%).
-    pub max_p: u8,
-    /// Enable ECN marking instead of dropping.
+    /// The average packet size in bytes (`avpkt`), 1000 by default (#819).
+    pub avpkt: u32,
+    /// The burst in packets. 0 derives it as tc(8) does:
+    /// `(2 * min + max) / 3` (#819).
+    pub burst: u32,
+    /// The link's bandwidth, for the idle-time damping table; 10 Mbit by
+    /// default (#819).
+    pub bandwidth: crate::util::Rate,
+    /// The maximum marking probability, a fraction from 0.0 to 1.0 (tc(8)'s
+    /// `probability`); 0.02 by default (#819).
+    pub probability: f64,
+    /// Mark rather than drop ECN-capable packets.
     pub ecn: bool,
-    /// Enable hard drop (drop all above max).
+    /// Drop everything above `max`, ECN-capable or not.
     pub harddrop: bool,
 }
 
@@ -3336,78 +3792,76 @@ impl Default for ChokeConfig {
 }
 
 impl ChokeConfig {
-    /// Create a new CHOKe configuration builder.
     pub fn new() -> Self {
         Self {
             limit: crate::util::Packets::ZERO,
             min: crate::util::Packets::ZERO,
             max: crate::util::Packets::ZERO,
-            max_p: 5, // ~2% probability
+            avpkt: 1000,
+            burst: 0,
+            bandwidth: crate::util::Rate::mbit(10),
+            probability: 0.02,
             ecn: false,
             harddrop: false,
         }
     }
 
-    /// Set the queue limit in **packets**: `sch_choke` counts packets, as
-    /// tc-choke(8) says; this said bytes before 0.32 (#515).
     pub fn limit(mut self, packets: crate::util::Packets) -> Self {
         self.limit = packets;
         self
     }
 
-    /// Set the minimum threshold in **packets**.
     pub fn min(mut self, packets: crate::util::Packets) -> Self {
         self.min = packets;
         self
     }
 
-    /// Set the maximum threshold in **packets**.
     pub fn max(mut self, packets: crate::util::Packets) -> Self {
         self.max = packets;
         self
     }
 
-    /// Set the maximum probability (0-100%).
-    pub fn max_probability(mut self, percent: f64) -> Self {
-        self.max_p = ((percent / 100.0) * 255.0).clamp(0.0, 255.0) as u8;
+    /// Set the average packet size.
+    pub fn avpkt(mut self, bytes: crate::util::Bytes) -> Self {
+        self.avpkt = bytes.as_u32_saturating();
         self
     }
 
-    /// Enable or disable ECN marking.
+    /// Set the burst, in packets. 0 derives it.
+    pub fn burst(mut self, packets: u32) -> Self {
+        self.burst = packets;
+        self
+    }
+
+    /// Set the link's bandwidth.
+    pub fn bandwidth(mut self, rate: crate::util::Rate) -> Self {
+        self.bandwidth = rate;
+        self
+    }
+
+    pub fn max_probability(mut self, percent: f64) -> Self {
+        self.probability = (percent / 100.0).clamp(0.0, 1.0);
+        self
+    }
+
     pub fn ecn(mut self, enable: bool) -> Self {
         self.ecn = enable;
         self
     }
 
-    /// Enable or disable hard drop.
     pub fn harddrop(mut self, enable: bool) -> Self {
         self.harddrop = enable;
         self
     }
 
-    /// Build the configuration.
     pub fn build(self) -> Self {
         self
     }
 
-    /// Parse a tc-style choke params slice into a typed `ChokeConfig`.
-    ///
-    /// Recognised tokens:
-    ///
-    /// - `limit <bytes>` — queue limit (tc-style size).
-    /// - `min <bytes>` — minimum threshold.
-    /// - `max <bytes>` — maximum threshold.
-    /// - `probability <pct>` — max probability as a percentage 0-100
-    ///   (converted internally to the kernel's 0-255 scale).
-    /// - `ecn` / `noecn` — ECN marking flag pair.
-    /// - `harddrop` / `noharddrop` — hard-drop flag pair.
-    ///
-    /// **Not yet typed-modelled** (returns `Error::invalid_message`):
-    /// `avpkt`, `burst`, `bandwidth` — same as [`RedConfig`]; CHOKe
-    /// uses the bare thresholds directly.
-    ///
-    /// Strict: unknown tokens, missing values, and unparseable values
-    /// return `Error::invalid_message`.
+    /// Parse a tc-style choke params slice, as tc(8) reads it (#819):
+    /// `limit`, `min`, `max` and `burst` in packets; `avpkt <size>`;
+    /// `bandwidth <rate>`; `probability <fraction>`; `ecn`. nlink also
+    /// takes `noecn`, `harddrop` and `noharddrop`.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut cfg = Self::new();
         let mut i = 0;
@@ -3419,54 +3873,42 @@ impl ChokeConfig {
                 })
             };
             match key {
-                "limit" | "min" | "max" => {
-                    let s = need_value()?;
-                    let bytes = crate::util::parse::get_size(s).map_err(|_| {
-                        Error::invalid_message(format!(
-                            "choke: invalid {key} `{s}` (expected tc-style size)"
-                        ))
-                    })?;
-                    let val: u32 = bytes.try_into().map_err(|_| {
-                        Error::invalid_message(format!("choke: {key} `{s}` exceeds u32"))
-                    })?;
+                "limit" | "min" | "max" | "burst" => {
+                    let val = tc_unsigned("choke", key, need_value()?)?;
                     match key {
                         "limit" => cfg.limit = crate::util::Packets::new(val),
                         "min" => cfg.min = crate::util::Packets::new(val),
                         "max" => cfg.max = crate::util::Packets::new(val),
-                        _ => unreachable!(),
+                        _ => cfg.burst = val,
                     }
                     i += 2;
                 }
-                "probability" => {
+                "avpkt" => {
                     let s = need_value()?;
-                    let pct: f64 = s.parse().map_err(|_| {
-                        Error::invalid_message(format!(
-                            "choke: invalid probability `{s}` (expected percentage 0-100)"
-                        ))
-                    })?;
-                    cfg = cfg.max_probability(pct);
+                    let bytes = crate::util::parse::get_size(s)
+                        .ok()
+                        .and_then(|b| u32::try_from(b).ok())
+                        .ok_or_else(|| {
+                            Error::invalid_message(format!("choke: invalid avpkt `{s}` (expected tc-style size)"))
+                        })?;
+                    cfg.avpkt = bytes;
                     i += 2;
                 }
-                "ecn" => {
-                    cfg.ecn = true;
+                "bandwidth" => {
+                    cfg.bandwidth = red_parse_bandwidth("choke", need_value()?)?;
+                    i += 2;
+                }
+                "probability" => {
+                    cfg.probability = red_parse_probability("choke", need_value()?)?;
+                    i += 2;
+                }
+                "ecn" | "noecn" => {
+                    cfg.ecn = key == "ecn";
                     i += 1;
                 }
-                "noecn" => {
-                    cfg.ecn = false;
+                "harddrop" | "noharddrop" => {
+                    cfg.harddrop = key == "harddrop";
                     i += 1;
-                }
-                "harddrop" => {
-                    cfg.harddrop = true;
-                    i += 1;
-                }
-                "noharddrop" => {
-                    cfg.harddrop = false;
-                    i += 1;
-                }
-                "avpkt" | "burst" | "bandwidth" => {
-                    return Err(Error::invalid_message(format!(
-                        "choke: `{key}` is not modelled by ChokeConfig — drop to a hand-rolled MessageBuilder if needed"
-                    )));
                 }
                 other => {
                     return Err(Error::invalid_message(format!(
@@ -3487,6 +3929,23 @@ impl QdiscConfig for ChokeConfig {
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         use super::types::tc::qdisc::{choke, red};
 
+        // tc(8)'s defaults, in packets.
+        let limit = self.limit.as_u32();
+        let qmax = if self.max.as_u32() == 0 { limit / 4 } else { self.max.as_u32() };
+        let qmin = if self.min.as_u32() == 0 { qmax / 3 } else { self.min.as_u32() };
+        let burst = if self.burst == 0 { (2 * qmin + qmax) / 3 } else { self.burst };
+        // tc derives choke's logs from the thresholds in bytes.
+        let derived = red_derive(
+            "choke",
+            &super::psched::psched(),
+            qmin.saturating_mul(self.avpkt),
+            qmax.saturating_mul(self.avpkt),
+            burst,
+            self.avpkt,
+            self.bandwidth,
+            self.probability,
+        )?;
+
         let mut flags: u8 = 0;
         if self.ecn {
             flags |= red::TC_RED_ECN as u8;
@@ -3496,19 +3955,17 @@ impl QdiscConfig for ChokeConfig {
         }
 
         let qopt = choke::TcRedQopt {
-            limit: self.limit.as_u32(),
-            qth_min: self.min.as_u32(),
-            qth_max: self.max.as_u32(),
-            wlog: 9,      // Weight log (default)
-            plog: 13,     // Probability log (default)
-            scell_log: 0, // Cell size log
+            limit,
+            qth_min: qmin,
+            qth_max: qmax,
+            wlog: derived.wlog,
+            plog: derived.plog,
+            scell_log: derived.scell_log,
             flags,
         };
-
         builder.append_attr(choke::TCA_CHOKE_PARMS, qopt.as_bytes());
-
-        let max_p = (self.max_p as u32) << 24;
-        builder.append_attr_u32(choke::TCA_CHOKE_MAX_P, max_p);
+        builder.append_attr(choke::TCA_CHOKE_STAB, &derived.stab);
+        builder.append_attr_u32(choke::TCA_CHOKE_MAX_P, derived.max_p);
 
         Ok(())
     }
@@ -3717,6 +4174,10 @@ pub struct GredConfig {
     pub grio: bool,
     /// Global queue limit in bytes (`TCA_GRED_LIMIT`).
     pub limit: Option<u32>,
+    /// Mark rather than drop ECN-capable packets (#820).
+    pub ecn: bool,
+    /// Drop above the maximum threshold, ECN-capable or not (#820).
+    pub harddrop: bool,
 }
 
 impl GredConfig {
@@ -3743,6 +4204,18 @@ impl GredConfig {
         self
     }
 
+    /// Enable or disable ECN marking.
+    pub fn ecn(mut self, enable: bool) -> Self {
+        self.ecn = enable;
+        self
+    }
+
+    /// Enable or disable hard drop.
+    pub fn harddrop(mut self, enable: bool) -> Self {
+        self.harddrop = enable;
+        self
+    }
+
     /// Set the global queue limit in bytes.
     pub fn limit(mut self, bytes: crate::util::Bytes) -> Self {
         self.limit = Some(bytes.as_u32_saturating());
@@ -3759,14 +4232,15 @@ impl GredConfig {
     /// Recognised tokens (setup phase):
     ///
     /// - `setup` — optional leading keyword (tc(8) accepts it; ignored).
-    /// - `DPs <n>` — number of virtual queues (1..=16).
+    /// - `vqs <n>` (or `DPs`) — number of virtual queues (1..=16).
     /// - `default <dp>` — default virtual queue.
     /// - `grio` / `nogrio` — GRIO flag pair.
     /// - `limit <bytes>` — global queue limit (tc-style size).
+    /// - `ecn`, `harddrop` — the setup's flags (#820).
     ///
     /// **Not modelled by `GredConfig`** (returns `Error::invalid_message`):
     /// the per-VQ RED tokens `min`/`max`/`avpkt`/`burst`/`bandwidth`/`DP`/
-    /// `probability`/`prio`/`ecn`/`harddrop`. Per-VQ parameterization needs
+    /// `probability`/`prio`. Per-VQ parameterization needs
     /// the RED stab probability table the kernel requires under
     /// `TCA_GRED_STAB`; configure VQs via a hand-rolled `MessageBuilder`
     /// until that lands.
@@ -3789,7 +4263,8 @@ impl GredConfig {
                     // tc(8) leading keyword; the setup fields follow.
                     i += 1;
                 }
-                "DPs" | "dps" => {
+                // tc-gred(8) says `vqs`; `DPs` is its older word (#820).
+                "vqs" | "DPs" | "dps" => {
                     let s = need_value()?;
                     let n: u32 = s.parse().map_err(|_| {
                         Error::invalid_message(format!(
@@ -3822,6 +4297,14 @@ impl GredConfig {
                     cfg.grio = false;
                     i += 1;
                 }
+                "ecn" => {
+                    cfg.ecn = true;
+                    i += 1;
+                }
+                "harddrop" => {
+                    cfg.harddrop = true;
+                    i += 1;
+                }
                 "limit" => {
                     let s = need_value()?;
                     let bytes = crate::util::parse::get_size(s).map_err(|_| {
@@ -3835,8 +4318,7 @@ impl GredConfig {
                     cfg.limit = Some(val);
                     i += 2;
                 }
-                "min" | "max" | "avpkt" | "burst" | "bandwidth" | "DP" | "probability" | "prio"
-                | "ecn" | "harddrop" => {
+                "min" | "max" | "avpkt" | "burst" | "bandwidth" | "DP" | "probability" | "prio" => {
                     return Err(Error::invalid_message(format!(
                         "gred: per-VQ token `{key}` is not modelled by GredConfig — \
                          per-VQ RED parameterization needs the TCA_GRED_STAB table; \
@@ -3869,7 +4351,8 @@ impl QdiscConfig for GredConfig {
             dps: self.virtual_queues.unwrap_or(1),
             def_dp: self.default_vq.unwrap_or(0),
             grio: u8::from(self.grio),
-            flags: 0,
+            flags: (u8::from(self.ecn) * super::types::tc::qdisc::red::TC_RED_ECN as u8)
+                | (u8::from(self.harddrop) * super::types::tc::qdisc::red::TC_RED_HARDDROP as u8),
             pad1: 0,
         };
         builder.append_attr(gred::TCA_GRED_DPS, sopt.as_bytes());
@@ -3923,6 +4406,9 @@ pub struct PieConfig {
     pub beta: Option<u32>,
     /// Enable ECN marking.
     pub ecn: bool,
+    /// Estimate the drop probability from the dequeue rate, not from
+    /// timestamps (#820).
+    pub dq_rate_estimator: bool,
     /// Use byte mode instead of packet mode.
     pub bytemode: bool,
 }
@@ -3944,6 +4430,7 @@ impl PieConfig {
             beta: None,
             ecn: false,
             bytemode: false,
+            dq_rate_estimator: false,
         }
     }
 
@@ -3989,6 +4476,12 @@ impl PieConfig {
         self
     }
 
+    /// Enable or disable the dequeue-rate estimator.
+    pub fn dq_rate_estimator(mut self, enable: bool) -> Self {
+        self.dq_rate_estimator = enable;
+        self
+    }
+
     /// Build the configuration.
     pub fn build(self) -> Self {
         self
@@ -4005,6 +4498,7 @@ impl PieConfig {
     /// - `beta <n>` — I-controller beta parameter.
     /// - `ecn` / `noecn` — ECN marking flag pair.
     /// - `bytemode` / `nobytemode` — byte-vs-packet mode pair.
+    /// - `dq_rate_estimator` / `no_dq_rate_estimator` (#820).
     ///
     /// Stricter than the legacy parser (which doesn't recognise pie
     /// at all): unknown tokens, missing values, and unparseable
@@ -4079,6 +4573,10 @@ impl PieConfig {
                     cfg.bytemode = false;
                     i += 1;
                 }
+                "dq_rate_estimator" | "no_dq_rate_estimator" => {
+                    cfg.dq_rate_estimator = key == "dq_rate_estimator";
+                    i += 1;
+                }
                 other => {
                     return Err(Error::invalid_message(format!(
                         "pie: unknown token `{other}`"
@@ -4118,6 +4616,7 @@ impl QdiscConfig for PieConfig {
         // only ever sent "on" could never turn either off (#488).
         builder.append_attr_u32(pie::TCA_PIE_ECN, u32::from(self.ecn));
         builder.append_attr_u32(pie::TCA_PIE_BYTEMODE, u32::from(self.bytemode));
+        builder.append_attr_u32(pie::TCA_PIE_DQ_RATE_ESTIMATOR, u32::from(self.dq_rate_estimator));
 
         Ok(())
     }
@@ -5098,6 +5597,9 @@ impl QdiscConfig for SkbprioConfig {
 // SfbConfig (Stochastic Fair Blue)
 // ============================================================================
 
+/// `SFB_MAX_PROB`: an SFB probability's full scale, 1.0.
+const SFB_MAX_PROB: u32 = 0xFFFF;
+
 /// SFB (Stochastic Fair Blue) qdisc configuration.
 ///
 /// SFB is a rate-control AQM that uses Bloom-filter accounting to keep
@@ -5198,13 +5700,16 @@ impl SfbConfig {
         self
     }
 
-    /// Parse a tc-style sfb params slice into a typed `SfbConfig`.
+    /// Parse a tc-style sfb params slice into a typed `SfbConfig`, as
+    /// tc-sfb(8) reads it (#820).
     ///
-    /// Recognised tokens: `limit <packets>`, `rehash <time>`,
-    /// `db <time>`, `max <packets>`, `target <packets>`,
-    /// `increment <n>`, `decrement <n>`, `penalty_rate <pps>`,
-    /// `penalty_burst <n>`. Strict: unknown tokens, missing values,
-    /// and unparseable values all error.
+    /// Recognised tokens: `limit <packets>`, `rehash <ms>`, `db <ms>`,
+    /// `max <packets>`, `target <packets>`, `increment <probability>`,
+    /// `decrement <probability>`, `penalty_rate <pps>`,
+    /// `penalty_burst <n>`. `rehash` and `db` are milliseconds, as tc reads
+    /// them; a time with a unit (`10s`) reads too. `increment` and
+    /// `decrement` are fractions from 0.0 to 1.0. Strict: unknown tokens,
+    /// missing values, and unparseable values all error.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut cfg = Self::new();
         let mut i = 0;
@@ -5215,19 +5720,26 @@ impl SfbConfig {
                     Error::invalid_message(format!("sfb: `{key}` requires a value"))
                 })
             };
-            let parse_u32 = |s: &str| -> Result<u32> {
-                s.parse::<u32>().map_err(|_| {
+            let parse_u32 = |s: &str| tc_unsigned("sfb", key, s);
+            // tc reads a bare number as milliseconds (#820).
+            let parse_time = |s: &str| -> Result<Duration> {
+                if let Ok(ms) = tc_unsigned("sfb", key, s) {
+                    return Ok(Duration::from_millis(ms.into()));
+                }
+                crate::util::parse::get_time(s).map_err(|_| {
                     Error::invalid_message(format!(
-                        "sfb: invalid {key} `{s}` (expected unsigned integer)"
+                        "sfb: invalid {key} `{s}` (expected milliseconds or a tc-style time)"
                     ))
                 })
             };
-            let parse_time = |s: &str| -> Result<Duration> {
-                crate::util::parse::get_time(s).map_err(|_| {
-                    Error::invalid_message(format!(
-                        "sfb: invalid {key} `{s}` (expected tc-style time)"
-                    ))
-                })
+            // A probability, scaled to SFB_MAX_PROB as tc's get_prob() does.
+            let parse_prob = |s: &str| -> Result<u32> {
+                match s.parse::<f64>() {
+                    Ok(p) if (0.0..=1.0).contains(&p) => Ok((p * f64::from(SFB_MAX_PROB) + 0.5) as u32),
+                    _ => Err(Error::invalid_message(format!(
+                        "sfb: invalid {key} `{s}` (expected a probability from 0.0 to 1.0)"
+                    ))),
+                }
             };
             match key {
                 "limit" => {
@@ -5251,11 +5763,11 @@ impl SfbConfig {
                     i += 2;
                 }
                 "increment" => {
-                    cfg.increment = Some(parse_u32(need_value()?)?);
+                    cfg.increment = Some(parse_prob(need_value()?)?);
                     i += 2;
                 }
                 "decrement" => {
-                    cfg.decrement = Some(parse_u32(need_value()?)?);
+                    cfg.decrement = Some(parse_prob(need_value()?)?);
                     i += 2;
                 }
                 "penalty_rate" => {
@@ -5283,17 +5795,27 @@ impl QdiscConfig for SfbConfig {
     fn write_options(&self, builder: &mut MessageBuilder) -> Result<()> {
         use super::types::tc::qdisc::sfb::{TCA_SFB_PARMS, TcSfbQopt};
 
+        // What is not set is tc(8)'s default, not 0: the kernel takes the
+        // struct as it comes, so a 0 increment never marks and a 0 rehash
+        // rehashes on every packet (#820).
         let ms = |d: Duration| d.as_millis() as u32;
+        let target = self.target.unwrap_or(0);
+        let max = match self.max.unwrap_or(0) {
+            0 if target >= 1 => (target * 5 + 1) / 4,
+            0 => 25,
+            max => max,
+        };
+        let bin_size = if target == 0 { (max * 4 + 3) / 5 } else { target };
         let qopt = TcSfbQopt {
-            rehash_interval: self.rehash.map(ms).unwrap_or(0),
-            warmup_time: self.db.map(ms).unwrap_or(0),
-            max: self.max.unwrap_or(0),
-            bin_size: self.target.unwrap_or(0),
-            increment: self.increment.unwrap_or(0),
-            decrement: self.decrement.unwrap_or(0),
+            rehash_interval: self.rehash.map_or(600 * 1000, ms),
+            warmup_time: self.db.map_or(60 * 1000, ms),
+            max,
+            bin_size,
+            increment: self.increment.unwrap_or((SFB_MAX_PROB + 1000) / 2000),
+            decrement: self.decrement.unwrap_or((SFB_MAX_PROB + 10000) / 20000),
             limit: self.limit.map_or(0, crate::util::Packets::as_u32),
-            penalty_rate: self.penalty_rate.unwrap_or(0),
-            penalty_burst: self.penalty_burst.unwrap_or(0),
+            penalty_rate: self.penalty_rate.unwrap_or(10),
+            penalty_burst: self.penalty_burst.unwrap_or(20),
         };
         builder.append_attr(TCA_SFB_PARMS, qopt.as_bytes());
         Ok(())
@@ -5456,7 +5978,7 @@ impl HhfConfig {
     ///
     /// Recognised tokens: `limit <packets>`, `quantum <bytes>`,
     /// `hh_limit <n>`, `reset_timeout <time>`, `admit_bytes <bytes>`,
-    /// `evict_timeout <time>`, `nonhh_weight <n>`. Strict: unknown
+    /// `evict_timeout <time>`, `non_hh_weight <n>` (or `nonhh_weight`). Strict: unknown
     /// tokens, missing values, and unparseable values all error.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut cfg = Self::new();
@@ -5516,7 +6038,8 @@ impl HhfConfig {
                     cfg.evict_timeout = Some(parse_time(need_value()?)?);
                     i += 2;
                 }
-                "nonhh_weight" => {
+                // tc(8)'s word is non_hh_weight (#820).
+                "non_hh_weight" | "nonhh_weight" => {
                     cfg.non_hh_weight = Some(parse_u32(need_value()?)?);
                     i += 2;
                 }
@@ -5918,6 +6441,24 @@ pub enum CakeFlowMode {
     Triple,
 }
 
+/// tc-cake(8)'s link framing keywords: the ATM mode each sets, the bytes it
+/// adds to the overhead, and the mpu it sets (`q_cake.c`).
+const CAKE_FRAMINGS: [(&str, Option<CakeAtmMode>, i32, Option<u32>); 13] = [
+    ("ipoa-vcmux", Some(CakeAtmMode::Atm), 8, None),
+    ("ipoa-llcsnap", Some(CakeAtmMode::Atm), 16, None),
+    ("bridged-vcmux", Some(CakeAtmMode::Atm), 24, None),
+    ("bridged-llcsnap", Some(CakeAtmMode::Atm), 32, None),
+    ("pppoa-vcmux", Some(CakeAtmMode::Atm), 10, None),
+    ("pppoa-llc", Some(CakeAtmMode::Atm), 14, None),
+    ("pppoe-vcmux", Some(CakeAtmMode::Atm), 32, None),
+    ("pppoe-llcsnap", Some(CakeAtmMode::Atm), 40, None),
+    ("pppoe-ptm", Some(CakeAtmMode::Ptm), 30, None),
+    ("bridged-ptm", Some(CakeAtmMode::Ptm), 22, None),
+    ("ethernet", None, 38, Some(84)),
+    ("ether-vlan", None, 4, None),
+    ("docsis", Some(CakeAtmMode::None), 18, Some(64)),
+];
+
 /// CAKE ATM/PTM overhead compensation mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -6168,6 +6709,11 @@ impl CakeConfig {
 
     /// Parse a tc-style cake params slice into a typed `CakeConfig`.
     ///
+    /// The link framing keywords (`ethernet`, `docsis`, `ether-vlan`,
+    /// `conservative`, `pppoe-ptm`, `bridged-llcsnap`, …) set the overhead,
+    /// mpu and ATM mode as tc-cake(8) does: each adds its bytes to the
+    /// overhead given so far (#820).
+    ///
     /// Recognised tokens with values:
     ///
     /// - `bandwidth <rate>` — set the shaping limit (also: `unlimited`
@@ -6225,7 +6771,28 @@ impl CakeConfig {
                     .copied()
                     .ok_or_else(|| Error::invalid_message(format!("cake: `{key}` requires a value")))
             };
+            // tc-cake(8)'s link framings (#820): each adds its bytes to the
+            // overhead so far, and may set the ATM mode and the mpu.
+            if let Some(&(_, atm, add, mpu)) = CAKE_FRAMINGS.iter().find(|(name, ..)| *name == key) {
+                if let Some(atm) = atm {
+                    cfg.atm_mode = Some(atm);
+                }
+                cfg.overhead = Some(cfg.overhead.unwrap_or(0) + add);
+                if let Some(mpu) = mpu {
+                    cfg.mpu = Some(mpu);
+                }
+                i += 1;
+                continue;
+            }
             match key {
+                // A whole ATM cell plus its framing: a safe overestimate.
+                "conservative" => {
+                    cfg.atm_mode = Some(CakeAtmMode::Atm);
+                    cfg.overhead = Some(48);
+                    i += 1;
+                }
+                // Deprecated in tc; it does nothing there either.
+                "via-ethernet" => i += 1,
                 // Value tokens.
                 "bandwidth" => {
                     let s = need_value()?;
@@ -6373,8 +6940,12 @@ impl CakeConfig {
                     i += 1;
                 }
                 // Boolean flag tokens.
+                // As tc(8): no overhead and no ATM framing, and the
+                // kernel told to ignore what a link layer would add (#820).
                 "raw" => {
                     cfg.raw = true;
+                    cfg.overhead = Some(0);
+                    cfg.atm_mode = Some(CakeAtmMode::None);
                     i += 1;
                 }
                 "nat" => {
@@ -6682,6 +7253,45 @@ impl QdiscConfig for PlugConfig {
     }
 }
 
+/// `queues` as tc(8)'s mqprio and taprio read it (#820): up to 16
+/// `count@offset` pairs, to the first word that is not one. `i` is at
+/// `queues` and is left past what was read.
+fn read_queues(kind: &str, params: &[&str], i: &mut usize) -> Result<Vec<(u16, u16)>> {
+    let mut queues = Vec::new();
+    while queues.len() < 16 {
+        let Some((count, offset)) = params.get(*i + 1 + queues.len()).and_then(|s| s.split_once('@')) else {
+            break;
+        };
+        let pair = count.parse::<u16>().ok().zip(offset.parse::<u16>().ok()).ok_or_else(|| {
+            Error::invalid_message(format!("{kind}: invalid queues `{count}@{offset}` (expected count@offset)"))
+        })?;
+        queues.push(pair);
+    }
+    if queues.is_empty() {
+        return Err(Error::invalid_message(format!("{kind}: `queues` requires at least one count@offset")));
+    }
+    *i += 1 + queues.len();
+    Ok(queues)
+}
+
+/// A `map` as tc(8)'s mqprio and taprio read it: up to 16 traffic classes,
+/// to the first word that is not one, the rest 0. `i` is at `map` and is
+/// left past what was read.
+fn read_prio_tc_map(kind: &str, params: &[&str], i: &mut usize) -> Result<[u8; 16]> {
+    let mut map = [0u8; 16];
+    let mut n = 0;
+    while n < 16 {
+        let Some(tc) = params.get(*i + 1 + n).and_then(|s| s.parse::<u8>().ok()) else { break };
+        map[n] = tc;
+        n += 1;
+    }
+    if n == 0 {
+        return Err(Error::invalid_message(format!("{kind}: `map` requires at least one traffic class")));
+    }
+    *i += 1 + n;
+    Ok(map)
+}
+
 // ============================================================================
 // MqprioConfig (Multi-Queue Priority)
 // ============================================================================
@@ -6784,16 +7394,10 @@ impl MqprioConfig {
     /// Recognised tokens:
     ///
     /// - `num_tc <n>` — number of traffic classes (1-16).
-    /// - `map <P0> <P1> ... <P15>` — exactly 16 priority-to-tc
-    ///   mappings.
-    /// - `hw` / `nohw` — hardware-offload flag pair.
-    ///
-    /// **Not yet typed-modelled** (returns `Error::invalid_message`):
-    /// `queues <count1@offset1> <count2@offset2> ...` — the
-    /// per-class queue layout is structured (count + offset pairs)
-    /// and the `count@offset` parsing isn't implemented here yet.
-    /// Use `MqprioConfig::queues()` directly on the typed builder
-    /// for that.
+    /// - `map <P0> <P1> ...` — up to 16 priority-to-tc mappings, the
+    ///   rest 0, as tc(8) reads them (#820).
+    /// - `queues <count@offset> ...` — up to 16 queue ranges (#820).
+    /// - `hw 1` / `hw 0` (tc(8)'s form), or `hw` / `nohw` — hardware offload.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut cfg = Self::new();
         let mut i = 0;
@@ -6818,36 +7422,28 @@ impl MqprioConfig {
                     i += 2;
                 }
                 "map" => {
-                    if params.len() < i + 1 + 16 {
-                        return Err(Error::invalid_message(format!(
-                            "mqprio: `map` requires exactly 16 values, got {}",
-                            params.len().saturating_sub(i + 1)
-                        )));
-                    }
-                    let mut map = [0u8; 16];
-                    for j in 0..16 {
-                        let s = params[i + 1 + j];
-                        map[j] = s.parse().map_err(|_| {
-                            Error::invalid_message(format!(
-                                "mqprio: invalid map[{j}] `{s}` (expected 0-15)"
-                            ))
-                        })?;
-                    }
-                    cfg.prio_tc_map = map;
-                    i += 17;
+                    // As tc(8) reads it (#820): up to 16 classes, to the
+                    // first word that is not one; the rest are 0.
+                    cfg.prio_tc_map = read_prio_tc_map("mqprio", params, &mut i)?;
                 }
-                "hw" => {
-                    cfg.hw = true;
-                    i += 1;
-                }
+                // tc(8) writes `hw 1` or `hw 0` (#820); a bare `hw` is on.
+                "hw" => match params.get(i + 1) {
+                    Some(&("0" | "1")) => {
+                        cfg.hw = params[i + 1] == "1";
+                        i += 2;
+                    }
+                    _ => {
+                        cfg.hw = true;
+                        i += 1;
+                    }
+                },
                 "nohw" => {
                     cfg.hw = false;
                     i += 1;
                 }
                 "queues" => {
-                    return Err(Error::invalid_message(
-                        "mqprio: `queues` (count@offset list) is not parsed by parse_params yet — use MqprioConfig::queues() on the typed builder",
-                    ));
+                    let queues = read_queues("mqprio", params, &mut i)?;
+                    cfg = cfg.queues(&queues);
                 }
                 other => {
                     return Err(Error::invalid_message(format!(
@@ -7061,7 +7657,7 @@ impl TaprioConfig {
     /// Recognised tokens:
     ///
     /// - `num_tc <n>` — number of traffic classes (1-16).
-    /// - `map <P0> ... <P15>` — exactly 16 priority-to-tc mappings.
+    /// - `map <P0> ...` — up to 16 priority-to-tc mappings, the rest 0.
     /// - `clockid <id>` — clock ID (named like `CLOCK_TAI` or bare
     ///   integer).
     /// - `base-time <ns>` — base time, ns since epoch (i64).
@@ -7077,9 +7673,8 @@ impl TaprioConfig {
     ///   `SET_AND_HOLD` (`HOLD`/`H`), or `SET_AND_RELEASE`
     ///   (`RELEASE`/`R`). Multiple `sched-entry` tokens append.
     ///
-    /// **Not yet typed-modelled** (returns `Error::invalid_message`):
-    /// `queues <count@offset>` — same pair-grammar deferral as
-    /// `MqprioConfig`.
+    /// - `map`, `queues` — as [`MqprioConfig::parse_params`] reads them
+    ///   (#820).
     ///
     /// **Net new CLI capability**: the legacy qdisc dispatcher
     /// silently swallowed `taprio`.
@@ -7113,23 +7708,9 @@ impl TaprioConfig {
                     i += 2;
                 }
                 "map" => {
-                    if params.len() < i + 1 + 16 {
-                        return Err(Error::invalid_message(format!(
-                            "taprio: `map` requires exactly 16 values, got {}",
-                            params.len().saturating_sub(i + 1)
-                        )));
-                    }
-                    let mut map = [0u8; 16];
-                    for j in 0..16 {
-                        let s = params[i + 1 + j];
-                        map[j] = s.parse().map_err(|_| {
-                            Error::invalid_message(format!(
-                                "taprio: invalid map[{j}] `{s}` (expected 0-15)"
-                            ))
-                        })?;
-                    }
-                    cfg.prio_tc_map = map;
-                    i += 17;
+                    // As tc(8) reads it (#820): up to 16 classes, to the
+                    // first word that is not one; the rest are 0.
+                    cfg.prio_tc_map = read_prio_tc_map("taprio", params, &mut i)?;
                 }
                 "clockid" => {
                     let s = need_value()?;
@@ -7219,9 +7800,8 @@ impl TaprioConfig {
                     i += 4;
                 }
                 "queues" => {
-                    return Err(Error::invalid_message(
-                        "taprio: `queues` (count@offset list) is not parsed by parse_params yet — use TaprioConfig::queues() on the typed builder",
-                    ));
+                    let queues = read_queues("taprio", params, &mut i)?;
+                    cfg = cfg.queues(&queues);
                 }
                 other => {
                     return Err(Error::invalid_message(format!(
@@ -7335,7 +7915,10 @@ impl QdiscConfig for TaprioConfig {
         if !self.entries.is_empty() {
             let list_token = builder.nest_start(TCA_TAPRIO_ATTR_SCHED_ENTRY_LIST);
             for (idx, entry) in self.entries.iter().enumerate() {
-                let entry_token = builder.nest_start(TCA_TAPRIO_ATTR_SCHED_SINGLE_ENTRY);
+                // TCA_TAPRIO_SCHED_ENTRY, not the top-level
+                // TCA_TAPRIO_ATTR_SCHED_SINGLE_ENTRY: the kernel skips
+                // that, and refuses an empty schedule (#823).
+                let entry_token = builder.nest_start(TCA_TAPRIO_SCHED_ENTRY);
                 builder.append_attr(TCA_TAPRIO_SCHED_ENTRY_INDEX, &(idx as u32).to_ne_bytes());
                 builder.append_attr(TCA_TAPRIO_SCHED_ENTRY_CMD, &[entry.cmd]);
                 builder.append_attr(
@@ -7773,6 +8356,9 @@ pub struct HtbClassConfig {
     mpu: u16,
     /// Per-packet overhead.
     overhead: u16,
+    /// The link layer the rate tables account for (tc(8)'s `linklayer`,
+    /// #826).
+    linklayer: psched::LinkLayer,
 }
 
 impl HtbClassConfig {
@@ -7801,6 +8387,7 @@ impl HtbClassConfig {
             mtu: 1600,
             mpu: 0,
             overhead: 0,
+            linklayer: psched::LinkLayer::Ethernet,
         }
     }
 
@@ -7871,6 +8458,12 @@ impl HtbClassConfig {
         self
     }
 
+    /// Set the link layer: ATM rounds each packet up to whole 53-byte cells.
+    pub fn linklayer(mut self, linklayer: psched::LinkLayer) -> Self {
+        self.linklayer = linklayer;
+        self
+    }
+
     /// Build the configuration. No-op marker for "I'm done"; the
     /// builder is already usable as a `ClassConfig` without it.
     pub fn build(self) -> Self {
@@ -7899,6 +8492,7 @@ impl HtbClassConfig {
         let mut mtu: Option<u32> = None;
         let mut mpu: Option<u16> = None;
         let mut overhead: Option<u16> = None;
+        let mut linklayer: Option<psched::LinkLayer> = None;
 
         let mut i = 0;
         while i < params.len() {
@@ -7978,9 +8572,22 @@ impl HtbClassConfig {
                     })?);
                     i += 2;
                 }
+                "linklayer" => {
+                    let v = val()?;
+                    linklayer = Some(match v {
+                        "ethernet" => psched::LinkLayer::Ethernet,
+                        "atm" | "adsl" => psched::LinkLayer::Atm,
+                        _ => {
+                            return Err(Error::invalid_message(format!(
+                                "htb: invalid linklayer `{v}` (expected ethernet, atm or adsl)"
+                            )));
+                        }
+                    });
+                    i += 2;
+                }
                 other => {
                     return Err(Error::invalid_message(format!(
-                        "htb: unknown token `{other}` (recognised: rate, ceil, burst, cburst, prio, quantum, mtu, mpu, overhead)"
+                        "htb: unknown token `{other}` (recognised: rate, ceil, burst, cburst, prio, quantum, mtu, mpu, overhead, linklayer)"
                     )));
                 }
             }
@@ -8012,7 +8619,52 @@ impl HtbClassConfig {
         if let Some(o) = overhead {
             cfg = cfg.overhead(o);
         }
+        if let Some(l) = linklayer {
+            cfg = cfg.linklayer(l);
+        }
         Ok(cfg)
+    }
+
+    /// The class as the tokens [`parse_params`](Self::parse_params)
+    /// reads, its inverse (#645). Values left at their defaults are not
+    /// written.
+    pub fn to_params(&self) -> Result<Vec<String>> {
+        let default = Self::new(self.rate);
+        let mut out = vec!["rate".to_string(), self.rate.to_string()];
+        let mut put = |k: &str, v: String| {
+            out.push(k.to_string());
+            out.push(v);
+        };
+        if let Some(c) = self.ceil {
+            put("ceil", c.to_string());
+        }
+        if let Some(b) = self.burst {
+            put("burst", b.to_string());
+        }
+        if let Some(b) = self.cburst {
+            put("cburst", b.to_string());
+        }
+        if let Some(p) = self.prio {
+            put("prio", p.to_string());
+        }
+        if let Some(q) = self.quantum {
+            put("quantum", crate::util::Bytes::new(u64::from(q)).to_string());
+        }
+        if self.mtu != default.mtu {
+            put("mtu", self.mtu.to_string());
+        }
+        if self.mpu != default.mpu {
+            put("mpu", self.mpu.to_string());
+        }
+        if self.overhead != default.overhead {
+            put("overhead", self.overhead.to_string());
+        }
+        match self.linklayer {
+            psched::LinkLayer::Ethernet => {}
+            psched::LinkLayer::Atm => put("linklayer", "atm".to_string()),
+            other => return Err(Error::not_supported(format!("htb: linklayer {other:?} has no token"))),
+        }
+        Ok(out)
     }
 }
 
@@ -8031,6 +8683,22 @@ impl HtbClassConfig {
     /// The declared priority, if any.
     pub(crate) fn priority(&self) -> Option<u32> {
         self.prio
+    }
+
+    /// The declared quantum, if any; the kernel's (rate / r2q) otherwise,
+    /// and not compared (#789).
+    pub(crate) fn quantum_declared(&self) -> Option<u32> {
+        self.quantum
+    }
+
+    /// The mpu and overhead both rate specs carry (#789).
+    pub(crate) fn mpu_and_overhead(&self) -> (u16, u16) {
+        (self.mpu, self.overhead)
+    }
+
+    /// The link layer, as the rate specs carry it.
+    pub(crate) fn linklayer_wire(&self) -> u8 {
+        self.linklayer as u8
     }
 
     /// The declared ceil burst as a dump reads it back (through the tick
@@ -8094,7 +8762,7 @@ impl ClassConfig for HtbClassConfig {
             overhead: cfg.overhead,
             ..Default::default()
         };
-        let linklayer = psched::LinkLayer::default();
+        let linklayer = cfg.linklayer;
         let rtab = psched::tc_calc_rtable(&mut rate_spec, rate, cfg.mtu, linklayer);
         let ctab = psched::tc_calc_rtable(&mut ceil_spec, ceil, cfg.mtu, linklayer);
 
@@ -8259,56 +8927,148 @@ impl HfscClassConfig {
         [self.rsc, self.fsc, self.usc]
     }
 
-    /// Parse a simplified `tc(8)`-style HFSC class param token slice.
+    /// Parse a `tc(8)`-style HFSC class param token slice.
     ///
-    /// Accepts the rate-only forms: `rt rate <rate>`, `ls rate <rate>`,
-    /// `ul rate <rate>`. The full `m1/d/m2` service-curve grammar is
-    /// not parsed here — callers needing arbitrary curves should use
-    /// the typed builder (`HfscClassConfig::new().rt_curve(...)`)
-    /// directly. Strict rejection on unknown tokens.
+    /// Each curve is `rt`, `ls`, `ul`, or `sc` (real-time and link-sharing
+    /// both), followed by `[m1 <rate> d <time>] m2 <rate>`, or by
+    /// `rate <rate>`, which is `m2` alone. `d` is a time (`5ms`, `100us`).
+    /// tc(8)'s other form, `[umax <size>] [dmax <time>] rate <rate>`, is
+    /// turned into `m1`, `d` and `m2` as tc turns it (#826).
+    /// Strict rejection on unknown tokens.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         use crate::util::Rate;
         let mut cfg = HfscClassConfig::new();
         let mut i = 0;
         while i < params.len() {
-            let curve = params[i];
-            let kind = match curve {
-                "rt" | "ls" | "ul" => curve,
-                "sc" => {
-                    return Err(Error::invalid_message(
-                        "hfsc: `sc` (real-time + link-share combined) not modelled by parse_params — use HfscClassConfig::rt_curve + ls_curve on the typed builder",
-                    ));
-                }
-                other => {
-                    return Err(Error::invalid_message(format!(
-                        "hfsc: unknown token `{other}` (recognised: rt, ls, ul; each followed by `rate <rate>`)"
-                    )));
-                }
-            };
-            // Expect `rate <rate>` after the curve keyword.
-            let next = params.get(i + 1).copied().ok_or_else(|| {
-                Error::invalid_message(format!("hfsc: `{kind}` requires `rate <rate>`"))
-            })?;
-            if next != "rate" {
+            let kind = params[i];
+            if !matches!(kind, "rt" | "ls" | "ul" | "sc") {
                 return Err(Error::invalid_message(format!(
-                    "hfsc: `{kind}` followed by `{next}` — only the `rate <rate>` form is parsed (use the typed builder for full m1/d/m2 curves)"
+                    "hfsc: unknown token `{kind}` (recognised: rt, ls, ul, sc; each followed by \
+                     `[m1 <rate> d <time>] m2 <rate>`, `[umax <size>] [dmax <time>] rate <rate>` or `rate <rate>`)"
                 )));
             }
-            let v = params.get(i + 2).copied().ok_or_else(|| {
-                Error::invalid_message(format!("hfsc: `{kind} rate` requires a value"))
-            })?;
-            let rate = v
-                .parse::<Rate>()
-                .map_err(|e| Error::invalid_message(format!("hfsc: invalid rate `{v}`: {e}")))?;
-            cfg = match kind {
-                "rt" => cfg.rt_rate(rate),
-                "ls" => cfg.ls_rate(rate),
-                "ul" => cfg.ul_rate(rate),
-                _ => unreachable!(),
+            let rate = |key: &str, v: &str| -> Result<u32> {
+                v.parse::<Rate>()
+                    .map(|r| r.as_u32_bytes_per_sec_saturating())
+                    .map_err(|e| Error::invalid_message(format!("hfsc: invalid {key} `{v}`: {e}")))
             };
-            i += 3;
+            let (mut m1, mut d, mut m2) = (None, None, None);
+            let (mut umax, mut dmax) = (None, None);
+            i += 1;
+            while let Some(&key) = params.get(i) {
+                if !matches!(key, "m1" | "d" | "m2" | "rate" | "umax" | "dmax") {
+                    break;
+                }
+                let v = params.get(i + 1).copied().ok_or_else(|| {
+                    Error::invalid_message(format!("hfsc: `{kind} {key}` requires a value"))
+                })?;
+                match key {
+                    "m1" => m1 = Some(rate(key, v)?),
+                    "d" | "dmax" => {
+                        let t = crate::util::parse::get_time(v).map_err(|e| {
+                            Error::invalid_message(format!("hfsc: invalid {key} `{v}`: {e}"))
+                        })?;
+                        let us = (t.as_nanos() + 500) / 1000;
+                        let us = u32::try_from(us).map_err(|_| {
+                            Error::invalid_message(format!("hfsc: {key} `{v}` is past u32 microseconds"))
+                        })?;
+                        if key == "d" {
+                            d = Some(us);
+                        } else {
+                            dmax = Some(us);
+                        }
+                    }
+                    "umax" => {
+                        let bytes = crate::util::parse::get_size(v).ok().and_then(|b| u32::try_from(b).ok()).ok_or_else(|| {
+                            Error::invalid_message(format!("hfsc: invalid umax `{v}` (expected a size)"))
+                        })?;
+                        umax = Some(bytes);
+                    }
+                    _ => m2 = Some(rate(key, v)?),
+                }
+                i += 2;
+            }
+            if umax.is_some() || dmax.is_some() {
+                if m1.is_some() || d.is_some() {
+                    return Err(Error::invalid_message(format!(
+                        "hfsc: `{kind}` takes `m1`/`d` or `umax`/`dmax`, not both"
+                    )));
+                }
+                let rate = m2.ok_or_else(|| {
+                    Error::invalid_message(format!("hfsc: `{kind} umax`/`dmax` requires `rate <rate>`"))
+                })?;
+                let (umax, dmax) = (umax.unwrap_or(0), dmax.unwrap_or(0));
+                if umax != 0 && dmax == 0 {
+                    return Err(Error::invalid_message(format!("hfsc: `{kind} umax` requires `dmax`")));
+                }
+                // tc's hfsc_get_sc2(): concave when umax/dmax beats the
+                // rate, with that slope up to dmax; convex otherwise, flat
+                // until dmax - umax/rate.
+                let slope = (f64::from(umax) * 1e6 / f64::from(dmax)).ceil();
+                if dmax != 0 && slope > f64::from(rate) {
+                    m1 = Some(slope as u32);
+                    d = Some(dmax);
+                } else {
+                    m1 = Some(0);
+                    let flat = (f64::from(dmax) - f64::from(umax) * 1e6 / f64::from(rate.max(1))).ceil();
+                    d = Some(flat.max(0.0) as u32);
+                }
+            }
+            let m2 = m2.ok_or_else(|| {
+                Error::invalid_message(format!(
+                    "hfsc: `{kind}` requires `m2 <rate>` or `rate <rate>`"
+                ))
+            })?;
+            let curve = TcServiceCurve::new(m1.unwrap_or(0), d.unwrap_or(0), m2);
+            cfg = match kind {
+                "rt" => cfg.rt_curve(curve),
+                "ls" => cfg.ls_curve(curve),
+                "ul" => cfg.ul_curve(curve),
+                _ => cfg.rt_curve(curve).ls_curve(curve),
+            };
         }
         Ok(cfg)
+    }
+
+    /// The class as the tokens [`parse_params`](Self::parse_params)
+    /// reads, its inverse (#645): `sc` when the real-time and
+    /// link-sharing curves are one.
+    pub fn to_params(&self) -> Result<Vec<String>> {
+        use crate::util::Rate;
+        let curve = |kind: &str, c: &TcServiceCurve| {
+            let rate = |m: u32| Rate::bytes_per_sec(u64::from(m)).to_string();
+            let mut out = vec![kind.to_string()];
+            if c.m1 == 0 && c.d == 0 {
+                out.extend(["rate".to_string(), rate(c.m2)]);
+            } else {
+                out.extend([
+                    "m1".to_string(),
+                    rate(c.m1),
+                    "d".to_string(),
+                    format!("{}us", c.d),
+                    "m2".to_string(),
+                    rate(c.m2),
+                ]);
+            }
+            out
+        };
+        let same = |a: &TcServiceCurve, b: &TcServiceCurve| (a.m1, a.d, a.m2) == (b.m1, b.d, b.m2);
+        let mut out = Vec::new();
+        match (&self.rsc, &self.fsc) {
+            (Some(r), Some(f)) if same(r, f) => out.extend(curve("sc", r)),
+            (r, f) => {
+                if let Some(r) = r {
+                    out.extend(curve("rt", r));
+                }
+                if let Some(f) = f {
+                    out.extend(curve("ls", f));
+                }
+            }
+        }
+        if let Some(u) = &self.usc {
+            out.extend(curve("ul", u));
+        }
+        Ok(out)
     }
 }
 
@@ -8442,6 +9202,15 @@ impl DrrClassConfig {
         }
         Ok(cfg)
     }
+
+    /// The class as the tokens [`parse_params`](Self::parse_params)
+    /// reads, its inverse (#645).
+    pub fn to_params(&self) -> Result<Vec<String>> {
+        Ok(self
+            .quantum
+            .map(|q| vec!["quantum".to_string(), q.to_string()])
+            .unwrap_or_default())
+    }
 }
 
 impl ClassConfig for DrrClassConfig {
@@ -8569,24 +9338,39 @@ impl QfqClassConfig {
                     cfg = cfg.weight(w);
                     i += 2;
                 }
-                "lmax" => {
+                // tc(8) says `maxpkt` (#826); `lmax` is the kernel's name.
+                "maxpkt" | "lmax" => {
                     let v = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::invalid_message("qfq: `lmax` requires a value")
+                        Error::invalid_message(format!("qfq: `{}` requires a value", params[i]))
                     })?;
                     let b = v.parse::<crate::util::Bytes>().map_err(|e| {
-                        Error::invalid_message(format!("qfq: invalid lmax `{v}`: {e}"))
+                        Error::invalid_message(format!("qfq: invalid {} `{v}`: {e}", params[i]))
                     })?;
                     cfg = cfg.lmax(b);
                     i += 2;
                 }
                 other => {
                     return Err(Error::invalid_message(format!(
-                        "qfq: unknown token `{other}` (recognised: weight, lmax)"
+                        "qfq: unknown token `{other}` (recognised: weight, maxpkt, lmax)"
                     )));
                 }
             }
         }
         Ok(cfg)
+    }
+
+    /// The class as the tokens [`parse_params`](Self::parse_params)
+    /// reads, its inverse (#645).
+    pub fn to_params(&self) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        if let Some(w) = self.weight {
+            out.extend(["weight".to_string(), w.to_string()]);
+        }
+        // tc's word, and the plain byte count tc reads.
+        if let Some(l) = self.lmax {
+            out.extend(["maxpkt".to_string(), l.as_u64().to_string()]);
+        }
+        Ok(out)
     }
 }
 
@@ -9984,7 +10768,7 @@ mod tests {
     fn test_sfb_parse_and_write() {
         let cfg = SfbConfig::parse_params(&[
             "limit", "1000", "rehash", "600ms", "db", "60ms", "max", "25", "target", "20",
-            "increment", "5", "decrement", "1", "penalty_rate", "10", "penalty_burst", "20",
+            "increment", "0.0005", "decrement", "0.00005", "penalty_rate", "10", "penalty_burst", "20",
         ])
         .unwrap();
         assert_eq!(cfg.limit, Some(crate::util::Packets::new(1000)));
@@ -9993,6 +10777,22 @@ mod tests {
         assert_eq!(cfg.max, Some(25));
         assert_eq!(cfg.target, Some(20));
         assert_eq!(cfg.penalty_rate, Some(10));
+        // Probabilities, scaled to 0xFFFF as tc does (#820).
+        assert_eq!((cfg.increment, cfg.decrement), (Some(33), Some(3)));
+        assert!(SfbConfig::parse_params(&["increment", "5"]).is_err());
+        // tc reads a bare rehash or db as milliseconds.
+        let cfg = SfbConfig::parse_params(&["rehash", "600", "db", "0x3c"]).unwrap();
+        assert_eq!((cfg.rehash, cfg.db), (Some(Duration::from_secs(600) / 1000), Some(Duration::from_millis(60))));
+
+        // What is unset is tc's default, not 0.
+        use crate::netlink::types::tc::qdisc::sfb::TCA_SFB_PARMS;
+        let attrs = qdisc_option_attrs(&SfbConfig::new());
+        let parms = &attrs[&TCA_SFB_PARMS];
+        let words: Vec<u32> = parms.chunks(4).map(|w| u32::from_ne_bytes(w.try_into().unwrap())).collect();
+        // rehash, db, max, bin_size, increment, decrement, limit, penalty rate and burst.
+        assert_eq!(words, [600_000, 60_000, 25, 20, 33, 3, 0, 10, 20]);
+        let attrs = qdisc_option_attrs(&SfbConfig::new().target(40));
+        assert_eq!(attrs[&TCA_SFB_PARMS][8..12], 50u32.to_ne_bytes());
 
         let mut b = MessageBuilder::new(0, 0);
         cfg.write_options(&mut b).unwrap();
@@ -11133,12 +11933,19 @@ mod tests {
     }
 
     #[test]
-    fn tbf_parse_params_latency_rejected() {
-        let err = TbfConfig::parse_params(&["latency", "50ms"]).unwrap_err();
-        assert!(
-            err.to_string().contains("derived form"),
-            "expected derived-form rejection, got: {err}"
-        );
+    fn tbf_parse_params_latency_is_tcs_limit() {
+        // rate * latency + burst: 125000 B/s * 50 ms + 10 KiB (#820).
+        let cfg = TbfConfig::parse_params(&["rate", "1mbit", "burst", "10kb", "latency", "50ms"]).unwrap();
+        assert_eq!(cfg.limit.as_u64(), 6250 + 10240);
+        // With a peak rate, the smaller of that and peakrate * latency + mtu.
+        let cfg = TbfConfig::parse_params(&[
+            "rate", "1mbit", "burst", "10kb", "peakrate", "2mbit", "mtu", "2000", "latency", "50ms",
+        ])
+        .unwrap();
+        assert_eq!(cfg.limit.as_u64(), 12500 + 2000);
+        // One of limit and latency, once, as tc takes them.
+        let err = TbfConfig::parse_params(&["limit", "10kb", "latency", "50ms"]).unwrap_err();
+        assert!(err.to_string().contains("once"), "{err}");
     }
 
     #[test]
@@ -11182,9 +11989,13 @@ mod tests {
         assert_eq!(cfg.quantum, 1024);
     }
 
+    /// #806: divisor, flows, depth and head drop are modelled; SFQRED is
+    /// not, and says so.
     #[test]
-    fn sfq_parse_params_divisor_rejected() {
-        let err = SfqConfig::parse_params(&["divisor", "1024"]).unwrap_err();
+    fn sfq_parse_params_divisor_flows_depth_headdrop() {
+        let cfg = SfqConfig::parse_params(&["divisor", "512", "flows", "64", "depth", "32", "headdrop"]).unwrap();
+        assert_eq!((cfg.divisor, cfg.flows, cfg.depth, cfg.headdrop), (512, 64, 32, true));
+        let err = SfqConfig::parse_params(&["redflowlimit", "100000"]).unwrap_err();
         assert!(err.to_string().contains("not modelled"), "got: {err}");
     }
 
@@ -11365,111 +12176,127 @@ mod tests {
         assert!(err.to_string().contains("invalid target"));
     }
 
-    #[test]
-    fn red_parse_params_empty_yields_default() {
-        let cfg = RedConfig::parse_params(&[]).unwrap();
-        assert_eq!(cfg.limit, 0);
-        assert_eq!(cfg.min, 0);
-        assert_eq!(cfg.max, 0);
-        assert_eq!(cfg.max_p, 5);
-        assert!(!cfg.ecn);
-        assert!(!cfg.adaptive);
+    /// What tc(8)'s own `tc_red.c` computes (built and run against this
+    /// clock as an oracle, #819): the STAB as the indices where its value
+    /// steps up by one, then 31 at 255.
+    fn stab_from_steps(steps: &[usize]) -> [u8; 256] {
+        let mut stab = [0u8; 256];
+        for (i, slot) in stab.iter_mut().enumerate().take(255) {
+            *slot = steps.iter().filter(|s| **s <= i).count() as u8;
+        }
+        stab[255] = 31;
+        stab
     }
 
     #[test]
-    fn red_parse_params_thresholds_with_size_suffixes() {
-        let cfg = RedConfig::parse_params(&["limit", "100k", "min", "10k", "max", "30k"]).unwrap();
-        assert_eq!(cfg.limit, 100 * 1024);
-        assert_eq!(cfg.min, 10 * 1024);
-        assert_eq!(cfg.max, 30 * 1024);
+    fn red_derives_what_tc_derives() {
+        use crate::netlink::psched::Psched;
+        use crate::util::Rate;
+        // limit 400000 min 30000 max 90000 avpkt 1000 burst 55
+        // probability 0.02 bandwidth 10mbit
+        let d = red_derive("red", &Psched::MODERN, 30000, 90000, 55, 1000, Rate::mbit(10), 0.02).unwrap();
+        assert_eq!((d.wlog, d.plog, d.scell_log, d.max_p), (5, 22, 15, 85_899_345));
+        let steps = [13, 25, 37, 49, 61, 73, 85, 97, 109, 121, 133, 145, 157, 169, 181, 193, 205, 217, 229, 241, 253];
+        assert_eq!(d.stab, stab_from_steps(&steps));
+        // choke: limit 1000 min 100 max 300 avpkt 1000 burst 200
+        // bandwidth 10mbit probability 0.1, thresholds times avpkt.
+        let d = red_derive("choke", &Psched::MODERN, 100_000, 300_000, 200, 1000, Rate::mbit(10), 0.1).unwrap();
+        assert_eq!((d.wlog, d.plog, d.scell_log, d.max_p), (7, 21, 17, 429_496_729));
+        let steps = [13, 25, 37, 49, 61, 73, 86, 98, 110, 122, 134, 146, 159, 171, 183, 195, 207, 219, 232, 244];
+        assert_eq!(d.stab, stab_from_steps(&steps));
+        // A burst too small for the minimum, and a max below the min.
+        assert!(red_derive("red", &Psched::MODERN, 30000, 90000, 1, 1000, Rate::mbit(10), 0.02).is_err());
+        assert!(red_derive("red", &Psched::MODERN, 90000, 30000, 55, 1000, Rate::mbit(10), 0.02).is_err());
+    }
+
+    /// The options a qdisc config writes, by attribute type.
+    fn qdisc_option_attrs(cfg: &impl QdiscConfig) -> std::collections::HashMap<u16, Vec<u8>> {
+        let mut b = MessageBuilder::new(0, 0);
+        cfg.write_options(&mut b).unwrap();
+        let bytes = b.finish();
+        let mut attrs = std::collections::HashMap::new();
+        let mut rest = &bytes[16..];
+        while rest.len() >= 4 {
+            let len = u16::from_ne_bytes([rest[0], rest[1]]) as usize;
+            // Without NLA_F_NESTED and NLA_F_NET_BYTEORDER.
+            let ty = u16::from_ne_bytes([rest[2], rest[3]]) & 0x3fff;
+            attrs.insert(ty, rest[4..len].to_vec());
+            rest = &rest[len.next_multiple_of(4).min(rest.len())..];
+        }
+        attrs
     }
 
     #[test]
-    fn red_parse_params_probability() {
-        // 50% should map to ~127 on the 0-255 scale.
-        let cfg = RedConfig::parse_params(&["probability", "50"]).unwrap();
-        assert!(
-            cfg.max_p >= 126 && cfg.max_p <= 128,
-            "expected ~127, got {}",
-            cfg.max_p
-        );
+    fn red_writes_a_stab_and_tcs_defaults() {
+        use crate::netlink::types::tc::qdisc::red;
+        // The kernel refuses a red without TCA_RED_STAB (#819).
+        let cfg = RedConfig::parse_params(&["limit", "400000", "avpkt", "1000"]).unwrap();
+        let attrs = qdisc_option_attrs(&cfg);
+        assert_eq!(attrs[&red::TCA_RED_STAB].len(), 256);
+        // tc's defaults: max a quarter of the limit, min a third of max.
+        let parms = &attrs[&red::TCA_RED_PARMS];
+        let word = |i: usize| u32::from_ne_bytes(parms[i * 4..i * 4 + 4].try_into().unwrap());
+        assert_eq!((word(0), word(1), word(2)), (400_000, 33_333, 100_000));
+        assert_eq!(attrs[&red::TCA_RED_MAX_P], 85_899_345u32.to_ne_bytes());
+        // The flags go in TCA_RED_FLAGS only: value, then selector.
+        let cfg = RedConfig::parse_params(&["limit", "400000", "avpkt", "1000", "ecn", "nodrop"]).unwrap();
+        let attrs = qdisc_option_attrs(&cfg);
+        assert_eq!(attrs[&red::TCA_RED_PARMS][15], 0);
+        let flags = &attrs[&red::TCA_RED_FLAGS];
+        assert_eq!(u32::from_ne_bytes(flags[..4].try_into().unwrap()), red::TC_RED_ECN | red::TC_RED_NODROP);
+        assert_eq!(u32::from_ne_bytes(flags[4..].try_into().unwrap()), 0xf);
     }
 
     #[test]
-    fn red_parse_params_flags_with_negations() {
-        let cfg = RedConfig::parse_params(&["ecn", "harddrop", "adaptive"]).unwrap();
-        assert!(cfg.ecn);
-        assert!(cfg.harddrop);
-        assert!(cfg.adaptive);
+    fn red_parse_params_reads_tcs_words() {
+        use crate::util::Rate;
         let cfg = RedConfig::parse_params(&[
-            "ecn",
-            "noecn",
-            "harddrop",
-            "noharddrop",
-            "adaptive",
-            "noadaptive",
+            "limit", "100k", "min", "10k", "max", "30k", "avpkt", "1500", "burst", "20", "bandwidth", "100mbit",
+            "probability", "0.05",
         ])
         .unwrap();
-        assert!(!cfg.ecn);
-        assert!(!cfg.harddrop);
-        assert!(!cfg.adaptive);
+        assert_eq!((cfg.limit, cfg.min, cfg.max, cfg.avpkt, cfg.burst), (100 * 1024, 10 * 1024, 30 * 1024, 1500, 20));
+        assert_eq!(cfg.bandwidth, Rate::mbit(100));
+        // tc-red(8)'s probability is a fraction: 0.05 is 5%.
+        assert_eq!(cfg.probability, 0.05);
+        assert!(RedConfig::parse_params(&["probability", "50"]).is_err());
+        assert!(RedConfig::parse_params(&["bandwidth", "10%"]).unwrap_err().to_string().contains("not modelled"));
+        let cfg = RedConfig::parse_params(&["ecn", "harddrop", "adaptative", "nodrop"]).unwrap();
+        assert!(cfg.ecn && cfg.harddrop && cfg.adaptive && cfg.nodrop);
+        let cfg = RedConfig::parse_params(&["ecn", "noecn", "harddrop", "noharddrop", "adaptive", "noadaptive"]).unwrap();
+        assert!(!cfg.ecn && !cfg.harddrop && !cfg.adaptive);
+        let cfg = RedConfig::parse_params(&[]).unwrap();
+        assert_eq!((cfg.avpkt, cfg.burst, cfg.probability), (1000, 0, 0.02));
+        assert_eq!(cfg.bandwidth, Rate::mbit(10));
+        assert!(RedConfig::parse_params(&["nonsense"]).unwrap_err().to_string().contains("unknown token"));
+        assert!(RedConfig::parse_params(&["qevent", "mark"]).unwrap_err().to_string().contains("not modelled"));
     }
 
     #[test]
-    fn red_parse_params_unsupported_features_rejected() {
-        for unsup in ["avpkt", "burst", "bandwidth"] {
-            let err = RedConfig::parse_params(&[unsup, "1"]).unwrap_err();
-            assert!(
-                err.to_string().contains("not modelled"),
-                "expected not-modelled for `{unsup}`, got: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn red_parse_params_unknown_token_errors() {
-        let err = RedConfig::parse_params(&["nonsense"]).unwrap_err();
-        assert!(err.to_string().contains("unknown token"));
-    }
-
-    #[test]
-    fn choke_parse_params_empty_yields_default() {
-        let cfg = ChokeConfig::parse_params(&[]).unwrap();
-        assert_eq!(cfg.limit, crate::util::Packets::new(0));
-        assert_eq!(cfg.min, crate::util::Packets::new(0));
-        assert_eq!(cfg.max, crate::util::Packets::new(0));
-        assert!(!cfg.ecn);
-        assert!(!cfg.harddrop);
-    }
-
-    #[test]
-    fn choke_parse_params_thresholds_and_flags() {
-        let cfg =
-            ChokeConfig::parse_params(&["limit", "100k", "min", "10k", "max", "30k", "ecn"])
-                .unwrap();
-        assert_eq!(cfg.limit, crate::util::Packets::new(100 * 1024));
-        assert_eq!(cfg.min, crate::util::Packets::new(10 * 1024));
-        assert_eq!(cfg.max, crate::util::Packets::new(30 * 1024));
+    fn choke_writes_a_stab_and_reads_tcs_words() {
+        use crate::netlink::types::tc::qdisc::choke;
+        let cfg = ChokeConfig::parse_params(&[
+            "limit", "1000", "min", "100", "max", "300", "avpkt", "1000", "burst", "200", "bandwidth", "10mbit",
+            "probability", "0.1", "ecn",
+        ])
+        .unwrap();
+        assert_eq!(cfg.limit, crate::util::Packets::new(1000));
+        assert_eq!((cfg.burst, cfg.probability), (200, 0.1));
         assert!(cfg.ecn);
-    }
-
-    #[test]
-    fn choke_parse_params_unsupported_features_rejected() {
-        for unsup in ["avpkt", "burst", "bandwidth"] {
-            let err = ChokeConfig::parse_params(&[unsup, "1"]).unwrap_err();
-            assert!(
-                err.to_string().contains("not modelled"),
-                "expected not-modelled for `{unsup}`, got: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn choke_parse_params_unknown_token_errors() {
-        let err = ChokeConfig::parse_params(&["nonsense"]).unwrap_err();
-        assert!(err.to_string().contains("unknown token"));
-        let err = ChokeConfig::parse_params(&["limit"]).unwrap_err();
-        assert!(err.to_string().contains("requires a value"));
+        let attrs = qdisc_option_attrs(&cfg);
+        assert_eq!(attrs[&choke::TCA_CHOKE_STAB].len(), 256);
+        assert_eq!(attrs[&choke::TCA_CHOKE_MAX_P], 429_496_729u32.to_ne_bytes());
+        // Packets, as tc reads them: no size suffix, any base.
+        assert!(ChokeConfig::parse_params(&["limit", "100k"]).is_err());
+        let cfg = ChokeConfig::parse_params(&["limit", "0x10"]).unwrap();
+        assert_eq!(cfg.limit, crate::util::Packets::new(16));
+        // tc's defaults: max a quarter of the limit, min a third of max.
+        let attrs = qdisc_option_attrs(&ChokeConfig::parse_params(&["limit", "1000"]).unwrap());
+        let parms = &attrs[&choke::TCA_CHOKE_PARMS];
+        let word = |i: usize| u32::from_ne_bytes(parms[i * 4..i * 4 + 4].try_into().unwrap());
+        assert_eq!((word(0), word(1), word(2)), (1000, 83, 250));
+        assert!(ChokeConfig::parse_params(&["nonsense"]).unwrap_err().to_string().contains("unknown token"));
+        assert!(ChokeConfig::parse_params(&["limit"]).unwrap_err().to_string().contains("requires a value"));
     }
 
     #[test]
@@ -11685,9 +12512,18 @@ mod tests {
     }
 
     #[test]
-    fn mqprio_parse_params_map_short_errors() {
-        let err = MqprioConfig::parse_params(&["map", "1", "2", "3"]).unwrap_err();
-        assert!(err.to_string().contains("requires exactly 16 values"));
+    fn mqprio_and_taprio_maps_read_as_tcs() {
+        // Up to 16 classes, to the first word that is not one; the rest
+        // are 0 (#820).
+        let cfg = MqprioConfig::parse_params(&["map", "1", "2", "3"]).unwrap();
+        assert_eq!(cfg.prio_tc_map, [1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let cfg = MqprioConfig::parse_params(&["num_tc", "2", "map", "0", "1", "queues", "1@0", "1@1", "hw", "0"]).unwrap();
+        assert_eq!(cfg.prio_tc_map[..3], [0, 1, 0]);
+        assert_eq!((cfg.count[1], cfg.offset[1]), (1, 1));
+        let cfg = TaprioConfig::parse_params(&["num_tc", "2", "map", "0", "1", "queues", "1@0", "1@1"]).unwrap();
+        assert_eq!(cfg.prio_tc_map[..3], [0, 1, 0]);
+        assert!(MqprioConfig::parse_params(&["map", "queues"]).unwrap_err().to_string().contains("at least one"));
+        assert!(TaprioConfig::parse_params(&["map"]).is_err());
     }
 
     #[test]
@@ -11697,9 +12533,13 @@ mod tests {
     }
 
     #[test]
-    fn mqprio_parse_params_queues_rejected() {
-        let err = MqprioConfig::parse_params(&["queues", "1@0"]).unwrap_err();
-        assert!(err.to_string().contains("not parsed by parse_params yet"));
+    fn mqprio_parse_params_reads_queues() {
+        // tc(8)'s count@offset pairs, to the first word that is not one (#820).
+        let cfg = MqprioConfig::parse_params(&["queues", "1@0", "2@1", "hw", "0"]).unwrap();
+        assert_eq!((&cfg.count[..3], &cfg.offset[..3]), (&[1, 2, 0][..], &[0, 1, 0][..]));
+        assert!(!cfg.hw);
+        assert!(MqprioConfig::parse_params(&["queues", "1@x"]).is_err());
+        assert!(MqprioConfig::parse_params(&["queues", "hw"]).is_err());
     }
 
     #[test]
@@ -11832,9 +12672,10 @@ mod tests {
     }
 
     #[test]
-    fn taprio_parse_params_queues_rejected() {
-        let err = TaprioConfig::parse_params(&["queues", "1@0"]).unwrap_err();
-        assert!(err.to_string().contains("not parsed by parse_params yet"));
+    fn taprio_parse_params_reads_queues() {
+        let cfg = TaprioConfig::parse_params(&["queues", "1@0", "1@1", "clockid", "CLOCK_TAI"]).unwrap();
+        assert_eq!((&cfg.count[..2], &cfg.offset[..2]), (&[1, 1][..], &[0, 1][..]));
+        assert!(TaprioConfig::parse_params(&["queues"]).is_err());
     }
 
     #[test]
@@ -11937,13 +12778,15 @@ mod tests {
         );
     }
 
+    /// A curve with an `m1` and no `m2` says what it lacks (#645 reads
+    /// the `m1`/`d`/`m2` form; it used to refuse everything but `rate`).
     #[test]
-    fn hfsc_class_parse_params_non_rate_form_errors() {
+    fn hfsc_class_parse_params_curve_without_m2_errors() {
         let err = HfscClassConfig::parse_params(&["rt", "rate", "10mbit", "ls", "m1", "100"])
             .unwrap_err();
         assert!(err.to_string().contains("hfsc:"), "kind-prefixed: {err}");
         assert!(
-            err.to_string().contains("only the `rate <rate>` form"),
+            err.to_string().contains("`ls` requires `m2 <rate>` or `rate <rate>`"),
             "got: {err}"
         );
     }
@@ -12020,6 +12863,71 @@ mod tests {
         assert!(CodelConfig::parse_params(&["bogus"]).is_err());
         assert!(CodelConfig::parse_params(&["limit"]).is_err()); // missing value
         assert!(CodelConfig::parse_params(&["target", "notatime"]).is_err());
+    }
+
+    #[test]
+    fn fq_reads_buckets_horizon_and_timer_slack() {
+        use crate::netlink::types::tc::qdisc::fq;
+        let cfg = FqConfig::parse_params(&["buckets", "1000", "horizon", "10s", "horizon_drop", "timer_slack", "20us"]).unwrap();
+        let attrs = qdisc_option_attrs(&cfg);
+        // log2 rounded up, as tc's ilog2(): 1000 buckets is 2^10 (#821).
+        assert_eq!(attrs[&fq::TCA_FQ_BUCKETS_LOG], 10u32.to_ne_bytes());
+        assert_eq!(attrs[&fq::TCA_FQ_HORIZON], 10_000_000u32.to_ne_bytes());
+        assert_eq!(attrs[&fq::TCA_FQ_HORIZON_DROP], [1]);
+        assert_eq!(attrs[&fq::TCA_FQ_TIMER_SLACK], 20_000u32.to_ne_bytes());
+        let attrs = qdisc_option_attrs(&FqConfig::parse_params(&["buckets", "2048", "horizon_cap"]).unwrap());
+        assert_eq!(attrs[&fq::TCA_FQ_BUCKETS_LOG], 11u32.to_ne_bytes());
+        assert_eq!(attrs[&fq::TCA_FQ_HORIZON_DROP], [0]);
+        assert!(FqConfig::parse_params(&["defrate", "1mbit"]).unwrap_err().to_string().contains("obsolete"));
+        assert!(FqConfig::parse_params(&["weights", "1"]).unwrap_err().to_string().contains("not modelled"));
+    }
+
+    #[test]
+    fn cake_framings_add_as_tcs() {
+        // Each adds to the overhead so far, as tc-cake(8)'s do (#820).
+        let cfg = CakeConfig::parse_params(&["ethernet"]).unwrap();
+        assert_eq!((cfg.overhead, cfg.mpu, cfg.atm_mode), (Some(38), Some(84), None));
+        let cfg = CakeConfig::parse_params(&["overhead", "10", "ether-vlan", "pppoe-ptm"]).unwrap();
+        assert_eq!((cfg.overhead, cfg.atm_mode), (Some(44), Some(CakeAtmMode::Ptm)));
+        let cfg = CakeConfig::parse_params(&["docsis"]).unwrap();
+        assert_eq!((cfg.overhead, cfg.mpu, cfg.atm_mode), (Some(18), Some(64), Some(CakeAtmMode::None)));
+        let cfg = CakeConfig::parse_params(&["bridged-llcsnap", "conservative"]).unwrap();
+        assert_eq!((cfg.overhead, cfg.atm_mode), (Some(48), Some(CakeAtmMode::Atm)));
+        let cfg = CakeConfig::parse_params(&["overhead", "20", "raw"]).unwrap();
+        assert_eq!((cfg.overhead, cfg.atm_mode, cfg.raw), (Some(0), Some(CakeAtmMode::None), true));
+        assert!(CakeConfig::parse_params(&["via-ethernet"]).is_ok());
+    }
+
+    #[test]
+    fn gred_and_pie_read_tcs_words() {
+        use crate::netlink::types::tc::qdisc::{gred, pie};
+        // tc-gred(8)'s `vqs`, and the setup's ecn and harddrop (#820).
+        let cfg = GredConfig::parse_params(&["setup", "vqs", "4", "default", "1", "ecn", "harddrop"]).unwrap();
+        assert_eq!((cfg.virtual_queues, cfg.default_vq, cfg.ecn, cfg.harddrop), (Some(4), Some(1), true, true));
+        let attrs = qdisc_option_attrs(&cfg);
+        assert_eq!(attrs[&gred::TCA_GRED_DPS][9], 3, "TC_RED_ECN | TC_RED_HARDDROP");
+        let cfg = PieConfig::parse_params(&["dq_rate_estimator"]).unwrap();
+        assert!(cfg.dq_rate_estimator);
+        assert_eq!(qdisc_option_attrs(&cfg)[&pie::TCA_PIE_DQ_RATE_ESTIMATOR], 1u32.to_ne_bytes());
+        assert!(!PieConfig::parse_params(&["dq_rate_estimator", "no_dq_rate_estimator"]).unwrap().dq_rate_estimator);
+        assert!(HhfConfig::parse_params(&["non_hh_weight", "2"]).is_ok());
+    }
+
+    #[test]
+    fn taprio_entries_nest_as_the_kernel_reads_them() {
+        use crate::netlink::types::tc::qdisc::taprio;
+        let cfg = TaprioConfig::parse_params(&["sched-entry", "S", "01", "300000", "sched-entry", "S", "02", "300000"]).unwrap();
+        let list = &qdisc_option_attrs(&cfg)[&taprio::TCA_TAPRIO_ATTR_SCHED_ENTRY_LIST];
+        // Each entry is a TCA_TAPRIO_SCHED_ENTRY nest: the kernel skips any
+        // other type and then refuses the empty schedule (#823).
+        let mut rest = &list[..];
+        let mut types = Vec::new();
+        while rest.len() >= 4 {
+            let len = u16::from_ne_bytes([rest[0], rest[1]]) as usize;
+            types.push(u16::from_ne_bytes([rest[2], rest[3]]) & 0x3fff);
+            rest = &rest[len.next_multiple_of(4).min(rest.len())..];
+        }
+        assert_eq!(types, [taprio::TCA_TAPRIO_SCHED_ENTRY; 2]);
     }
 
     #[test]
@@ -12116,5 +13024,93 @@ mod tests {
         assert!(TcHandle::major_only(0xffff).is_reserved_major());
         assert!(TcHandle::INGRESS.is_reserved_major());
         assert!(!TcHandle::major_only(0x8000).is_reserved_major());
+    }
+}
+
+/// `to_params` is `parse_params`' inverse for the class kinds a declared
+/// tree holds (#645): the tokens parse back to a class that writes the
+/// same request, and the same tokens.
+#[cfg(test)]
+mod class_params_tests {
+    use super::*;
+    use crate::util::{Bytes, Rate};
+
+    fn bytes(c: &impl ClassConfig) -> Vec<u8> {
+        let mut b = MessageBuilder::new(0, 0);
+        let start = b.len();
+        c.write_options(&mut b).unwrap();
+        b.as_bytes()[start..].to_vec()
+    }
+
+    macro_rules! round_trips {
+        ($ty:ident, $c:expr) => {{
+            let c: $ty = $c;
+            let tokens = c.to_params().unwrap_or_else(|e| panic!("{e}"));
+            let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+            let back = $ty::parse_params(&refs).unwrap_or_else(|e| panic!("{tokens:?}: {e}"));
+            assert_eq!(back.to_params().unwrap(), tokens);
+            assert_eq!(bytes(&back), bytes(&c), "{tokens:?}");
+            tokens
+        }};
+    }
+
+    #[test]
+    fn htb_round_trips() {
+        assert_eq!(
+            round_trips!(HtbClassConfig, HtbClassConfig::new(Rate::mbit(60)).ceil(Rate::mbit(100))),
+            ["rate", "60mbit", "ceil", "100mbit"]
+        );
+        round_trips!(
+            HtbClassConfig,
+            HtbClassConfig::new(Rate::bytes_per_sec(1_250_001))
+                .burst(Bytes::kib(32))
+                .cburst(Bytes::new(3000))
+                .prio(2)
+                .quantum(1514)
+                .mtu(9000)
+                .mpu(64)
+                .overhead(4)
+        );
+    }
+
+    #[test]
+    fn hfsc_round_trips_and_reads_curves() {
+        let two = TcServiceCurve::two_slope(2_500_000, 5000, 1_250_000);
+        assert_eq!(
+            round_trips!(HfscClassConfig, HfscClassConfig::new().rt_curve(two).ls_rate(Rate::mbit(60))),
+            ["rt", "m1", "20mbit", "d", "5000us", "m2", "10mbit", "ls", "rate", "60mbit"]
+        );
+        // One curve for both is `sc`.
+        assert_eq!(
+            round_trips!(HfscClassConfig, HfscClassConfig::new().rt_curve(two).ls_curve(two)),
+            ["sc", "m1", "20mbit", "d", "5000us", "m2", "10mbit"]
+        );
+        round_trips!(HfscClassConfig, HfscClassConfig::new().ls_rate(Rate::mbit(40)).ul_rate(Rate::mbit(80)));
+        // tc(8)'s spellings read as the same curve.
+        let parsed = HfscClassConfig::parse_params(&[
+            "rt", "m1", "20mbit", "d", "5ms", "m2", "10mbit", "ls", "m2", "60mbit",
+        ])
+        .unwrap();
+        assert_eq!(
+            bytes(&parsed),
+            bytes(&HfscClassConfig::new().rt_curve(two).ls_rate(Rate::mbit(60)))
+        );
+        for bad in [&["rt"][..], &["rt", "m1", "1mbit"], &["xx", "rate", "1mbit"], &["ls", "d", "1x", "m2", "1mbit"]] {
+            let err = HfscClassConfig::parse_params(bad).unwrap_err().to_string();
+            assert!(err.contains("hfsc: "), "{bad:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn drr_and_qfq_round_trip() {
+        assert_eq!(
+            round_trips!(DrrClassConfig, DrrClassConfig::new().quantum(Bytes::new(3000))),
+            ["quantum", "3000b"]
+        );
+        assert!(round_trips!(DrrClassConfig, DrrClassConfig::new()).is_empty());
+        assert_eq!(
+            round_trips!(QfqClassConfig, QfqClassConfig::new().weight(10).lmax(Bytes::kib(2))),
+            ["weight", "10", "maxpkt", "2048"]
+        );
     }
 }

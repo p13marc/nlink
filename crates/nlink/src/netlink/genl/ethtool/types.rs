@@ -198,8 +198,11 @@ pub struct LinkState {
     pub ifname: Option<String>,
     /// Interface index.
     pub ifindex: Option<u32>,
-    /// Link is detected (carrier present).
-    pub link: bool,
+    /// Link is detected (carrier present), or `None` when the driver
+    /// cannot tell: one without `ethtool_ops::get_link`, such as a dummy,
+    /// gets no `ETHTOOL_A_LINKSTATE_LINK`, and ethtool prints no "Link
+    /// detected" (#839).
+    pub link: Option<bool>,
     /// Signal Quality Index (0-100, if supported).
     pub sqi: Option<u32>,
     /// Maximum SQI value supported by the device.
@@ -380,9 +383,12 @@ impl Features {
         self.hw.is_set(feature)
     }
 
-    /// Check if a feature can be changed.
+    /// Check if a feature can be changed: the device lists it in `hw`
+    /// (its `hw_features`) and the kernel does not hold it fixed. ethtool
+    /// marks the rest `[fixed]`; until #839 only the second half was
+    /// checked.
     pub fn is_changeable(&self, feature: &str) -> bool {
-        !self.nochange.is_set(feature)
+        self.hw.is_set(feature) && !self.nochange.is_set(feature)
     }
 
     /// Get all active feature names.
@@ -501,6 +507,75 @@ impl RingsBuilder {
         self.tx = Some(size);
         self
     }
+}
+
+// =============================================================================
+// Timestamping
+// =============================================================================
+
+/// What timestamping a device can do (`ethtool -T`, #166): which
+/// `SO_TIMESTAMPING` flags a socket can ask of it, its hardware transmit
+/// modes and receive filters, and its PTP clock.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct Tsinfo {
+    /// Interface name.
+    pub ifname: Option<String>,
+    /// Interface index.
+    pub ifindex: Option<u32>,
+    /// The `SOF_TIMESTAMPING_*` capabilities, by the kernel's names:
+    /// `software-transmit`, `hardware-receive`, `software-system-clock`, ….
+    pub timestamping: EthtoolBitset,
+    /// The `HWTSTAMP_TX_*` modes: `off`, `on`, `onestep-sync`, ….
+    pub tx_types: EthtoolBitset,
+    /// The `HWTSTAMP_FILTER_*` receive filters: `none`, `all`,
+    /// `ptpv2-event`, ….
+    pub rx_filters: EthtoolBitset,
+    /// The index of its PTP hardware clock (`/dev/ptp<n>`), if it has one.
+    pub phc_index: Option<u32>,
+}
+
+// =============================================================================
+// PHYs
+// =============================================================================
+
+/// One PHY on a link (`ethtool --show-phys`, kernel 6.12, #166). A link
+/// can have several: a media converter in front of the PHY on the board,
+/// a PHY on an SFP module.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PhyInfo {
+    /// Interface name.
+    pub ifname: Option<String>,
+    /// Interface index.
+    pub ifindex: Option<u32>,
+    /// Its index on the link, which PHY-specific requests name it by.
+    pub index: u32,
+    /// Its driver's name.
+    pub driver: Option<String>,
+    /// Its device name.
+    pub name: Option<String>,
+    /// What it is attached to.
+    pub upstream: Option<PhyUpstream>,
+    /// The SFP bus it sits behind, when it is on an SFP module.
+    pub upstream_sfp: Option<String>,
+    /// The SFP cage it drives, if any.
+    pub downstream_sfp: Option<String>,
+}
+
+/// What a PHY is attached to (`enum phy_upstream`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PhyUpstream {
+    /// The MAC: a switch port or an Ethernet controller.
+    Mac,
+    /// Another PHY, by its index on the link: a media converter's.
+    Phy {
+        /// The upstream PHY's index.
+        index: u32,
+    },
+    /// A kind of upstream newer than nlink, by the kernel's number.
+    Other(u32),
 }
 
 // =============================================================================

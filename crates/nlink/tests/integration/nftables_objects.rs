@@ -1,22 +1,25 @@
-//! Named stateful objects — counters, quotas, limits — and object maps,
-//! checked on traffic; declared objects keep their live state across
-//! applies, a quota is updated in place and a changed limit is recreated
-//! without moving the rules that use it.
+//! Named stateful objects — counters, quotas, limits, conntrack helpers —
+//! and object maps, checked on traffic; declared objects keep their live
+//! state across applies, a quota is updated in place and a changed limit is
+//! recreated without moving the rules that use it.
 
 use std::net::Ipv4Addr;
 
 use nlink::netlink::nftables::config::{MoveReason, NftablesConfig};
 use nlink::netlink::nftables::types::{
-    Chain, ChainType, Family, Hook, LimitUnit, PacketField, Priority, Rule, Set, SetDataType,
-    SetElement,
+    Chain, ChainType, CtState, Family, Hook, LimitUnit, PacketField, Priority, Rule, Set,
+    SetDataType, SetElement,
 };
 use nlink::netlink::nftables::{
-    LimitExpr, NftablesEvent, Object, ObjectConfig, ObjectState, ObjectType, QuotaExpr,
+    CtHelperObject, LimitExpr, NftablesEvent, Object, ObjectConfig, ObjectState, ObjectType,
+    QuotaExpr, RuleExpr,
 };
 use nlink::netlink::{Connection, Nftables};
 use tokio_stream::StreamExt;
 
-use crate::common::traffic::{lo_up, send_udp};
+use crate::common::converge::assert_transition;
+use crate::common::counters::rule_packets;
+use crate::common::traffic::{in_ns, lo_up, send_udp};
 use crate::common::{TestNamespace, with_timeout};
 
 async fn ip_table_with_output(conn: &Connection<Nftables>) -> nlink::Result<()> {
@@ -389,4 +392,275 @@ async fn a_bound_constant_set_takes_new_elements() -> nlink::Result<()> {
         vec![constant(&[1]), constant(&[1, 2])],
     )];
     assert_converges("nft-const-set", cases).await
+}
+
+// ============================================================================
+// #703 — conntrack helper objects
+// ============================================================================
+
+/// #703: ct helper objects as nft writes them decode typed, and nlink
+/// installs the same objects and rules: `nft` lists the two tables alike.
+#[tokio::test]
+async fn ct_helpers_read_and_write_as_nft_does() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables", "nft_ct", "nf_conntrack_ftp", "nf_conntrack_tftp");
+
+    let ns = TestNamespace::new("nft-cthelper")?;
+    let script = "table inet a {
+ ct helper ftp-std { type \"ftp\" protocol tcp; }
+ ct helper tftp4 { type \"tftp\" protocol udp; l3proto ip; }
+ chain pre {
+  type filter hook prerouting priority 0;
+  tcp dport 21 ct helper set \"ftp-std\"
+  udp dport 69 ct helper set \"tftp4\"
+ }
+}
+";
+    let file = std::env::temp_dir().join(format!("nlink-cthelper-{}.nft", std::process::id()));
+    std::fs::write(&file, script).map_err(nlink::Error::from)?;
+    let installed = ns.exec("nft", &["-f", file.to_str().unwrap()]);
+    let _ = std::fs::remove_file(&file);
+    installed?;
+
+    let conn = ns.connection_for::<Nftables>()?;
+    let ftp = CtHelperObject::new("ftp", 6);
+    let tftp4 = CtHelperObject::new("tftp", 17).family(2);
+    conn.add_table("b", Family::Inet).await?;
+    conn.add_object(&Object::ct_helper("b", "ftp-std", ftp.clone()).family(Family::Inet))
+        .await?;
+    conn.add_object(&Object::ct_helper("b", "tftp4", tftp4.clone()).family(Family::Inet))
+        .await?;
+    conn.add_chain(
+        Chain::new("b", "pre")?
+            .family(Family::Inet)
+            .hook(Hook::Prerouting)
+            .priority(Priority::Filter)
+            .chain_type(ChainType::Filter),
+    )
+    .await?;
+    let rule = || Rule::new("b", "pre").family(Family::Inet);
+    conn.add_rule(rule().match_tcp_dport(21).set_ct_helper("ftp-std")).await?;
+    conn.add_rule(rule().match_udp_dport(69).set_ct_helper("tftp4")).await?;
+
+    let listed = |table: &str| -> nlink::Result<String> {
+        let out = ns.exec("nft", &["list", "table", "inet", table])?;
+        Ok(out.replacen(&format!("table inet {table}"), "table inet T", 1))
+    };
+    assert_eq!(listed("b")?, listed("a")?, "nlink's table b, nft's table a");
+
+    let mut helpers: Vec<(String, ObjectState)> = conn
+        .list_objects_in("a", Family::Inet)
+        .await?
+        .into_iter()
+        .map(|o| (o.name, o.state))
+        .collect();
+    helpers.sort_by(|x, y| x.0.cmp(&y.0));
+    assert_eq!(
+        helpers,
+        [
+            ("ftp-std".to_string(), ObjectState::CtHelper(ftp)),
+            ("tftp4".to_string(), ObjectState::CtHelper(tftp4)),
+        ]
+    );
+    let unknown = conn
+        .list_rules("a", Family::Inet)
+        .await?
+        .iter()
+        .flat_map(|r| r.expressions())
+        .filter(|e| matches!(e, RuleExpr::Unknown { .. }))
+        .count();
+    assert_eq!(unknown, 0, "`ct helper set` decodes typed");
+    Ok(())
+}
+
+/// An FTP control connection to 127.0.0.1:21 whose server announces a
+/// passive data port, then a connection to that port. With the ftp helper
+/// on the control connection, the kernel expects the data connection, which
+/// arrives `ct state related`. The helper reads a line only after one it has
+/// seen end in that direction, so the server greets first, as servers do.
+fn ftp_passive_exchange(ns: &TestNamespace) {
+    in_ns(ns, || {
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+
+        let control = TcpListener::bind("127.0.0.1:21").expect("bind 21");
+        let data = TcpListener::bind("127.0.0.1:0").expect("bind data");
+        let port = data.local_addr().expect("data port").port();
+        let mut client = TcpStream::connect("127.0.0.1:21").expect("connect 21");
+        let (mut server, _) = control.accept().expect("accept control");
+        let mut buf = [0u8; 128];
+        server.write_all(b"220 ready\r\n").expect("send 220");
+        let _ = client.read(&mut buf).expect("read 220");
+        client.write_all(b"PASV\r\n").expect("send PASV");
+        let _ = server.read(&mut buf).expect("read PASV");
+        let reply = format!(
+            "227 Entering Passive Mode (127,0,0,1,{},{}).\r\n",
+            port >> 8,
+            port & 0xff
+        );
+        server.write_all(reply.as_bytes()).expect("send 227");
+        let _ = client.read(&mut buf).expect("read 227");
+        let _data_client = TcpStream::connect(("127.0.0.1", port)).expect("connect data");
+        let _ = data.accept().expect("accept data");
+    })
+}
+
+/// An inet table whose output chain assigns the ftp helper `ftp-std`, for
+/// both families or for `l3proto`, and counts related packets.
+fn ftp_helper(l3proto: Option<u8>) -> NftablesConfig {
+    NftablesConfig::new().table("t", Family::Inet, move |t| {
+        let helper = CtHelperObject::new("ftp", 6);
+        let helper = match l3proto {
+            Some(family) => helper.family(family),
+            None => helper,
+        };
+        t.chain("out", |c| {
+            c.hook(Hook::Output)
+                .priority(Priority::Filter)
+                .chain_type(ChainType::Filter)
+        })
+        .object("ftp-std", ObjectConfig::CtHelper(helper))
+        .rule_keyed("out", "related", |r| r.match_ct_state(CtState::RELATED).counter())
+        .rule_keyed("out", "ftp", |r| r.match_tcp_dport(21).set_ct_helper("ftp-std"))
+    })
+}
+
+/// #703: a declared ct helper converges, the rule assigning it makes an
+/// FTP data connection related, and a helper changed in place (both
+/// families → IPv4 only) is recreated with its rule and still works.
+#[tokio::test]
+async fn a_declared_ct_helper_makes_ftp_data_related() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables", "nft_ct", "nf_conntrack_ftp");
+
+    let ns = TestNamespace::new("nft-cthelper-ftp")?;
+    lo_up(&ns).await?;
+    let steps = [ftp_helper(None), ftp_helper(Some(2))];
+    assert_transition(&ns, &steps, false, async |i, conn| {
+        let related = async || {
+            rule_packets(conn, "t", Family::Inet, "out", 0)
+                .await
+                .map_err(|e| e.to_string())
+        };
+        let before = related().await?;
+        ftp_passive_exchange(&ns);
+        let after = related().await?;
+        match conn.list_objects_in("t", Family::Inet).await {
+            Ok(objects) if objects.len() == 1 => {}
+            other => return Err(format!("objects: {other:?}")),
+        }
+        if after > before {
+            Ok(())
+        } else {
+            Err(format!("step {}: no related packet ({before} -> {after})", i + 1))
+        }
+    })
+    .await
+}
+
+// ============================================================================
+// #703 — secmark objects
+// ============================================================================
+
+/// #703: a secmark object and the rule that sets it, as nft writes them,
+/// decode typed, and nlink installs the same: `nft` lists the two tables
+/// alike. The context is AppArmor's `unconfined`, which every AppArmor
+/// kernel knows.
+#[tokio::test]
+async fn secmark_reads_and_writes_as_nft_does() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables", "apparmor");
+
+    let ns = TestNamespace::new("nft-secmark")?;
+    let script = "table inet a {
+ secmark s1 { \"unconfined\" }
+ chain out {
+  type filter hook output priority 0;
+  meta l4proto udp meta secmark set \"s1\"
+ }
+}
+";
+    let file = std::env::temp_dir().join(format!("nlink-secmark-{}.nft", std::process::id()));
+    std::fs::write(&file, script).map_err(nlink::Error::from)?;
+    let installed = ns.exec("nft", &["-f", file.to_str().unwrap()]);
+    let _ = std::fs::remove_file(&file);
+    installed?;
+
+    let conn = ns.connection_for::<Nftables>()?;
+    conn.add_table("b", Family::Inet).await?;
+    let unconfined = ObjectConfig::Secmark("unconfined".to_string());
+    conn.add_object(&Object::new("b", "s1", unconfined).family(Family::Inet)).await?;
+    conn.add_chain(
+        Chain::new("b", "out")?
+            .family(Family::Inet)
+            .hook(Hook::Output)
+            .priority(Priority::Filter)
+            .chain_type(ChainType::Filter),
+    )
+    .await?;
+    conn.add_rule(
+        Rule::new("b", "out")
+            .family(Family::Inet)
+            .match_l4proto(17)
+            .set_secmark("s1"),
+    )
+    .await?;
+
+    let listed = |table: &str| -> nlink::Result<String> {
+        let out = ns.exec("nft", &["list", "table", "inet", table])?;
+        Ok(out.replacen(&format!("table inet {table}"), "table inet T", 1))
+    };
+    assert_eq!(listed("b")?, listed("a")?, "nlink's table b, nft's table a");
+    let objects = conn.list_objects_in("a", Family::Inet).await?;
+    assert_eq!(objects.len(), 1);
+    assert_eq!(objects[0].state, ObjectState::Secmark("unconfined".to_string()));
+    let unknown = conn
+        .list_rules("a", Family::Inet)
+        .await?
+        .iter()
+        .flat_map(|r| r.expressions())
+        .filter(|e| matches!(e, RuleExpr::Unknown { .. }))
+        .count();
+    assert_eq!(unknown, 0, "`meta secmark set` decodes typed");
+    Ok(())
+}
+
+/// #703: a declared secmark object marks what its rule marks: `meta secmark
+/// != 0` counts the three datagrams after the rule that sets it, and none
+/// before. Re-applying changes nothing.
+#[tokio::test]
+async fn a_declared_secmark_marks_packets() -> nlink::Result<()> {
+    use nlink::netlink::nftables::types::MetaKey;
+    use nlink::netlink::nftables::{CmpOp, Expr, Register};
+    require_root!();
+    nlink::require_modules!("nf_tables", "apparmor");
+
+    let ns = TestNamespace::new("nft-secmark-tr")?;
+    lo_up(&ns).await?;
+    let conn = ns.connection_for::<Nftables>()?;
+    let marked = |r: Rule| {
+        r.match_l4proto(17)
+            .expr(Expr::Meta { dreg: Register::R0, key: MetaKey::Secmark })
+            .expr(Expr::Cmp { sreg: Register::R0, op: CmpOp::Neq, data: vec![0; 4] })
+            .counter()
+    };
+    let cfg = NftablesConfig::new().table("t", Family::Inet, |t| {
+        t.chain("out", |c| {
+            c.hook(Hook::Output)
+                .priority(Priority::Filter)
+                .chain_type(ChainType::Filter)
+        })
+        .object("s1", ObjectConfig::Secmark("unconfined".to_string()))
+        .rule_keyed("out", "before", marked)
+        .rule_keyed("out", "set", |r| r.match_l4proto(17).set_secmark("s1"))
+        .rule_keyed("out", "after", marked)
+    });
+    cfg.diff(&conn).await?.apply(&conn).await?;
+    let again = cfg.diff(&conn).await?;
+    assert!(again.is_empty(), "second diff must be empty: {again}");
+
+    send_udp(&ns, &["127.0.0.1:9"], 3);
+    assert_eq!(rule_packets(&conn, "t", Family::Inet, "out", 0).await?, 0);
+    assert_eq!(rule_packets(&conn, "t", Family::Inet, "out", 2).await?, 3);
+    Ok(())
 }

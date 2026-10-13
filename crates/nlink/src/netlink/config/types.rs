@@ -39,10 +39,9 @@ pub struct NetworkConfig {
     /// Nexthop objects and groups (#516).
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
     pub(crate) nexthops: Vec<DeclaredNexthop>,
-    /// The TC trees declared with [`tc`](Self::tc). Not in JSON or YAML
-    /// yet: a filter's actions have no document form.
-    #[cfg_attr(feature = "serde", serde(skip))]
-    #[cfg_attr(feature = "schemars", schemars(skip))]
+    /// The TC trees declared with [`tc`](Self::tc): in JSON and YAML, each
+    /// class, filter and action as its kind and tc(8)'s words (#645).
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
     pub(crate) tc: Vec<super::tc_tree::DeclaredTc>,
     /// The `rtm_protocol` declared routes are installed with, and the one
     /// the diff treats as the config's own; `None` is `boot` (#512). See
@@ -132,6 +131,13 @@ impl NetworkConfig {
             let at = || format!("routes.{}/{}", r.destination, r.prefix_len);
             if let Some(why) = r.gateway_family_mismatch() {
                 errors.push(ValidationErrorInfo::new(at(), why));
+            }
+            // `rtnh_hops` is a u8, the weight less one (#783).
+            if let Some(h) = r.attrs.multipath.iter().find(|h| h.weight > 256) {
+                errors.push(ValidationErrorInfo::new(
+                    at(),
+                    format!("a next hop's weight is 1 to 256, not {}", h.weight),
+                ));
             }
             // IPv6 masks host bits away; IPv4 refuses them (EINVAL,
             // "Invalid prefix for given prefix length") (#518).
@@ -1274,6 +1280,14 @@ impl NetworkConfig {
             })),
         }
         self
+    }
+
+    /// Whether it declares an ingress or clsact qdisc on `dev`, the hook a
+    /// tree's redirect hangs off.
+    pub(crate) fn declares_ingress_hook(&self, dev: &str) -> bool {
+        self.qdiscs
+            .iter()
+            .any(|q| q.dev == dev && q.effective_parent() == QdiscParent::Ingress)
     }
 
     /// Declare `dev`'s TC tree (#514): HTB, HFSC, DRR or QFQ classes, the
@@ -3960,6 +3974,9 @@ pub(crate) struct AddressAttrs {
     pub(crate) peer: Option<IpAddr>,
     /// The IPv4 label (`eth0:1`); the kernel's default is the device name.
     pub(crate) label: Option<String>,
+    /// The IPv4 broadcast address (`IFA_BROADCAST`, `ip addr add … brd`);
+    /// none unless declared (#783).
+    pub(crate) broadcast: Option<std::net::Ipv4Addr>,
     /// The metric of the prefix route (`IFA_RT_PRIORITY`).
     pub(crate) metric: Option<u32>,
     /// `IFA_F_NODAD`: skip duplicate address detection (IPv6).
@@ -4048,6 +4065,21 @@ impl AddressBuilder {
         self
     }
 
+    /// The IPv4 broadcast address (`ip addr add … brd 10.0.0.255`), which
+    /// the kernel also routes as broadcast in the local table (#783). Left
+    /// undeclared, an address's broadcast is not compared, since the tools
+    /// that add addresses set one (`brd +`, DHCP clients).
+    pub fn broadcast(mut self, broadcast: &str) -> Self {
+        match broadcast.parse::<std::net::Ipv4Addr>() {
+            Ok(b) if self.address.address.is_ipv4() => self.address.attrs.broadcast = Some(b),
+            Ok(_) => self.errors.push("a broadcast address is IPv4 only".into()),
+            Err(_) => self
+                .errors
+                .push(format!("broadcast {broadcast:?} is not an IPv4 address")),
+        }
+        self
+    }
+
     /// The metric of the prefix route the address installs.
     pub fn metric(mut self, metric: u32) -> Self {
         self.address.attrs.metric = Some(metric);
@@ -4126,6 +4158,9 @@ struct AddressRepr {
     /// The IPv4 label (`eth0:1`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     label: Option<String>,
+    /// The IPv4 broadcast address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    broadcast: Option<String>,
     /// The metric of the prefix route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     metric: Option<u32>,
@@ -4193,6 +4228,7 @@ impl From<DeclaredAddress> for AddressRepr {
             address: format!("{}/{}", a.address, a.prefix_len),
             peer: t.peer.map(|p| p.to_string()),
             label: t.label.clone(),
+            broadcast: t.broadcast.map(|b| b.to_string()),
             metric: t.metric,
             flags,
             valid_lft: t.lifetimes.map(|(v, _)| v),
@@ -4213,6 +4249,9 @@ impl TryFrom<AddressRepr> for DeclaredAddress {
         }
         if let Some(label) = &r.label {
             b = b.label(label);
+        }
+        if let Some(broadcast) = &r.broadcast {
+            b = b.broadcast(broadcast);
         }
         if let Some(metric) = r.metric {
             b = b.metric(metric);
@@ -4303,6 +4342,11 @@ impl DeclaredAddress {
     /// The declared metric of its prefix route.
     pub fn metric(&self) -> Option<u32> {
         self.attrs.metric
+    }
+
+    /// The declared IPv4 broadcast address (#783).
+    pub fn broadcast(&self) -> Option<std::net::Ipv4Addr> {
+        self.attrs.broadcast
     }
 
     /// The `IFA_F_*` flags declared (`nodad`, `optimistic`,
@@ -4436,21 +4480,21 @@ pub struct RouteNexthop {
     /// The device; the kernel's, from the gateway, when unset.
     #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     pub dev: Option<String>,
-    /// Its share of the flows, 1 and up.
+    /// Its share of the flows, 1 to 256 (a `u16` since 0.32, #783).
     #[cfg_attr(feature = "serde", serde(default = "one", skip_serializing_if = "is_one"))]
-    pub weight: u8,
+    pub weight: u16,
     /// The gateway is on the link whatever the subnets say.
     #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "std::ops::Not::not"))]
     pub onlink: bool,
 }
 
 #[cfg(feature = "serde")]
-fn one() -> u8 {
+fn one() -> u16 {
     1
 }
 
 #[cfg(feature = "serde")]
-fn is_one(w: &u8) -> bool {
+fn is_one(w: &u16) -> bool {
     *w == 1
 }
 
@@ -4501,7 +4545,7 @@ impl RouteNexthopBuilder {
     }
 
     /// Its share of the flows, 1 and up (0 is 1).
-    pub fn weight(mut self, weight: u8) -> Self {
+    pub fn weight(mut self, weight: u16) -> Self {
         self.hop.weight = weight.max(1);
         self
     }
@@ -5558,9 +5602,31 @@ impl QdiscBuilder {
     /// The kernel sizes the flow table in `fq_codel_init` and will not
     /// resize it, so a different one replaces the qdisc, which drops its
     /// queue and resets its statistics (#361, #596).
+    ///
+    /// On sfq, the most flows (`SfqConfig::flows`, #806).
     pub fn flows(mut self, flows: u32) -> Self {
-        with_kind!(self, "flows", "fq_codel", FqCodel, |c| c.flows =
-            Some(flows))
+        match &mut self.qdisc_type {
+            Some(QdiscSpec::FqCodel(c)) => c.flows = Some(flows),
+            Some(QdiscSpec::Sfq(c)) => c.flows = flows,
+            _ => self.wrong_kind("flows", "fq_codel or sfq"),
+        }
+        self
+    }
+
+    /// Set sfq's hash buckets (`SfqConfig::divisor`, #806).
+    pub fn divisor(mut self, buckets: u32) -> Self {
+        with_kind!(self, "divisor", "sfq", Sfq, |c| c.divisor = buckets)
+    }
+
+    /// Set the most packets an sfq flow queues (`SfqConfig::depth`, #806).
+    pub fn depth(mut self, packets: u32) -> Self {
+        with_kind!(self, "depth", "sfq", Sfq, |c| c.depth = packets)
+    }
+
+    /// Drop from the head of a full sfq flow's queue
+    /// (`SfqConfig::headdrop`, #806).
+    pub fn headdrop(mut self, on: bool) -> Self {
+        with_kind!(self, "headdrop", "sfq", Sfq, |c| c.headdrop = on)
     }
 
     /// Set the bytes dequeued per round — fq_codel's and sfq's
@@ -5579,6 +5645,20 @@ impl QdiscBuilder {
     /// negotiated it (`FqCodelConfig::ecn`) (#361).
     pub fn ecn(mut self, enabled: bool) -> Self {
         with_kind!(self, "ecn", "fq_codel", FqCodel, |c| c.ecn = Some(enabled))
+    }
+
+    /// Set the most packets fq_codel drops at once when full
+    /// (`FqCodelConfig::drop_batch`, #806).
+    pub fn drop_batch(mut self, packets: u32) -> Self {
+        with_kind!(self, "drop_batch", "fq_codel", FqCodel, |c| c.drop_batch = Some(packets))
+    }
+
+    /// Apply fq_codel's CE threshold to the packets whose DS field, masked
+    /// with `mask`, equals `value` (`FqCodelConfig::ce_threshold_selector`,
+    /// #806).
+    pub fn ce_threshold_selector(mut self, value: u8, mask: u8) -> Self {
+        with_kind!(self, "ce_threshold_selector", "fq_codel", FqCodel, |c| c.ce_threshold_selector =
+            Some((value, mask)))
     }
 
     /// Set the sfq hash-perturbation period (`SfqConfig::perturb`).
@@ -5701,6 +5781,24 @@ impl QdiscBuilder {
     /// packet. netem's packet limit is [`limit`](Self::limit).
     pub fn limit_bytes(mut self, limit: crate::util::Bytes) -> Self {
         with_kind!(self, "limit_bytes", "tbf", Tbf, |c| c.limit = limit)
+    }
+
+    /// Set the bytes a TBF adds to each packet's size when it charges its
+    /// rates (`TbfConfig::overhead`, #806).
+    pub fn overhead(mut self, bytes: u16) -> Self {
+        with_kind!(self, "overhead", "tbf", Tbf, |c| c.overhead = bytes)
+    }
+
+    /// Set the least size a TBF charges a packet as (`TbfConfig::mpu`,
+    /// #806).
+    pub fn mpu(mut self, bytes: u16) -> Self {
+        with_kind!(self, "mpu", "tbf", Tbf, |c| c.mpu = bytes)
+    }
+
+    /// Set the link layer a TBF's rate tables are for
+    /// (`TbfConfig::linklayer`, #806).
+    pub fn linklayer(mut self, linklayer: crate::netlink::psched::LinkLayer) -> Self {
+        with_kind!(self, "linklayer", "tbf", Tbf, |c| c.linklayer = linklayer)
     }
 
     /// Configure as SFQ qdisc.

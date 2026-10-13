@@ -1946,6 +1946,27 @@ impl Connection<Route> {
         }
     }
 
+    /// The ifindex of each of `names` in this connection's namespace: the
+    /// devices a filter or action names rather than indexes (#645). One
+    /// that does not exist is [`ErrorDetail::NotFound`](crate::ErrorDetail::NotFound).
+    pub(crate) async fn ifindexes_of(
+        &self,
+        names: &[&str],
+    ) -> Result<std::collections::HashMap<String, u32>> {
+        let mut out = std::collections::HashMap::new();
+        for name in names {
+            if out.contains_key(*name) {
+                continue;
+            }
+            let link = self
+                .get_link_by_name(*name)
+                .await?
+                .ok_or_else(|| self.interface_not_found(*name))?;
+            out.insert(name.to_string(), link.ifindex());
+        }
+        Ok(out)
+    }
+
     /// Get a network interface by index.
     ///
     /// Returns `None` if the interface doesn't exist.
@@ -2702,6 +2723,15 @@ impl Connection<Route> {
             .map_err(|e| e.with_context("add_rule"))
     }
 
+    /// [`add_rule`](Self::add_rule) without `NLM_F_EXCL`, beside a rule the
+    /// kernel's lenient check takes for it (#793).
+    pub(crate) async fn add_rule_alongside(&self, rule: super::rule::RuleBuilder) -> Result<()> {
+        let builder = rule.build_alongside()?;
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("add_rule"))
+    }
+
     /// Delete a routing rule.
     ///
     /// # Example
@@ -3059,8 +3089,13 @@ impl Connection<Route> {
         self.dump_stream::<TcMessage>(NlMsgType::RTM_GETQDISC).await
     }
 
-    /// Stream a TC class dump frame-by-frame. See
-    /// [`Self::stream_qdiscs`].
+    /// Was: stream a TC class dump. The kernel's class dump answers for one
+    /// interface (`tc_dump_tclass` looks up `tcm_ifindex`), and this sent
+    /// none, so the stream always ended empty (#778).
+    #[deprecated(
+        since = "0.32.0",
+        note = "always empty: a class dump is per interface; use `stream_classes_by_index` (#778)"
+    )]
     #[instrument(level = "debug", skip_all, fields(method = "stream_classes"))]
     pub async fn stream_classes(
         &self,
@@ -3069,20 +3104,55 @@ impl Connection<Route> {
             .await
     }
 
-    /// Stream a TC filter dump frame-by-frame. See
-    /// [`Self::stream_qdiscs`].
-    ///
-    /// Note: the kernel returns filters for **all** interfaces
-    /// (matches the eager `get_filters` semantics). Filter
-    /// client-side via `.filter(|f| f.as_ref().map(|f|
-    /// f.ifindex() == my_index).unwrap_or(true))` if you only
-    /// care about one interface — there's no kernel-side
-    /// per-ifindex `RTM_GETTFILTER` dump filter.
+    /// Stream one interface's TC classes frame by frame (#778): what
+    /// [`get_classes_by_index`](Self::get_classes_by_index) returns, without
+    /// buffering the dump. See [`Self::stream_qdiscs`].
+    #[instrument(level = "debug", skip_all, fields(method = "stream_classes_by_index"))]
+    pub async fn stream_classes_by_index(
+        &self,
+        ifindex: u32,
+    ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, TcMessage>> {
+        let header = crate::netlink::types::tc::TcMsg::new().with_ifindex(ifindex as i32);
+        self.dump_stream_with_body::<TcMessage>(NlMsgType::RTM_GETTCLASS, header.as_bytes())
+            .await
+    }
+
+    /// Was: stream a TC filter dump. The kernel's filter dump answers for
+    /// one interface and one parent (`tc_dump_tfilter`), and this sent
+    /// neither, so the stream always ended empty (#778).
+    #[deprecated(
+        since = "0.32.0",
+        note = "always empty: a filter dump is per interface and parent; use `stream_filters_by_index` (#778)"
+    )]
     #[instrument(level = "debug", skip_all, fields(method = "stream_filters"))]
     pub async fn stream_filters(
         &self,
     ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, TcMessage>> {
         self.dump_stream::<TcMessage>(NlMsgType::RTM_GETTFILTER)
+            .await
+    }
+
+    /// Stream the TC filters under one parent of one interface frame by
+    /// frame (#778): the root qdisc's with `parent` `None`, a hook's with
+    /// [`TcHandle::INGRESS`], [`TcHandle::CLSACT_INGRESS`] or
+    /// [`TcHandle::CLSACT_EGRESS`]. See [`Self::stream_qdiscs`].
+    ///
+    /// The kernel opens each priority's filters with the classifier itself,
+    /// as `tc filter show` prints it: handle 0 and no options. It is not a
+    /// filter; [`get_filters_by_index`](Self::get_filters_by_index) leaves
+    /// it out, and a stream's reader skips `handle_raw() == 0`. A parent
+    /// with no qdisc ends the stream with `EINVAL`.
+    #[instrument(level = "debug", skip_all, fields(method = "stream_filters_by_index"))]
+    pub async fn stream_filters_by_index(
+        &self,
+        ifindex: u32,
+        parent: Option<TcHandle>,
+    ) -> Result<crate::netlink::dump_stream::DumpStream<'_, Route, TcMessage>> {
+        let mut header = crate::netlink::types::tc::TcMsg::new().with_ifindex(ifindex as i32);
+        if let Some(parent) = parent {
+            header = header.with_parent(parent.as_raw());
+        }
+        self.dump_stream_with_body::<TcMessage>(NlMsgType::RTM_GETTFILTER, header.as_bytes())
             .await
     }
 

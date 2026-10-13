@@ -2249,3 +2249,111 @@ async fn a_value_that_looks_like_an_attribute_still_changes() -> nlink::Result<(
     })
     .await
 }
+
+// ============================================================================
+// #703 — netdev chains on several devices
+// ============================================================================
+
+/// #703: a netdev chain bound to two devices, as nft writes it (`devices =
+/// { d0, d1 }`, NFTA_HOOK_DEVS), and nlink's: `nft` lists the two tables
+/// alike, and both read back both devices.
+#[tokio::test]
+async fn a_netdev_chain_on_two_devices_reads_and_writes_as_nft_does() -> nlink::Result<()> {
+    use nlink::netlink::link::DummyLink;
+    use nlink::netlink::nftables::Chain;
+    use nlink::netlink::Route;
+    require_root!();
+    nlink::require_modules!("nf_tables", "dummy");
+
+    let ns = TestNamespace::new("nft-devs")?;
+    let route: nlink::Connection<Route> = ns.connection()?;
+    for dev in ["d0", "d1"] {
+        route.add_link(DummyLink::new(dev)).await?;
+        route.set_link_up(dev).await?;
+    }
+    let script = "table netdev a {
+ chain c {
+  type filter hook ingress devices = { d0, d1 } priority 0;
+ }
+}
+";
+    let file = std::env::temp_dir().join(format!("nlink-devs-{}.nft", std::process::id()));
+    std::fs::write(&file, script).map_err(nlink::Error::from)?;
+    let installed = ns.exec("nft", &["-f", file.to_str().unwrap()]);
+    let _ = std::fs::remove_file(&file);
+    installed?;
+    let nft = ns.connection_for::<Nftables>()?;
+    nft.add_table("b", Family::Netdev).await?;
+    nft.add_chain(
+        Chain::new("b", "c")?
+            .family(Family::Netdev)
+            .hook(Hook::NetdevIngress)
+            .priority(Priority::Filter)
+            .chain_type(ChainType::Filter)
+            .device("d0")
+            .device("d1"),
+    )
+    .await?;
+    let listed = |table: &str| -> nlink::Result<String> {
+        let out = ns.exec("nft", &["list", "table", "netdev", table])?;
+        Ok(out.replacen(&format!("table netdev {table}"), "table netdev T", 1))
+    };
+    assert_eq!(listed("b")?, listed("a")?, "nlink's table b, nft's table a");
+    for table in ["a", "b"] {
+        let chains = nft.list_chains_in(table, Family::Netdev).await?;
+        let mut devices = chains[0].devices.clone();
+        devices.sort();
+        assert_eq!(devices, ["d0", "d1"], "{table}");
+    }
+    Ok(())
+}
+
+/// `netdev t`: an ingress chain on `devices`, counting UDP from each of the
+/// pair's veth and `lo`.
+fn ingress_on(devices: &[&'static str], veth: &'static str) -> NftablesConfig {
+    let devices = devices.to_vec();
+    NftablesConfig::new().table("t", Family::Netdev, move |t| {
+        t.chain("in", move |c| {
+            devices
+                .iter()
+                .fold(c.hook(Hook::NetdevIngress).priority(Priority::Filter), |c, d| c.device(*d))
+        })
+        .rule_keyed("in", "veth", move |r| r.match_iif(veth).match_l4proto(17).counter())
+        .rule_keyed("in", "lo", |r| r.match_iif("lo").match_l4proto(17).counter())
+    })
+}
+
+/// #703: a declared netdev chain converges on one device, then on two —
+/// a changed set of devices recreates it — and counts what comes in on
+/// each: from the peer on the veth always, from itself on `lo` once `lo`
+/// is one of its devices.
+#[tokio::test]
+async fn a_declared_netdev_chain_takes_a_second_device() -> nlink::Result<()> {
+    use crate::common::counters::rule_packets;
+    use crate::common::traffic::{lo_up, send_udp};
+    require_root!();
+    nlink::require_modules!("nf_tables", "veth");
+
+    let pair = crate::common::topo::NsPair::new("nftdevs", 96).await?;
+    lo_up(&pair.b).await?;
+    let steps = [ingress_on(&[pair.b_if], pair.b_if), ingress_on(&[pair.b_if, "lo"], pair.b_if)];
+    let b_addr = pair.b_addr;
+    assert_transition(&pair.b, &steps, false, async |i, conn| {
+        let count = async |nth| {
+            rule_packets(conn, "t", Family::Netdev, "in", nth)
+                .await
+                .map_err(|e| e.to_string())
+        };
+        let (veth, lo) = (count(0).await?, count(1).await?);
+        send_udp(&pair.a, &[format!("{b_addr}:9")], 3);
+        send_udp(&pair.b, &["127.0.0.1:9"], 3);
+        let got = (count(0).await? - veth, count(1).await? - lo);
+        let want = (3, if i == 0 { 0 } else { 3 });
+        if got == want {
+            Ok(())
+        } else {
+            Err(format!("step {}: counted {got:?} (veth, lo), want {want:?}", i + 1))
+        }
+    })
+    .await
+}

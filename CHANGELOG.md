@@ -385,6 +385,21 @@ All notable changes to this project will be documented in this file.
     joined the new one. Now it fails with `NamespaceDeleted`. A root
     test recreates a pool's namespace and fails without the fix.
 
+- **What enters a namespace has left it when it returns (#797).** Several
+  calls `setns` a thread of their own: `Netns::run`, a `Netns` handle's
+  socket worker (behind `Connection::new_in`, `Netns::socket` and
+  `Netns::sysctl`), `NetlinkSocket::new_in_namespace`, the
+  `*_sysctl*_path` helpers and `vrf exec`'s interface lookup. Each let its
+  thread exit inside the namespace,
+  and the handle's worker was not even joined. The kernel lets `join`
+  return before it releases an exiting thread's namespaces. So for a
+  moment, and longer after `Connection::new_in("name")`, which drops its
+  handle at once, the namespace still held the caller. `Netns::pids`
+  listed it, and `delete_and_wait` could find the namespace held. Each
+  thread now goes back before it ends, panics included, and dropping a
+  `Netns` joins its worker. This was the integration flake on
+  `netns::pids_names_what_is_inside`.
+
 - **fq_pie's `ecn_prob` is a percentage (#631).** `FqPieConfig::ecn_prob`
   sent `TCA_FQ_PIE_ECN_PROB` per-mille, so `ecn_prob 20` installed 200.
   That is above the kernel's maximum probability, so ECN marking applied
@@ -727,6 +742,490 @@ All notable changes to this project will be documented in this file.
   `output` alone, so the JSON helpers' error (#718) didn't compile under
   `serde` or `schemars` by themselves. CI now checks both features on their
   own, and the integration lane builds with `serde`.
+
+- **A mirred `dev <name>` is looked up in the right namespace (#645).**
+  `MirredAction::parse_params` used to read `/sys/class/net` in the calling
+  process's namespace. For a connection in another namespace, that found the
+  wrong device or none at all. The name is now resolved by the connection
+  that installs the action.
+- **`RouteFilter::from_if(name)` can be installed (#645).** Nothing resolved
+  the name, so every install failed.
+
+- **`is_goto_chain(TC_ACT_UNSPEC)` is false (#645).** The goto test checked a
+  single bit, and `continue` (-1) has every bit set, so it read as a goto to
+  chain 16777215. It now compares the opcode nibble, as the kernel's
+  `TC_ACT_EXT_CMP` does. `tc_act_goto_chain` and `tc_act_chain` keep 28 bits of
+  chain (`TC_ACT_EXT_VAL_MASK`), where they used to cut it to 24.
+- **A gate's `base-time` in whole nanoseconds is read exactly (#645).** Before,
+  an absolute time lost precision through a float.
+- **An ife `use tcindex` over 65535 is refused (#645).** It used to be truncated
+  to 16 bits.
+
+- **police's `conform-exceed` is read exceed first, as tc(8) reads it
+  (#751).** tc-police(8)'s form is `conform-exceed EXCEEDACT[/NOTEXCEEDACT]`.
+  nlink took the first value as the conform action. So `conform-exceed
+  drop/pipe` dropped the traffic that conformed and piped the traffic that
+  exceeded, with no error, in `PoliceAction::parse_params` and in `nlink-tc`.
+  The conform half is now optional, as in tc(8).
+- **A gate's bare times are nanoseconds (#751).** tc-gate(8) reads a bare
+  `base-time`, `cycle-time` or `sched-entry` interval as nanoseconds. nlink
+  read it as microseconds, a thousand times too long. A bare decimal is now
+  refused.
+- **A gate interval past `u32` nanoseconds is refused (#751).** That's about
+  4.29 s. `GateAction::sched_entry` used to wrap it; writing the action now
+  says so.
+- **ct reads tc(8)'s `nat` (#751).** `nat src|dst addr <range>` was refused,
+  because the `addr` keyword wasn't read. A bare `nat`, which NATs as the
+  conntrack entry says, was refused too. The old form without `addr` still
+  reads. `CtAction::nat()` is new.
+
+- **ethtool getters read the device they name (#754).** `ethtool_get` sent a
+  dump, which ethtool answers for every device in the namespace, and nlink
+  kept the first answer. So `get_link_state`, `get_link_info`,
+  `get_link_modes`, `get_features`, `get_rings`, `get_channels`,
+  `get_coalesce` and their siblings returned `lo`'s values, whatever device
+  they were asked about. They now send a request for the named device.
+- **`set_features` works (#754).** `ETHTOOL_MSG_FEATURES_SET` answers with a
+  reply message unless asked not to, and nlink expected only an ACK, so every
+  call failed. Set requests now carry `ETHTOOL_FLAG_OMIT_REPLY`.
+- **`get_features` reads which features are on (#754).** The kernel lists a
+  feature set's set bits without a value flag, and nlink read each of them as
+  off.
+
+
+- **An address match in a bridge or netdev table matches (#708).** nlink put
+  a `meta nfproto ipv4`/`ipv6` guard in front of every address field. In a
+  bridge or netdev table `meta nfproto` is the table's own family, so such a
+  rule never matched anything, silently. The guard is now `meta protocol`,
+  the ethertype, as nft writes it.
+
+
+- **Protocol guards as nft writes them (#708).** A rule's `meta nfproto` and
+  `meta l4proto` guards are written once each: `tcp dport 22` with a `clamp
+  mss` used to say `meta l4proto tcp` three times. `nfproto` is left out
+  where an ip or ip6 table implies it; nft 1.0.6 could not list a hash input
+  or dynset key behind one. The declarative diff drops the same redundant
+  guards before comparing, so rules an older nlink installed with them still
+  diff empty.
+
+
+- **A `uint` attribute decodes when it fits in 32 bits (#763).** A YNL `uint`
+  (`NLA_UINT`) is 4 bytes on the wire while its value fits, and the derives'
+  `u64` fields required 8. So a net_shaper bandwidth or burst, or an ovpn
+  counter, under 2³² failed to decode with `Truncated`.
+
+- **A route through a nexthop object is removed, and its replace undone
+  (#769).** The kernel dumps such a route with the nexthop's gateway and
+  device as well as its id (`nexthop_compat_mode`), and the diff read it
+  back with all three. So when the previous config declared the route and
+  this one does not, the delete matched no route and the route stayed,
+  listed by every diff. And undoing a replace of one sent the id with the
+  gateway, which the kernel refuses. The read-back now keeps the id alone,
+  and a delete names the nexthop object.
+
+- **`get_eth_stats` reads the device it names (#773).** It sent its
+  request as a dump, which ethtool answers for every device in the
+  namespace, ignoring the one a dump names, and kept the first answer:
+  `lo`'s stats, empty, whatever the device. It is a single-device request
+  now, as #754 made the other getters.
+
+- **A unix filter's inode picks out that socket (#776).**
+  `SocketFilter::unix().inode(n)` put the inode in the dump request,
+  which `unix_diag_dump` never reads; only the exact, non-dump lookup does.
+  So the filter returned every unix socket. The replies are now checked
+  against it, as the type and path already were (#223).
+
+- **TC classes and filters stream per interface (#778).**
+  `stream_classes()` and `stream_filters()` sent their dumps with no
+  interface, and a class or filter dump answers for one, so both always
+  ended empty, although the docs said they returned every interface's
+  entries. `stream_classes_by_index(ifindex)` and
+  `stream_filters_by_index(ifindex, parent)` stream one interface's; the
+  old two are deprecated.
+
+- **A route through an encap or on-link nexthop object converges (#769).**
+  The kernel echoes the nexthop object's encap and on-link flag with the
+  route, as it does its gateway and device. The diff compared them as the
+  route's own, so a declared route through an MPLS-encapsulating nexthop
+  never converged. And the read-back kept the encap, so undoing a replace
+  of one sent the encap with the id, which the kernel refuses.
+
+- **An undo puts a removed address back as it was (#781).** The diff read
+  a live address back bare, address and peer only, and that is what the
+  undo of its removal added again. The label, metric, flags
+  (`noprefixroute`, `nodad`, `home`, `mngtmpaddr`) and lifetimes were
+  lost; without `noprefixroute`, the kernel added a prefix route that had
+  not been there. The read-back is whole now.
+
+- **A tunnel's output key is compared (#782).** A declared key is the key
+  both ways, but the comparison read only the input key. So a gre, gretap,
+  vti, ip6gre, ip6gretap or vti6 tunnel with a different output key
+  matched its declaration and was never put right. Both are compared now,
+  and an apply makes them the declared key.
+
+- **An undo puts back the tree under a qdisc the apply took away (#783).**
+  Replacing a root or hook qdisc with another kind or handle (a graft), or
+  deleting one the previous config declared, destroys the classes, the
+  qdiscs in them and the filters under it. The undo added the bare qdisc
+  back and said nothing was lost. The diff now reads that tree back and
+  records it on `Step::ReplaceQdisc`/`Step::DeleteQdisc` as `underneath`
+  (`Underneath::{Nothing, Tree, Lost}`), and the inverse is a `RestoreTc`
+  of it, the qdisc first. A tree that cannot be replayed (a BPF filter)
+  leaves the step without an inverse. `Step::DeleteQdisc` is a struct
+  variant now, `{ qdisc, underneath }`; `Step` is new in this release.
+
+- **An IPv4 multipath hop keeps its IPv6 gateway (#786).**
+  `Ipv4Route::multipath` with `NextHop::gateway_v6` dropped the gateway
+  and installed the hop through its bare device. Such a hop's gateway now
+  goes out as `RTA_VIA` (RFC 5549), as a single-gateway route's already
+  did. And `RouteMessage::multipath()` reads `RTA_VIA` back, so a route
+  `ip` made through IPv6 gateways is no longer read, undone or restored
+  without them.
+
+- **An undo puts a route back with its protocol (#783).** A config owns
+  `static` routes as well as `boot` ones by default, so it replaces and
+  purges `proto static` routes, systemd-networkd's among them. The undo put
+  them back with the plan's protocol, `boot`. `Step::ReplaceRoute` now
+  carries `protocol` (what `after` is installed with; the plan's when
+  unset) and `before_protocol` (what the replaced route had).
+  `Step::DeleteRoute` becomes `{ route, protocol }`. The inverses put
+  routes back as they were. `Step` is new in this release.
+
+- **One apply converges a tunnel's MAC and a vti's MTU (#788).** A MAC
+  declared on a gretap, ip6gretap, erspan, ip6erspan or macsec link, and an
+  MTU on a vti, were not sent when the link was created. The next diff
+  found them, and a second apply set them. They go out at create now:
+  `GretapLink`, `Ip6GretapLink`, `ErspanLink`, `Ip6ErspanLink` and
+  `MacsecLink` gain `address()`, and `VtiLink` gains `mtu()`.
+
+- **An ERSPAN tunnel's output key is compared too (#782).** Its session
+  goes out as both keys, but the comparison read only the input key. So an
+  erspan or ip6erspan whose output key differed matched its declaration.
+
+- **An HTB class's quantum, mpu and overhead are compared (#789).** A
+  declared class sends them, and the kernel dumps them back, but the
+  comparison looked at rate, ceil, bursts and priority only. So a class
+  whose quantum, mpu or overhead drifted matched its declaration. A
+  quantum left unset is the kernel's choice, and is still not compared.
+
+- **A police action's conform verdict, peakrate and average rate, and a
+  gact action's random verdict, are compared (#791).** A declared tree
+  compared a police by its rate, burst, mtu and exceed verdict, and a gact
+  by its verdict. A filter whose action drifted in the rest matched its
+  declaration. Every other action kind is still compared by its kind
+  alone; #791 stays open for that.
+
+- **A police action's average rate installs (#792).** The kernel takes
+  `avrate` only with a rate estimator, which tc(8) sends with the filter
+  (`estimator 1sec 8sec`, `TCA_RATE`). nlink had no way to send one, so
+  every filter with an `avrate` police failed with a bare `EINVAL`.
+  `ActionList::with_estimator(Estimator::new(interval, time_constant)?)`
+  gives a filter's actions one, computed as tc computes it; `Estimator` also
+  reads and prints tc's words. `FilterConfig::estimator` carries it to the
+  request, the tree document form has an `estimator` field, and the
+  declarative comparison of a police's `avrate` (#791) now has policers to
+  compare.
+
+- **A police from tc(8)'s words is what tc makes of them (#800).**
+  `PoliceAction::parse_params` started from `PoliceAction::new()`'s
+  defaults. Those drop what exceeds, where tc reclassifies it, and send an
+  mtu of 2047, where tc sends 0 and the kernel picks: `255 << cell_log`
+  with a rate, no limit without one. So `police rate 1mbit burst 32k`
+  dropped traffic tc would have passed on, and a rate-less (`avrate`)
+  policer held every packet over 2047 bytes to its limit. That includes
+  every GRO-aggregated packet on an ingress hook. `parse_params` now starts
+  from tc's defaults, and `to_params` leaves out what equals them. The
+  declarative comparison takes a sent mtu of 0 as the kernel's choice, so
+  such a police converges. `PoliceAction::new()` is unchanged.
+
+- **A declared filter's chain is compared (#793).** The live lookup went by
+  parent, priority and protocol, and the comparison left the chain out. A
+  filter in chain 0 so matched a declaration in chain 5, and was never
+  moved. The replace also deleted in chain 0, whatever chain the filter it
+  replaced was in, so a declaration that moved a filter out of chain 5 left
+  it there and added another. A filter of a declared filter's name in
+  another chain is now removed, with its chain: `TcTreeDiff::filters_to_remove`
+  holds `FilterKey`s (parent, chain, priority, protocol), and
+  `del_filter_in_chain_by_index` deletes one.
+
+- **A route or rule with a TOS is not the declared one (#793).** A
+  declaration has no TOS, so it is installed with 0, and the comparison
+  ignored it. A live `tos 0x10` route or rule at the declared key passed
+  for the declared one, which was never added, so the traffic it was for
+  went unrouted. A route now matches a declaration only with TOS 0. A rule
+  with a TOS, realms (`FRA_FLOW`) or a suppressed interface group no longer
+  reads back as a declaration. Adding the declared rule beside such a rule
+  needed one more fix: the kernel's `NLM_F_EXCL` check is lenient and takes
+  the TOS rule for it, as `ip rule add` finds ("File exists"). The apply
+  read that as "already present". Now, on `EEXIST`, it checks for the
+  exact rule, and if it is absent, adds the declared one without
+  `NLM_F_EXCL`.
+
+- **A bridge FDB entry declared without a VLAN is one per port VLAN too
+  (#793).** `br_fdb_add` makes the untagged entry and one for each VLAN on
+  the port: VLAN 1 by default, with or without VLAN filtering. The diff
+  compared the untagged entry only, so a deleted per-VLAN entry went
+  unseen, and so did the traffic in that VLAN it was for. The diff now
+  expects one static entry per VLAN of the port, and re-adds the
+  declaration when one is missing or learned. It reads the ports' VLANs
+  whenever a config declares FDB entries.
+
+- **A veth or netkit pair whose peer has another name is not the declared
+  one (#793).** The comparison looked at the peer's namespace and never at
+  its name. So `ip link add v0 type veth peer name v0-x` passed for a
+  declaration with peer `v0-p`, and the declared peer never appeared. When
+  the peer is in this namespace, its name is compared now, and a mismatch
+  is a recreate. The apply refuses that recreate while the other peer is
+  undeclared, because the kernel deletes it with the pair. Renaming the
+  peer in place is #804. A peer in another namespace is still left alone,
+  since a CNI renames peers there.
+
+- **An IPv4 address keeps its broadcast through an undo or a restore
+  (#783).** `DeclaredAddress` had no broadcast, so the undo of a removed
+  address (#781) and #745's restore of a recreated link put the address
+  back without its `brd`, and without the broadcast route the kernel makes
+  for it in the local table. The read-back keeps it now.
+  `AddressBuilder::broadcast` declares one, and the JSON form has a
+  `broadcast` key. A declared broadcast is compared, and a drift recreates
+  the address, because a replace leaves an IPv4 broadcast as it was. One
+  not declared is not compared: the tools that add addresses set one
+  (`brd +`, DHCP clients).
+
+- **A replaced qdisc whose spec cannot hold its settings is not put back
+  as another (#783).** `QdiscSpec::from_live` read back only what a spec
+  carries. An sfq with another divisor, flow count or depth, or with head
+  drop, read back as a plain sfq. So did an fq_codel with another drop
+  batch or a CE threshold selector, and a TBF whose rate had an overhead,
+  an mpu or an ATM link layer. Its replace's undo then put back a qdisc
+  with the kernel's defaults and reported it as the one it replaced. Such
+  a replace is irreversible now, and so is the removal of such a root. An
+  undeclared tree holding one refuses the recreate that would lose it.
+
+- **A nexthop with an encap is not a declared one (#783).** A declaration
+  has no encap, and the diff did not read the kernel's. So `ip nexthop add
+  id 7 encap mpls 100 via …` passed for a declared nexthop 7 via the same
+  gateway, and traffic through it went out with a label nothing declared.
+  #745's restore of a recreated link also put such a nexthop back without
+  its encap, silently. `Nexthop::encap_type` reads `NHA_ENCAP_TYPE` now. A
+  declared nexthop with an encap is replaced, and the restore refuses one
+  with the reason.
+
+- **A route with what a declaration cannot say is not the declared one
+  (#783).** The comparison and the read-back held a route's prefsrc, scope,
+  on-link flag, MPLS encap and six metrics. A live route with any other
+  metric (`rtt`, `ssthresh`, `rto_min`, `quickack`, …), locked metrics, a
+  congestion control, realms, a non-MPLS encap (seg6, ip, bpf, …), or an
+  IPv6 router preference or expiry passed for its declaration. The undo of
+  its replace or removal then put back a route without them, and #745's
+  restore did the same. Such a route now differs from its declaration, and
+  the replace that sends none of it converges. Its replace or removal has
+  no inverse (`ReplaceRoute`/`DeleteRoute` carry `lost`), and the restore
+  refuses it with the reason. `RouteMessage` reads `RTA_FLOW`,
+  `RTAX_LOCK` and `RTAX_CC_ALGO` (`flow()`, `metrics_lock()`,
+  `congctl()`).
+
+- **A route through a blackhole nexthop is put back as unicast (#783).**
+  The kernel dumps a route through a nexthop object with the object's type
+  while the object is a blackhole, so the read-back took such a route for a
+  blackhole route. An undo or #745's restore re-added it as `blackhole …
+  nhid N`, and a route added that way stays a blackhole whatever its
+  object becomes: once the object had a gateway, the route still dropped
+  everything. A route through an object reads back as unicast now. One
+  already stuck as a blackhole through an object that is not one is not
+  the declared route, and the apply replaces it.
+
+- **An FDB entry the apply moves is moved back by its undo (#783).** A
+  bridge keeps one entry per MAC and VLAN, so setting one on a port takes
+  it from another port. A VXLAN device keeps one remote per unicast MAC,
+  which a replace swaps. The diff looked for the entry on the declared port
+  or remote alone, so it recorded no `before`, and the undo deleted the
+  entry instead of moving it back. It now finds the entry where it is and
+  records it: the plan shows `~ fdb … (was on p0)` or `(was dst …)`, and
+  the undo puts the entry back.
+
+- **A multipath hop's weight of 256, its encap and its realms are read
+  (#783).** The weight was a `u8`, so the kernel's largest, 256, read back
+  as 255. It passed for a declared 255, and an undo put back 255. A hop's
+  encap and realms (`RTA_FLOW`) were not read at all, so a route whose hop
+  had them passed for its declaration, and its undo or restore lost them.
+  The weight is a `u16` now, 1 to 256 (`ParsedNextHop`, `RouteNexthop`,
+  `NextHop`, `RouteNexthopBuilder`), and the validation refuses more. A
+  hop with an encap or realms is something a declaration cannot say: the
+  route differs from its declaration and is not put back.
+
+- **Devlink health reporters and parameters are the requested device's
+  (#777).** `get_health_reporters` and `get_params` (and
+  `get_health_reporter`, `get_health_errors` and `get_param` on top of them)
+  stamped the requested bus and device on every reply and read neither
+  from the reply. On a kernel whose devlink dumps ignore the device named
+  (before per-instance filtering), they returned every instance's
+  reporters or parameters as the requested one's. And a reporter dump's
+  port reporters came back as the device's, so `get_health_reporter(name)`
+  could return a port's. Replies for another device are dropped now.
+  `HealthReporter::port` says which port a reporter is on, and
+  `get_health_reporter` returns the device's own.
+
+- **A tunnel_key action installs the key id it is given (#811).**
+  `TunnelKeyAction` wrote `TCA_TUNNEL_KEY_ENC_KEY_ID` as 8 bytes, following
+  the header's `/* be64 */` comment. The kernel reads a `__be32`
+  (`nla_get_be32()` in `tunnel_key_init()`), so it took the first four
+  bytes, always zero. Every `tunnel_key set … id N` nlink installed carried
+  key id 0, and the traffic it encapsulated went out with VNI or key 0.
+  `parse_params` also takes tc-tunnel_key(8)'s own `src_ip`/`dst_ip`, for
+  either family. It took only `src`/`dst`, which tc accepts as
+  abbreviations, and nlink's `src6`/`dst6`.
+
+- **Every action kind is compared by what it does (#791).** A declared
+  filter's actions were compared by their kind alone, except mirred, gact
+  and police. So a vlan action pushing another id, an skbedit setting
+  another mark, a nat or tunnel_key with other addresses, or a pedit with
+  another value all matched their declaration and were never put right.
+  vlan, mpls, skbmod, skbedit, connmark, csum, nat, tunnel_key, ct, pedit,
+  simple, sample, ctinfo and ife are now compared by their attributes.
+  Timestamps, padding, counters and the `tc_gen` bookkeeping are left
+  out, and so are the defaults the kernel reports for what a request
+  leaves out. A sweep of every kind, applied twice and then drifted with
+  `tc`, checks each one. It found that a vlan pop sent a protocol the
+  kernel neither reads nor reports, which it no longer sends, and the
+  tunnel_key key id bug (#811). `gate` and `bpf` still compare by kind.
+
+- **A declared gate or bpf action is compared by what it does (#813).**
+  After #791 these two kinds were still compared by kind alone. A gate is
+  now read as the schedule the kernel keeps: its verdict, priority, base
+  time, cycle and extension, flags and clock, and each entry's state,
+  interval, IPV and octet limit. `act_gate`'s defaults stand in for what a
+  request leaves out, and the index the kernel numbers itself is left out.
+  A bpf action is compared by its program and name. A request names the
+  program by fd and a dump by id, so the fd is read as its program's id
+  (`BPF_OBJ_GET_INFO_BY_FD`).
+
+- **An skbmod ethertype and an ife type and `use` value install as given
+  (#816).** nlink sent them big-endian, but the kernel reads them in host
+  order (`nla_get_u16()`, and the ife metadata ops' raw `u32`). On a
+  little-endian host, `set etype 0x88b5` installed `0xb588`, `type 0xed3e`
+  installed `0x3eed`, and `use mark 5` installed mark `5 << 24`. A sweep of
+  every action kind's tc(8) lines against `tc` found it.
+
+- **Action lines take tc(8)'s own words (#817).** Seven kinds' `parse_params`
+  refused, or read differently, what tc writes for what they set:
+  - vlan's `push id 100` / `modify id 200` (the `id` keyword was read as
+    the id);
+  - skbedit's `priority`, a class id in hex (`10` is 0x10, `1:10` is
+    0x10010), its `mark 1/0xff`, `ptype` and `inheritdsfield`;
+  - csum's `iph and tcp`;
+  - tunnel_key's `unset`, `csum`, `nocsum` and `nofrag`;
+  - ct's `mark 7` and `mark 7/0xff`;
+  - ctinfo's `dscp 0xfc 0x01`;
+  - and a pedit line's verdict, which tc makes `pass` and nlink made
+    `pipe`.
+
+  Marks and masks read in any base, as tc's `get_u32(.., 0)` does, and
+  skbedit's and ct's `to_params` write `mark V/M`, which tc reads. A sweep
+  installing every action kind's lines through `tc` and through nlink
+  found them.
+
+- **A red or choke qdisc installs (#819).** The kernel refused both with
+  `EINVAL`, whatever the configuration, because nlink never sent their
+  idle-damping table (`TCA_RED_STAB`, `TCA_CHOKE_STAB`). `RedConfig` and
+  `ChokeConfig` now derive the EWMA weight, the probability's log and the
+  table as tc(8) does (`tc_red.c`), from the thresholds, `burst`, `avpkt`
+  and `bandwidth`, and fill in what is left out with tc's defaults. They
+  also read tc's words: `avpkt`, `burst` and `bandwidth`, which were
+  refused, and `probability` as a fraction (`0.02` is 2%), where nlink
+  read a percentage. red also gets `nodrop`, and sends its flags in
+  `TCA_RED_FLAGS` as tc does.
+
+- **A taprio's schedule reaches the kernel (#823).** Its entries were
+  nested as `TCA_TAPRIO_ATTR_SCHED_SINGLE_ENTRY`, a top-level attribute,
+  where the kernel reads `TCA_TAPRIO_SCHED_ENTRY`. The kernel skipped every
+  entry, then refused the empty schedule, so no taprio from nlink ever
+  installed.
+
+- **Qdisc lines take tc(8)'s own words (#820).** A sweep installing every
+  qdisc kind's tc lines through `tc` and through nlink found these refused
+  or misread:
+  - gred's `vqs` and its setup `ecn` and `harddrop`;
+  - sfb's `increment` and `decrement`, which tc reads as probabilities,
+    and `rehash` and `db`, which tc reads as milliseconds where nlink read
+    a bare number as microseconds. An `SfbConfig` field left unset is now
+    tc's default where it was 0: a 0 increment never marks, and a 0 rehash
+    interval rehashes on every packet;
+  - hhf's `non_hh_weight`;
+  - a mqprio or taprio `map` shorter than 16 entries (the rest are 0),
+    their `queues`, which neither parsed, and mqprio's `hw 0` / `hw 1`;
+  - tbf's `latency`, from which tc computes the limit;
+  - pie's `dq_rate_estimator`;
+  - cake's link framings (`ethernet`, `docsis`, `ether-vlan`,
+    `conservative`, `pppoe-ptm`, `bridged-llcsnap`, …). cake's `raw` now
+    also sets overhead 0 and no ATM framing, as tc's does.
+
+- **A route filter and a mark-only u32 filter install (#825).** The kernel
+  refused every `RouteFilter` ("Creating with handle of 0 is invalid"):
+  a route filter's handle is its key, which tc(8) computes from `to`,
+  `from`, `fromif` and `order`, and nlink sent 0. The new
+  `FilterConfig::default_handle()` lets a kind supply the handle when the
+  caller gives none, and `RouteFilter` gives tc's. A u32 whose only match
+  was `mark` was refused for want of a selector ("Selector not
+  specified"); nlink now sends one, as tc does for every `match`.
+
+- **u32 values read as tc(8) reads them (#831).** A raw match's value
+  (`match u16 80 0xffff at 22`) was read as hex, so it matched port 128;
+  it is read in any base now, with masks in hex, as tc reads them. `match
+  mark` reads both numbers in any base and refuses a value outside its
+  mask. An IPv4 `/0` panicked in a debug build and matched one address in
+  release; it is mask 0. And keys at one offset merge into one, as tc's
+  `pack_key()` merges them, so two matches that disagree on the same bits
+  are refused.
+
+- **Class and filter lines take tc(8)'s own words (#826, #829).** A sweep
+  installing each class and filter kind's tc lines through `tc` and
+  through nlink found these refused:
+  - htb's `linklayer` (`HtbClassConfig::linklayer`, which the declarative
+    diff compares);
+  - hfsc's `umax`/`dmax`/`rate` curves, turned into `m1`/`d`/`m2` as tc
+    turns them;
+  - qfq's `maxpkt`, which `to_params` writes now in place of `lmax`;
+  - u32's `ip tos`/`dsfield`/`precedence`/`ihl`/`nofrag`/`firstfrag`/
+    `df`/`mf`/`icmp_type`/`icmp_code`, `ip6 …`, `icmp type|code` and
+    `ether src|dst`;
+  - fw's `indev` (`FwFilter::indev`);
+  - route's `fromif` and `order` (`RouteFilter::order`);
+  - flow's `key` and its `and`/`or`/`xor`, folded into one mask and xor
+    in order as tc folds them.
+
+- **A basic filter takes tc's ematch expressions, and a u32 ematch installs
+  (#828).** `BasicFilter::parse_params` reads `match EXPR` as tc-ematch(8)
+  does: `cmp(...)` and `u32(...)` matches, each optionally `not`, joined
+  by `and` or `or`, ending where the expression stops. A match may be one
+  argument or several. Groups and the other modules are refused with a
+  clear error. A u32 ematch from the builder never installed: nlink sent
+  its key as 12 bytes, and the kernel validates the whole `struct
+  tc_u32_key`. It also sent the key's word in host order, where the
+  packet's word is big-endian. Both are tc's now.
+
+- **A u32 offset takes a sign (#835)**, as tc(8)'s `get_integer(.., 0)`
+  reads one: `match u16 0x0800 0xffff at -2` matches the ethertype before
+  the network header. `at`, `offset plus`/`at` and `hashkey … at` took
+  only an unsigned number, in decimal or `0x` hex; they read any base now
+  too.
+
+- **A sockdiag filter reads ss's host conditions (#838).** `FilterExpr`
+  refused a bracketed IPv6 address (`src [::1]`) and an address with a port
+  (`src 127.0.0.1:8001`, `dst [::1]:443`, `src *:22`), which ss(8) reads.
+  It reads them now as ss's `parse_hostcond()` does, the port folded in as
+  `sport`/`dport`. A parse error says where it stopped, where it printed
+  an empty `ContextError`. A sweep putting each ss expression through `ss`
+  and through nlink's query, on the same sockets, found them; everything
+  else agreed.
+
+- **ethtool's features and carrier read as the ethtool CLI reads them
+  (#839).** `Features::is_changeable` checked only the kernel's
+  never-change set, so it called changeable every feature outside the
+  device's `hw` set: 98 features across `lo`, a veth and a dummy, which
+  ethtool marks `[fixed]` and `set_features` cannot change.
+  `LinkState::link` read `false` for a device whose driver cannot report
+  its carrier, such as an up dummy; it is `Option<bool>`, `None` there, as
+  ethtool prints no "Link detected".
 
 ### Added
 
@@ -2603,6 +3102,373 @@ All notable changes to this project will be documented in this file.
     `QdiscConfig`.
   - An undo puts a replaced HFSC, DRR or QFQ root back, since
     `QdiscSpec::from_live` reads them.
+
+- **A mirred action can name its target (#645).** `MirredAction::to_dev(name)`
+  sends to the device by name. The connection that installs the filter or
+  action resolves the name in its own namespace, at every install. So a
+  declared tree's filter finds its target again after the target is deleted
+  and created with another ifindex. Before, that worked only for
+  `TcBuilder::redirect_ingress_to`.
+  - `ActionConfig` and `FilterConfig` gain `device_names()` and
+    `resolve_devices()`, with defaults. Flower, matchall, cgroup, route,
+    rsvp and flow filters pass them through to their actions.
+  - A route filter also resolves its `from_if`.
+
+- **TC trees in JSON and YAML (#645).** `NetworkConfig.tc`, `ConfigDiff.tc` and
+  a plan's `Step::TcTree` serialize and read back. Each class, filter and action
+  is written as its kind plus the tc(8) words its `parse_params` reads:
+  `{"kind": "flower", "params": "ip_proto tcp dst_port 22 classid 1:10",
+  "actions": [{"kind": "mirred", "params": "egress mirror dev ifb0"}]}`. The IFB
+  redirect is written `{"redirect-to": "ifb0"}`. Handles and protocols are
+  written as tc(8) writes them.
+  - **`to_params` writers.** `to_params()` is the inverse of `parse_params`:
+    parsed back, its tokens give the same request. It's new on
+    `FlowerFilter`, `MatchallFilter`, `FwFilter`, `U32Filter`,
+    `HtbClassConfig`, `HfscClassConfig`, `DrrClassConfig` and
+    `QfqClassConfig`. `ActionConfig` gains it as a provided method, and all 19
+    action kinds implement it.
+  - **Values a grammar can't express** are an error, not dropped. Examples:
+    a bpf action held by file descriptor, a goto verdict on an action other
+    than gact.
+  - **Grammars that grew so every builder value has a word:**
+    - HFSC curves take `[m1 <rate> d <time>] m2 <rate>`, and `sc` for real-time
+      and link-sharing together. Before, they took only `rt|ls|ul rate <rate>`.
+    - u32 takes `match mark VAL MASK` and `at nexthdr+N`.
+    - flower takes `chain` and `goto_chain`.
+    - mirred, and the vlan, mpls, skbmod, skbedit, tunnel_key, connmark, ctinfo,
+      ife, gate, csum, sample, ct and nat actions, take a verdict (`pipe`,
+      `drop`, …).
+    - ct takes `label`, `port`, `helper <family>-<proto>-<name>` and IPv6 NAT
+      addresses.
+    - A bpf action opened with `from_pinned` is written `pinned <path>`.
+
+- **The TC recipes as declarations (#645).** `RateLimiter`, `PerHostLimiter`
+  and `PerPeerImpairer` each gain `declare(config)` and `to_config()`. Each
+  returns what its `apply` installs, as part of a `NetworkConfig`, with the
+  same handles, priorities, classes, leaves and filters. So a recipe can be
+  diffed and applied with the rest of a config, not beside it.
+  - Installed imperatively, the declaration diffs empty against it.
+  - Applied from the declaration, the recipe's `reconcile` has nothing to do.
+  - `RateLimiter`'s ingress half declares its tagged IFB and the redirect on
+    the device's hook. That's the clsact or ingress qdisc the config already
+    declares, or an ingress qdisc if it declares none.
+  - A `PerPeerImpairer` made with `new_by_index` can't be declared, since a
+    declaration names its device.
+
+- **A recreate can keep the TC tree the config doesn't declare (#645).** With
+  `PlanOptions::preserve_undeclared_tc(true)` (or
+  `ApplyOptions::with_preserve_undeclared_tc`), the recreate goes ahead where
+  it used to be refused. This applies when a link's kind change recreates it
+  and it carries undeclared qdiscs, classes or filters. The diff keeps a
+  snapshot in `LinkRecreate::preserved_tc` (`PreservedTc`, `TcObject`), and
+  `Step::RestoreTc` puts it back after the declared qdiscs:
+  - **Qdiscs** go back through their typed declaration. HTB's own dump isn't
+    a request it accepts.
+  - **Classes and filters** are replayed from their dumps, parent first,
+    without what only a dump has: status flags, offload counts, an action's
+    index, statistics and timestamps.
+  - **A mirred action's target** is looked up again by name, including a
+    mirror back to the recreated link itself.
+  - **What can't be replayed still refuses the recreate.** That covers a
+    qdisc of a kind that doesn't read back, and a BPF filter or action,
+    whose dump has a program id but no fd.
+  - **The undo:** a restore is listed in `ApplyResult::irreversible()`, as
+    the recreate is (#745).
+
+- **`log` takes its options (#703).** `LogExpr` gains the following, and
+  decodes them:
+  - for a syslog `log`: `level(LogLevel)` (`emerg` … `debug`, `audit`) and
+    `flags(LogFlags)` (`tcp sequence`, `tcp options`, `ip options`, `skuid`,
+    `ether`, `all`);
+  - for an `nflog` group: `snaplen` and `queue_threshold`.
+
+  A `log` carrying any of these used to decode as `Unknown`. The default level
+  (`warn`) reads back as none.
+
+- **Header writes (#703).** `Rule::set_header(HeaderWrite)` writes `ip dscp`,
+  `ip ttl`, `ip saddr` and `ip daddr`, `ip6 dscp`, `ip6 hoplimit`, `ip6 saddr`
+  and `ip6 daddr`, and `tcp`/`udp sport` and `dport`, as nft writes them:
+  - behind nft's guard;
+  - with the checksums the field sits in updated;
+  - a field narrower than 16 bits read, masked and written back.
+
+  It writes `Expr::PayloadSet`, which `RuleExpr::PayloadSet` decodes (it was
+  `Unknown`). `PayloadCsum` is new.
+
+- **`queue`, `dup` and `fwd` (#703).**
+  - `QueueExpr` covers a queue, a range of queues or a register, with
+    `QueueFlags` (`bypass`, `fanout`).
+  - `Rule::dup_to(addr, device)` and `Rule::dup_to_device(ifindex)` send a
+    copy of the packet.
+  - `Rule::fwd_to(ifindex)` and `Rule::fwd_ip_to(addr, ifindex)` forward the
+    packet from a netdev chain.
+
+  Each is written as nft writes it, and decoded: `RuleExpr::Queue`,
+  `RuleExpr::Dup`, `RuleExpr::Fwd`.
+
+- **`numgen`, `jhash` and `symhash` (#703).** `Rule::generate(Generated)`
+  computes a value into the first register, written as nft writes it:
+  - `numgen inc|random mod N [offset O]`;
+  - `jhash <fields> mod N [seed S] [offset O]`;
+  - `symhash mod N [offset O]`.
+
+  `Rule::set_meta_from(MetaKey)` and `Rule::set_ct_from(CtKey)` store the
+  value, and a `QueueExpr::register` queue can take it. The expressions decode
+  as `RuleExpr::Numgen` and `RuleExpr::Hash`. `NumgenKind` and `HashKind` are
+  new.
+
+- **`tproxy`, `socket` and `synproxy` (#703).**
+  - `Rule::tproxy(family, addr, port)` hands a packet to a local transparent
+    socket.
+  - `Rule::match_socket(SocketMatch)` matches `socket transparent`,
+    `wildcard` or `mark`.
+  - `SynproxyExpr` answers a SYN with a cookie (mss, wscale, timestamp,
+    sack-perm).
+
+  Each is written as nft writes it, and decoded: `RuleExpr::Tproxy`,
+  `RuleExpr::Socket`, `RuleExpr::Synproxy`. `SocketKey` is new.
+
+
+- **Conntrack helper objects (#703).** `ObjectConfig::CtHelper(CtHelperObject)`
+  (`Object::ct_helper`) declares `ct helper <name> { type "ftp" protocol tcp;
+  [l3proto ip;] }`, and `Rule::set_ct_helper(name)` assigns it to a
+  connection. Both are written as nft writes them and decode typed
+  (`ObjectState::CtHelper`); a declared helper converges, and a changed one is
+  recreated with the rules that use it.
+
+
+- **dynset per-element statements (#703).** `DynsetExpr::statement` (and
+  `counter()`) gives each element an `ElementStatement` of its own (a
+  counter, limit, quota or connlimit): `add @seen { ip saddr counter }`, `update @flood { ip saddr limit rate
+  over 10/second }`. `Rule::dynset(field, DynsetExpr)` is the general form of
+  `add_to_set`/`update_in_set`/`delete_from_set` that carries them. They are
+  written as nft writes them, and `RuleExpr::Dynset` decodes them into its new
+  `statements` field; a dynset with statements used to decode as `Unknown`.
+
+
+- **Set statements and policy (#703).**
+  - `Set::counter()`/`Set::statement(..)` (and the same on a declared set)
+    give every element a counter, quota, limit or connlimit of its own: `set
+    s { …; counter; }`, ipset's `counters`. The kernel adds them to each
+    element, whether a control-plane add or a dynset puts it there, and a
+    lookup that matches the element updates them.
+  - `SetElement::counter()` and `SetElement::quota_used()` read what an
+    element's own counter and quota hold, from `list_set_elements`.
+  - `Set::policy(SetPolicy::Memory)` is `policy memory`.
+
+  `SetInfo` reports `policy` and `statements`. Both are written as nft writes
+  them, and the declarative diff recreates a set whose declared statements or
+  policy changed. The ipset recipe maps `counters` and per-element comments
+  to them.
+
+
+- **`osf` and secmark objects (#703).**
+  - `Rule::match_osf(name, OsfTtl, version)` matches the operating system a
+    TCP SYN's fingerprint names: `osf [ttl loose|skip] [version] name
+    "Linux"`.
+  - `ObjectConfig::Secmark(context)` is a secmark object, and
+    `Rule::set_secmark(name)` gives a packet its mark.
+
+  Both are written as nft writes them and decode typed: `RuleExpr::Osf` and
+  `ObjectState::Secmark`. `OsfTtl` is new and audited.
+
+
+- **Ranges of marks and other host-order keys (#703).** An interval set of
+  marks, ifindexes or class ids used to be refused. Its keys now go in
+  network order, as nft writes them, so ranges compare and merge as the
+  numbers they are; they read back in host order.
+  - `SetElement::mark_range(first, last)` builds one.
+  - `Rule::match_in_interval_set` / `match_not_in_interval_set` convert the
+    packet's field before the lookup.
+  - `NftablesConfig::validate` refuses a plain `match_in_set` on such a set,
+    which would never match.
+
+  A concatenation with a host-order field is still refused in an interval
+  set.
+
+
+- **`DESTROY` deletes (#703).** `Transaction::destroy_table`, `destroy_chain`,
+  `destroy_rule`, `destroy_set`, `destroy_object` and `destroy_flowtable`
+  delete what is there and take what is already gone as deleted, where the
+  matching `del_*` fails the whole batch with `ENOENT` (`NFT_MSG_DESTROY*`,
+  kernel 6.3+; `connection::kernel_has_destroy()` tells). They join
+  `destroy_set_elements`.
+
+
+- **Opt-in comment updates (#703).** The kernel keeps a table's, chain's or
+  set's comment as it was created, so the declarative diff has not compared
+  them. With `NftDiffOptions::recreate_on_comment_change(true)`, a changed one
+  recreates what carries it, in the same batch:
+  - an owned table, with everything declared in it (the new
+    `NftablesDiff::tables_to_recreate`);
+  - a chain, with its rules;
+  - a set, with its declared elements.
+
+  A shared table keeps its comment, and declared objects carry none. Off by
+  default: counters and dynamic elements start again.
+
+
+- **Netdev chains on several devices (#703).** `Chain::device` (and the
+  declared chain's) adds a device. A chain on two or more is written as
+  `NFTA_HOOK_DEVS`, as nft writes `devices = { a, b }`; one device is still
+  `NFTA_HOOK_DEV`. The declarative diff compares a chain's devices as a set,
+  and a changed set recreates the chain. `DeclaredChain::devices()` is new.
+  It used to replace the device: see the migration guide.
+
+
+- **`ip vrf exec` (#257).** `NetnsCommand::vrf(name)` runs a process with
+  every inet socket it opens bound to the VRF, as `ip vrf exec` does: a
+  `BPF_PROG_TYPE_CGROUP_SOCK` program that sets the socket's `bound_dev_if` to
+  the VRF's ifindex is attached to the process's cgroup at
+  `BPF_CGROUP_INET_SOCK_CREATE`. The cgroup is the one given with `cgroup()`,
+  or `vrf/<netns inode>/<name>` under the caller's own: iproute2 uses
+  `vrf/<name>`, and the namespace keeps two VRFs called `red` apart.
+  `namespace::vrf_cgroup(name)` finds it again. `nlink-ip vrf exec` is built on
+  it; it used to set a `VRF` environment variable and bind nothing. `vrf
+  identify` and `vrf pids` read cgroup v2.
+
+
+- **The `netdev` Generic Netlink family (#166).** `Connection<Netdev>`
+  (`genl::netdev`) reads per-device facts rtnetlink does not carry:
+  - a device's XDP features, XDP receive metadata and AF_XDP flags
+    (`get_netdev`, `dump_netdevs`, typed `XdpFeatures`);
+  - its RX and TX queues and the NAPI instance serving each (`get_queue`,
+    `dump_queues`);
+  - its NAPI instances, their interrupts and kthreads (`get_napi`,
+    `dump_napis`);
+  - the standard queue statistics, per device or per queue (`dump_qstats`).
+
+  The commands and attribute sets are audited against `linux/netdev.h` and
+  the vendored YNL spec.
+
+
+- **ethtool timestamping capabilities (#166).** `Connection<Ethtool>::get_tsinfo`
+  is `ethtool -T`: which `SO_TIMESTAMPING` flags a device supports, its
+  hardware transmit modes and receive filters (`Tsinfo`, by the kernel's
+  names), and its PTP clock's index.
+
+
+- **Per-CPU IPsec SAs (#166).** `XfrmSaBuilder::pcpu(cpu)` makes an SA the
+  one for a CPU (`XFRMA_SA_PCPU`, RFC 9611, kernel 6.13+), and
+  `SecurityAssociation::pcpu` reads it back. An older kernel ignores the
+  attribute, so check what reads back. The CI kernel is older, so this is
+  checked by unit test only.
+
+
+- **`tcp_info` fields after `snd_wnd`, and AccECN (#166).** `TcpInfo` reads the
+  fields later kernels appended:
+  - `rcv_wnd`, `rehash`, `total_rto`, `total_rto_recoveries` and
+    `total_rto_time`;
+  - 6.18's Accurate ECN counters: `received_ce`, the six
+    delivered/received ECT(0)/ECT(1)/CE byte counts, `accecn_fail_mode`
+    and `accecn_opt_seen`.
+
+  Each block is read only when the kernel sends it. The offsets were checked
+  with `offsetof` against the uapi headers, 6.18's against its source. The
+  AccECN block is unit-pinned: no kernel here sends it.
+
+
+- **Record and replay (#168).** The new feature `replay` (not in `full`) adds
+  `nlink::replay`, for testing code that drives nlink without root, a
+  namespace or a particular kernel:
+  - `Recorder` hands out connections whose traffic it keeps, in a namespace
+    or not, a GENL family's id resolution included;
+  - `Fixture` (a text file, one hex datagram per line) hands out connections
+    that answer from the recording.
+
+  A replayed send must match the recorded one, its sequence numbers and port
+  id aside. The answers carry the live sequence numbers, multicast replays
+  as recorded, and a replay past its end is an error, not a hang. The recipe
+  is `replay-testing`. nlink's own unit tests replay a committed recording
+  (`scripts/regen-replay-fixtures.sh` refreshes it), and
+  `scripts/audit-socket-io.sh` keeps every send and receive in
+  `NetlinkSocket`, where the hook is.
+
+- **An undo puts back a deleted link (#745).** A link the apply deletes,
+  to recreate it or because the previous config declared it and this one
+  does not, used to be irreversible. The diff now reads back, as
+  declarations, what the deletion takes:
+  - the link, and the links the kernel deletes with it. Each is checked
+    against the comparison the diff runs, for every kind a declaration has:
+    its kind parameters, state, MTU, MAC, master, alias and other
+    attributes, a bridge's options, a bridge port's options and VLANs;
+  - the ports it releases, with their master, state and port options;
+  - the addresses, routes (with their protocol), nexthop objects,
+    permanent and proxy neighbours, FDB entries and TC trees on them;
+  - what a bond or VRF port loses on the way out: its IPv6 addresses, its
+    routes, the routes in the VRF's table among them, its neighbours and its
+    nexthops.
+
+  `LinkRecreate::restore` and `LinkRemoval::restore` carry it as a
+  `LinkRestore`. The inverse of `Step::DeleteForRecreate` and
+  `Step::RemoveLink` is the new `Step::RestoreLink`, and that of
+  `Step::RestoreTc` the new `Step::ClearTc`. What no declaration can put
+  back leaves the deletion without an inverse, and `unrestorable` says why:
+  a kind no declaration has, a pair whose peer is in another namespace, an
+  address with a lifetime, a route the kernel learned from a router
+  advertisement, a BPF filter, an FDB entry with a remote port or VNI.
+  A kind parameter no declaration has comes back as the kernel's default,
+  as on a recreate, and so does a MAC the kernel picked at random for a
+  bridge with no ports.
+
+- **A link's PHYs (#166).** `Connection<Ethtool>::get_phys` lists the
+  PHYs on a link (`ETHTOOL_MSG_PHY_GET`, kernel 6.12, `ethtool
+  --show-phys`), and `dump_phys` the PHYs on every link: the one on the
+  board, a media converter in front of it, one on an SFP module. Each
+  `PhyInfo` has its index on the link (which PHY-specific requests name
+  it by), its driver and device names, what it is attached to (the MAC,
+  or another PHY), and the SFP bus or cage it sits behind or drives. A
+  virtual device has none.
+
+- **sfq, fq_codel and TBF carry the settings tc(8) gives them (#806).**
+  - `SfqConfig` has `divisor`, `flows`, `depth` and `headdrop`. It sends
+    the whole `tc_sfq_qopt_v1`, as tc does: nlink's struct was short of its
+    stats, and `sfq_change()` takes depth and head drop only from one of
+    full size.
+  - `FqCodelConfig` has `drop_batch` and `ce_threshold_selector`.
+  - `TbfConfig` has `overhead`, `mpu` and `linklayer`, on both rate tables.
+    The bucket comparison and read-back model the kernel's framed
+    `psched_l2t_ns` (overhead, mpu, ATM cells).
+  - Each has its tc(8) tokens, a JSON form and `QdiscBuilder` setters, and
+    is compared when declared. A qdisc with them reads back whole, so its
+    replace's undo puts it back as it was. #783 had made that undo
+    irreversible.
+
+- **A veth or netkit pair's peer is renamed to the name its pair declares
+  (#804).** Since #793 a peer in this namespace with another name was a
+  recreate, which the apply refused while the old peer was undeclared. The
+  apply now renames the peer in place: it takes the peer down, since the
+  kernel renames no running device, renames it, and puts it back up. What
+  is on the peer, addresses included, stays. The diff lists it in
+  `ConfigDiff::links_to_rename` (`LinkRename`; the JSON gains a
+  `links-to-rename` key). The plan step is `Step::RenameLink`, whose undo
+  renames it back, and the rest of the diff is against the renamed link. A
+  recreate is still planned when another link already has the declared
+  name.
+
+- **`FqConfig` has `buckets`, `horizon`, `horizon_drop` and `timer_slack`
+  (#821)**, and `parse_params` reads them, with tc's `horizon_cap`. tc's
+  `defrate` is refused with a reason, since the kernel ignores it.
+
+- **Flower takes the rest of tc-flower(8)'s keys (#827)**, in `parse_params`
+  and as builder setters:
+  - ICMP `type`/`code`, as ICMPv4 or ICMPv6 by the network protocol;
+  - `ip_flags`;
+  - `ct_state`, `ct_zone`, `ct_mark` and `ct_label`;
+  - `indev`;
+  - `vlan_ethtype`, and QinQ's `cvlan_id`, `cvlan_prio` and
+    `cvlan_ethtype`;
+  - `mpls_label`, `mpls_tc`, `mpls_bos` and `mpls_ttl`;
+  - masked MACs, a MAC or a bit count after `/`;
+  - `arp_op`, `arp_sip`, `arp_tip`, `arp_sha` and `arp_tha`;
+  - the tunnel keys `enc_key_id`, `enc_src_ip`, `enc_dst_ip`,
+    `enc_dst_port`, `enc_tos` and `enc_ttl`.
+
+  Under a VLAN tag the L3 keys follow `vlan_ethtype`, as the kernel reads
+  them, and ARP, MPLS and ICMP keys under any other protocol are refused
+  rather than installed as a match-all. A declared tree compares every new
+  key, including a live filter that matches on one more, and reads a VLAN
+  filter's ethertype as the kernel dumps it: the innermost protocol.
 
 ## [0.31.0] - 2026-10-11
 

@@ -108,10 +108,31 @@ fn hfsc_defcls(live: &TcMessage) -> Option<u16> {
 /// `max(256, quantum)`.
 const FQ_CODEL_MIN_QUANTUM: u32 = 256;
 
-/// The largest limit sfq keeps when neither depth nor flows is set, which
-/// nlink never does: `sfq_change()` caps `limit` at `maxdepth * maxflows`,
-/// `SFQ_MAX_DEPTH` (127) times `SFQ_DEFAULT_FLOWS` (128) by default.
-const SFQ_MAX_LIMIT: u32 = 127 * 128;
+/// sfq's defaults and caps (`sch_sfq.c`): `SFQ_DEFAULT_FLOWS`,
+/// `SFQ_MAX_DEPTH` (the default depth too) and `SFQ_MAX_FLOWS`.
+const SFQ_DEFAULT_FLOWS: u32 = 128;
+const SFQ_MAX_DEPTH: u32 = 127;
+const SFQ_MAX_FLOWS: u32 = 0x10000 - SFQ_MAX_DEPTH - 1;
+
+/// A live TBF's overhead, mpu and link layer (#806), from its rate; `None`
+/// when its peak rate has others, which no `TbfConfig` sends (#783).
+fn tbf_framing(live: &TcMessage) -> Option<(u16, u16, psched::LinkLayer)> {
+    use crate::netlink::types::tc::qdisc::tbf::{TCA_TBF_PARMS, TcTbfQopt};
+    use zerocopy::FromBytes;
+    let (q, _) = crate::netlink::attr::AttrIter::new(live.raw_options().unwrap_or(&[]))
+        .find(|(t, _)| t & 0x7FFF == TCA_TBF_PARMS)
+        .and_then(|(_, p)| TcTbfQopt::read_from_prefix(p).ok())?;
+    let layer = |r: &crate::netlink::types::tc::qdisc::TcRateSpec| match r.linklayer & 0x0F {
+        0 => Some(psched::LinkLayer::Unaware),
+        1 => Some(psched::LinkLayer::Ethernet),
+        2 => Some(psched::LinkLayer::Atm),
+        _ => None,
+    };
+    let framing = (q.rate.overhead, q.rate.mpu, layer(&q.rate)?);
+    let peak_agrees = q.peakrate.rate == 0
+        || (q.peakrate.overhead, q.peakrate.mpu, layer(&q.peakrate)) == (framing.0, framing.1, Some(framing.2));
+    peak_agrees.then_some(framing)
+}
 
 impl QdiscSpec {
     /// The config to install, or `None` for the kernel default.
@@ -142,6 +163,11 @@ impl QdiscSpec {
     /// [`matches`](Self::matches) reads, from their parsed options, and the
     /// kernel's default root. `None` for another kind; the spec read back
     /// [`matches`](Self::matches) the qdisc it came from.
+    ///
+    /// `None` too for a TBF whose peak rate is framed unlike its rate,
+    /// which no `TbfConfig` sends (#783). An sfq's divisor, flows, depth
+    /// and head drop, an fq_codel's drop batch and CE selector, and a TBF's
+    /// overhead, mpu and link layer are their specs' (#806).
     pub(crate) fn from_live(live: &TcMessage) -> Option<Self> {
         use crate::netlink::tc_options::QdiscOptions as O;
         use crate::util::{Bytes, Packets, Rate};
@@ -156,7 +182,8 @@ impl QdiscSpec {
             ("drr", _) => Self::Drr(DrrConfig::new()),
             ("qfq", _) => Self::Qfq(QfqConfig::new()),
             (_, Some(O::Netem(o))) => Self::Netem(NetemConfig::from(&o)),
-            (_, Some(O::FqCodel(o))) => Self::FqCodel(FqCodelConfig {
+            (_, Some(O::FqCodel(o))) => {
+                Self::FqCodel(FqCodelConfig {
                 target: Some(us(o.target_us)),
                 interval: Some(us(o.interval_us)),
                 limit: Some(Packets::new(o.limit)),
@@ -165,23 +192,39 @@ impl QdiscSpec {
                 ecn: Some(o.ecn),
                 ce_threshold: o.ce_threshold_us.map(us),
                 memory_limit: o.memory_limit,
-            }),
+                drop_batch: o.drop_batch_size,
+                ce_threshold_selector: o.ce_threshold_selector,
+            })
+            }
             (_, Some(O::Htb(o))) => Self::Htb(HtbQdiscConfig {
                 default_class: o.default_class,
                 r2q: o.rate2quantum,
                 direct_qlen: o.direct_qlen.map(Packets::new),
             }),
-            (_, Some(O::Tbf(o))) => Self::Tbf(TbfConfig {
-                rate: Rate::bytes_per_sec(o.rate),
-                peakrate: (o.peakrate != 0).then(|| Rate::bytes_per_sec(o.peakrate)),
-                burst: Bytes::new(u64::from(o.burst)),
-                mtu: o.mtu,
-                limit: Bytes::new(u64::from(o.limit)),
-            }),
+            (_, Some(O::Tbf(o))) => {
+                let framing @ (overhead, mpu, linklayer) = tbf_framing(live)?;
+                // The dumped buckets are framed sizes; what to send for them
+                // is not, unless there is no framing (#806).
+                let mtu = if o.peakrate != 0 { psched::tbf_bucket_declared(o.peakrate, o.mtu, framing) } else { o.mtu };
+                Self::Tbf(TbfConfig {
+                    rate: Rate::bytes_per_sec(o.rate),
+                    peakrate: (o.peakrate != 0).then(|| Rate::bytes_per_sec(o.peakrate)),
+                    burst: Bytes::new(u64::from(psched::tbf_bucket_declared(o.rate, o.burst, framing))),
+                    mtu,
+                    limit: Bytes::new(u64::from(o.limit)),
+                    overhead,
+                    mpu,
+                    linklayer,
+                })
+            }
             (_, Some(O::Sfq(o))) => Self::Sfq(SfqConfig {
                 perturb: o.perturb_period,
                 limit: Packets::new(o.limit),
                 quantum: o.quantum,
+                divisor: o.divisor,
+                flows: o.flows,
+                depth: o.depth.unwrap_or(0),
+                headdrop: o.headdrop.unwrap_or(false),
             }),
             (_, Some(O::Prio(o))) => Self::Prio(PrioConfig {
                 bands: o.bands,
@@ -212,6 +255,8 @@ impl QdiscSpec {
         if live.kind() != Some(self.kind()) {
             return false;
         }
+        // The message, which some arms read beside its parsed options.
+        let live_msg = live;
         match (self, live.options()) {
             (Self::Netem(cfg), _) => netem_matches(cfg, live),
             (Self::Tbf(cfg), Some(QdiscOptions::Tbf(live))) => {
@@ -224,9 +269,11 @@ impl QdiscSpec {
                 // the kernel keeps the tick count written into `qopt.mtu`.
                 let rate = cfg.rate.as_bytes_per_sec();
                 let peak = cfg.peakrate.map(|r| r.as_bytes_per_sec());
-                let burst = psched::tbf_bucket_round_trip(rate, cfg.burst.as_u32_saturating());
+                // The kernel charges the buckets with the rate's framing (#806).
+                let framing = (cfg.overhead, cfg.mpu, cfg.linklayer);
+                let burst = psched::tbf_bucket_round_trip_framed(rate, cfg.burst.as_u32_saturating(), framing);
                 let mtu = match peak {
-                    Some(peak) => psched::tbf_bucket_round_trip(peak, cfg.mtu),
+                    Some(peak) => psched::tbf_bucket_round_trip_framed(peak, cfg.mtu, framing),
                     None => psched::tc_calc_xmitsize(rate, psched::tc_calc_xmittime(rate, cfg.mtu)),
                 };
                 // Without a limit there is no match, so an apply gets to
@@ -239,6 +286,7 @@ impl QdiscSpec {
                     && live.limit == cfg.limit.as_u32_saturating()
                     && live.peakrate == peak.unwrap_or(0)
                     && live.mtu == mtu
+                    && tbf_framing(live_msg) == Some((cfg.overhead, cfg.mpu, cfg.linklayer))
             }
             (Self::Htb(cfg), Some(QdiscOptions::Htb(live))) => {
                 live.default_class == cfg.default_class
@@ -267,16 +315,29 @@ impl QdiscSpec {
                     && cfg
                         .memory_limit
                         .is_none_or(|m| live.memory_limit == Some(m))
+                    && cfg.drop_batch.is_none_or(|b| live.drop_batch_size == Some(b))
+                    && cfg
+                        .ce_threshold_selector
+                        .is_none_or(|s| live.ce_threshold_selector == Some(s))
             }
             (Self::Sfq(cfg), Some(QdiscOptions::Sfq(live))) => {
-                // A limit or quantum of 0 leaves the kernel its default, so
-                // is not compared; the perturbation period always is, 0
-                // being the kernel's "off". The limit is capped at
-                // `maxdepth * maxflows`.
+                // A limit, quantum, divisor, flow count or depth of 0
+                // leaves the kernel its default, so is not compared; the
+                // perturbation period and head drop always are, 0 and off
+                // being the kernel's. As `sfq_change()` has it, the depth is
+                // capped at 127, the limit at `maxdepth * maxflows`, and a
+                // limit caps the flows in turn (#806).
+                let flows = if cfg.flows == 0 { SFQ_DEFAULT_FLOWS } else { cfg.flows.min(SFQ_MAX_FLOWS) };
+                let depth = if cfg.depth == 0 { SFQ_MAX_DEPTH } else { cfg.depth.min(SFQ_MAX_DEPTH) };
+                let limit = cfg.limit.as_u32().min(depth * flows);
+                let live_flows = if cfg.limit == crate::util::Packets::ZERO { flows } else { flows.min(limit) };
                 live.perturb_period == cfg.perturb
-                    && (cfg.limit == crate::util::Packets::ZERO
-                        || live.limit == cfg.limit.as_u32().min(SFQ_MAX_LIMIT))
+                    && (cfg.limit == crate::util::Packets::ZERO || live.limit == limit)
                     && (cfg.quantum == 0 || live.quantum == cfg.quantum)
+                    && (cfg.divisor == 0 || live.divisor == cfg.divisor)
+                    && (cfg.flows == 0 || live.flows == live_flows)
+                    && (cfg.depth == 0 || live.depth == Some(depth))
+                    && live.headdrop.unwrap_or(false) == cfg.headdrop
             }
             (Self::Prio(cfg), Some(QdiscOptions::Prio(live))) => {
                 live.bands == cfg.bands && live.priomap == cfg.effective_priomap()
@@ -518,8 +579,9 @@ mod tests {
     /// and `mtu` as psched ticks and no TCA_TBF_BURST/PBURST.
     fn kernel_tbf_echo(rate: u32, limit: u32, buffer_ticks: u32, mtu_ticks: u32) -> Vec<u8> {
         use crate::netlink::types::tc::qdisc::{TcRateSpec, tbf};
+        // The kernel reports the link layer sent, Ethernet's 1 (#806).
         let qopt = tbf::TcTbfQopt {
-            rate: TcRateSpec::new(rate),
+            rate: TcRateSpec { linklayer: 1, ..TcRateSpec::new(rate) },
             peakrate: TcRateSpec::default(),
             limit,
             buffer: buffer_ticks,

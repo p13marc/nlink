@@ -139,89 +139,58 @@ impl VrfCmd {
         Ok(())
     }
 
+    /// `ip vrf exec <name> <cmd>`: run the command with every socket it
+    /// opens bound to the VRF (#257), and exit with its status.
     fn exec(&self, name: &str, command: &[String]) -> Result<()> {
-        use std::{os::unix::process::CommandExt, process::Command};
+        use nlink::netlink::namespace::NetnsCommand;
+        use std::process::Command;
 
-        if command.is_empty() {
+        let Some((program, args)) = command.split_first() else {
             return Err(nlink::netlink::Error::invalid_message(
                 "no command specified".to_string(),
             ));
-        }
-
-        // Use ip vrf exec approach: set SO_BINDTODEVICE on sockets
-        // The actual implementation binds the process to the VRF
-        // For now, we can use the cgroup approach or LD_PRELOAD
-
-        // Simplest approach: use `ip vrf exec` if available, or set environment
-        // For a proper implementation, we'd need to:
-        // 1. Create a network namespace or
-        // 2. Use cgroups to associate the process with the VRF
-
-        // For now, exec with VRF environment hint
-        let err = Command::new(&command[0])
-            .args(&command[1..])
-            .env("VRF", name)
-            .exec();
-
-        Err(nlink::netlink::Error::from(err).with_context(format!("exec {}", command[0])))
+        };
+        let mut cmd = Command::new(program);
+        cmd.args(args);
+        let status = NetnsCommand::path("/proc/self/ns/net", cmd)?
+            .vrf(name)
+            .spawn()?
+            .wait()
+            .map_err(|e| nlink::netlink::Error::from(e).with_context(format!("wait for {program}")))?;
+        std::process::exit(status.code().unwrap_or(1));
     }
 
+    /// `ip vrf identify [pid]`: the VRF a process was started in, from the
+    /// last component of its cgroup v2 path under `vrf/` (nlink's and
+    /// iproute2's layouts both end with the VRF's name).
     fn identify(&self, pid: &str) -> Result<()> {
-        // Read /proc/<pid>/cgroup to find VRF association
         let cgroup_path = format!("/proc/{}/cgroup", pid);
-
-        match std::fs::read_to_string(&cgroup_path) {
-            Ok(content) => {
-                // Look for net_cls cgroup that might indicate VRF
-                for line in content.lines() {
-                    if line.contains("net_cls") {
-                        // Extract VRF name if present
-                        if let Some(vrf_name) = line.split('/').next_back()
-                            && !vrf_name.is_empty()
-                            && vrf_name != ":"
-                        {
-                            println!("{}", vrf_name);
-                            return Ok(());
-                        }
-                    }
-                }
-                // No VRF association found
-                println!();
-                Ok(())
-            }
-            Err(e) => Err(nlink::netlink::Error::from(e)
-                .with_context(format!("read the cgroup of process {pid}"))),
-        }
+        let content = std::fs::read_to_string(&cgroup_path).map_err(|e| {
+            nlink::netlink::Error::from(e).with_context(format!("read the cgroup of process {pid}"))
+        })?;
+        let vrf = content
+            .lines()
+            .filter_map(|line| line.strip_prefix("0::"))
+            .find_map(|path| path.split_once("/vrf/").map(|(_, rest)| rest))
+            .and_then(|rest| rest.rsplit('/').next())
+            .unwrap_or_default();
+        println!("{vrf}");
+        Ok(())
     }
 
+    /// `ip vrf pids <name>`: the processes in the VRF's cgroup.
     fn pids(&self, name: &str) -> Result<()> {
-        // List PIDs in the VRF's cgroup
-        let cgroup_path = format!("/sys/fs/cgroup/net_cls/{}/tasks", name);
-
-        match std::fs::read_to_string(&cgroup_path) {
-            Ok(content) => {
-                for line in content.lines() {
-                    println!("{}", line);
-                }
-                Ok(())
-            }
-            Err(_) => {
-                // Try alternative cgroup v2 path
-                let cgroup_v2_path = format!("/sys/fs/cgroup/{}/cgroup.procs", name);
-                match std::fs::read_to_string(&cgroup_v2_path) {
-                    Ok(content) => {
-                        for line in content.lines() {
-                            println!("{}", line);
-                        }
-                        Ok(())
-                    }
-                    Err(_) => {
-                        // No cgroup found, VRF may not have any processes
-                        Ok(())
-                    }
-                }
-            }
+        let Some(dir) = nlink::netlink::namespace::vrf_cgroup(name)? else {
+            return Ok(());
+        };
+        let procs = dir.join("cgroup.procs");
+        let content = std::fs::read_to_string(&procs).map_err(|e| {
+            nlink::netlink::Error::from(e).with_context(format!("read {}", procs.display()))
+        })?;
+        for line in content.lines() {
+            println!("{line}");
         }
+        Ok(())
     }
 }
 

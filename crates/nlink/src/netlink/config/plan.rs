@@ -52,6 +52,9 @@ pub enum Step {
     /// A link whose recreate would destroy what the config does not
     /// declare (#417): the apply fails here.
     RefuseRecreate(LinkRecreate),
+    /// Rename a veth's or netkit's peer to the name its pair declares
+    /// (#804), down for the rename and up again after it.
+    RenameLink(super::LinkRename),
     /// Delete a link to create it again: a kind parameter it cannot change
     /// live (#417). The create is a later step.
     DeleteForRecreate(LinkRecreate),
@@ -63,6 +66,11 @@ pub enum Step {
         /// The link.
         name: String,
     },
+    /// Create a deleted link again as it was, with the links the kernel
+    /// deleted with it, and put back what was on them and the ports they
+    /// had (#745): the inverse of [`Self::DeleteForRecreate`] and
+    /// [`Self::RemoveLink`].
+    RestoreLink(Box<super::LinkRestore>),
     /// Raise a link's MTU before a link stacked on it is created: the
     /// kernel refuses an MTU above the lower device's at create (#473).
     RaiseMtuFirst {
@@ -135,9 +143,44 @@ pub enum Step {
         /// Why, when it is there now: a link change in this apply flushes
         /// it (#649).
         reason: Option<String>,
+        /// The protocol `after` is installed with: the plan's when unset, as
+        /// for a declared route; an undo's, the one the route had (#783).
+        #[cfg_attr(
+            feature = "serde",
+            serde(default, skip_serializing_if = "Option::is_none", with = "opt_protocol")
+        )]
+        #[cfg_attr(feature = "schemars", schemars(with = "Option<u8>"))]
+        protocol: Option<RouteProtocol>,
+        /// The protocol of the route it overwrites, which the inverse puts
+        /// it back with (#783).
+        #[cfg_attr(
+            feature = "serde",
+            serde(default, skip_serializing_if = "Option::is_none", with = "opt_protocol")
+        )]
+        #[cfg_attr(feature = "schemars", schemars(with = "Option<u8>"))]
+        before_protocol: Option<RouteProtocol>,
+        /// What the route it overwrites has that `before` cannot say (a
+        /// metric past the six a declaration has, realms, a non-MPLS
+        /// encap, …), which leaves the step without an inverse (#783).
+        #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+        lost: Option<String>,
     },
     /// Delete a route.
-    DeleteRoute(DeclaredRoute),
+    DeleteRoute {
+        /// The route.
+        route: DeclaredRoute,
+        /// The protocol it has, which the inverse puts it back with (#783).
+        #[cfg_attr(
+            feature = "serde",
+            serde(default, skip_serializing_if = "Option::is_none", with = "opt_protocol")
+        )]
+        #[cfg_attr(feature = "schemars", schemars(with = "Option<u8>"))]
+        protocol: Option<RouteProtocol>,
+        /// What the route has that `route` cannot say, which leaves the
+        /// step without an inverse (#783).
+        #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+        lost: Option<String>,
+    },
     /// Install a neighbour with `NLM_F_REPLACE` (#516): added, or
     /// overwriting the entry in its place.
     SetNeighbour {
@@ -174,7 +217,13 @@ pub enum Step {
     DeleteRule(DeclaredRule),
     /// Delete a qdisc the previous config declared; the kernel's default
     /// comes back (#512).
-    DeleteQdisc(DeclaredQdisc),
+    DeleteQdisc {
+        /// The qdisc.
+        qdisc: DeclaredQdisc,
+        /// What it has under it, which goes with it (#783).
+        #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "super::Underneath::is_nothing"))]
+        underneath: super::Underneath,
+    },
     /// Replace a qdisc with the declared one.
     ReplaceQdisc {
         /// The live qdisc it replaces, as a declaration, where its kind
@@ -182,23 +231,37 @@ pub enum Step {
         before: Option<DeclaredQdisc>,
         /// The qdisc installed.
         after: DeclaredQdisc,
+        /// What the live qdisc has under it, which a replace by another
+        /// kind or at another handle destroys (#783). A replace in place
+        /// keeps it, and this is [`Nothing`](super::Underneath::Nothing).
+        #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "super::Underneath::is_nothing"))]
+        underneath: super::Underneath,
     },
     /// Add a declared qdisc.
     AddQdisc(DeclaredQdisc),
+    /// Put back a recreated link's TC tree that the config does not
+    /// declare, kept with
+    /// [`PlanOptions::preserve_undeclared_tc`](super::PlanOptions::preserve_undeclared_tc)
+    /// (#645): after the declared qdiscs, before the declared trees.
+    RestoreTc(super::preserve::PreservedTc),
+    /// Delete a device's root and ingress qdiscs, and with them its classes
+    /// and filters (#745): the inverse of [`Self::RestoreTc`].
+    ClearTc {
+        /// The device.
+        dev: String,
+    },
     /// Diff a declared TC tree again, against the device as the steps
-    /// before left it, and apply the difference (#514). Not read back from
-    /// a serialized plan yet: its tree has no serialized form (#645).
-    #[cfg_attr(feature = "serde", serde(skip_deserializing))]
+    /// before left it, and apply the difference (#514).
     TcTree {
         /// The device.
         dev: String,
         /// What the diff found, one line each; the apply diffs again.
         planned: Vec<String>,
-        #[cfg_attr(feature = "serde", serde(skip))]
-        #[cfg_attr(feature = "schemars", schemars(skip))]
+        /// The tree.
         tree: Box<DeclaredTc>,
-        #[cfg_attr(feature = "serde", serde(skip))]
-        #[cfg_attr(feature = "schemars", schemars(skip))]
+        /// The tree the previous config declared on the device, whose
+        /// classes and filters this one no longer declares go.
+        #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
         previous: Option<Box<DeclaredTc>>,
     },
 }
@@ -218,16 +281,28 @@ impl Step {
 
     /// The step that undoes this one, when it can be known from the plan:
     /// an address or route added or removed, a link created, a qdisc the
-    /// previous config declared, a link's state, MTU, master or MAC.
+    /// previous config declared, a link's state, MTU, master or MAC, a link
+    /// deleted and what went with it (#745).
     ///
     /// `None` for what cannot be put back from the plan alone: a deleted
-    /// link and everything that went with it, a kind parameter, a replaced
-    /// qdisc's old parameters, a TC tree, a refusal.
+    /// link with something no declaration can say
+    /// ([`LinkRecreate::unrestorable`](super::LinkRecreate::unrestorable)),
+    /// a kind parameter that had the kernel's default, a replaced qdisc
+    /// whose kind does not read back, a TC tree without the previous one,
+    /// a refusal.
     pub fn inverse(&self) -> Option<Step> {
         Some(match self {
             Self::CreateLink(link) => Self::DeleteLink {
                 name: link.name.clone(),
             },
+            Self::RenameLink(r) => Self::RenameLink(super::LinkRename {
+                from: r.to.clone(),
+                to: r.from.clone(),
+                peer_of: r.peer_of.clone(),
+            }),
+            Self::DeleteForRecreate(r) => Self::RestoreLink(r.restore.clone()?),
+            Self::RemoveLink(r) => Self::RestoreLink(r.restore.clone()?),
+            Self::RestoreTc(tc) => Self::ClearTc { dev: tc.dev.clone() },
             Self::ModifyLink { name, changes, .. } => Self::ModifyLink {
                 name: name.clone(),
                 changes: invert_link_changes(changes)?,
@@ -241,38 +316,90 @@ impl Step {
                 address: address.clone(),
                 reason: None,
             },
-            Self::ReplaceRoute { before, after, .. } => match before {
+            // What a declaration cannot say is not put back (#783).
+            Self::ReplaceRoute { lost: Some(_), .. } | Self::DeleteRoute { lost: Some(_), .. } => {
+                return None;
+            }
+            Self::ReplaceRoute {
+                before,
+                after,
+                protocol,
+                before_protocol,
+                ..
+            } => match before {
                 Some(before) => Self::ReplaceRoute {
                     before: Some(after.clone()),
                     after: before.clone(),
                     reason: None,
+                    protocol: *before_protocol,
+                    before_protocol: *protocol,
+                    lost: None,
                 },
-                None => Self::DeleteRoute(after.clone()),
+                None => Self::DeleteRoute {
+                    route: after.clone(),
+                    protocol: *protocol,
+                    lost: None,
+                },
             },
-            Self::DeleteRoute(route) => Self::ReplaceRoute {
+            Self::DeleteRoute { route, protocol, .. } => Self::ReplaceRoute {
                 before: None,
                 after: route.clone(),
                 reason: None,
+                protocol: *protocol,
+                before_protocol: None,
+                lost: None,
             },
-            Self::AddQdisc(q) => Self::DeleteQdisc(q.clone()),
+            Self::AddQdisc(q) => Self::DeleteQdisc {
+                qdisc: q.clone(),
+                underneath: super::Underneath::Nothing,
+            },
+            // A qdisc that took a tree with it puts the tree back, itself
+            // first; one that took what cannot be put back has no inverse
+            // (#783).
+            Self::DeleteQdisc {
+                underneath: super::Underneath::Tree { tree },
+                ..
+            }
+            | Self::ReplaceQdisc {
+                underneath: super::Underneath::Tree { tree },
+                ..
+            } => Self::RestoreTc((**tree).clone()),
+            Self::DeleteQdisc {
+                underneath: super::Underneath::Lost { .. },
+                ..
+            }
+            | Self::ReplaceQdisc {
+                underneath: super::Underneath::Lost { .. },
+                ..
+            } => return None,
             // Removing what a kernel-default declaration replaced, whose kind
             // did not read back: nothing to put back.
-            Self::DeleteQdisc(q) if q.qdisc_type == crate::netlink::tc_spec::QdiscSpec::KernelDefault => {
+            Self::DeleteQdisc { qdisc: q, .. }
+                if q.qdisc_type == crate::netlink::tc_spec::QdiscSpec::KernelDefault =>
+            {
                 return None;
             }
             // The qdisc it replaced; the kernel's default root comes back
             // when the declared one goes (#649).
-            Self::ReplaceQdisc { before: Some(before), after } => {
+            Self::ReplaceQdisc {
+                before: Some(before),
+                after,
+                ..
+            } => {
                 if before.qdisc_type == crate::netlink::tc_spec::QdiscSpec::KernelDefault {
-                    Self::DeleteQdisc(after.clone())
+                    Self::DeleteQdisc {
+                        qdisc: after.clone(),
+                        underneath: super::Underneath::Nothing,
+                    }
                 } else {
                     Self::ReplaceQdisc {
                         before: Some(after.clone()),
                         after: before.clone(),
+                        underneath: super::Underneath::Nothing,
                     }
                 }
             }
-            Self::DeleteQdisc(q) => Self::AddQdisc(q.clone()),
+            Self::DeleteQdisc { qdisc: q, .. } => Self::AddQdisc(q.clone()),
             Self::SetNeighbour { before, after } => match before {
                 Some(before) => Self::SetNeighbour {
                     before: Some(after.clone()),
@@ -442,6 +569,7 @@ impl fmt::Display for Step {
             Self::RefuseNexthop(conflict) => write!(f, "{conflict}"),
             Self::RefuseRemoval(removal) => write!(f, "{removal}"),
             Self::RefuseRecreate(recreate) => write!(f, "{recreate}"),
+            Self::RenameLink(rename) => write!(f, "{rename}"),
             Self::DeleteForRecreate(recreate) => write!(
                 f,
                 "- link {} (to recreate it: {})",
@@ -449,6 +577,8 @@ impl fmt::Display for Step {
             ),
             Self::RemoveLink(removal) => write!(f, "{removal}"),
             Self::DeleteLink { name } => write!(f, "- link {name}"),
+            Self::RestoreLink(restore) => write!(f, "+ link {restore}"),
+            Self::ClearTc { dev } => write!(f, "- tc {dev} (its qdiscs, classes and filters)"),
             Self::RaiseMtuFirst { link, mtu } => {
                 write!(f, "~ link {link} mtu {mtu} (before the links created on it)")
             }
@@ -485,7 +615,7 @@ impl fmt::Display for Step {
                 ),
                 None => write!(f, "+ route {}", route_text(after)),
             },
-            Self::DeleteRoute(route) => write!(f, "- route {}", route_text(route)),
+            Self::DeleteRoute { route, .. } => write!(f, "- route {}", route_text(route)),
             Self::SetNeighbour { before, after } => {
                 let replaced: Vec<(DeclaredNeighbour, DeclaredNeighbour)> =
                     before.iter().map(|b| (after.clone(), b.clone())).collect();
@@ -506,14 +636,14 @@ impl fmt::Display for Step {
             }
             Self::DeleteNexthop(n) => write!(f, "- {n}"),
             Self::DeleteRule(r) => write!(f, "- {r}"),
-            Self::DeleteQdisc(q) => write!(
+            Self::DeleteQdisc { qdisc: q, .. } => write!(
                 f,
                 "- qdisc {} on {} ({:?})",
                 q.qdisc_type.kind(),
                 q.dev,
                 q.effective_parent()
             ),
-            Self::ReplaceQdisc { after: q, before } => {
+            Self::ReplaceQdisc { after: q, before, .. } => {
                 write!(f, "~ qdisc {} on {} ({:?})", q.qdisc_type.kind(), q.dev, q.parent)?;
                 match before {
                     Some(b) => write!(f, " (replacing {})", b.qdisc_type.kind()),
@@ -523,6 +653,7 @@ impl fmt::Display for Step {
             Self::AddQdisc(q) => {
                 write!(f, "+ qdisc {} on {} ({:?})", q.qdisc_type.kind(), q.dev, q.parent)
             }
+            Self::RestoreTc(tc) => write!(f, "+ restore {tc} (kept across its recreate)"),
             Self::TcTree { dev, planned, .. } if planned.is_empty() => {
                 write!(f, "~ tc {dev} (diffed again after the qdiscs)")
             }
@@ -624,6 +755,8 @@ impl super::ConfigDiff {
                 .cloned()
                 .map(Step::RefuseRemoval),
         );
+        // Before anything that names the peer by the name it is given.
+        steps.extend(self.links_to_rename.iter().cloned().map(Step::RenameLink));
         for recreate in &self.links_to_recreate {
             steps.push(if recreate.is_refused() {
                 Step::RefuseRecreate(recreate.clone())
@@ -734,7 +867,10 @@ impl super::ConfigDiff {
                 .find(|(r, _)| r == route)
                 .map(|(_, before)| before.clone());
             steps.push(Step::ReplaceRoute {
+                before_protocol: before.as_ref().and_then(|b| self.protocol_of(b)),
+                lost: before.as_ref().and_then(|b| self.lost_of(b)),
                 before,
+                protocol: None,
                 after: route.clone(),
                 reason: self
                     .routes_readded
@@ -746,14 +882,25 @@ impl super::ConfigDiff {
         // A rule after the routes of the table it looks up, so traffic it
         // steers there finds them.
         steps.extend(self.rules_to_add.iter().cloned().map(Step::AddRule));
-        steps.extend(self.qdiscs_to_remove.iter().cloned().map(Step::DeleteQdisc));
+        steps.extend(self.qdiscs_to_remove.iter().map(|q| Step::DeleteQdisc {
+            qdisc: q.clone(),
+            underneath: self.underneath_of(q),
+        }));
         for q in &self.qdiscs_to_replace {
             steps.push(Step::ReplaceQdisc {
                 before: self.qdiscs_replaced.iter().find(|(d, _)| d == q).map(|(_, b)| b.clone()),
                 after: q.clone(),
+                underneath: self.underneath_of(q),
             });
         }
         steps.extend(self.qdiscs_to_add.iter().cloned().map(Step::AddQdisc));
+        steps.extend(
+            self.links_to_recreate
+                .iter()
+                .filter(|r| !r.is_refused())
+                .filter_map(|r| r.preserved_tc.clone())
+                .map(Step::RestoreTc),
+        );
         for (tree, previous) in &self.tc_declared {
             let planned = self
                 .tc
@@ -768,7 +915,11 @@ impl super::ConfigDiff {
                 previous: previous.clone().map(Box::new),
             });
         }
-        steps.extend(self.routes_to_remove.iter().cloned().map(Step::DeleteRoute));
+        steps.extend(self.routes_to_remove.iter().map(|route| Step::DeleteRoute {
+            route: route.clone(),
+            protocol: self.protocol_of(route),
+            lost: self.lost_of(route),
+        }));
         steps.extend(self.nexthops_to_remove.iter().cloned().map(Step::DeleteNexthop));
         steps.extend(
             self.addresses_to_remove
@@ -855,6 +1006,9 @@ mod tests {
                 before: None,
                 after: route("10.1.0.0", 16, "10.0.0.2"),
                 reason: Some("re-add: flushed when d0 goes down".into()),
+                protocol: None,
+                before_protocol: None,
+                lost: None,
             },
             Step::SetVrfStrictMode { on: true },
         ]);
@@ -878,16 +1032,34 @@ mod tests {
         );
         assert_eq!(back.steps[1].reason(), plan.steps[1].reason());
 
-        // A TC tree step has no serialized tree yet (#645): refused, not
-        // read back empty.
+        // A TC tree step reads back with its tree and the previous one
+        // (#645).
+        let declared = |rate| {
+            crate::netlink::config::NetworkConfig::new()
+                .tc("d0", |t| {
+                    t.class(
+                        crate::TcHandle::major_only(1),
+                        crate::TcHandle::new(1, 1),
+                        crate::netlink::tc::HtbClassConfig::new(crate::util::Rate::mbit(rate)),
+                    )
+                })
+                .tc_trees()[0]
+                .clone()
+        };
         let tree = Plan::new(vec![Step::TcTree {
             dev: "d0".into(),
-            planned: vec![],
-            tree: Box::default(),
-            previous: None,
+            planned: vec!["~ class htb 1:1 on d0".into()],
+            tree: Box::new(declared(20)),
+            previous: Some(Box::new(declared(10))),
         }]);
         let json = serde_json::to_string(&tree).unwrap();
-        assert!(serde_json::from_str::<Plan>(&json).is_err(), "{json}");
+        let back: Plan = serde_json::from_str(&json).unwrap();
+        assert_eq!(serde_json::to_string(&back).unwrap(), json);
+        let Step::TcTree { tree, previous, .. } = &back.steps[0] else {
+            panic!("{back:?}")
+        };
+        assert_eq!(**tree, declared(20));
+        assert_eq!(previous.as_deref(), Some(&declared(10)));
     }
 
     /// A neighbour set over another is undone by setting the other back;
@@ -1012,7 +1184,7 @@ mod tests {
                 Step::DeleteAddress { reason: Some(_), .. } => "del-addr-early",
                 Step::AddAddress { .. } => "add-addr",
                 Step::ReplaceRoute { .. } => "route",
-                Step::DeleteRoute(_) => "del-route",
+                Step::DeleteRoute { .. } => "del-route",
                 Step::DeleteAddress { .. } => "del-addr",
                 _ => "other",
             })
@@ -1046,19 +1218,50 @@ mod tests {
     fn inverses_undo_what_can_be_undone() {
         let r = route("10.1.0.0", 16, "10.0.0.2");
         let old = route("10.1.0.0", 16, "10.0.0.1");
-        let Some(Step::ReplaceRoute { before, after, .. }) = (Step::ReplaceRoute {
+        let Some(Step::ReplaceRoute { before, after, protocol, .. }) = (Step::ReplaceRoute {
             before: Some(old.clone()),
             after: r.clone(),
             reason: None,
+            protocol: None,
+            before_protocol: Some(RouteProtocol::Static),
+            lost: None,
         })
         .inverse() else {
             panic!("a replace's inverse is a replace");
         };
-        assert_eq!((before, after), (Some(r.clone()), old));
+        // The route it overwrote goes back with its own protocol (#783).
+        assert_eq!((before, after, protocol), (Some(r.clone()), old.clone(), Some(RouteProtocol::Static)));
         assert!(matches!(
-            Step::ReplaceRoute { before: None, after: r.clone(), reason: None }.inverse(),
-            Some(Step::DeleteRoute(x)) if x == r
+            Step::ReplaceRoute {
+                before: None,
+                after: r.clone(),
+                reason: None,
+                protocol: None,
+                before_protocol: None,
+                lost: None,
+            }
+            .inverse(),
+            Some(Step::DeleteRoute { route: x, .. }) if x == r
         ));
+        assert!(matches!(
+            Step::DeleteRoute { route: r.clone(), protocol: Some(RouteProtocol::Zebra), lost: None }.inverse(),
+            Some(Step::ReplaceRoute { protocol: Some(RouteProtocol::Zebra), .. })
+        ));
+        // What a declaration cannot say leaves no inverse (#783).
+        let lost = Some("it has rto_min, which no declaration has".to_string());
+        assert!(Step::DeleteRoute { route: r.clone(), protocol: None, lost: lost.clone() }.inverse().is_none());
+        assert!(
+            Step::ReplaceRoute {
+                before: Some(old.clone()),
+                after: r.clone(),
+                reason: None,
+                protocol: None,
+                before_protocol: None,
+                lost,
+            }
+            .inverse()
+            .is_none()
+        );
         assert!(matches!(
             Step::AddAddress { address: addr("d0", "10.0.0.1", 24), reason: None }.inverse(),
             Some(Step::DeleteAddress { .. })

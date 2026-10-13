@@ -1,6 +1,7 @@
 //! [`NetnsCommand`]: a process spawned in a network namespace, with what a
 //! lab needs around it (#521) — an `/etc/netns` overlay policy, the user to
-//! run as once inside, the cgroup to start in, and a parent-death signal.
+//! run as once inside, the cgroup to start in, a VRF to bind its sockets to
+//! (`ip vrf exec`, #257), and a parent-death signal.
 //!
 //! ```no_run
 //! # fn example() -> nlink::Result<()> {
@@ -70,6 +71,7 @@ pub struct NetnsCommand {
     overlay: Overlay,
     user: Option<SpawnUser>,
     cgroup: Option<PathBuf>,
+    vrf: Option<String>,
     pdeathsig: Option<libc::c_int>,
     exit_status_file: Option<PathBuf>,
 }
@@ -101,6 +103,7 @@ impl NetnsCommand {
             overlay: Overlay::Off,
             user: None,
             cgroup: None,
+            vrf: None,
             pdeathsig: None,
             exit_status_file: None,
         }
@@ -127,6 +130,24 @@ impl NetnsCommand {
     /// limits.
     pub fn cgroup(mut self, dir: impl Into<PathBuf>) -> Self {
         self.cgroup = Some(dir.into());
+        self
+    }
+
+    /// Bind every inet socket the process opens to the VRF device `name`
+    /// in its namespace, as `ip vrf exec` does (#257): a
+    /// `BPF_PROG_TYPE_CGROUP_SOCK` program that sets the socket's
+    /// `bound_dev_if` is attached to the process's cgroup at
+    /// `BPF_CGROUP_INET_SOCK_CREATE`, so its routes come from the VRF's
+    /// table, and so do its children's.
+    ///
+    /// The cgroup is the one given with [`cgroup`](Self::cgroup), or by
+    /// default `vrf/<netns inode>/<name>` under this process's own cgroup
+    /// (iproute2 uses `vrf/<name>`; the namespace keeps two `red` VRFs
+    /// apart), created if it is missing and left for the next exec. Needs
+    /// cgroup v2, `CAP_SYS_ADMIN` and `CAP_BPF` (or root) in the initial
+    /// user namespace.
+    pub fn vrf(mut self, name: impl Into<String>) -> Self {
+        self.vrf = Some(name.into());
         self
     }
 
@@ -371,6 +392,16 @@ impl NetnsCommand {
                 ));
             }
         };
+        if let Some(vrf) = &self.vrf {
+            use std::os::fd::AsFd;
+            let ifindex = super::vrf_exec::ifindex_in(self.ns_fd.as_fd(), vrf)?;
+            let dir = match &self.cgroup {
+                Some(dir) => dir.clone(),
+                None => super::vrf_exec::default_cgroup(self.ns_fd.as_fd(), vrf)?,
+            };
+            super::vrf_exec::bind_sockets(&dir, ifindex)?;
+            self.cgroup = Some(dir);
+        }
         let cgroup = match &self.cgroup {
             Some(dir) => Some(
                 std::fs::OpenOptions::new()

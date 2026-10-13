@@ -1522,7 +1522,7 @@ fn parse_ethtool_event(cmd: u8, data: &[u8]) -> Option<super::genl::ethtool::Eth
                         state.ifindex = idx;
                     }
                     t if t == EthtoolLinkstateAttr::Link as u16 && !payload.is_empty() => {
-                        state.link = payload[0] != 0;
+                        state.link = Some(payload[0] != 0);
                     }
                     t if t == EthtoolLinkstateAttr::Sqi as u16 && payload.len() >= 4 => {
                         state.sqi = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));

@@ -99,6 +99,8 @@ pub struct FqCodelOptions {
     pub memory_limit: Option<u32>,
     /// Drop batch size.
     pub drop_batch_size: Option<u32>,
+    /// The CE threshold's selector and mask, when it has them (#806).
+    pub ce_threshold_selector: Option<(u8, u8)>,
 }
 
 impl FqCodelOptions {
@@ -1245,6 +1247,8 @@ mod fq_codel_attrs {
     pub const TCA_FQ_CODEL_CE_THRESHOLD: u16 = 7;
     pub const TCA_FQ_CODEL_DROP_BATCH_SIZE: u16 = 8;
     pub const TCA_FQ_CODEL_MEMORY_LIMIT: u16 = 9;
+    pub const TCA_FQ_CODEL_CE_THRESHOLD_SELECTOR: u16 = 10;
+    pub const TCA_FQ_CODEL_CE_THRESHOLD_MASK: u16 = 11;
 }
 
 fn parse_fq_codel_options(data: &[u8]) -> FqCodelOptions {
@@ -1300,6 +1304,14 @@ fn parse_fq_codel_options(data: &[u8]) -> FqCodelOptions {
             }
             TCA_FQ_CODEL_DROP_BATCH_SIZE if payload.len() >= 4 => {
                 opts.drop_batch_size = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+            }
+            TCA_FQ_CODEL_CE_THRESHOLD_SELECTOR if !payload.is_empty() => {
+                let mask = opts.ce_threshold_selector.map_or(0, |(_, m)| m);
+                opts.ce_threshold_selector = Some((payload[0], mask));
+            }
+            TCA_FQ_CODEL_CE_THRESHOLD_MASK if !payload.is_empty() => {
+                let value = opts.ce_threshold_selector.map_or(0, |(v, _)| v);
+                opts.ce_threshold_selector = Some((value, payload[0]));
             }
             TCA_FQ_CODEL_MEMORY_LIMIT if payload.len() >= 4 => {
                 opts.memory_limit = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));

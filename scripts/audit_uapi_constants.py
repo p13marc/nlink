@@ -44,6 +44,7 @@ NEWER_FILE = REPO / "scripts" / "audit-uapi-constants.newer"
 CONST_ALLOW_FILE = REPO / "scripts" / "audit-uapi-constants.const-allowlist"
 MODMAP_FILE = REPO / "scripts" / "audit-uapi-constants.modmap"
 YNL_QUIRKS_FILE = REPO / "scripts" / "audit-uapi-constants.ynl-quirks"
+DISTRO_FILE = REPO / "scripts" / "audit-uapi-constants.distro"
 SRC_DIRS = [REPO / "crates" / "nlink" / "src"]
 
 
@@ -438,6 +439,15 @@ def main() -> int:
         if line.split("#", 1)[0].strip()
     }
 
+    # Constants a distribution's headers number differently from upstream,
+    # with the upstream value nlink must hold (see the file's header).
+    distro: dict[str, int] = {}
+    for line in DISTRO_FILE.read_text().splitlines():
+        entry = line.split("#", 1)[0].split()
+        if entry:
+            distro[entry[0]] = int(entry[1], 0)
+    distro_notes: list[str] = []
+
     failures: list[str] = []
     unclassified: list[str] = []
     ahead_of_headers: list[str] = []
@@ -488,7 +498,9 @@ def main() -> int:
             checked_variants += 1
             checked_names.add(kernel_name)
             expected = kernel[kernel_name]
-            if value != expected:
+            if value != expected and distro.get(kernel_name) == value:
+                distro_notes.append(f"{kernel_name}: these headers say {expected}, upstream {value}")
+            elif value != expected:
                 failures.append(
                     f"{path.relative_to(REPO)}: {name}::{variant} = {value}, "
                     f"but {kernel_name} = {expected}"
@@ -522,7 +534,11 @@ def main() -> int:
             continue
         checked_consts += 1
         checked_names.add(kernel_name)
-        if value != kernel[kernel_name]:
+        if value != kernel[kernel_name] and distro.get(kernel_name) == value:
+            distro_notes.append(
+                f"{kernel_name}: these headers say {kernel[kernel_name]}, upstream {value}"
+            )
+        elif value != kernel[kernel_name]:
             where = f"{enclosing}::{name}" if prefix else name
             failures.append(
                 f"{path.relative_to(REPO)}: {where} = {value}, "
@@ -546,6 +562,15 @@ def main() -> int:
         print("These are silent-wrong-value bugs: the kernel accepts the message and")
         print("acts on a different attribute than the one you named.")
         return 1
+
+    if distro_notes:
+        print(
+            f"note: {len(distro_notes)} constant(s) disagree with this host's headers, "
+            "which a distribution patched; nlink holds the upstream value:"
+        )
+        for entry in distro_notes:
+            print(f"  {entry}")
+        print("      (see scripts/audit-uapi-constants.distro)\n")
 
     if ahead_of_headers:
         print(

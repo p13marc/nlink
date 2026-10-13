@@ -123,7 +123,7 @@ impl RulesetSnapshot {
                     priority: chain.priority().map(|p| p.to_i32()).or(base.then_some(0)),
                     chain_type: chain.chain_type(),
                     device: chain.device().map(str::to_string),
-                    devices: chain.device().map(str::to_string).into_iter().collect(),
+                    devices: chain.devices().to_vec(),
                     // A base chain without a policy accepts.
                     policy: chain
                         .policy()
@@ -162,6 +162,8 @@ impl RulesetSnapshot {
                             depleted: false,
                         },
                         ObjectConfig::Limit(l) => ObjectState::Limit(l.clone()),
+                        ObjectConfig::CtHelper(h) => ObjectState::CtHelper(h.clone()),
+                        ObjectConfig::Secmark(c) => ObjectState::Secmark(c.clone()),
                     },
                     comment: None,
                     managed: true,
@@ -218,6 +220,8 @@ fn set_info(set: &DeclaredSet, table: &str, family: Family, handle: u64) -> SetI
         }),
         comment: set.comment.clone(),
         managed: true,
+        policy: set.policy().unwrap_or_default(),
+        statements: set.statements().iter().map(|s| s.as_dumped()).collect(),
     }
 }
 

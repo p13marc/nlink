@@ -79,7 +79,9 @@ const AF_INET: u8 = 2;
 const AF_INET6: u8 = 10;
 
 /// Route metrics attributes (RTAX_*)
-mod rtax {
+pub(crate) mod rtax {
+    /// The metrics locked against path discovery, a bit per `RTAX_*`.
+    pub const LOCK: u16 = 1;
     pub const MTU: u16 = 2;
     pub const WINDOW: u16 = 3;
     pub const RTT: u16 = 4;
@@ -94,6 +96,8 @@ mod rtax {
     pub const RTO_MIN: u16 = 13;
     pub const INITRWND: u16 = 14;
     pub const QUICKACK: u16 = 15;
+    /// The congestion control, a string.
+    pub const CC_ALGO: u16 = 16;
 }
 
 /// Nexthop flags (RTNH_F_*)
@@ -362,8 +366,8 @@ pub struct NextHop {
     gateway_v6: Option<Ipv6Addr>,
     /// Output interface reference
     dev: Option<InterfaceRef>,
-    /// Weight (for ECMP)
-    weight: u8,
+    /// Weight (for ECMP), 1 to 256
+    weight: u16,
     /// Flags
     flags: u8,
 }
@@ -411,9 +415,10 @@ impl NextHop {
         self.dev.as_ref()
     }
 
-    /// Set weight (1-256).
-    pub fn weight(mut self, weight: u8) -> Self {
-        self.weight = weight.max(1);
+    /// Set weight, 1 to 256 (a `u16` since 0.32, #783); one past 256 is
+    /// written as 256.
+    pub fn weight(mut self, weight: u16) -> Self {
+        self.weight = weight.clamp(1, 256);
         self
     }
 
@@ -1470,17 +1475,22 @@ fn write_multipath_v4(
     for (i, nh) in nexthops.iter().enumerate() {
         let ifindex = resolved_indices.get(i).copied().flatten().unwrap_or(0);
 
-        // Calculate the length of this nexthop entry
-        // rtnexthop (8 bytes) + optional RTA_GATEWAY (4 + 4 bytes for IPv4)
+        // Calculate the length of this nexthop entry: rtnexthop (8 bytes),
+        // then RTA_GATEWAY for an IPv4 gateway (4 + 4 bytes) or RTA_VIA for
+        // an IPv6 one (`struct rtvia`: 4 + 2 + 16 bytes, padded to 24; RFC
+        // 5549, #786). An IPv6 gateway used to go nowhere: the hop was
+        // installed through its bare device.
         let mut nh_len: u16 = 8; // sizeof(rtnexthop)
         if nh.gateway_v4.is_some() {
             nh_len += 8; // NLA header (4) + IPv4 address (4)
+        } else if nh.gateway_v6.is_some() {
+            nh_len += 24;
         }
 
         // Write rtnexthop header
         mp_data.extend_from_slice(&nh_len.to_ne_bytes());
         mp_data.push(nh.flags);
-        mp_data.push(nh.weight.saturating_sub(1)); // hops = weight - 1
+        mp_data.push((nh.weight.clamp(1, 256) - 1) as u8); // hops = weight - 1
         mp_data.extend_from_slice(&ifindex.to_ne_bytes());
 
         // Write RTA_GATEWAY if present
@@ -1490,6 +1500,13 @@ fn write_multipath_v4(
             mp_data.extend_from_slice(&nla_len.to_ne_bytes());
             mp_data.extend_from_slice(&(RtaAttr::Gateway as u16).to_ne_bytes());
             mp_data.extend_from_slice(&gw.octets());
+        } else if let Some(gw) = nh.gateway_v6 {
+            let nla_len: u16 = 4 + 2 + 16;
+            mp_data.extend_from_slice(&nla_len.to_ne_bytes());
+            mp_data.extend_from_slice(&(RtaAttr::Via as u16).to_ne_bytes());
+            mp_data.extend_from_slice(&(libc::AF_INET6 as u16).to_ne_bytes());
+            mp_data.extend_from_slice(&gw.octets());
+            mp_data.extend_from_slice(&[0, 0]); // pad to 4
         }
     }
 
@@ -1515,7 +1532,7 @@ fn write_multipath_v6(
         // Write rtnexthop header
         mp_data.extend_from_slice(&nh_len.to_ne_bytes());
         mp_data.push(nh.flags);
-        mp_data.push(nh.weight.saturating_sub(1));
+        mp_data.push((nh.weight.clamp(1, 256) - 1) as u8);
         mp_data.extend_from_slice(&ifindex.to_ne_bytes());
 
         // Write RTA_GATEWAY if present

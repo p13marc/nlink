@@ -3033,6 +3033,54 @@ async fn a_pinned_bpf_program_attaches_as_filter_and_action() -> Result<()> {
     Ok(())
 }
 
+/// #813: a declared bpf action is compared by its program. A request names
+/// the program by fd and a dump by id, so the comparison went by kind
+/// alone, and a filter whose action ran another program matched.
+#[tokio::test]
+async fn a_declared_bpf_action_is_compared_by_its_program() -> Result<()> {
+    use nlink::netlink::action::{ActionList, BpfAction};
+    use nlink::netlink::config::NetworkConfig;
+    use nlink::{EthProto, FilterPriority};
+    require_root!();
+    // Loading a program needs CAP_BPF in the initial user namespace.
+    nlink::require_host_root!();
+    nlink::require_modules!("dummy", "sch_ingress", "cls_matchall", "act_bpf");
+
+    let one = BpfPin::load("decl-one", BPF_PROG_TYPE_SCHED_ACT)?;
+    let two = BpfPin::load("decl-two", BPF_PROG_TYPE_SCHED_ACT)?;
+    let ns = TestNamespace::new("tc-bpf-decl")?;
+    let conn = ns.connection()?;
+    let actions = |pin: &BpfPin| -> Result<ActionList> {
+        Ok(ActionList::new().with(BpfAction::from_pinned(&pin.path)?.name("act").build()))
+    };
+    let declared = actions(&one)?;
+    let cfg = NetworkConfig::new()
+        .link("d0", |l| l.dummy().up())
+        .qdisc("d0", |q| q.clsact())
+        .tc("d0", move |t| {
+            t.filter(TcHandle::CLSACT_INGRESS, FilterPriority::new(1), EthProto::ALL, MatchallFilter::new().actions(declared.clone()))
+        });
+    let applied = cfg.apply(&conn).await?;
+    assert!(applied.is_success(), "{applied:?}");
+    assert!(cfg.diff(&conn).await?.is_empty(), "the declared action did not converge");
+
+    ns.exec("tc", &["filter", "del", "dev", "d0", "ingress", "prio", "1"])?;
+    conn.add_filter_full(
+        "d0",
+        TcHandle::CLSACT_INGRESS,
+        None,
+        EthProto::ALL,
+        FilterPriority::new(1),
+        MatchallFilter::new().actions(actions(&two)?),
+    )
+    .await?;
+    assert!(!cfg.diff(&conn).await?.is_empty(), "another program compared equal");
+    let applied = cfg.apply(&conn).await?;
+    assert!(applied.is_success(), "{applied:?}");
+    assert!(cfg.diff(&conn).await?.is_empty(), "did not converge");
+    Ok(())
+}
+
 const BPF_PROG_TYPE_SCHED_CLS: u32 = 3;
 const BPF_PROG_TYPE_SCHED_ACT: u32 = 4;
 
@@ -3121,4 +3169,975 @@ impl Drop for BpfPin {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+/// The actions on each filter at `dev`'s clsact ingress, by priority,
+/// without what tells two installs of one action apart (index,
+/// references, position).
+fn filter_actions(ns: &TestNamespace, dev: &str) -> Result<Vec<(u64, serde_json::Value)>> {
+    let out = ns.exec("tc", &["-j", "filter", "show", "dev", dev, "ingress"])?;
+    // iproute2 6.1 prints some kinds' options as text inside the JSON
+    // (skbmod): read those filters' text instead.
+    let Ok(listed) = serde_json::from_str::<serde_json::Value>(&out) else {
+        return filter_actions_text(ns, dev);
+    };
+    let mut by_prio = Vec::new();
+    for f in listed.as_array().into_iter().flatten() {
+        let Some(actions) = f["options"]["actions"].as_array() else {
+            continue;
+        };
+        let mut actions = actions.clone();
+        for a in &mut actions {
+            if let Some(o) = a.as_object_mut() {
+                for volatile in ["order", "index", "ref", "bind", "not_in_hw", "used_hw_stats"] {
+                    o.remove(volatile);
+                }
+            }
+        }
+        by_prio.push((f["pref"].as_u64().unwrap_or(0), serde_json::Value::Array(actions)));
+    }
+    Ok(by_prio)
+}
+
+/// [`filter_actions`] from `tc filter show`'s text: each filter's action
+/// lines, without the index and reference counts.
+fn filter_actions_text(ns: &TestNamespace, dev: &str) -> Result<Vec<(u64, serde_json::Value)>> {
+    let out = ns.exec("tc", &["filter", "show", "dev", dev, "ingress"])?;
+    let mut by_prio: Vec<(u64, String)> = Vec::new();
+    for line in out.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        if words.first() == Some(&"filter") {
+            let pref = words.iter().position(|w| *w == "pref").and_then(|i| words.get(i + 1)?.parse().ok()).unwrap_or(0);
+            if by_prio.last().is_none_or(|(p, _)| *p != pref) {
+                by_prio.push((pref, String::new()));
+            }
+            continue;
+        }
+        let Some((_, text)) = by_prio.last_mut() else { continue };
+        let mut rest = words.iter().copied();
+        while let Some(w) = rest.next() {
+            match w {
+                "index" | "ref" | "bind" => {
+                    rest.next();
+                }
+                "not_in_hw" | "in_hw" | "used_hw_stats" => {}
+                w => {
+                    text.push_str(w);
+                    text.push(' ');
+                }
+            }
+        }
+    }
+    Ok(by_prio
+        .into_iter()
+        .filter(|(_, text)| !text.is_empty())
+        .map(|(pref, text)| (pref, serde_json::Value::String(text)))
+        .collect())
+}
+
+/// One tc(8) action line installed by `tc` and by nlink's `parse_params`,
+/// each on a matchall at `d0`'s clsact ingress, makes the same action: the
+/// kernel lists the two alike. On filters rather than standalone: a
+/// standalone action needs CAP_NET_ADMIN in the initial user namespace.
+async fn same_as_tc(
+    ns: &TestNamespace,
+    kind: &str,
+    line: &str,
+    install: impl AsyncFnOnce(nlink::netlink::action::ActionList) -> Result<()>,
+    parse: impl FnOnce(&[&str]) -> Result<nlink::netlink::action::ActionList>,
+) -> Result<()> {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let mut args = vec!["filter", "add", "dev", "d0", "ingress", "prio", "1", "matchall", "action", kind];
+    args.extend(&words);
+    ns.exec("tc", &args)?;
+    install(parse(&words)?).await?;
+    let listed = filter_actions(ns, "d0")?;
+    assert_eq!(listed.len(), 2, "{kind} {line}: {listed:?}");
+    assert_eq!(listed[0].1, listed[1].1, "{kind} {line}: tc's, then nlink's");
+    ns.exec("tc", &["filter", "del", "dev", "d0", "ingress"])?;
+    Ok(())
+}
+
+/// A namespace with `d0` up and a clsact on it, and a way to put a
+/// matchall carrying `actions` at prio 2 on its ingress.
+async fn clsact_d0(prefix: &str) -> Result<(TestNamespace, Connection<Route>, u32)> {
+    let ns = TestNamespace::new(prefix)?;
+    let conn = ns.connection()?;
+    conn.add_link(DummyLink::new("d0")).await?;
+    conn.set_link_up("d0").await?;
+    ns.exec("tc", &["qdisc", "add", "dev", "d0", "clsact"])?;
+    let d0 = conn.get_link_by_name("d0").await?.expect("d0").ifindex();
+    Ok((ns, conn, d0))
+}
+
+async fn matchall_at_prio_2(
+    conn: &Connection<Route>,
+    d0: u32,
+    actions: nlink::netlink::action::ActionList,
+) -> Result<()> {
+    conn.add_filter_by_index_full(
+        d0,
+        TcHandle::CLSACT_INGRESS,
+        None,
+        nlink::EthProto::ALL,
+        nlink::FilterPriority::new(2),
+        MatchallFilter::new().actions(actions),
+    )
+    .await
+}
+
+/// #792: a police action's average rate installs when the filter gives
+/// its actions a rate estimator, and makes what tc(8)'s
+/// `estimator 1sec 8sec` makes. The kernel takes `avrate` only with an
+/// estimator, which goes on the filter request as `TCA_RATE`; nlink could
+/// not send one, so every filter with an `avrate` police failed with a bare
+/// `EINVAL`.
+#[tokio::test]
+async fn a_police_avrate_installs_with_an_estimator() -> Result<()> {
+    use nlink::netlink::action::{ActionList, Estimator, PoliceAction};
+    use nlink::{Bytes, Rate};
+    require_root!();
+    nlink::require_modules!("dummy", "sch_ingress", "cls_matchall", "act_police");
+
+    let (ns, conn, d0) = clsact_d0("tc-avrate").await?;
+    let shaped = || PoliceAction::new().rate(Rate::mbit(1)).burst(Bytes::kib(32)).avrate(Rate::mbit(2));
+    let err = matchall_at_prio_2(&conn, d0, ActionList::new().with(shaped()))
+        .await
+        .expect_err("the kernel refuses an avrate without an estimator");
+    assert!(err.is_invalid_argument(), "{err}");
+
+    // iproute2 6.15 refuses `rate` with `avrate`, so the line tc and nlink
+    // both make has the average rate alone. Its mtu and verdict are given:
+    // nlink's defaults for them are not tc's (#800).
+    let line = "avrate 1mbit mtu 2047 conform-exceed drop";
+    let mut args = vec!["filter", "add", "dev", "d0", "ingress", "prio", "1", "estimator", "1sec", "8sec", "matchall", "action", "police"];
+    args.extend(line.split_whitespace());
+    ns.exec("tc", &args)?;
+    let estimator = Estimator::parse_params(&["1sec", "8sec"])?;
+    let alone = PoliceAction::parse_params(&line.split_whitespace().collect::<Vec<_>>())?;
+    matchall_at_prio_2(&conn, d0, ActionList::new().with_estimator(estimator).with(alone)).await?;
+    // The police lines without their index (`police 0x1`).
+    let police_lines = || -> Result<Vec<String>> {
+        let shown = ns.exec("tc", &["filter", "show", "dev", "d0", "ingress"])?;
+        Ok(shown
+            .lines()
+            .filter_map(|l| l.split_once(" police 0x").map(|(_, rest)| rest.split_once(' ').map_or("", |r| r.1).to_string()))
+            .collect())
+    };
+    let lines = police_lines()?;
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[0], lines[1], "tc's, then nlink's");
+    assert!(lines[0].contains("avrate 1Mbit"), "{lines:?}");
+
+    // The kernel takes a rate with it, which tc does not let it send.
+    ns.exec("tc", &["filter", "del", "dev", "d0", "ingress"])?;
+    matchall_at_prio_2(&conn, d0, ActionList::new().with_estimator(estimator).with(shaped())).await?;
+    let lines = police_lines()?;
+    assert!(lines.len() == 1 && lines[0].contains("rate 1Mbit") && lines[0].contains("avrate 2Mbit"), "{lines:?}");
+    Ok(())
+}
+
+/// #811: a tunnel_key action's key id is the one asked for. nlink sent it as
+/// 8 bytes where the kernel reads a `__be32`, so it installed key id 0.
+#[tokio::test]
+async fn a_tunnel_keys_id_is_installed_as_tc_installs_it() -> Result<()> {
+    use nlink::netlink::action::{ActionList, TunnelKeyAction};
+    require_root!();
+    nlink::require_modules!("dummy", "sch_ingress", "cls_matchall", "act_tunnel_key");
+
+    let (ns, conn, d0) = clsact_d0("tc-tunkey").await?;
+    // tc reads `src` as an abbreviation of `src_ip`, its own word (#811).
+    for line in ["set src 10.0.0.1 dst 10.0.0.2 id 100 dst_port 4789", "set dst_ip 10.0.0.2 src_ip 10.0.0.1 id 4096"] {
+        same_as_tc(&ns, "tunnel_key", line, async |a| matchall_at_prio_2(&conn, d0, a).await, |w| {
+            Ok(ActionList::new().with(TunnelKeyAction::parse_params(w)?))
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+/// One tc(8) qdisc line installed at `dummy0`'s root by `tc` and by nlink
+/// makes the same qdisc: `tc -j` reports the same options for both.
+async fn qdisc_same_as_tc(
+    ns: &TestNamespace,
+    conn: &Connection<Route>,
+    kind: &str,
+    line: &str,
+    config: impl nlink::netlink::tc::QdiscConfig,
+) -> Result<()> {
+    let options = || -> Result<serde_json::Value> {
+        let out = ns.exec("tc", &["-j", "qdisc", "show", "dev", "dummy0", "root"])?;
+        let listed: serde_json::Value =
+            serde_json::from_str(&out).map_err(|e| nlink::Error::invalid_message(format!("{e}: {out}")))?;
+        Ok(listed[0]["options"].clone())
+    };
+    let mut args = vec!["qdisc", "add", "dev", "dummy0", "root", kind];
+    args.extend(line.split_whitespace());
+    ns.exec("tc", &args)?;
+    let theirs = options()?;
+    ns.exec("tc", &["qdisc", "del", "dev", "dummy0", "root"])?;
+    conn.add_qdisc("dummy0", config).await?;
+    let ours = options()?;
+    ns.exec("tc", &["qdisc", "del", "dev", "dummy0", "root"])?;
+    assert_eq!(theirs, ours, "{kind} {line}: tc's, then nlink's");
+    Ok(())
+}
+
+/// #806: an sfq's divisor, flows, depth and head drop are what tc(8)
+/// makes of the same words. `SfqConfig` could not say them, and sent the
+/// v0 struct, from which the kernel takes no depth or head drop.
+#[tokio::test]
+async fn sfq_divisor_flows_depth_and_headdrop_are_tcs() -> Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "sch_sfq");
+
+    let (ns, conn) = setup_tc_ns("tc-sfq-opts").await?;
+    for line in ["divisor 512 flows 64 depth 32 headdrop", "limit 100 depth 10", "flows 200 quantum 3000", "perturb 10"] {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        qdisc_same_as_tc(&ns, &conn, "sfq", line, SfqConfig::parse_params(&words)?).await?;
+    }
+    Ok(())
+}
+
+/// #806: an fq_codel's drop batch and CE threshold selector, and a TBF's
+/// overhead, mpu and link layer, are what tc(8) makes of the same words.
+/// The configs could not say them.
+#[tokio::test]
+async fn fq_codel_and_tbf_framing_are_tcs() -> Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "sch_fq_codel", "sch_tbf");
+
+    let (ns, conn) = setup_tc_ns("tc-qdisc-opts").await?;
+    for line in ["drop_batch 32", "ce_threshold 2ms ce_threshold_selector 0x01/0x01", "ce_threshold 2ms ce_threshold_selector 0x04/0xfc"] {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        qdisc_same_as_tc(&ns, &conn, "fq_codel", line, FqCodelConfig::parse_params(&words)?).await?;
+    }
+    for line in [
+        "rate 1mbit burst 32k limit 64k overhead 24 mpu 64",
+        "rate 1mbit burst 32k limit 64k linklayer atm",
+        "rate 10mbit burst 64k limit 128k peakrate 20mbit mtu 2k overhead 8",
+    ] {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        qdisc_same_as_tc(&ns, &conn, "tbf", line, TbfConfig::parse_params(&words)?).await?;
+    }
+    Ok(())
+}
+
+/// #816: an skbmod ethertype and an ife type and `use` value are what tc
+/// installs. nlink sent them big-endian where the kernel reads host order,
+/// so `set etype 0x88b5` installed 0xb588 and `use mark 5` mark 5 << 24.
+#[tokio::test]
+async fn skbmod_and_ife_values_install_as_tcs() -> Result<()> {
+    use nlink::netlink::action::{ActionList, IfeAction, SkbmodAction};
+    require_root!();
+    nlink::require_modules!("dummy", "sch_ingress", "cls_matchall", "act_skbmod", "act_ife");
+
+    let (ns, conn, d0) = clsact_d0("tc-byteorder").await?;
+    for line in ["set smac 02:00:00:00:00:02 set etype 0x88b5", "set etype 0x0800"] {
+        same_as_tc(&ns, "skbmod", line, async |a| matchall_at_prio_2(&conn, d0, a).await, |w| {
+            Ok(ActionList::new().with(SkbmodAction::parse_params(w)?))
+        })
+        .await?;
+    }
+    for line in ["encode type 0xed3e use mark 5", "encode use prio 7", "encode allow mark"] {
+        same_as_tc(&ns, "ife", line, async |a| matchall_at_prio_2(&conn, d0, a).await, |w| {
+            Ok(ActionList::new().with(IfeAction::parse_params(w)?))
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+/// Every qdisc kind's tc(8) lines make, through nlink's `parse_params`, the
+/// qdisc tc makes of them: `tc -j` lists the same options for both. The
+/// qdisc side of the action sweep (#817); kinds were checked one by one as
+/// each bug came (#806).
+#[tokio::test]
+async fn every_qdisc_kinds_lines_install_as_tcs() -> Result<()> {
+    use nlink::netlink::tc::*;
+    require_root!();
+    nlink::require_modules!(
+        "dummy", "sch_prio", "sch_multiq", "sch_sfq", "sch_tbf", "sch_htb", "sch_hfsc", "sch_drr", "sch_qfq",
+        "sch_red", "sch_choke", "sch_gred", "sch_sfb", "sch_codel", "sch_fq_codel", "sch_fq", "sch_pie",
+        "sch_fq_pie", "sch_hhf", "sch_cake", "sch_netem", "sch_etf", "sch_cbs", "sch_skbprio", "sch_plug",
+        "sch_ets", "sch_mqprio", "sch_taprio"
+    );
+
+    // (device, kind, line): `mq0` has four TX queues, for the kinds that
+    // want a multiqueue device.
+    let rows: &[(&str, &str, &str)] = &[
+        ("dummy0", "pfifo", "limit 100"),
+        ("dummy0", "bfifo", "limit 10000"),
+        ("dummy0", "bfifo", "limit 10kb"),
+        ("dummy0", "pfifo_fast", ""),
+        ("dummy0", "prio", "bands 4"),
+        ("dummy0", "prio", "bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1"),
+        ("dummy0", "sfq", ""),
+        ("dummy0", "sfq", "limit 100 perturb 10 quantum 1514"),
+        ("dummy0", "tbf", "rate 1mbit burst 10kb limit 20kb"),
+        ("dummy0", "tbf", "rate 1mbit burst 10kb latency 50ms"),
+        ("dummy0", "tbf", "rate 1mbit burst 10kb peakrate 2mbit mtu 2000 latency 50ms"),
+        ("dummy0", "htb", "default 10"),
+        ("dummy0", "htb", "r2q 5 default 20 direct_qlen 100"),
+        ("dummy0", "hfsc", "default 10"),
+        ("dummy0", "drr", ""),
+        ("dummy0", "qfq", ""),
+        // Not `adaptive`: adaptive RED retunes max_P every 500 ms while the
+        // queue idles, so a slow dump would differ from a quick one.
+        ("dummy0", "red", "limit 400000 min 30000 max 90000 avpkt 1000 burst 55 probability 0.02 bandwidth 10mbit ecn"),
+        ("dummy0", "red", "limit 400000 min 30000 max 90000 avpkt 1000 burst 55 bandwidth 10mbit harddrop"),
+        ("dummy0", "red", "limit 400000 avpkt 1000"),
+        ("dummy0", "red", "limit 1mb avpkt 1500 min 100kb nodrop ecn"),
+        ("dummy0", "choke", "limit 1000 min 100 max 300 avpkt 1000 burst 200 bandwidth 10mbit probability 0.1 ecn"),
+        ("dummy0", "choke", "limit 1000 bandwidth 10mbit"),
+        ("dummy0", "gred", "setup vqs 4 default 1"),
+        ("dummy0", "gred", "setup vqs 4 default 1 grio"),
+        ("dummy0", "gred", "setup vqs 2 default 0 limit 100000 ecn harddrop"),
+        ("dummy0", "sfb", "limit 1000"),
+        ("dummy0", "sfb", "target 40"),
+        ("dummy0", "sfb", "rehash 600 db 60 limit 1000 max 25 target 20 increment 0.0005 decrement 0.00005 penalty_rate 10 penalty_burst 20"),
+        ("dummy0", "codel", "limit 1000 target 5ms interval 100ms ecn"),
+        ("dummy0", "codel", "ce_threshold 1ms noecn"),
+        ("dummy0", "fq_codel", "limit 1000 flows 2048 quantum 1514 target 5ms interval 100ms memory_limit 32Mb ecn"),
+        ("dummy0", "fq", "limit 1000 flow_limit 50 quantum 3028 initial_quantum 15140 maxrate 100mbit buckets 2048 orphan_mask 1023 nopacing"),
+        ("dummy0", "fq", "low_rate_threshold 550kbit horizon 10s horizon_drop ce_threshold 4ms"),
+        ("dummy0", "fq", "buckets 1000 horizon 2s horizon_cap timer_slack 20us"),
+        ("dummy0", "pie", "limit 1000 target 15ms tupdate 15ms alpha 2 beta 20 ecn bytemode"),
+        ("dummy0", "pie", "dq_rate_estimator"),
+        ("dummy0", "pie", "limit 500 no_dq_rate_estimator"),
+        ("dummy0", "fq_pie", "limit 1000 flows 1024 target 15ms tupdate 15ms alpha 2 beta 20 quantum 1514 memory_limit 32Mb ecn_prob 10 ecn bytemode dq_rate_estimator"),
+        ("dummy0", "hhf", "limit 500"),
+        ("dummy0", "hhf", "limit 1000 quantum 1514 hh_limit 2048 reset_timeout 40ms admit_bytes 131072 evict_timeout 1s non_hh_weight 2"),
+        ("dummy0", "cake", "bandwidth 100mbit"),
+        ("dummy0", "cake", "unlimited besteffort"),
+        ("dummy0", "cake", "bandwidth 50mbit diffserv4 nat wash ack-filter"),
+        ("dummy0", "cake", "rtt 50ms overhead 18 mpu 64 noatm"),
+        ("dummy0", "cake", "bandwidth 10mbit ethernet"),
+        ("dummy0", "cake", "bandwidth 10mbit docsis ingress"),
+        ("dummy0", "cake", "triple-isolate split-gso memlimit 4mb fwmark 0xff"),
+        ("dummy0", "cake", "bandwidth 20mbit conservative"),
+        ("dummy0", "cake", "bandwidth 20mbit overhead 10 ether-vlan pppoe-ptm"),
+        ("dummy0", "cake", "bandwidth 20mbit bridged-llcsnap"),
+        ("dummy0", "cake", "bandwidth 20mbit raw"),
+        ("dummy0", "netem", "delay 10ms"),
+        ("dummy0", "netem", "delay 10ms 2ms 25%"),
+        ("dummy0", "netem", "loss 1%"),
+        ("dummy0", "netem", "loss 0.5% 25%"),
+        ("dummy0", "netem", "duplicate 1% corrupt 0.1%"),
+        ("dummy0", "netem", "delay 10ms reorder 25% 50% gap 5"),
+        ("dummy0", "netem", "rate 1mbit 20 100 5"),
+        ("dummy0", "netem", "slot 10ms 20ms packets 10 bytes 1000"),
+        ("dummy0", "netem", "loss state 1% 2% 3% 4% 5%"),
+        ("dummy0", "netem", "loss gemodel 1% 10% 70% 0.1%"),
+        ("dummy0", "netem", "limit 2000 ecn loss 1%"),
+        ("dummy0", "etf", "clockid CLOCK_TAI delta 300000"),
+        ("dummy0", "etf", "clockid CLOCK_TAI delta 300000 deadline_mode"),
+        ("dummy0", "cbs", "idleslope 1000 sendslope -9000 hicredit 30 locredit -1470"),
+        ("dummy0", "skbprio", "limit 100"),
+        ("dummy0", "plug", ""),
+        ("dummy0", "ets", "bands 3"),
+        ("dummy0", "ets", "bands 4 strict 2 quanta 1500 1500 priomap 0 1 2 3"),
+        ("mq0", "mq", ""),
+        ("mq0", "multiq", ""),
+        ("mq0", "mqprio", "num_tc 2 map 0 0 0 0 1 1 1 1 queues 1@0 1@1 hw 0"),
+        ("mq0", "mqprio", "num_tc 2 map 1 0 queues 2@0 2@2 hw 0"),
+        (
+            "mq0",
+            "taprio",
+            "num_tc 2 map 0 1 queues 1@0 1@1 base-time 1000 sched-entry S 01 300000 sched-entry S 02 300000 clockid CLOCK_TAI",
+        ),
+    ];
+
+    let (ns, conn) = setup_tc_ns("tc-qdisc-sweep").await?;
+    ns.exec("ip", &["link", "add", "mq0", "numtxqueues", "4", "numrxqueues", "4", "type", "dummy"])?;
+    ns.exec("ip", &["link", "set", "mq0", "up"])?;
+    // Some kinds' `tc -j` is not JSON (hfsc prints its text inside
+    // `options`): those compare by tc's text after the handle.
+    let options = |dev: &str| -> Result<serde_json::Value> {
+        // Details: red's and choke's derived logs show only with -d.
+        let out = ns.exec("tc", &["-d", "-j", "qdisc", "show", "dev", dev, "root"])?;
+        if let Ok(mut listed) = serde_json::from_str::<serde_json::Value>(&out) {
+            // A netem's seed is random unless given.
+            if let Some(options) = listed[0]["options"].as_object_mut() {
+                options.remove("seed");
+            }
+            return Ok(listed[0]["options"].take());
+        }
+        let out = ns.exec("tc", &["-d", "qdisc", "show", "dev", dev, "root"])?;
+        Ok(serde_json::Value::String(out.split_once("refcnt").map_or(&*out, |(_, rest)| rest).trim().to_string()))
+    };
+    let mut failed = Vec::new();
+    for &(dev, kind, line) in rows {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let mut args = vec!["qdisc", "add", "dev", dev, "root", kind];
+        args.extend(&words);
+        if let Err(e) = ns.exec("tc", &args) {
+            failed.push(format!("{kind} {line}: tc refused it: {e}"));
+            continue;
+        }
+        let theirs = options(dev)?;
+        ns.exec("tc", &["qdisc", "del", "dev", dev, "root"])?;
+        macro_rules! install {
+            ($ty:ty) => {
+                match <$ty>::parse_params(&words) {
+                    Ok(config) => conn.add_qdisc(dev, config).await,
+                    Err(e) => {
+                        failed.push(format!("{kind} {line}: nlink refused it: {e}"));
+                        continue;
+                    }
+                }
+            };
+        }
+        let added = match kind {
+            "pfifo" => install!(PfifoConfig),
+            "bfifo" => install!(BfifoConfig),
+            "pfifo_fast" => install!(PfifoFastConfig),
+            "prio" => install!(PrioConfig),
+            "sfq" => install!(SfqConfig),
+            "tbf" => install!(TbfConfig),
+            "htb" => install!(HtbQdiscConfig),
+            "hfsc" => install!(HfscConfig),
+            "drr" => install!(DrrConfig),
+            "qfq" => install!(QfqConfig),
+            "red" => install!(RedConfig),
+            "choke" => install!(ChokeConfig),
+            "gred" => install!(GredConfig),
+            "sfb" => install!(SfbConfig),
+            "codel" => install!(CodelConfig),
+            "fq_codel" => install!(FqCodelConfig),
+            "fq" => install!(FqConfig),
+            "pie" => install!(PieConfig),
+            "fq_pie" => install!(FqPieConfig),
+            "hhf" => install!(HhfConfig),
+            "cake" => install!(CakeConfig),
+            "netem" => install!(NetemConfig),
+            "etf" => install!(EtfConfig),
+            "cbs" => install!(CbsConfig),
+            "skbprio" => install!(SkbprioConfig),
+            "plug" => install!(PlugConfig),
+            "ets" => install!(EtsConfig),
+            "mq" => install!(MqConfig),
+            "multiq" => install!(MultiqConfig),
+            "mqprio" => install!(MqprioConfig),
+            "taprio" => install!(TaprioConfig),
+            other => panic!("no parser for {other}"),
+        };
+        if let Err(e) = added {
+            failed.push(format!("{kind} {line}: the kernel refused nlink's: {e}"));
+            continue;
+        }
+        let ours = options(dev)?;
+        ns.exec("tc", &["qdisc", "del", "dev", dev, "root"])?;
+        if theirs != ours {
+            failed.push(format!("{kind} {line}:\n  tc:    {theirs}\n  nlink: {ours}"));
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+    Ok(())
+}
+
+/// tc(8) arguments from a line: words, but a parenthesised ematch
+/// (`cmp(u8 at 9 layer network eq 6)`) stays one, as the shell quotes it.
+fn tc_words(line: &str) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    let mut depth = 0usize;
+    for w in line.split_whitespace() {
+        match words.last_mut() {
+            Some(last) if depth > 0 => {
+                last.push(' ');
+                last.push_str(w);
+            }
+            _ => words.push(w.to_string()),
+        }
+        depth = (depth + w.matches('(').count()).saturating_sub(w.matches(')').count());
+    }
+    words
+}
+
+/// Every class kind's tc(8) lines make, through nlink's `parse_params`, the
+/// class tc makes of them: `tc -d class show` lists the same. The class
+/// side of the qdisc and action sweeps (#817, #820).
+#[tokio::test]
+async fn every_class_kinds_lines_install_as_tcs() -> Result<()> {
+    use nlink::netlink::tc::{DrrClassConfig, HfscClassConfig, HtbClassConfig, QfqClassConfig};
+    require_root!();
+    nlink::require_modules!("dummy", "sch_htb", "sch_hfsc", "sch_drr", "sch_qfq");
+
+    let rows: &[(&str, &str)] = &[
+        ("htb", "rate 1mbit"),
+        ("htb", "rate 1mbit ceil 2mbit burst 15k cburst 15k prio 1 quantum 1514"),
+        ("htb", "rate 1mbit linklayer atm overhead 10 mpu 64"),
+        ("htb", "rate 10mbit mtu 9000"),
+        ("hfsc", "sc rate 1mbit ul rate 2mbit"),
+        ("hfsc", "rt m1 2mbit d 10ms m2 1mbit"),
+        ("hfsc", "ls umax 1500b dmax 10ms rate 1mbit"),
+        ("hfsc", "sc umax 1500 dmax 50ms rate 10mbit ul m2 20mbit"),
+        ("drr", "quantum 1514"),
+        ("drr", ""),
+        ("qfq", "weight 10 maxpkt 2000"),
+        ("qfq", "weight 1"),
+    ];
+
+    let (ns, conn) = setup_tc_ns("tc-class-sweep").await?;
+    let shown = || ns.exec("tc", &["-d", "class", "show", "dev", "dummy0", "classid", "1:10"]);
+    let mut failed = Vec::new();
+    for &(kind, line) in rows {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        // A fresh qdisc each time: htb has no change operation.
+        let _ = ns.exec("tc", &["qdisc", "del", "dev", "dummy0", "root"]);
+        ns.exec("tc", &["qdisc", "add", "dev", "dummy0", "root", "handle", "1:", kind])?;
+        let mut args = vec!["class", "add", "dev", "dummy0", "parent", "1:", "classid", "1:10", kind];
+        args.extend(&words);
+        if let Err(e) = ns.exec("tc", &args) {
+            failed.push(format!("{kind} {line}: tc refused it: {e}"));
+            continue;
+        }
+        let theirs = shown()?;
+        ns.exec("tc", &["class", "del", "dev", "dummy0", "classid", "1:10"])?;
+        macro_rules! install {
+            ($ty:ty) => {
+                match <$ty>::parse_params(&words) {
+                    Ok(config) => conn.add_class("dummy0", TcHandle::major_only(1), TcHandle::new(1, 0x10), config).await,
+                    Err(e) => {
+                        failed.push(format!("{kind} {line}: nlink refused it: {e}"));
+                        continue;
+                    }
+                }
+            };
+        }
+        let added = match kind {
+            "htb" => install!(HtbClassConfig),
+            "hfsc" => install!(HfscClassConfig),
+            "drr" => install!(DrrClassConfig),
+            "qfq" => install!(QfqClassConfig),
+            other => panic!("no parser for {other}"),
+        };
+        if let Err(e) = added {
+            failed.push(format!("{kind} {line}: the kernel refused nlink's: {e}"));
+            continue;
+        }
+        let ours = shown()?;
+        ns.exec("tc", &["class", "del", "dev", "dummy0", "classid", "1:10"])?;
+        if theirs != ours {
+            failed.push(format!("{kind} {line}:\n  tc:    {}\n  nlink: {}", theirs.trim(), ours.trim()));
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+    Ok(())
+}
+
+/// Every filter kind's tc(8) lines make, through nlink's `parse_params`,
+/// the filter tc makes of them: `tc -d filter show` lists the same. The
+/// filter side of the qdisc and action sweeps (#817, #820); flower's
+/// ordinary lines are `flower_lines_install_the_same_through_tc_and_nlink`.
+#[tokio::test]
+async fn every_filter_kinds_lines_install_as_tcs() -> Result<()> {
+    require_root!();
+    nlink::require_modules!(
+        "dummy", "sch_htb", "cls_u32", "cls_fw", "cls_route", "cls_basic", "cls_matchall", "cls_flow", "cls_flower",
+        "em_cmp", "em_u32"
+    );
+
+    // (kind, protocol, handle, line)
+    let rows: &[(&str, &str, Option<&str>, &str)] = &[
+        ("u32", "ip", None, "match ip dst 10.0.0.1/32 classid 1:10"),
+        ("u32", "ip", None, "match ip src 10.0.0.0/24 match ip dport 80 0xffff classid 1:10"),
+        ("u32", "ip", None, "match ip protocol 6 0xff match tcp dst 443 0xffff flowid 1:10"),
+        ("u32", "ip", None, "match u32 0x0a000001 0xffffffff at 16 classid 1:10"),
+        ("u32", "ip", None, "match u16 0x0050 0xffff at 22 classid 1:10"),
+        ("u32", "ip", None, "match u16 80 0xffff at 22 classid 1:10"),
+        ("u32", "ip", None, "match mark 16 255 classid 1:10"),
+        ("u32", "ip", None, "match ip dst 0.0.0.0/0 classid 1:10"),
+        ("u32", "ip", None, "match ip sport 80 0xffff match ip dport 443 0xffff classid 1:10"),
+        ("u32", "ip", None, "match ip nofrag match ip df classid 1:10"),
+        ("u32", "ip", None, "match ip ihl 5 0xf match ip dsfield 0x20 0xfc classid 1:10"),
+        ("u32", "ip", None, "match icmp type 8 0xff match icmp code 0 0xff classid 1:10"),
+        ("u32", "ip", None, "match u8 0x06 0xff at 9 classid 1:10"),
+        ("u32", "ip", None, "match mark 0x10 0xff classid 1:10"),
+        ("u32", "ip", None, "match ip tos 0x10 0xff classid 1:10"),
+        ("u32", "ip", None, "match ip icmp_type 8 0xff classid 1:10"),
+        ("u32", "ip", None, "match ip sport 1024 0xfc00 classid 1:10"),
+        ("u32", "ipv6", None, "match ip6 dst fd00::1/128 classid 1:10"),
+        ("u32", "ipv6", None, "match ip6 protocol 17 0xff match ip6 dport 53 0xffff classid 1:10"),
+        ("u32", "ipv6", None, "match ip6 src fd00:1::/40 match ip6 priority 0x10 0xff classid 1:10"),
+        ("u32", "ipv6", None, "match ip6 flowlabel 0x12345 0xfffff match ip6 icmp_type 128 0xff classid 1:10"),
+        ("u32", "all", None, "match ether dst 02:00:00:00:00:01 classid 1:10"),
+        // Before the network header: the ethertype (#835).
+        ("u32", "all", None, "match u16 0x0800 0xffff at -2 classid 1:10"),
+        ("u32", "all", None, "match u8 0x02 0xff at -0xe classid 1:10"),
+        ("u32", "all", None, "match ether src 02:00:00:00:00:02 classid 1:10"),
+        ("fw", "ip", Some("0x10"), "classid 1:10"),
+        ("fw", "ip", Some("0x10"), "indev lo classid 1:10"),
+        ("route", "ip", None, "to 10 classid 1:10"),
+        ("route", "ip", None, "from 5 classid 1:10"),
+        ("route", "ip", None, "to 10 from 5 classid 1:10"),
+        ("route", "ip", None, "fromif lo classid 1:10"),
+        ("route", "ip", None, "to 10 order 5 classid 1:10"),
+        ("basic", "ip", None, "classid 1:10"),
+        // tc-ematch(8) expressions (#828).
+        ("basic", "ip", None, "match cmp(u8 at 9 layer network eq 6) classid 1:10"),
+        ("basic", "ip", None, "match u32(u32 0x0a000001 0xffffffff at 16) classid 1:10"),
+        ("basic", "ip", None, "match u32(u16 0x0050 0xffff at 22) classid 1:10"),
+        ("basic", "ip", None, "match cmp(u16 at 2 layer transport eq 80) and cmp(u8 at 9 layer network eq 6) classid 1:10"),
+        ("basic", "ip", None, "match not cmp(u8 at 9 layer network eq 17) or u32(u8 0x06 0xff at 9) classid 1:10"),
+        ("basic", "ip", None, "match cmp(u32 at 12 layer network mask 0xffffff00 trans gt 167772160) classid 1:10"),
+        ("matchall", "all", None, "classid 1:10"),
+        // flower's keys beyond flower_lines_install_the_same_through_tc_and_nlink's (#827).
+        ("flower", "ip", None, "ip_proto icmp type 8 code 0 classid 1:10"),
+        ("flower", "ipv6", None, "ip_proto icmpv6 type 128/255 classid 1:10"),
+        ("flower", "ip", None, "ip_flags frag/nofirstfrag classid 1:10"),
+        ("flower", "ip", None, "ct_state +trk+est-new classid 1:10"),
+        ("flower", "ip", None, "ct_mark 5/0xff ct_zone 3 classid 1:10"),
+        ("flower", "ip", None, "ct_label 0102030405060708090a0b0c0d0e0f10 classid 1:10"),
+        ("flower", "ip", None, "enc_key_id 100 enc_dst_ip 10.0.0.1 enc_src_ip 10.0.0.0/24 enc_dst_port 4789 classid 1:10"),
+        ("flower", "ip", None, "enc_dst_ip fd00::1 enc_tos 0x10/0xfc enc_ttl 64 classid 1:10"),
+        ("flower", "mpls_uc", None, "mpls_label 100 mpls_tc 3 mpls_bos 1 mpls_ttl 64 classid 1:10"),
+        ("flower", "arp", None, "arp_op request arp_sip 10.0.0.1 arp_tip 10.0.0.0/24 classid 1:10"),
+        ("flower", "arp", None, "arp_op reply arp_sha 02:00:00:00:00:01 arp_tha 02:00:00:00:00:00/24 classid 1:10"),
+        ("flower", "802.1q", None, "vlan_id 10 vlan_ethtype ip src_ip 10.0.0.1 classid 1:10"),
+        ("flower", "802.1q", None, "vlan_id 10 vlan_ethtype ipv6 ip_proto tcp dst_port 443 classid 1:10"),
+        ("flower", "802.1ad", None, "vlan_id 10 vlan_ethtype 802.1q cvlan_id 20 cvlan_prio 3 cvlan_ethtype ip classid 1:10"),
+        ("flower", "ip", None, "dst_mac 02:00:00:00:00:00/ff:ff:ff:00:00:00 classid 1:10"),
+        ("flower", "ip", None, "src_mac 02:00:00:00:00:00/24 classid 1:10"),
+        ("flower", "ip", None, "indev lo classid 1:10"),
+        ("flow", "ip", Some("1"), "map key mark and 0xff baseclass 1:1 divisor 16"),
+        ("flow", "ip", Some("1"), "map key priority or 0x10 xor 0x1 rshift 2 addend 3 baseclass 1:1 divisor 64"),
+    ];
+
+    filter_lines_same_as_tc("tc-filter-sweep", rows).await
+}
+
+/// flow's hash mode, which the kernel refuses in a user namespace other
+/// than the initial one (`EOPNOTSUPP`, rootless containers included).
+#[tokio::test]
+async fn flow_hash_lines_install_as_tcs() -> Result<()> {
+    require_root!();
+    nlink::require_host_root!();
+    nlink::require_modules!("dummy", "sch_htb", "cls_flow");
+    let rows: &[(&str, &str, Option<&str>, &str)] = &[
+        ("flow", "ip", Some("1"), "hash keys src,dst divisor 1024 baseclass 1:10"),
+        ("flow", "ip", Some("1"), "hash keys src,dst,proto,proto-src,proto-dst divisor 256 perturb 10 baseclass 1:1"),
+    ];
+    filter_lines_same_as_tc("tc-flow-hash", rows).await
+}
+
+/// Installs each `(kind, protocol, handle, line)` through `tc` and through
+/// nlink's `parse_params` on an HTB root, and fails with every line whose
+/// `tc -d filter show` differs.
+async fn filter_lines_same_as_tc(label: &str, rows: &[(&str, &str, Option<&str>, &str)]) -> Result<()> {
+    use nlink::netlink::filter::{BasicFilter, FlowFilter, FlowerFilter, FwFilter, MatchallFilter, RouteFilter, U32Filter};
+    let (ns, conn) = setup_tc_ns(label).await?;
+    ns.exec("tc", &["qdisc", "add", "dev", "dummy0", "root", "handle", "1:", "htb"])?;
+    for class in ["1:1", "1:10"] {
+        ns.exec("tc", &["class", "add", "dev", "dummy0", "parent", "1:", "classid", class, "htb", "rate", "10mbit"])?;
+    }
+    let shown = || ns.exec("tc", &["-d", "filter", "show", "dev", "dummy0", "parent", "1:"]);
+    let mut failed = Vec::new();
+    for &(kind, proto, handle, line) in rows {
+        let words = tc_words(line);
+        let words: Vec<&str> = words.iter().map(String::as_str).collect();
+        let mut args = vec!["filter", "add", "dev", "dummy0", "parent", "1:", "protocol", proto, "prio", "1"];
+        if let Some(handle) = handle {
+            args.extend(["handle", handle]);
+        }
+        args.push(kind);
+        args.extend(&words);
+        if let Err(e) = ns.exec("tc", &args) {
+            failed.push(format!("{kind} {line}: tc refused it: {e}"));
+            continue;
+        }
+        let theirs = shown()?;
+        ns.exec("tc", &["filter", "del", "dev", "dummy0", "parent", "1:"])?;
+        let protocol: nlink::EthProto = proto.parse()?;
+        let handle = handle.map(|h| TcHandle::from_raw(u32::from_str_radix(h.trim_start_matches("0x"), 16).expect("hex")));
+        macro_rules! install {
+            ($ty:ty) => {
+                match <$ty>::parse_params(&words) {
+                    Ok(config) => {
+                        conn.add_filter_full(
+                            "dummy0",
+                            TcHandle::major_only(1),
+                            handle,
+                            protocol,
+                            nlink::FilterPriority::new(1),
+                            config,
+                        )
+                        .await
+                    }
+                    Err(e) => {
+                        failed.push(format!("{kind} {line}: nlink refused it: {e}"));
+                        continue;
+                    }
+                }
+            };
+        }
+        let added = match kind {
+            "u32" => install!(U32Filter),
+            "fw" => install!(FwFilter),
+            "route" => install!(RouteFilter),
+            "basic" => install!(BasicFilter),
+            "matchall" => install!(MatchallFilter),
+            "flow" => install!(FlowFilter),
+            "flower" => install!(FlowerFilter),
+            other => panic!("no parser for {other}"),
+        };
+        if let Err(e) = added {
+            failed.push(format!("{kind} {line}: the kernel refused nlink's: {e}"));
+            continue;
+        }
+        let ours = shown()?;
+        ns.exec("tc", &["filter", "del", "dev", "dummy0", "parent", "1:"])?;
+        if theirs != ours {
+            failed.push(format!("{kind} {line}:\n  tc:    {}\n  nlink: {}", theirs.trim(), ours.trim()));
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+    Ok(())
+}
+
+
+/// #828: a basic filter with a u32 ematch from the builder installs, and
+/// matches what tc's line for it matches. nlink sent the ematch's key as 12
+/// bytes, which the kernel refuses for want of the `offmask` that ends a
+/// `struct tc_u32_key`, and in host order where the packet's word is
+/// big-endian.
+#[tokio::test]
+async fn a_basic_filters_u32_ematch_installs_as_tcs() -> Result<()> {
+    use nlink::netlink::filter::{BasicFilter, Ematch, EmatchU32};
+    require_root!();
+    nlink::require_modules!("dummy", "sch_htb", "cls_basic", "em_u32");
+
+    let (ns, conn) = setup_tc_ns("tc-em-u32").await?;
+    ns.exec("tc", &["qdisc", "add", "dev", "dummy0", "root", "handle", "1:", "htb"])?;
+    ns.exec("tc", &["class", "add", "dev", "dummy0", "parent", "1:", "classid", "1:10", "htb", "rate", "10mbit"])?;
+    let shown = || ns.exec("tc", &["-d", "filter", "show", "dev", "dummy0", "parent", "1:"]);
+    ns.exec(
+        "tc",
+        &["filter", "add", "dev", "dummy0", "parent", "1:", "protocol", "ip", "prio", "1", "basic", "match", "u32(u8 0x06 0xff at 9)", "classid", "1:10"],
+    )?;
+    let theirs = shown()?;
+    ns.exec("tc", &["filter", "del", "dev", "dummy0", "parent", "1:"])?;
+    // The IP protocol: byte 9, the second of the word at offset 8.
+    let filter = BasicFilter::new()
+        .classid(TcHandle::new(1, 0x10))
+        .ematch(Ematch::u32(EmatchU32 { mask: 0x00ff_0000, value: 0x0006_0000, offset: 8 }));
+    conn.add_filter_full("dummy0", TcHandle::major_only(1), None, nlink::EthProto::IP, nlink::FilterPriority::new(1), filter)
+        .await?;
+    assert_eq!(shown()?, theirs);
+    Ok(())
+}
+
+/// #819, #823: a red, a choke and a taprio from nlink's builders install.
+/// The kernel refused red and choke without their idle-damping table,
+/// which nlink did not send, and a taprio whose entries it skipped as the
+/// wrong attribute; no test had installed one of the three.
+#[tokio::test]
+async fn red_choke_and_taprio_from_the_builders_install() -> Result<()> {
+    use nlink::netlink::tc::{ChokeConfig, RedConfig, TaprioConfig};
+    use nlink::netlink::types::tc::qdisc::taprio::TaprioSchedEntry;
+    use nlink::{Bytes, Packets};
+    require_root!();
+    nlink::require_modules!("dummy", "sch_red", "sch_choke", "sch_taprio");
+
+    let (ns, conn) = setup_tc_ns("tc-red-builders").await?;
+    let shown = |dev: &str| ns.exec("tc", &["-d", "qdisc", "show", "dev", dev, "root"]);
+
+    conn.add_qdisc("dummy0", RedConfig::new().limit(Bytes::new(400_000)).min(Bytes::new(30_000)).max(Bytes::new(90_000)))
+        .await?;
+    let red = shown("dummy0")?;
+    // tc's arithmetic for these thresholds, avpkt 1000 and 10 Mbit.
+    assert!(red.contains("min 30000b max 90000b") && red.contains("ewma 5"), "{red}");
+    ns.exec("tc", &["qdisc", "del", "dev", "dummy0", "root"])?;
+
+    conn.add_qdisc("dummy0", ChokeConfig::new().limit(Packets::new(1000)).min(Packets::new(100)).max(Packets::new(300)))
+        .await?;
+    let choke = shown("dummy0")?;
+    assert!(choke.contains("limit 1000p min 100p max 300p"), "{choke}");
+    ns.exec("tc", &["qdisc", "del", "dev", "dummy0", "root"])?;
+
+    ns.exec("ip", &["link", "add", "mq0", "numtxqueues", "4", "type", "dummy"])?;
+    let taprio = TaprioConfig::new()
+        .num_tc(2)
+        .map(&[0, 1])
+        .queues(&[(1, 0), (1, 1)])
+        .clockid(libc::CLOCK_TAI)
+        .base_time(1000)
+        .entry(TaprioSchedEntry::set_gates(0x1, 300_000))
+        .entry(TaprioSchedEntry::set_gates(0x2, 300_000));
+    conn.add_qdisc("mq0", taprio).await?;
+    let taprio = shown("mq0")?;
+    assert!(taprio.contains("gatemask 0x1") && taprio.contains("gatemask 0x2"), "{taprio}");
+    Ok(())
+}
+
+/// Every action kind's tc(8) lines make, through nlink's `parse_params`,
+/// the action tc makes of them. A sweep: the kinds were checked one at a
+/// time, as each bug came, and a tunnel_key key id was 0 for every
+/// release (#811), and seven kinds' parsers did not take tc's own words
+/// for what they set (#817).
+#[tokio::test]
+async fn every_action_kinds_lines_install_as_tcs() -> Result<()> {
+    use nlink::netlink::action::*;
+    require_root!();
+    nlink::require_modules!(
+        "dummy", "sch_ingress", "cls_matchall", "act_gact", "act_mirred", "act_vlan", "act_mpls", "act_skbmod",
+        "act_skbedit", "act_connmark", "act_csum", "act_nat", "act_tunnel_key", "act_ct", "act_pedit",
+        "act_simple", "act_sample", "act_gate", "act_ctinfo", "act_ife"
+    );
+
+    fn list(kind: &str, w: &[&str]) -> Result<ActionList> {
+        Ok(match kind {
+            "gact" => ActionList::new().with(GactAction::parse_params(w)?),
+            "vlan" => ActionList::new().with(VlanAction::parse_params(w)?),
+            "mpls" => ActionList::new().with(MplsAction::parse_params(w)?),
+            "skbmod" => ActionList::new().with(SkbmodAction::parse_params(w)?),
+            "skbedit" => ActionList::new().with(SkbeditAction::parse_params(w)?),
+            "connmark" => ActionList::new().with(ConnmarkAction::parse_params(w)?),
+            "csum" => ActionList::new().with(CsumAction::parse_params(w)?),
+            "nat" => ActionList::new().with(NatAction::parse_params(w)?),
+            "tunnel_key" => ActionList::new().with(TunnelKeyAction::parse_params(w)?),
+            "ct" => ActionList::new().with(CtAction::parse_params(w)?),
+            "pedit" => ActionList::new().with(PeditAction::parse_params(w)?),
+            "simple" => ActionList::new().with(SimpleAction::parse_params(w)?),
+            "sample" => ActionList::new().with(SampleAction::parse_params(w)?),
+            "gate" => ActionList::new().with(GateAction::parse_params(w)?),
+            "ctinfo" => ActionList::new().with(CtinfoAction::parse_params(w)?),
+            "ife" => ActionList::new().with(IfeAction::parse_params(w)?),
+            other => panic!("no parser for {other}"),
+        })
+    }
+    let rows: &[(&str, &str)] = &[
+        ("gact", "drop"),
+        ("gact", "pass random determ drop 10"),
+        ("vlan", "pop"),
+        ("vlan", "push id 100"),
+        ("vlan", "push id 100 protocol 802.1ad priority 3"),
+        ("vlan", "modify id 200"),
+        ("mpls", "push label 100 ttl 64 tc 3"),
+        ("mpls", "pop protocol ipv4"),
+        ("mpls", "modify label 200"),
+        ("mpls", "dec_ttl"),
+        ("skbmod", "set dmac 02:00:00:00:00:01"),
+        ("skbmod", "set smac 02:00:00:00:00:02 set etype 0x88b5"),
+        ("skbmod", "swap mac"),
+        ("skbedit", "priority 7"),
+        ("skbedit", "priority 10"),
+        ("skbedit", "priority 1:10"),
+        ("skbedit", "inheritdsfield"),
+        ("skbedit", "mark 42"),
+        ("skbedit", "mark 1/0xff"),
+        ("skbedit", "ptype host"),
+        ("connmark", "zone 5"),
+        ("csum", "iph"),
+        ("csum", "iph and tcp and udp"),
+        ("nat", "egress 10.0.0.1 192.168.0.1"),
+        ("nat", "ingress 10.0.0.0/24 192.168.0.0"),
+        ("tunnel_key", "set src_ip 10.0.0.1 dst_ip 10.0.0.2 id 100 dst_port 4789 tos 4 ttl 64"),
+        ("tunnel_key", "set src_ip fd00::1 dst_ip fd00::2 id 7 nocsum"),
+        ("tunnel_key", "set src_ip 10.0.0.1 dst_ip 10.0.0.2 id 9 csum"),
+        ("tunnel_key", "unset"),
+        ("ct", "commit"),
+        ("ct", "commit mark 7"),
+        ("ct", "commit zone 5 mark 7/0xff"),
+        ("ct", "clear"),
+        ("pedit", "ex munge ip ttl set 5"),
+        ("pedit", "ex munge ip dst set 10.0.0.9"),
+        ("pedit", "ex munge tcp dport set 8080"),
+        ("pedit", "ex munge eth dst set 02:00:00:00:00:09"),
+        ("simple", "sdata hello"),
+        ("sample", "rate 100 group 5"),
+        ("sample", "rate 100 group 5 trunc 128"),
+        ("gate", "base-time 1000 sched-entry open 2000"),
+        ("gate", "priority 1 clockid CLOCK_TAI base-time 1000 sched-entry open 2000 sched-entry close 3000"),
+        ("ctinfo", "cpmark zone 1"),
+        ("ctinfo", "dscp 0xfc 0x01 zone 5"),
+        ("ife", "encode allow mark"),
+        ("ife", "encode type 0xed3e use mark 5"),
+    ];
+
+    let (ns, conn, d0) = clsact_d0("tc-act-sweep").await?;
+    let mut failed = Vec::new();
+    for (kind, line) in rows {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let parsed = match list(kind, &words) {
+            Ok(list) => list,
+            Err(e) => {
+                failed.push(format!("{kind} {line}: nlink refused it: {e}"));
+                continue;
+            }
+        };
+        let mut args = vec!["filter", "add", "dev", "d0", "ingress", "prio", "1", "matchall", "action", kind];
+        args.extend(&words);
+        if let Err(e) = ns.exec("tc", &args) {
+            failed.push(format!("{kind} {line}: tc refused it: {e}"));
+            continue;
+        }
+        if let Err(e) = matchall_at_prio_2(&conn, d0, parsed).await {
+            failed.push(format!("{kind} {line}: the kernel refused nlink's: {e}"));
+            ns.exec("tc", &["filter", "del", "dev", "d0", "ingress"])?;
+            continue;
+        }
+        let listed = filter_actions(&ns, "d0")?;
+        if listed.len() != 2 || listed[0].1 != listed[1].1 {
+            failed.push(format!("{kind} {line}:\n  tc:    {}\n  nlink: {}", listed[0].1, listed.get(1).map_or("-".into(), |l| l.1.to_string())));
+        }
+        ns.exec("tc", &["filter", "del", "dev", "d0", "ingress"])?;
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+    Ok(())
+}
+
+/// #751: a gate's bare times are nanoseconds and a ct `nat` is spelled
+/// with `addr`, as tc(8) reads them. nlink read a bare gate time as
+/// microseconds, and refused the `addr` keyword.
+#[tokio::test]
+async fn gate_and_ct_lines_read_as_tc_reads_them() -> Result<()> {
+    use nlink::netlink::action::{ActionList, CtAction, GateAction};
+    require_root!();
+    nlink::require_modules!("dummy", "sch_ingress", "cls_matchall", "act_gate", "act_ct");
+
+    let (ns, conn, d0) = clsact_d0("tc-acts").await?;
+    for line in ["base-time 1000 sched-entry open 2000", "base-time 1ms cycle-time 3ms sched-entry close 3ms"] {
+        same_as_tc(&ns, "gate", line, async |a| matchall_at_prio_2(&conn, d0, a).await, |w| {
+            Ok(ActionList::new().with(GateAction::parse_params(w)?))
+        })
+        .await?;
+    }
+    // tc(8) wants a word after the NAT arguments: a verdict.
+    for line in ["commit nat src addr 10.0.0.1-10.0.0.9 pipe", "commit nat dst addr 192.0.2.7 pipe", "nat pipe"] {
+        same_as_tc(&ns, "ct", line, async |a| matchall_at_prio_2(&conn, d0, a).await, |w| {
+            Ok(ActionList::new().with(CtAction::parse_params(w)?))
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+/// #751: `conform-exceed` is exceed first, as tc-police(8) reads it.
+/// nlink read it conform first, so `drop/pipe` dropped the traffic that
+/// conformed. #800: what a line leaves out is what tc leaves out. The police rate table needs root in the initial user
+/// namespace.
+#[tokio::test]
+async fn police_conform_exceed_reads_as_tc_reads_it() -> Result<()> {
+    use nlink::netlink::action::{ActionList, PoliceAction};
+    require_root!();
+    nlink::require_host_root!();
+    nlink::require_modules!("dummy", "sch_ingress", "cls_matchall", "act_police");
+
+    let (ns, conn, d0) = clsact_d0("tc-police").await?;
+    // The last three leave out what tc fills in: the exceed verdict and the
+    // mtu (#800).
+    for line in [
+        "rate 1mbit burst 32k conform-exceed drop/pipe",
+        "rate 2mbit burst 64k conform-exceed reclassify",
+        "rate 1mbit burst 32k",
+        "rate 1mbit burst 32k conform-exceed pipe",
+        "rate 1mbit burst 32k mtu 9000",
+    ] {
+        same_as_tc(&ns, "police", line, async |a| matchall_at_prio_2(&conn, d0, a).await, |w| {
+            Ok(ActionList::new().with(PoliceAction::parse_params(w)?))
+        })
+        .await?;
+    }
+    Ok(())
 }

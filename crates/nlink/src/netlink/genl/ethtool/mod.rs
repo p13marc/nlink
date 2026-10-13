@@ -27,7 +27,7 @@
 //!
 //! // Query link state
 //! let state = conn.get_link_state("eth0").await?;
-//! println!("Link: {}", if state.link { "up" } else { "down" });
+//! println!("Link: {:?}", state.link);
 //!
 //! // Query link modes
 //! let modes = conn.get_link_modes("eth0").await?;
@@ -186,6 +186,10 @@ pub enum EthtoolCmd {
 // =============================================================================
 // Header Attributes
 // =============================================================================
+
+/// `ETHTOOL_FLAG_OMIT_REPLY`: a set or act request does not answer with
+/// its optional reply message.
+pub const ETHTOOL_FLAG_OMIT_REPLY: u32 = 1 << 1;
 
 /// Attributes for the request header (nested under ETHTOOL_A_HEADER).
 #[repr(u16)]
@@ -516,6 +520,54 @@ pub enum EthtoolRingsAttr {
 // =============================================================================
 // Channels Attributes
 // =============================================================================
+
+/// Attributes of a device's timestamping capabilities
+/// (`ETHTOOL_MSG_TSINFO_GET`, #166).
+#[repr(u16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EthtoolTsinfoAttr {
+    Unspec = 0,
+    /// Request header (nested).
+    Header = 1,
+    /// `SOF_TIMESTAMPING_*` supported (bitset).
+    Timestamping = 2,
+    /// `HWTSTAMP_TX_*` modes (bitset).
+    TxTypes = 3,
+    /// `HWTSTAMP_FILTER_*` receive filters (bitset).
+    RxFilters = 4,
+    /// The PTP hardware clock's index (u32), when there is one.
+    PhcIndex = 5,
+    /// Hardware timestamping statistics (nested).
+    Stats = 6,
+}
+
+/// Attributes of one PHY on a link (`ETHTOOL_MSG_PHY_GET`, kernel 6.12,
+/// #166).
+#[repr(u16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EthtoolPhyAttr {
+    Unspec = 0,
+    /// Request header (nested).
+    Header = 1,
+    /// The PHY's index on its link (u32), which PHY-specific requests name
+    /// it by.
+    Index = 2,
+    /// Its driver's name (string).
+    Drvname = 3,
+    /// Its device name (string).
+    Name = 4,
+    /// What it is attached to (u32, `enum phy_upstream`): the MAC (0) or
+    /// another PHY (1).
+    UpstreamType = 5,
+    /// The index of the PHY it is attached to, when that is a PHY (u32).
+    UpstreamIndex = 6,
+    /// The SFP bus it sits behind, on an SFP module (string).
+    UpstreamSfpName = 7,
+    /// The SFP cage it drives (string).
+    DownstreamSfpName = 8,
+}
 
 /// Attributes for channel counts.
 #[repr(u16)]

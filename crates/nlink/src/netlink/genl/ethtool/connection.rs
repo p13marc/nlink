@@ -4,12 +4,14 @@
 //! settings using the ethtool netlink interface.
 
 use super::{
-    ETHTOOL_GENL_NAME, ETHTOOL_GENL_VERSION, ETHTOOL_MCGRP_MONITOR, EthtoolBitsetAttr,
+    ETHTOOL_FLAG_OMIT_REPLY, ETHTOOL_GENL_NAME, ETHTOOL_GENL_VERSION, ETHTOOL_MCGRP_MONITOR, EthtoolBitsetAttr,
     EthtoolChannelsAttr, EthtoolCmd, EthtoolCoalesceAttr, EthtoolEeeAttr, EthtoolFeaturesAttr,
     EthtoolFecAttr, EthtoolHeaderAttr, EthtoolLinkinfoAttr, EthtoolLinkmodesAttr,
     EthtoolLinkstateAttr, EthtoolModuleEepromAttr, EthtoolPauseAttr, EthtoolRingsAttr,
     EthtoolRssAttr, EthtoolStatsAttr, EthtoolStatsGrpAttr, EthtoolStringAttr,
-    EthtoolStringSet, EthtoolStringsetAttr, EthtoolStrsetAttr, EthtoolWolAttr, WOL_MODE_NAMES,
+    EthtoolPhyAttr, EthtoolStringSet, EthtoolStringsetAttr, EthtoolStrsetAttr, EthtoolTsinfoAttr,
+    EthtoolWolAttr,
+    WOL_MODE_NAMES,
     bitset::EthtoolBitset,
     stats_group, types::*,
 };
@@ -108,7 +110,7 @@ impl Connection<Ethtool> {
     /// // By index
     /// let state = conn.get_link_state(5u32).await?;
     ///
-    /// println!("Link detected: {}", state.link);
+    /// println!("Link detected: {:?}", state.link);
     /// # Ok(())
     /// # }
     /// ```
@@ -140,7 +142,7 @@ impl Connection<Ethtool> {
                     self.parse_header(payload, &mut state.ifname, &mut state.ifindex)?;
                 }
                 t if t == EthtoolLinkstateAttr::Link as u16 && !payload.is_empty() => {
-                    state.link = payload[0] != 0;
+                    state.link = Some(payload[0] != 0);
                 }
                 t if t == EthtoolLinkstateAttr::Sqi as u16 && payload.len() >= 4 => {
                     state.sqi = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
@@ -769,6 +771,100 @@ impl Connection<Ethtool> {
     ) -> Result<()> {
         let builder = configure(RingsBuilder::new());
         self.apply_rings(ifname, &builder).await
+    }
+
+    /// A device's timestamping capabilities (`ethtool -T`, #166): what
+    /// `SO_TIMESTAMPING` can ask of it, its hardware modes and filters, and
+    /// its PTP clock. Accepts an interface name or index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_tsinfo"))]
+    pub async fn get_tsinfo(&self, iface: impl Into<InterfaceRef>) -> Result<Tsinfo> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        let response = self.ethtool_get(EthtoolCmd::TsinfoGet, &ifname).await?;
+        let mut info = Tsinfo::default();
+        let Some(data) = response.get(GENL_HDRLEN..) else {
+            return Ok(info);
+        };
+        for (attr_type, payload) in AttrIter::new(data) {
+            match attr_type {
+                t if t == EthtoolTsinfoAttr::Header as u16 => {
+                    self.parse_header(payload, &mut info.ifname, &mut info.ifindex)?;
+                }
+                t if t == EthtoolTsinfoAttr::Timestamping as u16 => {
+                    info.timestamping = EthtoolBitset::parse(payload)?;
+                }
+                t if t == EthtoolTsinfoAttr::TxTypes as u16 => {
+                    info.tx_types = EthtoolBitset::parse(payload)?;
+                }
+                t if t == EthtoolTsinfoAttr::RxFilters as u16 => {
+                    info.rx_filters = EthtoolBitset::parse(payload)?;
+                }
+                t if t == EthtoolTsinfoAttr::PhcIndex as u16 && payload.len() >= 4 => {
+                    info.phc_index = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+                }
+                _ => {}
+            }
+        }
+        Ok(info)
+    }
+
+    /// The PHYs on a link (`ethtool --show-phys`, kernel 6.12, #166): the
+    /// one on the board, a media converter in front of it, one on an SFP
+    /// module. A virtual device has none. Accepts an interface name or
+    /// index.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_phys"))]
+    pub async fn get_phys(&self, iface: impl Into<InterfaceRef>) -> Result<Vec<PhyInfo>> {
+        let ifname = self.resolve_interface_name(&iface.into()).await?;
+        let replies = self.ethtool_dump(EthtoolCmd::PhyGet, Some(&ifname)).await?;
+        Ok(replies.iter().filter_map(|r| r.get(GENL_HDRLEN..)).map(phy_from_reply).collect())
+    }
+
+    /// Every PHY on every link in the connection's namespace (#166).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "dump_phys"))]
+    pub async fn dump_phys(&self) -> Result<Vec<PhyInfo>> {
+        let replies = self.ethtool_dump(EthtoolCmd::PhyGet, None).await?;
+        Ok(replies.iter().filter_map(|r| r.get(GENL_HDRLEN..)).map(phy_from_reply).collect())
+    }
+
+    /// An ethtool dump, of one device's objects when `ifname` is given: the
+    /// commands with a dump handler of their own (PHY_GET) honour the
+    /// device a dump names, unlike the default handler, which answers for
+    /// every device (#754, #773). Each reply's payload, GENL header first.
+    async fn ethtool_dump(&self, cmd: EthtoolCmd, ifname: Option<&str>) -> Result<Vec<Vec<u8>>> {
+        let mut builder = MessageBuilder::new(self.state().family_id, NLM_F_REQUEST | NLM_F_DUMP);
+        builder.append(&GenlMsgHdr::new(cmd as u8, ETHTOOL_GENL_VERSION));
+        if let Some(ifname) = ifname {
+            let header = builder.nest_start(1 | NLA_F_NESTED); // ETHTOOL_A_*_HEADER = 1
+            builder.append_attr_str(EthtoolHeaderAttr::DevName as u16, ifname);
+            builder.nest_end(header);
+        }
+        let seq = self.socket().next_seq();
+        builder.set_seq(seq);
+        builder.set_pid(self.socket().pid());
+
+        // #134 — dual-mode recv (dump). Register/lock before send.
+        let mut session = self.recv_session_dump(seq).await?;
+        let msg = builder.finish();
+        self.socket().send(&msg).await?;
+
+        self.with_timeout(async {
+            let mut replies = Vec::new();
+            loop {
+                let data: Vec<u8> = session.recv_with_timeout(self).await?;
+                for msg_result in MessageIter::new(&data) {
+                    let (header, payload) = msg_result?;
+                    match classify(header, payload, seq) {
+                        Classification::SkipSeq | Classification::Ack => continue,
+                        Classification::Error(e) => return Err(e),
+                        Classification::Done(result) => {
+                            result?;
+                            return Ok(replies);
+                        }
+                        Classification::Data { payload } => replies.push(payload.to_vec()),
+                    }
+                }
+            }
+        })
+        .await
     }
 
     fn parse_rings(&self, data: &[u8], rings: &mut Rings) -> Result<()> {
@@ -1812,65 +1908,19 @@ impl Connection<Ethtool> {
         Ok(stats)
     }
 
-    /// Custom STATS_GET request — the stats message uses header attr
-    /// id 2 (not the usual 1) and needs a `Groups` bitset selecting
-    /// which standardized groups to return.
+    /// STATS_GET for one device: its header is attribute 2, not the usual
+    /// 1, and a `Groups` bitset selects the standardized groups. A `doit`:
+    /// sent as a dump, ethtool answered for every device and the first,
+    /// `lo`, was kept, whatever the name (#773).
     async fn ethtool_stats_get(&self, ifname: &str) -> Result<Vec<u8>> {
-        let family_id = self.state().family_id;
-
-        let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
-        let genl_hdr = GenlMsgHdr::new(EthtoolCmd::StatsGet as u8, ETHTOOL_GENL_VERSION);
-        builder.append(&genl_hdr);
-
-        // Header nest (note: STATS header is attr id 2).
-        let header = builder.nest_start(EthtoolStatsAttr::Header as u16 | NLA_F_NESTED);
-        builder.append_attr_str(EthtoolHeaderAttr::DevName as u16, ifname);
-        builder.nest_end(header);
-
-        // Groups bitset (compact, no-mask): select the 4 standardized
-        // groups (bits 0..=3 set => 0x0F).
-        let groups = builder.nest_start(EthtoolStatsAttr::Groups as u16 | NLA_F_NESTED);
-        builder.append_attr(EthtoolBitsetAttr::Nomask as u16, &[]);
-        builder.append_attr_u32(EthtoolBitsetAttr::Size as u16, 4);
-        builder.append_attr(EthtoolBitsetAttr::Value as u16, &0x0fu32.to_ne_bytes());
-        builder.nest_end(groups);
-
-        let seq = self.socket().next_seq();
-        builder.set_seq(seq);
-        builder.set_pid(self.socket().pid());
-
-        // #134 — dual-mode recv (dump). Register/lock before send.
-        let mut session = self.recv_session_dump(seq).await?;
-        let msg = builder.finish();
-        self.socket().send(&msg).await?;
-
-        self.with_timeout(async {
-            let mut result_payload: Option<Vec<u8>> = None;
-            loop {
-                let data: Vec<u8> = session.recv_with_timeout(self).await?;
-                let mut done = false;
-                for msg_result in MessageIter::new(&data) {
-                    let (header, payload) = msg_result?;
-                    match classify(header, payload, seq) {
-                        Classification::SkipSeq | Classification::Ack => continue,
-                        Classification::Error(e) => return Err(e),
-                        Classification::Done(result) => {
-                            result?;
-                            done = true;
-                            break;
-                        }
-                        Classification::Data { payload } => {
-                            if result_payload.is_none() {
-                                result_payload = Some(payload.to_vec());
-                            }
-                        }
-                    }
-                }
-                if done {
-                    break;
-                }
-            }
-            result_payload.ok_or_else(|| Error::invalid_message("no stats response received"))
+        self.ethtool_doit(EthtoolCmd::StatsGet, EthtoolStatsAttr::Header as u16, ifname, |builder| {
+            // Groups bitset (compact, no-mask): the 4 standardized groups
+            // (bits 0..=3 set => 0x0F).
+            let groups = builder.nest_start(EthtoolStatsAttr::Groups as u16 | NLA_F_NESTED);
+            builder.append_attr(EthtoolBitsetAttr::Nomask as u16, &[]);
+            builder.append_attr_u32(EthtoolBitsetAttr::Size as u16, 4);
+            builder.append_attr(EthtoolBitsetAttr::Value as u16, &0x0fu32.to_ne_bytes());
+            builder.nest_end(groups);
         })
         .await
     }
@@ -1928,69 +1978,16 @@ impl Connection<Ethtool> {
         Ok(())
     }
 
-    /// Send an ethtool GET request (dump style).
+    /// Send an ethtool GET for one device and return its reply payload.
+    ///
+    /// A `doit`. It was a dump (`NLM_F_DUMP`), which ethtool answers for
+    /// every device in the namespace — `ethnl_default_start` drops the
+    /// device a dump names — and this kept the first message: every getter
+    /// built on it (link state, info and modes, features, rings, channels,
+    /// coalesce, …) read the namespace's first device, `lo`, whatever it
+    /// was asked for.
     async fn ethtool_get(&self, cmd: EthtoolCmd, ifname: &str) -> Result<Vec<u8>> {
-        let family_id = self.state().family_id;
-
-        let mut builder = MessageBuilder::new(family_id, NLM_F_REQUEST | NLM_F_DUMP);
-
-        // Append GENL header
-        let genl_hdr = GenlMsgHdr::new(cmd as u8, ETHTOOL_GENL_VERSION);
-        builder.append(&genl_hdr);
-
-        // Append request header with device name
-        let header_token = builder.nest_start(1 | NLA_F_NESTED); // ETHTOOL_A_*_HEADER = 1
-        builder.append_attr_str(EthtoolHeaderAttr::DevName as u16, ifname);
-        builder.nest_end(header_token);
-
-        // Send request
-        let seq = self.socket().next_seq();
-        builder.set_seq(seq);
-        builder.set_pid(self.socket().pid());
-
-        // #134 — dual-mode recv (dump). Register/lock before send.
-        let mut session = self.recv_session_dump(seq).await?;
-        let msg = builder.finish();
-        self.socket().send(&msg).await?;
-
-        // Plan 172 — wrap the recv loop in the Connection-level
-        // operation timeout (Plan 171 default: 30s).
-        self.with_timeout(async {
-            // Receive responses until NLMSG_DONE
-            let mut result_payload: Option<Vec<u8>> = None;
-
-            loop {
-                let data: Vec<u8> = session.recv_with_timeout(self).await?;
-                let mut done = false;
-
-                for msg_result in MessageIter::new(&data) {
-                    let (header, payload) = msg_result?;
-
-                    match classify(header, payload, seq) {
-                        Classification::SkipSeq | Classification::Ack => continue,
-                        Classification::Error(e) => return Err(e),
-                        Classification::Done(result) => {
-                            result?;
-                            done = true;
-                            break;
-                        }
-                        Classification::Data { payload } => {
-                            // Store the first valid response payload
-                            if result_payload.is_none() {
-                                result_payload = Some(payload.to_vec());
-                            }
-                        }
-                    }
-                }
-
-                if done {
-                    break;
-                }
-            }
-
-            result_payload.ok_or_else(|| Error::invalid_message("no response received"))
-        })
-        .await
+        self.ethtool_get_with(cmd, ifname, |_| {}).await
     }
 
     /// Send a parameterized ethtool GET (`doit`, not a dump): the caller
@@ -2003,6 +2000,20 @@ impl Connection<Ethtool> {
         ifname: &str,
         build_attrs: impl FnOnce(&mut MessageBuilder),
     ) -> Result<Vec<u8>> {
+        // ETHTOOL_A_*_HEADER = 1, for every message but STATS.
+        self.ethtool_doit(cmd, 1, ifname, build_attrs).await
+    }
+
+    /// An ethtool GET for one device, as a `doit`, with its header in
+    /// attribute `header` (STATS keeps it in 2), and the single reply's
+    /// payload.
+    async fn ethtool_doit(
+        &self,
+        cmd: EthtoolCmd,
+        header: u16,
+        ifname: &str,
+        build_attrs: impl FnOnce(&mut MessageBuilder),
+    ) -> Result<Vec<u8>> {
         let family_id = self.state().family_id;
 
         // NLM_F_REQUEST only (no DUMP) — this is a do-it with parameters.
@@ -2010,7 +2021,7 @@ impl Connection<Ethtool> {
         let genl_hdr = GenlMsgHdr::new(cmd as u8, ETHTOOL_GENL_VERSION);
         builder.append(&genl_hdr);
 
-        let header_token = builder.nest_start(1 | NLA_F_NESTED); // ETHTOOL_A_*_HEADER = 1
+        let header_token = builder.nest_start(header | NLA_F_NESTED);
         builder.append_attr_str(EthtoolHeaderAttr::DevName as u16, ifname);
         builder.nest_end(header_token);
 
@@ -2069,9 +2080,14 @@ impl Connection<Ethtool> {
         // Append GENL header
         builder.append(&GenlMsgHdr::new(cmd as u8, ETHTOOL_GENL_VERSION));
 
-        // Append request header with device name
+        // Append request header with device name. A set request may
+        // answer with a reply message — FEATURES_SET does, with what it
+        // changed — before its ACK, unless the header asks it not to; an
+        // ACK-only exchange saw that reply as an error, so `set_features`
+        // failed on every device.
         let header_token = builder.nest_start(1 | NLA_F_NESTED); // ETHTOOL_A_*_HEADER = 1
         builder.append_attr_str(EthtoolHeaderAttr::DevName as u16, ifname);
+        builder.append_attr_u32(EthtoolHeaderAttr::Flags as u16, ETHTOOL_FLAG_OMIT_REPLY);
         builder.nest_end(header_token);
 
         // Let caller append additional attributes
@@ -2147,6 +2163,100 @@ fn parse_one_stat(data: &[u8]) -> Option<(u32, u64)> {
         }
     }
     None
+}
+
+/// A PHY_GET reply's attributes, after its GENL header, as a [`PhyInfo`].
+fn phy_from_reply(data: &[u8]) -> PhyInfo {
+    let text = |p: &[u8]| std::str::from_utf8(p).unwrap_or("").trim_end_matches('\0').to_string();
+    let u32_of = |p: &[u8]| p.get(..4).map(|b| u32::from_ne_bytes(b.try_into().unwrap()));
+    let mut phy = PhyInfo::default();
+    let mut upstream_type = None;
+    let mut upstream_index = None;
+    for (attr_type, payload) in AttrIter::new(data) {
+        match attr_type & !NLA_F_NESTED {
+            t if t == EthtoolPhyAttr::Header as u16 => {
+                for (t, p) in AttrIter::new(payload) {
+                    match t {
+                        t if t == EthtoolHeaderAttr::DevIndex as u16 => phy.ifindex = u32_of(p),
+                        t if t == EthtoolHeaderAttr::DevName as u16 => phy.ifname = Some(text(p)),
+                        _ => {}
+                    }
+                }
+            }
+            t if t == EthtoolPhyAttr::Index as u16 => phy.index = u32_of(payload).unwrap_or(0),
+            t if t == EthtoolPhyAttr::Drvname as u16 => phy.driver = Some(text(payload)),
+            t if t == EthtoolPhyAttr::Name as u16 => phy.name = Some(text(payload)),
+            t if t == EthtoolPhyAttr::UpstreamType as u16 => upstream_type = u32_of(payload),
+            t if t == EthtoolPhyAttr::UpstreamIndex as u16 => upstream_index = u32_of(payload),
+            t if t == EthtoolPhyAttr::UpstreamSfpName as u16 => phy.upstream_sfp = Some(text(payload)),
+            t if t == EthtoolPhyAttr::DownstreamSfpName as u16 => {
+                phy.downstream_sfp = Some(text(payload))
+            }
+            _ => {}
+        }
+    }
+    // `PHY_UPSTREAM_MAC`, `PHY_UPSTREAM_PHY`.
+    phy.upstream = upstream_type.map(|t| match t {
+        0 => PhyUpstream::Mac,
+        1 => PhyUpstream::Phy {
+            index: upstream_index.unwrap_or(0),
+        },
+        other => PhyUpstream::Other(other),
+    });
+    phy
+}
+
+#[cfg(test)]
+mod phy_tests {
+    use super::*;
+    use crate::netlink::builder::MessageBuilder;
+
+    /// A media converter's PHY on an SFP module, as the kernel's
+    /// `phy_fill_reply` writes it.
+    #[test]
+    fn a_phy_reply_reads_back() {
+        let mut b = MessageBuilder::new(0, 0);
+        let header = b.nest_start(EthtoolPhyAttr::Header as u16 | NLA_F_NESTED);
+        b.append_attr_u32(EthtoolHeaderAttr::DevIndex as u16, 7);
+        b.append_attr_str(EthtoolHeaderAttr::DevName as u16, "eth0");
+        b.nest_end(header);
+        b.append_attr_u32(EthtoolPhyAttr::Index as u16, 2);
+        b.append_attr_str(EthtoolPhyAttr::Drvname as u16, "Marvell 88X3310");
+        b.append_attr_str(EthtoolPhyAttr::Name as u16, "sfp-eth0:00");
+        b.append_attr_u32(EthtoolPhyAttr::UpstreamType as u16, 1);
+        b.append_attr_u32(EthtoolPhyAttr::UpstreamIndex as u16, 1);
+        b.append_attr_str(EthtoolPhyAttr::UpstreamSfpName as u16, "sfp-eth0");
+        let phy = phy_from_reply(&b.as_bytes()[16..]);
+        assert_eq!(
+            phy,
+            PhyInfo {
+                ifname: Some("eth0".into()),
+                ifindex: Some(7),
+                index: 2,
+                driver: Some("Marvell 88X3310".into()),
+                name: Some("sfp-eth0:00".into()),
+                upstream: Some(PhyUpstream::Phy { index: 1 }),
+                upstream_sfp: Some("sfp-eth0".into()),
+                downstream_sfp: None,
+            }
+        );
+    }
+
+    /// The PHY on the board, attached to the MAC; an upstream kind newer
+    /// than nlink keeps its number.
+    #[test]
+    fn a_phy_on_the_mac_and_an_unknown_upstream() {
+        let mut b = MessageBuilder::new(0, 0);
+        b.append_attr_u32(EthtoolPhyAttr::Index as u16, 1);
+        b.append_attr_u32(EthtoolPhyAttr::UpstreamType as u16, 0);
+        b.append_attr_str(EthtoolPhyAttr::DownstreamSfpName as u16, "sfp-eth1");
+        let phy = phy_from_reply(&b.as_bytes()[16..]);
+        assert_eq!(phy.upstream, Some(PhyUpstream::Mac));
+        assert_eq!(phy.downstream_sfp.as_deref(), Some("sfp-eth1"));
+        let mut b = MessageBuilder::new(0, 0);
+        b.append_attr_u32(EthtoolPhyAttr::UpstreamType as u16, 9);
+        assert_eq!(phy_from_reply(&b.as_bytes()[16..]).upstream, Some(PhyUpstream::Other(9)));
+    }
 }
 
 #[cfg(test)]

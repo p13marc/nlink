@@ -50,7 +50,7 @@ pub use connection::{RawMessage, Transaction};
 pub use events::{GenInfo, NftablesEvent, NftablesGroup, SetElementsEvent, NFNLGRP_NFTABLES};
 pub use resync::{nftables_snapshot, BorrowedResyncStream, OwnedResyncStream};
 pub use expr::*;
-pub use object::{Object, ObjectConfig, ObjectInfo, ObjectState, ObjectType};
+pub use object::{CtHelperObject, Object, ObjectConfig, ObjectInfo, ObjectState, ObjectType};
 pub use types::*;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
@@ -94,9 +94,22 @@ pub const NFT_MSG_DELSET: u8 = 11;
 pub const NFT_MSG_NEWSETELEM: u8 = 12;
 pub const NFT_MSG_GETSETELEM: u8 = 13;
 pub const NFT_MSG_DELSETELEM: u8 = 14;
+/// Delete a table, and take one that is already gone as deleted
+/// (`NFT_MSG_DESTROYTABLE`, kernel 6.3+, as the rest of the family).
+pub const NFT_MSG_DESTROYTABLE: u8 = 26;
+/// `NFT_MSG_DESTROYCHAIN`.
+pub const NFT_MSG_DESTROYCHAIN: u8 = 27;
+/// `NFT_MSG_DESTROYRULE`.
+pub const NFT_MSG_DESTROYRULE: u8 = 28;
+/// `NFT_MSG_DESTROYSET`.
+pub const NFT_MSG_DESTROYSET: u8 = 29;
 /// Delete set elements, and take one that is already gone as deleted
 /// (`NFT_MSG_DESTROYSETELEM`, kernel 6.3+).
 pub const NFT_MSG_DESTROYSETELEM: u8 = 30;
+/// `NFT_MSG_DESTROYOBJ`.
+pub const NFT_MSG_DESTROYOBJ: u8 = 31;
+/// `NFT_MSG_DESTROYFLOWTABLE`.
+pub const NFT_MSG_DESTROYFLOWTABLE: u8 = 32;
 pub const NFT_MSG_NEWGEN: u8 = 15;
 pub const NFT_MSG_GETGEN: u8 = 16;
 pub const NFT_MSG_NEWOBJ: u8 = 18;
@@ -257,6 +270,17 @@ pub const NFTA_PAYLOAD_DREG: u16 = 1;
 pub const NFTA_PAYLOAD_BASE: u16 = 2;
 pub const NFTA_PAYLOAD_OFFSET: u16 = 3;
 pub const NFTA_PAYLOAD_LEN: u16 = 4;
+/// `NFTA_PAYLOAD_SREG` — the register a payload write takes its value from.
+pub const NFTA_PAYLOAD_SREG: u16 = 5;
+/// `NFTA_PAYLOAD_CSUM_TYPE` — the checksum a payload write updates.
+pub const NFTA_PAYLOAD_CSUM_TYPE: u16 = 6;
+/// `NFTA_PAYLOAD_CSUM_OFFSET` — where that checksum is in the header.
+pub const NFTA_PAYLOAD_CSUM_OFFSET: u16 = 7;
+/// `NFTA_PAYLOAD_CSUM_FLAGS` — `NFT_PAYLOAD_L4CSUM_PSEUDOHDR`.
+pub const NFTA_PAYLOAD_CSUM_FLAGS: u16 = 8;
+/// `NFT_PAYLOAD_L4CSUM_PSEUDOHDR` — the write changes the transport
+/// checksum's pseudo-header (an address), so that checksum is updated too.
+pub const NFT_PAYLOAD_L4CSUM_PSEUDOHDR: u32 = 1;
 
 // Immediate
 pub const NFTA_IMMEDIATE_DREG: u16 = 1;
@@ -413,6 +437,133 @@ pub const NFTA_LOG_SNAPLEN: u16 = 3;
 pub const NFTA_LOG_QTHRESHOLD: u16 = 4;
 /// `NFTA_LOG_FLAGS` — what a syslog `log` adds: TCP sequence, options, ….
 pub const NFTA_LOG_FLAGS: u16 = 6;
+/// `NF_LOG_TCPSEQ` (`linux/netfilter/nf_log.h`).
+pub const NF_LOG_TCPSEQ: u32 = 0x01;
+/// `NF_LOG_TCPOPT`.
+pub const NF_LOG_TCPOPT: u32 = 0x02;
+/// `NF_LOG_IPOPT`.
+pub const NF_LOG_IPOPT: u32 = 0x04;
+/// `NF_LOG_UID`.
+pub const NF_LOG_UID: u32 = 0x08;
+/// `NF_LOG_MACDECODE`.
+pub const NF_LOG_MACDECODE: u32 = 0x20;
+/// `NF_LOG_MASK`: the flags a `log` takes.
+pub const NF_LOG_MASK: u32 = 0x2f;
+
+// Queue — `enum nft_queue_attributes`.
+/// `NFTA_QUEUE_NUM` — the first queue (be16).
+pub const NFTA_QUEUE_NUM: u16 = 1;
+/// `NFTA_QUEUE_TOTAL` — how many queues from it (be16).
+pub const NFTA_QUEUE_TOTAL: u16 = 2;
+/// `NFTA_QUEUE_FLAGS` — `NFT_QUEUE_FLAG_*` (be16).
+pub const NFTA_QUEUE_FLAGS: u16 = 3;
+/// `NFTA_QUEUE_SREG_QNUM` — the register holding the queue number.
+pub const NFTA_QUEUE_SREG_QNUM: u16 = 4;
+/// `NFT_QUEUE_FLAG_BYPASS` — accept the packet when no program listens.
+pub const NFT_QUEUE_FLAG_BYPASS: u16 = 0x01;
+/// `NFT_QUEUE_FLAG_CPU_FANOUT` — pick the queue by CPU, not by hash.
+pub const NFT_QUEUE_FLAG_CPU_FANOUT: u16 = 0x02;
+/// `NFT_QUEUE_FLAG_MASK`.
+pub const NFT_QUEUE_FLAG_MASK: u16 = 0x03;
+
+// Numgen — `enum nft_ng_attributes`.
+/// `NFTA_NG_DREG`.
+pub const NFTA_NG_DREG: u16 = 1;
+/// `NFTA_NG_MODULUS`.
+pub const NFTA_NG_MODULUS: u16 = 2;
+/// `NFTA_NG_TYPE` — `enum nft_ng_types`.
+pub const NFTA_NG_TYPE: u16 = 3;
+/// `NFTA_NG_OFFSET`.
+pub const NFTA_NG_OFFSET: u16 = 4;
+
+// Hash — `enum nft_hash_attributes`.
+/// `NFTA_HASH_SREG`.
+pub const NFTA_HASH_SREG: u16 = 1;
+/// `NFTA_HASH_DREG`.
+pub const NFTA_HASH_DREG: u16 = 2;
+/// `NFTA_HASH_LEN`.
+pub const NFTA_HASH_LEN: u16 = 3;
+/// `NFTA_HASH_MODULUS`.
+pub const NFTA_HASH_MODULUS: u16 = 4;
+/// `NFTA_HASH_SEED` — without one, the kernel picks a seed and does not
+/// report it.
+pub const NFTA_HASH_SEED: u16 = 5;
+/// `NFTA_HASH_OFFSET`.
+pub const NFTA_HASH_OFFSET: u16 = 6;
+/// `NFTA_HASH_TYPE` — `enum nft_hash_types`.
+pub const NFTA_HASH_TYPE: u16 = 7;
+
+// Ct helper object — `enum nft_ct_helper_attributes`.
+/// `NFTA_CT_HELPER_NAME` — the conntrack helper (`ftp`, `tftp`, …).
+pub const NFTA_CT_HELPER_NAME: u16 = 1;
+/// `NFTA_CT_HELPER_L3PROTO` — `NFPROTO_*` (be16).
+pub const NFTA_CT_HELPER_L3PROTO: u16 = 2;
+/// `NFTA_CT_HELPER_L4PROTO` — `IPPROTO_*` (u8).
+pub const NFTA_CT_HELPER_L4PROTO: u16 = 3;
+
+// Tproxy — `enum nft_tproxy_attributes`.
+/// `NFTA_TPROXY_FAMILY` — `NFPROTO_IPV4`, `NFPROTO_IPV6`, or 0 in an inet
+/// table for either.
+pub const NFTA_TPROXY_FAMILY: u16 = 1;
+/// `NFTA_TPROXY_REG_ADDR`.
+pub const NFTA_TPROXY_REG_ADDR: u16 = 2;
+/// `NFTA_TPROXY_REG_PORT`.
+pub const NFTA_TPROXY_REG_PORT: u16 = 3;
+
+// Socket — `enum nft_socket_attributes`.
+/// `NFTA_SOCKET_KEY` — `enum nft_socket_keys`.
+pub const NFTA_SOCKET_KEY: u16 = 1;
+/// `NFTA_SOCKET_DREG`.
+pub const NFTA_SOCKET_DREG: u16 = 2;
+/// `NFTA_SOCKET_LEVEL` — a `cgroupv2` key's ancestor level.
+pub const NFTA_SOCKET_LEVEL: u16 = 3;
+
+// Osf — `enum nft_osf_attributes`.
+/// `NFTA_OSF_DREG`.
+pub const NFTA_OSF_DREG: u16 = 1;
+/// `NFTA_OSF_TTL` — `NF_OSF_TTL_*` (u8).
+pub const NFTA_OSF_TTL: u16 = 2;
+/// `NFTA_OSF_FLAGS` — `NFT_OSF_F_*` (be32): a request may carry only
+/// [`NFT_OSF_F_VERSION`]; the dump always has it, 0 included.
+pub const NFTA_OSF_FLAGS: u16 = 3;
+/// `NFT_OSF_F_VERSION` — the name is `genre:version`.
+pub const NFT_OSF_F_VERSION: u32 = 1;
+/// `NFT_OSF_MAXGENRELEN` — the register an `osf` writes, NUL included.
+pub const NFT_OSF_MAXGENRELEN: usize = 16;
+
+// Secmark object — `enum nft_secmark_attributes`.
+/// `NFTA_SECMARK_CTX` — the security context (string).
+pub const NFTA_SECMARK_CTX: u16 = 1;
+
+// Synproxy — `enum nft_synproxy_attributes`.
+/// `NFTA_SYNPROXY_MSS` (be16).
+pub const NFTA_SYNPROXY_MSS: u16 = 1;
+/// `NFTA_SYNPROXY_WSCALE` (u8).
+pub const NFTA_SYNPROXY_WSCALE: u16 = 2;
+/// `NFTA_SYNPROXY_FLAGS` — `NF_SYNPROXY_OPT_*` (be32).
+pub const NFTA_SYNPROXY_FLAGS: u16 = 3;
+/// `NF_SYNPROXY_OPT_MSS` (`linux/netfilter/nf_synproxy.h`).
+pub const NF_SYNPROXY_OPT_MSS: u32 = 0x01;
+/// `NF_SYNPROXY_OPT_WSCALE`.
+pub const NF_SYNPROXY_OPT_WSCALE: u32 = 0x02;
+/// `NF_SYNPROXY_OPT_SACK_PERM`.
+pub const NF_SYNPROXY_OPT_SACK_PERM: u32 = 0x04;
+/// `NF_SYNPROXY_OPT_TIMESTAMP`.
+pub const NF_SYNPROXY_OPT_TIMESTAMP: u32 = 0x08;
+
+// Dup — `enum nft_dup_attributes`.
+/// `NFTA_DUP_SREG_ADDR` — the register holding the gateway address.
+pub const NFTA_DUP_SREG_ADDR: u16 = 1;
+/// `NFTA_DUP_SREG_DEV` — the register holding the output ifindex.
+pub const NFTA_DUP_SREG_DEV: u16 = 2;
+
+// Fwd — `enum nft_fwd_attributes`.
+/// `NFTA_FWD_SREG_DEV` — the register holding the output ifindex.
+pub const NFTA_FWD_SREG_DEV: u16 = 1;
+/// `NFTA_FWD_SREG_ADDR` — the register holding the next hop.
+pub const NFTA_FWD_SREG_ADDR: u16 = 2;
+/// `NFTA_FWD_NFPROTO` — the next hop's family (`NFPROTO_IPV4`/`_IPV6`).
+pub const NFTA_FWD_NFPROTO: u16 = 3;
 
 // Connlimit — `enum nft_connlimit_attributes`.
 /// `NFTA_CONNLIMIT_COUNT` — the connection count.
@@ -493,6 +644,11 @@ pub const NFTA_SET_GC_INTERVAL: u16 = 12;
 /// `NFTA_SET_OBJ_TYPE` — an object map's object type (`NFT_OBJECT_*`).
 pub const NFTA_SET_OBJ_TYPE: u16 = 15;
 pub const NFTA_SET_HANDLE: u16 = 16;
+/// `NFTA_SET_EXPR` — the one statement every element gets (#703).
+pub const NFTA_SET_EXPR: u16 = 17;
+/// `NFTA_SET_EXPRESSIONS` — several, a list of `NFTA_LIST_ELEM`; taken
+/// only with [`NFT_SET_EXPR`], which the set keeps in its flags.
+pub const NFTA_SET_EXPRESSIONS: u16 = 18;
 
 // Set element attributes
 pub const NFTA_SET_ELEM_LIST_TABLE: u16 = 1;
@@ -515,6 +671,10 @@ pub const NFTA_SET_ELEM_OBJREF: u16 = 9;
 /// `NFTA_SET_ELEM_KEY_END` — the inclusive end of a range, in the same
 /// element: how an interval set of concatenated keys stores one.
 pub const NFTA_SET_ELEM_KEY_END: u16 = 10;
+/// `NFTA_SET_ELEM_EXPR` — an element's one statement, with its live state.
+pub const NFTA_SET_ELEM_EXPR: u16 = 7;
+/// `NFTA_SET_ELEM_EXPRESSIONS` — several, a list of `NFTA_LIST_ELEM`.
+pub const NFTA_SET_ELEM_EXPRESSIONS: u16 = 11;
 /// `NFT_SET_ELEM_INTERVAL_END` — an interval set's range-end element.
 pub const NFT_SET_ELEM_INTERVAL_END: u32 = 1;
 /// `NFT_SET_ELEM_CATCHALL` — the catch-all (`*`) element.
@@ -538,16 +698,20 @@ pub const NFTA_DYNSET_SREG_DATA: u16 = 5;
 /// dumped, 0 when the expression has none; refused (`EOPNOTSUPP`) in a
 /// request for a set without `NFT_SET_TIMEOUT`.
 pub const NFTA_DYNSET_TIMEOUT: u16 = 6;
-/// `NFTA_DYNSET_EXPR` — one per-element expression (not modelled).
+/// `NFTA_DYNSET_EXPR` — one per-element statement, dumped only when the
+/// set declares none of its own.
 pub const NFTA_DYNSET_EXPR: u16 = 7;
 /// `NFTA_DYNSET_FLAGS` — always dumped.
 pub const NFTA_DYNSET_FLAGS: u16 = 9;
-/// `NFTA_DYNSET_EXPRESSIONS` — several per-element expressions (not
-/// modelled).
+/// `NFTA_DYNSET_EXPRESSIONS` — several per-element statements, a list of
+/// `NFTA_LIST_ELEM`; taken only with [`NFT_DYNSET_F_EXPR`].
 pub const NFTA_DYNSET_EXPRESSIONS: u16 = 10;
 /// `NFT_DYNSET_F_INV` — the rule matches when the update *fails* (a full
 /// set), instead of when it succeeds.
 pub const NFT_DYNSET_F_INV: u32 = 1;
+/// `NFT_DYNSET_F_EXPR` — the request carries `NFTA_DYNSET_EXPRESSIONS`.
+/// Never dumped.
+pub const NFT_DYNSET_F_EXPR: u32 = 2;
 
 // Set flags
 pub const NFT_SET_ANONYMOUS: u32 = 0x1;
@@ -631,7 +795,13 @@ mod table_flag_tests {
         assert_eq!(NFT_MSG_NEWFLOWTABLE, 22);
         assert_eq!(NFT_MSG_GETFLOWTABLE, 23);
         assert_eq!(NFT_MSG_DELFLOWTABLE, 24);
+        assert_eq!(NFT_MSG_DESTROYTABLE, 26);
+        assert_eq!(NFT_MSG_DESTROYCHAIN, 27);
+        assert_eq!(NFT_MSG_DESTROYRULE, 28);
+        assert_eq!(NFT_MSG_DESTROYSET, 29);
         assert_eq!(NFT_MSG_DESTROYSETELEM, 30);
+        assert_eq!(NFT_MSG_DESTROYOBJ, 31);
+        assert_eq!(NFT_MSG_DESTROYFLOWTABLE, 32);
         assert_eq!(NFT_FLOWTABLE_HW_OFFLOAD, 0x1);
         assert_eq!(NFT_FLOWTABLE_COUNTER, 0x2);
         assert_eq!(NF_NETDEV_INGRESS, 0);

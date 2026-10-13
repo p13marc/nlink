@@ -117,6 +117,7 @@ ExthdrOp = NFT_EXTHDR_OP
     TcpOpt -> TCPOPT
 DynsetOp = NFT_DYNSET_OP
 ObjectType = NFT_OBJECT
+SetPolicy = NFT_SET_POL
 MetaKey = NFT_META
     IifName -> IIFNAME
     OifName -> OIFNAME
@@ -175,6 +176,16 @@ IcmpxCode = NFT_REJECT_ICMPX
 RtKey = NFT_RT
     TcpMss -> TCPMSS
 ByteorderOp = NFT_BYTEORDER
+LogLevel = NFT_LOGLEVEL
+PayloadCsum = NFT_PAYLOAD_CSUM
+NumgenKind = NFT_NG
+    Incremental -> INCREMENTAL
+HashKind = NFT_HASH
+SocketKey = NFT_SOCKET
+OsfTtl = NF_OSF_TTL
+    Exact -> TRUE
+    Loose -> LESS
+    Skip -> NOCHECK
 
 # -------------------------------------------------------------------- ethtool
 EthtoolCmd = ETHTOOL_MSG
@@ -202,6 +213,8 @@ EthtoolModuleEepromAttr = ETHTOOL_A_MODULE_EEPROM
 EthtoolPauseAttr = ETHTOOL_A_PAUSE
     StatsRxSrc -> STATS_SRC
 EthtoolRingsAttr = ETHTOOL_A_RINGS
+EthtoolTsinfoAttr = ETHTOOL_A_TSINFO
+EthtoolPhyAttr = ETHTOOL_A_PHY
 EthtoolRssAttr = ETHTOOL_A_RSS
 EthtoolStatsAttr = ETHTOOL_A_STATS
 EthtoolStatsGrpAttr = ETHTOOL_A_STATS_GRP
@@ -273,6 +286,12 @@ NetShaperHandleAttr = NET_SHAPER_A_HANDLE
 NetShaperCmd = NET_SHAPER_CMD
 NetShaperMetric = NET_SHAPER_METRIC
 NetShaperScope = NET_SHAPER_SCOPE
+NetdevCmd = NETDEV_CMD
+NetdevDevAttr = NETDEV_A_DEV
+NetdevQueueAttr = NETDEV_A_QUEUE
+NetdevNapiAttr = NETDEV_A_NAPI
+NetdevQstatsAttr = NETDEV_A_QSTATS
+NetdevQueueType = NETDEV_QUEUE_TYPE
 OvpnAttr = OVPN_A
 OvpnPeerAttr = OVPN_A_PEER
 OvpnKeyconfAttr = OVPN_A_KEYCONF

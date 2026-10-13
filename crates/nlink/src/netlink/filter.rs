@@ -38,11 +38,14 @@
 //! # }
 //! ```
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+};
 
 use super::{
     Connection,
-    action::ActionList,
+    action::{ActionList, Estimator},
     builder::MessageBuilder,
     connection::{ack_request, create_request, replace_request},
     error::{Error, Result},
@@ -131,6 +134,72 @@ pub trait FilterConfig: Send + Sync {
     /// relative to operator-installed rules (#201).
     fn priority(&self) -> Option<FilterPriority> {
         None
+    }
+
+    /// The handle to install the filter under when the caller gives none:
+    /// one the kind derives from what it matches, as tc(8) does. A route
+    /// filter's is its key, and the kernel refuses it without one (#825).
+    ///
+    /// Called after [`resolve_devices`](Self::resolve_devices). `None`
+    /// leaves the kernel to choose. Defaulted so external impls stay
+    /// source-compatible.
+    fn default_handle(&self) -> Option<TcHandle> {
+        None
+    }
+
+    /// The devices the filter names rather than indexes — a
+    /// [`MirredAction::to_dev`](super::action::MirredAction::to_dev)
+    /// target, a [`RouteFilter::from_if`] — which the connection that
+    /// installs it resolves in its own namespace (#645). None by default.
+    fn device_names(&self) -> Vec<&str> {
+        Vec::new()
+    }
+
+    /// Take the ifindex of each name [`device_names`](Self::device_names)
+    /// gave from `ifindexes`; an error for one it does not have.
+    fn resolve_devices(&mut self, ifindexes: &HashMap<String, u32>) -> Result<()> {
+        let _ = ifindexes;
+        Ok(())
+    }
+
+    /// The rate estimator for the filter's actions, sent as `TCA_RATE`
+    /// (#792): its [`ActionList::with_estimator`]. None by default.
+    fn estimator(&self) -> Option<Estimator> {
+        None
+    }
+}
+
+/// [`FilterConfig::device_names`], [`FilterConfig::resolve_devices`] and
+/// [`FilterConfig::estimator`] for a filter that names devices only in its
+/// `actions`.
+macro_rules! from_actions {
+    () => {
+        fn estimator(&self) -> Option<Estimator> {
+            self.actions.as_ref().and_then(ActionList::estimator)
+        }
+
+        fn device_names(&self) -> Vec<&str> {
+            self.actions
+                .as_ref()
+                .map(ActionList::device_names)
+                .unwrap_or_default()
+        }
+
+        fn resolve_devices(&mut self, ifindexes: &HashMap<String, u32>) -> Result<()> {
+            match &mut self.actions {
+                Some(actions) => actions.resolve_devices(ifindexes),
+                None => Ok(()),
+            }
+        }
+    };
+}
+
+/// The filter's [`FilterConfig::estimator`] as `TCA_RATE`, which the kernel
+/// hands to every action the filter creates (#792).
+fn write_estimator(builder: &mut MessageBuilder, config: &impl FilterConfig) {
+    use zerocopy::IntoBytes;
+    if let Some(estimator) = config.estimator() {
+        builder.append_attr(TcaAttr::Rate as u16, estimator.parms().as_bytes());
     }
 }
 
@@ -267,11 +336,8 @@ impl U32Filter {
 
     /// Match source IPv4 address with prefix length.
     pub fn match_src_ipv4(mut self, addr: Ipv4Addr, prefix_len: u8) -> Self {
-        let mask = if prefix_len >= 32 {
-            0xFFFFFFFF
-        } else {
-            !((1u32 << (32 - prefix_len)) - 1)
-        };
+        // A /0 is mask 0, as tc makes it (#831): `1 << 32` overflowed.
+        let mask = u32::MAX.checked_shl(32 - u32::from(prefix_len.min(32))).unwrap_or(0);
         let val = u32::from_be_bytes(addr.octets());
         // IP source address is at offset 12 in IP header
         self.keys.push(u32_mod::pack_key32(val, mask, 12));
@@ -280,11 +346,7 @@ impl U32Filter {
 
     /// Match destination IPv4 address with prefix length.
     pub fn match_dst_ipv4(mut self, addr: Ipv4Addr, prefix_len: u8) -> Self {
-        let mask = if prefix_len >= 32 {
-            0xFFFFFFFF
-        } else {
-            !((1u32 << (32 - prefix_len)) - 1)
-        };
+        let mask = u32::MAX.checked_shl(32 - u32::from(prefix_len.min(32))).unwrap_or(0);
         let val = u32::from_be_bytes(addr.octets());
         // IP destination address is at offset 16 in IP header
         self.keys.push(u32_mod::pack_key32(val, mask, 16));
@@ -542,7 +604,24 @@ impl U32Filter {
                             f.keys.push(triple.key);
                             i = triple.consumed;
                         }
-                        "ip" | "tcp" | "udp" => {
+                        // `match mark VAL MASK`, as tc(8) writes it.
+                        "mark" => {
+                            let val = need_value(params, i + 1, "u32", "match mark")?;
+                            let mask = need_value(params, i + 2, "u32", "match mark VAL")?;
+                            // Both in any base, as tc reads them (#831).
+                            let (val, mask) = (
+                                parse_u32_any("u32", "mark", val)?,
+                                parse_u32_any("u32", "mark mask", mask)?,
+                            );
+                            if val & mask != val {
+                                return Err(Error::invalid_message(format!(
+                                    "u32: mark {val:#x} has bits outside its mask {mask:#x}"
+                                )));
+                            }
+                            f = f.match_mark(val, mask);
+                            i += 4;
+                        }
+                        "ip" | "tcp" | "udp" | "ip6" | "ether" | "icmp" => {
                             let consumed;
                             (f, consumed) = apply_named_match(f, params, i, width)?;
                             i += consumed;
@@ -550,7 +629,7 @@ impl U32Filter {
                         other => {
                             return Err(Error::invalid_message(format!(
                                 "u32: unknown match width `{other}` \
-                                 (expected u32, u16, u8, ip, tcp, or udp)"
+                                 (expected u32, u16, u8, mark, ip, ip6, tcp, udp, icmp or ether)"
                             )));
                         }
                     }
@@ -706,12 +785,106 @@ impl U32Filter {
                 }
                 other => {
                     return Err(Error::invalid_message(format!(
-                        "u32: unknown token `{other}` (supports: match u32|u16|u8 VAL MASK at OFFSET, match ip|tcp|udp ..., classid/flowid, chain, divisor, ht, link, hashkey, skip_hw, skip_sw)"
+                        "u32: unknown token `{other}` (supports: match u32|u16|u8 VAL MASK at OFFSET, match mark VAL MASK, match ip|tcp|udp ..., classid/flowid, chain, divisor, ht, link, offset, hashkey, skip_hw, skip_sw)"
                     )));
                 }
             }
         }
+        // Keys at the same offset are one key, as tc's pack_key() makes them.
+        f.keys = merge_u32_keys(std::mem::take(&mut f.keys))?;
         Ok(f)
+    }
+
+    /// The filter as the tokens [`parse_params`](Self::parse_params) reads,
+    /// its inverse (#645): each key as a raw `match u32`, which is what a
+    /// named match (`match ip src …`) packs into.
+    pub fn to_params(&self) -> Result<Vec<String>> {
+        let unsigned = |what: &str, v: i32| {
+            u32::try_from(v).map_err(|_| {
+                Error::not_supported(format!("u32: a negative {what} ({v}) has no token"))
+            })
+        };
+        let mut out: Vec<String> = Vec::new();
+        for k in &self.keys {
+            let at = match k.offmask {
+                0 => unsigned("offset", k.off)?.to_string(),
+                -1 => format!("nexthdr+{}", unsigned("offset", k.off)?),
+                m => {
+                    return Err(Error::not_supported(format!(
+                        "u32: a key's offset mask {m:#x} has no token"
+                    )));
+                }
+            };
+            out.extend([
+                "match".to_string(),
+                "u32".to_string(),
+                format!("0x{:08x}", u32::from_be(k.val)),
+                format!("0x{:08x}", u32::from_be(k.mask)),
+                "at".to_string(),
+                at,
+            ]);
+        }
+        if let Some((val, mask)) = self.mark {
+            out.extend([
+                "match".to_string(),
+                "mark".to_string(),
+                format!("0x{val:x}"),
+                format!("0x{mask:x}"),
+            ]);
+        }
+        if let Some(c) = self.classid {
+            out.extend(["classid".to_string(), classid_param(c)]);
+        }
+        if let Some(c) = self.chain {
+            out.extend(["chain".to_string(), c.to_string()]);
+        }
+        if let Some(d) = self.divisor {
+            out.extend(["divisor".to_string(), d.to_string()]);
+        }
+        if let Some(h) = self.ht {
+            out.extend(["ht".to_string(), format!("0x{h:08x}")]);
+        }
+        if let Some(h) = self.link {
+            out.extend(["link".to_string(), format!("0x{h:08x}")]);
+        }
+        let o = self.offset;
+        let known = u32_mod::TC_U32_OFFSET | u32_mod::TC_U32_VAROFFSET | u32_mod::TC_U32_EAT;
+        if o.flags & !known != 0 {
+            return Err(Error::not_supported(format!(
+                "u32: offset flags {:#x} have no token",
+                o.flags
+            )));
+        }
+        if o.flags != 0 {
+            out.push("offset".to_string());
+            if o.flags & u32_mod::TC_U32_OFFSET != 0 {
+                out.extend(["plus".to_string(), o.plus.to_string()]);
+            }
+            if o.flags & u32_mod::TC_U32_VAROFFSET != 0 {
+                out.extend([
+                    "at".to_string(),
+                    unsigned("offset at", i32::from(o.at))?.to_string(),
+                    "mask".to_string(),
+                    format!("0x{:x}", o.mask),
+                    "shift".to_string(),
+                    o.shift.to_string(),
+                ]);
+            }
+            if o.flags & u32_mod::TC_U32_EAT != 0 {
+                out.push("eat".to_string());
+            }
+        }
+        if let Some((mask, at)) = self.hashkey {
+            out.extend([
+                "hashkey".to_string(),
+                "mask".to_string(),
+                format!("0x{mask:08x}"),
+                "at".to_string(),
+                unsigned("hashkey offset", i32::from(at))?.to_string(),
+            ]);
+        }
+        out.extend(skip_flags_params("u32", self.flags)?);
+        Ok(out)
     }
 
     /// Build the filter configuration.
@@ -776,10 +949,12 @@ impl FilterConfig for U32Filter {
             builder.append_attr(u32_mod::TCA_U32_MARK, mark.as_bytes());
         }
 
-        // Build and add selector if we have keys or a hashkey
-        // configured. Divisor-only filters (which create the hash
-        // table itself) emit just TCA_U32_DIVISOR — no selector.
-        if !self.keys.is_empty() || self.hashkey.is_some() || self.offset.flags != 0 {
+        // Build and add selector if we have keys, a hashkey or a mark
+        // configured: tc sends one for every `match`, and the kernel
+        // refuses a mark-only filter without it (#825). Divisor-only
+        // filters (which create the hash table itself) emit just
+        // TCA_U32_DIVISOR — no selector.
+        if !self.keys.is_empty() || self.hashkey.is_some() || self.offset.flags != 0 || self.mark.is_some() {
             let mut sel = u32_mod::TcU32Sel::new();
             sel.set_terminal();
             for key in &self.keys {
@@ -810,6 +985,28 @@ impl FilterConfig for U32Filter {
 
 /// Borrow `params[i + 1]`, returning a kind-prefixed
 /// `InvalidMessage` if the value slot is missing.
+/// A filter's classid as its token.
+fn classid_param(classid: u32) -> String {
+    TcHandle::from_raw(classid).to_string()
+}
+
+/// The `skip_hw`/`skip_sw` tokens of a filter's `TCA_CLS_FLAGS_*`, or an
+/// error for another flag.
+fn skip_flags_params(kind: &str, flags: u32) -> Result<Vec<String>> {
+    use super::types::tc::filter::flower::{TCA_CLS_FLAGS_SKIP_HW, TCA_CLS_FLAGS_SKIP_SW};
+    if flags & !(TCA_CLS_FLAGS_SKIP_HW | TCA_CLS_FLAGS_SKIP_SW) != 0 {
+        return Err(Error::not_supported(format!("{kind}: flags {flags:#x} have no token")));
+    }
+    let mut out = Vec::new();
+    if flags & TCA_CLS_FLAGS_SKIP_HW != 0 {
+        out.push("skip_hw".to_string());
+    }
+    if flags & TCA_CLS_FLAGS_SKIP_SW != 0 {
+        out.push("skip_sw".to_string());
+    }
+    Ok(out)
+}
+
 fn need_value<'a>(params: &[&'a str], i: usize, kind: &str, key: &str) -> Result<&'a str> {
     params
         .get(i + 1)
@@ -837,18 +1034,27 @@ fn parse_hex_u32(kind: &str, key: &str, s: &str) -> Result<u32> {
     })
 }
 
-/// Parse an offset (decimal first, hex if prefixed). Negative offsets
-/// are valid in the kernel API (signed) but rare in user input;
-/// reject them at the parser level for now.
+/// Parse an offset as tc(8)'s `get_integer(.., 0)` does: a sign, then
+/// decimal, `0x` hex or `0` octal. The kernel's offsets are signed: a
+/// negative one reaches back before the network header (#835).
 fn parse_offset(kind: &str, s: &str) -> Result<i32> {
-    let v: u32 = if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        u32::from_str_radix(rest, 16)
-            .map_err(|_| Error::invalid_message(format!("{kind}: invalid offset `{s}`")))?
-    } else {
-        s.parse::<u32>()
-            .map_err(|_| Error::invalid_message(format!("{kind}: invalid offset `{s}`")))?
+    let invalid = || Error::invalid_message(format!("{kind}: invalid offset `{s}`"));
+    let (negative, digits) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
     };
-    Ok(v as i32)
+    if digits.starts_with(['+', '-']) {
+        return Err(invalid());
+    }
+    let magnitude = if let Some(hex) = digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")) {
+        i64::from_str_radix(hex, 16)
+    } else if digits.len() > 1 && digits.starts_with('0') {
+        i64::from_str_radix(&digits[1..], 8)
+    } else {
+        digits.parse::<i64>()
+    }
+    .map_err(|_| invalid())?;
+    i32::try_from(if negative { -magnitude } else { magnitude }).map_err(|_| invalid())
 }
 
 /// Result of parsing one `match WIDTH VAL MASK at OFFSET` triple.
@@ -879,15 +1085,20 @@ fn parse_u32_raw_match(params: &[&str], i: usize, width: &str) -> Result<U32Matc
             "u32: expected `at` between MASK and OFFSET, got `{at_kw}`"
         )));
     }
+    // `at nexthdr+N`: relative to the next header, as tc(8) writes it.
+    let (off_s, nexthdr) = match off_s.strip_prefix("nexthdr+") {
+        Some(rest) => (rest, true),
+        None => (off_s, false),
+    };
     let offset = parse_offset("u32", off_s)?;
-    let key = match width {
+    let mut key = match width {
         "u32" => {
-            let val = parse_hex_u32("u32", "VAL", val_s)?;
+            let val = parse_u32_any("u32", "VAL", val_s)?;
             let mask = parse_hex_u32("u32", "MASK", mask_s)?;
             u32_mod::pack_key32(val, mask, offset)
         }
         "u16" => {
-            let val = parse_hex_u32("u32", "VAL", val_s)?;
+            let val = parse_u32_any("u32", "VAL", val_s)?;
             let mask = parse_hex_u32("u32", "MASK", mask_s)?;
             if val > 0xFFFF || mask > 0xFFFF {
                 return Err(Error::invalid_message(format!(
@@ -897,7 +1108,7 @@ fn parse_u32_raw_match(params: &[&str], i: usize, width: &str) -> Result<U32Matc
             u32_mod::pack_key16(val as u16, mask as u16, offset)
         }
         "u8" => {
-            let val = parse_hex_u32("u32", "VAL", val_s)?;
+            let val = parse_u32_any("u32", "VAL", val_s)?;
             let mask = parse_hex_u32("u32", "MASK", mask_s)?;
             if val > 0xFF || mask > 0xFF {
                 return Err(Error::invalid_message(format!(
@@ -913,18 +1124,20 @@ fn parse_u32_raw_match(params: &[&str], i: usize, width: &str) -> Result<U32Matc
             )));
         }
     };
+    if nexthdr {
+        key.offmask = -1;
+    }
     Ok(U32MatchTriple {
         key,
         consumed: i + 6,
     })
 }
 
-/// Apply a named-match shortcut (`match ip src ADDR/PREFIX`,
-/// `match tcp dport PORT`, etc.) by routing through the existing
-/// typed setters. Returns the mutated filter; caller advances `i` by
-/// 4 (the shortcut is always exactly `match LAYER FIELD VALUE`).
-/// Apply `match ip|tcp|udp FIELD VALUE [MASK]`; returns the filter and
-/// the number of tokens consumed.
+/// Apply `match ip|ip6|tcp|udp|icmp|ether FIELD VALUE [MASK]`, as tc(8)'s
+/// `parse_ip`, `parse_ip6`, `parse_icmp` and `parse_ether` do; returns the
+/// filter and the number of tokens consumed. Values read in any base and
+/// masks in hex, as tc reads them; a mask tc requires is optional here and
+/// defaults to all of the field.
 fn apply_named_match(
     filter: U32Filter,
     params: &[&str],
@@ -935,36 +1148,50 @@ fn apply_named_match(
         .get(i + 2)
         .copied()
         .ok_or_else(|| Error::invalid_message(format!("u32: `match {layer}` requires FIELD")))?;
+    let mut filter = filter;
+
+    // The IPv4 fragment fields take no value.
+    let frag = match (layer, field) {
+        ("ip", "nofrag") => Some((0, 0x3FFF)),
+        ("ip", "firstfrag") => Some((0x2000, 0x3FFF)),
+        ("ip", "df") => Some((0x4000, 0x4000)),
+        ("ip", "mf") => Some((0x2000, 0x2000)),
+        _ => None,
+    };
+    if let Some((val, mask)) = frag {
+        filter.keys.push(u32_mod::pack_key16(val, mask, 6));
+        return Ok((filter, 3));
+    }
+
     let value = params.get(i + 3).copied().ok_or_else(|| {
         Error::invalid_message(format!("u32: `match {layer} {field}` requires VALUE"))
     })?;
-
-    // tc(8) writes a port match with a hex mask: `match ip dport 80 0xffff`.
-    // Taken when the next token is one; the mask was not accepted at all
-    // before (#492).
-    let port_match = |off: i32, nexthdr: bool| -> Result<(U32Filter, usize)> {
-        let port = parse_port(field, layer, value)?;
-        let (mask, consumed) = match params
-            .get(i + 4)
-            .and_then(|s| parse_hex_u32("u32", "port mask", s).ok())
-        {
-            Some(mask) => {
-                let mask = u16::try_from(mask).map_err(|_| {
-                    Error::invalid_message(format!(
-                        "u32: `match {layer} {field}` mask `{}` is wider than 16 bits",
-                        params[i + 4]
-                    ))
-                })?;
-                (mask, 5)
-            }
-            None => (0xFFFF, 4),
+    // `VALUE [MASK]`: the mask is taken when the next token is hex.
+    let masked = |width: u32| -> Result<(u32, u32, usize)> {
+        let full = if width == 32 { u32::MAX } else { (1u32 << width) - 1 };
+        let val = parse_u32_any("u32", &format!("{layer} {field}"), value)?;
+        let (mask, consumed) = match params.get(i + 4).and_then(|s| parse_hex_u32("u32", "mask", s).ok()) {
+            Some(mask) => (mask, 5),
+            None => (full, 4),
         };
-        let key = if nexthdr {
-            u32_mod::pack_key16_nexthdr(port & mask, mask, off)
-        } else {
-            u32_mod::pack_key16(port & mask, mask, off)
-        };
-        let mut filter = filter.clone();
+        if val > full || mask > full {
+            return Err(Error::invalid_message(format!(
+                "u32: `match {layer} {field}` value or mask is wider than {width} bits"
+            )));
+        }
+        Ok((val, mask, consumed))
+    };
+    let u8_at = |mut filter: U32Filter, off: i32, offmask: i32| -> Result<(U32Filter, usize)> {
+        let (val, mask, consumed) = masked(8)?;
+        let mut key = u32_mod::pack_key8((val & mask) as u8, mask as u8, off);
+        key.offmask = offmask;
+        filter.keys.push(key);
+        Ok((filter, consumed))
+    };
+    let u16_at = |mut filter: U32Filter, off: i32, offmask: i32| -> Result<(U32Filter, usize)> {
+        let (val, mask, consumed) = masked(16)?;
+        let mut key = u32_mod::pack_key16((val & mask) as u16, mask as u16, off);
+        key.offmask = offmask;
         filter.keys.push(key);
         Ok((filter, consumed))
     };
@@ -979,7 +1206,8 @@ fn apply_named_match(
             Ok((filter.match_dst_ipv4(addr, prefix), 4))
         }
         ("ip", "protocol") => {
-            // tc(8) writes it with a mask too: `match ip protocol 6 0xff`.
+            // tc(8) writes it with a mask too: `match ip protocol 6 0xff`;
+            // nlink also takes a protocol name.
             let proto = parse_ip_proto_name_or_num(value)?;
             match params
                 .get(i + 4)
@@ -992,27 +1220,119 @@ fn apply_named_match(
                             params[i + 4]
                         ))
                     })?;
-                    let mut filter = filter;
                     filter.keys.push(u32_mod::pack_key8(proto & mask, mask, 9));
                     Ok((filter, 5))
                 }
                 None => Ok((filter.match_ip_proto(proto), 4)),
             }
         }
+        ("ip", "tos" | "dsfield" | "precedence") => u8_at(filter, 1, 0),
+        ("ip", "ihl") => u8_at(filter, 0, 0),
+        ("ip", "icmp_type") => u8_at(filter, 20, 0),
+        ("ip", "icmp_code") => u8_at(filter, 21, 0),
         // Fixed offsets past a 20-byte IPv4 header, as tc's `ip sport|dport`.
         // `tcp|udp sport|dport` are nlink's aliases for them.
-        ("ip" | "tcp" | "udp", "sport") => port_match(20, false),
-        ("ip" | "tcp" | "udp", "dport") => port_match(22, false),
-        // tc's `tcp|udp src|dst`: relative to the next header, which a
-        // linking filter's `offset` sets.
-        ("tcp" | "udp", "src") => port_match(0, true),
-        ("tcp" | "udp", "dst") => port_match(2, true),
+        ("ip" | "tcp" | "udp", "sport") => u16_at(filter, 20, 0),
+        ("ip" | "tcp" | "udp", "dport") => u16_at(filter, 22, 0),
+        // tc's `tcp|udp src|dst` and `icmp type|code`: relative to the next
+        // header, which a linking filter's `offset` sets.
+        ("tcp" | "udp", "src") => u16_at(filter, 0, -1),
+        ("tcp" | "udp", "dst") => u16_at(filter, 2, -1),
+        ("icmp", "type") => u8_at(filter, 0, -1),
+        ("icmp", "code") => u8_at(filter, 1, -1),
+        ("ip6", "src" | "dst") => {
+            let (addr, plen) = match value.split_once('/') {
+                Some((a, p)) => (a, p.parse::<u32>().ok().filter(|p| *p <= 128)),
+                None => (value, Some(128)),
+            };
+            let (addr, plen) = addr.parse::<std::net::Ipv6Addr>().ok().zip(plen).ok_or_else(|| {
+                Error::invalid_message(format!("u32: invalid IPv6 prefix `{value}`"))
+            })?;
+            let base = if field == "src" { 8 } else { 24 };
+            let octets = addr.octets();
+            for word in 0..4u32 {
+                let bits = plen.saturating_sub(word * 32).min(32);
+                if bits == 0 {
+                    break;
+                }
+                let n = word as usize * 4;
+                let val = u32::from_be_bytes([octets[n], octets[n + 1], octets[n + 2], octets[n + 3]]);
+                let mask = u32::MAX << (32 - bits);
+                filter.keys.push(u32_mod::pack_key32(val, mask, base + 4 * word as i32));
+            }
+            Ok((filter, 4))
+        }
+        // The traffic class: eight bits, 20 bits into the first word.
+        ("ip6", "priority") => {
+            let (val, mask, consumed) = masked(8)?;
+            filter.keys.push(u32_mod::pack_key32(val << 20, mask << 20, 0));
+            Ok((filter, consumed))
+        }
+        ("ip6", "protocol") => u8_at(filter, 6, 0),
+        ("ip6", "flowlabel") => {
+            let (val, mask, consumed) = masked(32)?;
+            filter.keys.push(u32_mod::pack_key32(val, mask, 0));
+            Ok((filter, consumed))
+        }
+        ("ip6", "sport") => u16_at(filter, 40, 0),
+        ("ip6", "dport") => u16_at(filter, 42, 0),
+        ("ip6", "icmp_type") => u8_at(filter, 40, 0),
+        // tc gives this one an offmask of 1; kept, so a line means here
+        // what it means there.
+        ("ip6", "icmp_code") => u8_at(filter, 41, 1),
+        // Before the network header: the destination at -14, the source
+        // at -8.
+        ("ether", "src" | "dst") => {
+            let mac = parse_mac(value)
+                .map_err(|_| Error::invalid_message(format!("u32: invalid MAC `{value}`")))?;
+            let base = if field == "src" { -8 } else { -14 };
+            for (n, byte) in mac.iter().enumerate() {
+                filter.keys.push(u32_mod::pack_key8(*byte, 0xFF, base + n as i32));
+            }
+            Ok((filter, 4))
+        }
         _ => Err(Error::invalid_message(format!(
-            "u32: unsupported `match {layer} {field}` \
-             (supported: ip src/dst/protocol/sport/dport, \
-             tcp/udp src/dst/sport/dport)"
+            "u32: unsupported `match {layer} {field}` (supported: ip src/dst/protocol/tos/dsfield/\
+             precedence/ihl/nofrag/firstfrag/df/mf/sport/dport/icmp_type/icmp_code, ip6 src/dst/\
+             priority/protocol/flowlabel/sport/dport/icmp_type/icmp_code, tcp/udp src/dst/sport/\
+             dport, icmp type/code, ether src/dst)"
         ))),
     }
+}
+
+/// Merge keys at the same offset into one, as tc's `pack_key()` does: a
+/// value both name the same bits of must agree (#831).
+fn merge_u32_keys(keys: Vec<u32_mod::TcU32Key>) -> Result<Vec<u32_mod::TcU32Key>> {
+    let mut out: Vec<u32_mod::TcU32Key> = Vec::with_capacity(keys.len());
+    for key in keys {
+        match out.iter_mut().find(|k| k.off == key.off && k.offmask == key.offmask) {
+            Some(k) => {
+                if (k.val ^ key.val) & k.mask & key.mask != 0 {
+                    return Err(Error::invalid_message(format!(
+                        "u32: two matches disagree at offset {}",
+                        key.off
+                    )));
+                }
+                k.val |= key.val;
+                k.mask |= key.mask;
+            }
+            None => out.push(key),
+        }
+    }
+    Ok(out)
+}
+
+/// A value as tc(8)'s `get_u32(.., 0)` reads it: decimal, `0x` hex or `0`
+/// octal (#831).
+fn parse_u32_any(kind: &str, key: &str, s: &str) -> Result<u32> {
+    let parsed = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16)
+    } else if s.len() > 1 && s.starts_with('0') {
+        u32::from_str_radix(&s[1..], 8)
+    } else {
+        s.parse::<u32>()
+    };
+    parsed.map_err(|_| Error::invalid_message(format!("{kind}: invalid {key} `{s}` (expected unsigned integer)")))
 }
 
 /// Parse a u32 handle in tc(8) notation — `htid[:[bucket[:node]]]`, hex,
@@ -1088,14 +1408,6 @@ fn parse_ip_proto_name_or_num(s: &str) -> Result<u8> {
     })
 }
 
-/// Parse a u16 port value with kind-prefixed error context.
-fn parse_port(field: &str, layer: &str, s: &str) -> Result<u16> {
-    s.parse::<u16>().map_err(|_| {
-        Error::invalid_message(format!(
-            "u32: invalid {layer} {field} `{s}` (expected port 0–65535)"
-        ))
-    })
-}
 
 // ============================================================================
 // FlowerFilter
@@ -1159,6 +1471,47 @@ pub struct FlowerFilter {
     ip_ttl: Option<(u8, u8)>,
     /// TCP flags.
     tcp_flags: Option<(u16, u16)>,
+    /// ICMP type and code, each with its mask: ICMPv4 or ICMPv6 by the
+    /// network ethertype and `ip_proto` (#827).
+    icmp_type: Option<(u8, u8)>,
+    icmp_code: Option<(u8, u8)>,
+    /// `TCA_FLOWER_KEY_FLAGS`: the fragment flags and their mask (#827).
+    ip_flags: Option<(u32, u32)>,
+    /// Conntrack state, zone, mark and labels, each with its mask (#827).
+    ct_state: Option<(u16, u16)>,
+    ct_zone: Option<(u16, u16)>,
+    ct_mark: Option<(u32, u32)>,
+    ct_labels: Option<([u8; 16], [u8; 16])>,
+    /// The device packets arrived on (#827).
+    indev: Option<String>,
+    /// The ethertype inside the VLAN tag, the inner tag's id and priority,
+    /// and the ethertype inside that (#827).
+    vlan_ethtype: Option<u16>,
+    cvlan_id: Option<u16>,
+    cvlan_prio: Option<u8>,
+    cvlan_ethtype: Option<u16>,
+    /// The top MPLS label stack entry (#827).
+    mpls_label: Option<u32>,
+    mpls_tc: Option<u8>,
+    mpls_bos: Option<u8>,
+    mpls_ttl: Option<u8>,
+    /// MAC masks; all ones when not given (#827).
+    src_mac_mask: Option<[u8; 6]>,
+    dst_mac_mask: Option<[u8; 6]>,
+    /// ARP opcode, addresses and hardware addresses, with masks (#827).
+    arp_op: Option<(u8, u8)>,
+    arp_sip: Option<(Ipv4Addr, u8)>,
+    arp_tip: Option<(Ipv4Addr, u8)>,
+    arp_sha: Option<([u8; 6], [u8; 6])>,
+    arp_tha: Option<([u8; 6], [u8; 6])>,
+    /// Tunnel metadata: key id, outer addresses, UDP port, TOS and TTL
+    /// (#827).
+    enc_key_id: Option<u32>,
+    enc_src_ip: Option<(IpAddr, u8)>,
+    enc_dst_ip: Option<(IpAddr, u8)>,
+    enc_dst_port: Option<u16>,
+    enc_tos: Option<(u8, u8)>,
+    enc_ttl: Option<(u8, u8)>,
     /// Filter flags (skip_hw, skip_sw, etc.).
     flags: u32,
     /// Priority.
@@ -1421,6 +1774,186 @@ impl FlowerFilter {
         self
     }
 
+    /// Match the ICMP (or ICMPv6) type under a mask. Needs `ip_proto` icmp
+    /// on IPv4 or icmpv6 on IPv6.
+    pub fn icmp_type(mut self, icmp_type: u8, mask: u8) -> Self {
+        self.icmp_type = Some((icmp_type, mask));
+        self
+    }
+
+    /// Match the ICMP (or ICMPv6) code under a mask.
+    pub fn icmp_code(mut self, code: u8, mask: u8) -> Self {
+        self.icmp_code = Some((code, mask));
+        self
+    }
+
+    /// Match `TCA_FLOWER_KEY_FLAGS` under a mask: the fragment bits,
+    /// `TCA_FLOWER_KEY_FLAGS_IS_FRAGMENT` and `…_FRAG_IS_FIRST`.
+    pub fn ip_flags(mut self, flags: u32, mask: u32) -> Self {
+        self.ip_flags = Some((flags, mask));
+        self
+    }
+
+    /// Match the conntrack state (`TCA_FLOWER_KEY_CT_FLAGS_*`) under a mask.
+    pub fn ct_state(mut self, state: u16, mask: u16) -> Self {
+        self.ct_state = Some((state, mask));
+        self
+    }
+
+    /// Match the conntrack zone under a mask.
+    pub fn ct_zone(mut self, zone: u16, mask: u16) -> Self {
+        self.ct_zone = Some((zone, mask));
+        self
+    }
+
+    /// Match the conntrack mark under a mask.
+    pub fn ct_mark(mut self, mark: u32, mask: u32) -> Self {
+        self.ct_mark = Some((mark, mask));
+        self
+    }
+
+    /// Match the 128-bit conntrack labels under a mask.
+    pub fn ct_labels(mut self, labels: [u8; 16], mask: [u8; 16]) -> Self {
+        self.ct_labels = Some((labels, mask));
+        self
+    }
+
+    /// Match only packets that arrived on `dev`; the kernel resolves the
+    /// name in the filter's namespace.
+    pub fn indev(mut self, dev: impl Into<String>) -> Self {
+        self.indev = Some(dev.into());
+        self
+    }
+
+    /// The ethertype inside the VLAN tag: the protocol the L3 keys match
+    /// under a VLAN, or a second tag's for QinQ.
+    pub fn vlan_ethtype(mut self, ethertype: EthProto) -> Self {
+        self.vlan_ethtype = Some(ethertype.as_u16());
+        self
+    }
+
+    /// Match the inner (customer) VLAN id. Needs `vlan_ethtype` a VLAN tag.
+    pub fn cvlan_id(mut self, id: u16) -> Self {
+        self.cvlan_id = Some(id);
+        self
+    }
+
+    /// Match the inner VLAN priority.
+    pub fn cvlan_prio(mut self, prio: u8) -> Self {
+        self.cvlan_prio = Some(prio);
+        self
+    }
+
+    /// The ethertype inside the inner VLAN tag.
+    pub fn cvlan_ethtype(mut self, ethertype: EthProto) -> Self {
+        self.cvlan_ethtype = Some(ethertype.as_u16());
+        self
+    }
+
+    /// Match the top MPLS label. Needs the MPLS ethertype.
+    pub fn mpls_label(mut self, label: u32) -> Self {
+        self.mpls_label = Some(label);
+        self
+    }
+
+    /// Match the top MPLS entry's traffic class.
+    pub fn mpls_tc(mut self, tc: u8) -> Self {
+        self.mpls_tc = Some(tc);
+        self
+    }
+
+    /// Match the top MPLS entry's bottom-of-stack bit.
+    pub fn mpls_bos(mut self, bos: u8) -> Self {
+        self.mpls_bos = Some(bos);
+        self
+    }
+
+    /// Match the top MPLS entry's TTL.
+    pub fn mpls_ttl(mut self, ttl: u8) -> Self {
+        self.mpls_ttl = Some(ttl);
+        self
+    }
+
+    /// Match the source MAC under a mask.
+    pub fn src_mac_masked(mut self, mac: [u8; 6], mask: [u8; 6]) -> Self {
+        self.src_mac = Some(mac);
+        self.src_mac_mask = Some(mask);
+        self
+    }
+
+    /// Match the destination MAC under a mask.
+    pub fn dst_mac_masked(mut self, mac: [u8; 6], mask: [u8; 6]) -> Self {
+        self.dst_mac = Some(mac);
+        self.dst_mac_mask = Some(mask);
+        self
+    }
+
+    /// Match the ARP opcode under a mask. Needs the ARP or RARP ethertype.
+    pub fn arp_op(mut self, op: u8, mask: u8) -> Self {
+        self.arp_op = Some((op, mask));
+        self
+    }
+
+    /// Match the ARP sender address under a prefix.
+    pub fn arp_sip(mut self, addr: Ipv4Addr, prefix_len: u8) -> Self {
+        self.arp_sip = Some((addr, prefix_len));
+        self
+    }
+
+    /// Match the ARP target address under a prefix.
+    pub fn arp_tip(mut self, addr: Ipv4Addr, prefix_len: u8) -> Self {
+        self.arp_tip = Some((addr, prefix_len));
+        self
+    }
+
+    /// Match the ARP sender hardware address under a mask.
+    pub fn arp_sha(mut self, mac: [u8; 6], mask: [u8; 6]) -> Self {
+        self.arp_sha = Some((mac, mask));
+        self
+    }
+
+    /// Match the ARP target hardware address under a mask.
+    pub fn arp_tha(mut self, mac: [u8; 6], mask: [u8; 6]) -> Self {
+        self.arp_tha = Some((mac, mask));
+        self
+    }
+
+    /// Match a tunnel's key id (a VNI, a GRE key).
+    pub fn enc_key_id(mut self, id: u32) -> Self {
+        self.enc_key_id = Some(id);
+        self
+    }
+
+    /// Match a tunnel's outer source address under a prefix.
+    pub fn enc_src_ip(mut self, addr: IpAddr, prefix_len: u8) -> Self {
+        self.enc_src_ip = Some((addr, prefix_len));
+        self
+    }
+
+    /// Match a tunnel's outer destination address under a prefix.
+    pub fn enc_dst_ip(mut self, addr: IpAddr, prefix_len: u8) -> Self {
+        self.enc_dst_ip = Some((addr, prefix_len));
+        self
+    }
+
+    /// Match a tunnel's outer UDP destination port.
+    pub fn enc_dst_port(mut self, port: u16) -> Self {
+        self.enc_dst_port = Some(port);
+        self
+    }
+
+    /// Match a tunnel's outer TOS under a mask.
+    pub fn enc_tos(mut self, tos: u8, mask: u8) -> Self {
+        self.enc_tos = Some((tos, mask));
+        self
+    }
+
+    /// Match a tunnel's outer TTL under a mask.
+    pub fn enc_ttl(mut self, ttl: u8, mask: u8) -> Self {
+        self.enc_ttl = Some((ttl, mask));
+        self
+    }
+
     /// Skip hardware offload.
     pub fn skip_hw(mut self) -> Self {
         self.flags |= flower::TCA_CLS_FLAGS_SKIP_HW;
@@ -1500,8 +2033,17 @@ impl FlowerFilter {
     /// restricted to 0x88a8 frames asked for a 0x8100 TPID and matched
     /// nothing.
     fn effective_eth_type(&self) -> Option<u16> {
+        let protocol = (!matches!(self.protocol, 0 | ETH_P_ALL)).then_some(self.protocol);
+        // Under a VLAN tag, an address's implied ethertype is the inner
+        // protocol's, which `vlan_ethtype` carries: the outer one stays the
+        // tag the filter is installed under (#827).
+        if self.vlan_ethtype.is_some()
+            && let Some(tag) = protocol.filter(|p| matches!(p, 0x8100 | 0x88A8))
+        {
+            return Some(tag);
+        }
         self.eth_type
-            .or((!matches!(self.protocol, 0 | ETH_P_ALL)).then_some(self.protocol))
+            .or(protocol)
             .or((self.vlan_id.is_some() || self.vlan_prio.is_some()).then_some(0x8100))
     }
 
@@ -1617,12 +2159,15 @@ impl FlowerFilter {
                     }
                     i += 2;
                 }
+                // A MAC with an optional `/MASK`, a MAC or a bit count (#827).
                 "src_mac" => {
-                    f = f.src_mac(parse_mac(need_value()?)?);
+                    let (mac, mask) = parse_flower_mac(need_value()?, key)?;
+                    f = f.src_mac_masked(mac, mask);
                     i += 2;
                 }
                 "dst_mac" => {
-                    f = f.dst_mac(parse_mac(need_value()?)?);
+                    let (mac, mask) = parse_flower_mac(need_value()?, key)?;
+                    f = f.dst_mac_masked(mac, mask);
                     i += 2;
                 }
                 "eth_type" => {
@@ -1679,11 +2224,146 @@ impl FlowerFilter {
                     f.flags |= flower::TCA_CLS_FLAGS_SKIP_SW;
                     i += 1;
                 }
-                "ct_state" | "ct_zone" | "ct_mark" | "enc_key_id" | "enc_dst_ip" | "enc_src_ip"
-                | "enc_dst_port" | "indev" => {
-                    return Err(Error::invalid_message(format!(
-                        "flower: `{key}` is not modelled by FlowerFilter yet — file an issue if you need this match"
-                    )));
+                "chain" | "goto_chain" => {
+                    let s = need_value()?;
+                    let n: u32 = s.parse().map_err(|_| {
+                        Error::invalid_message(format!("flower: invalid {key} `{s}`"))
+                    })?;
+                    f = if key == "chain" { f.chain(n) } else { f.goto_chain(n) };
+                    i += 2;
+                }
+                // tc-flower(8)'s other keys (#827), read as f_flower.c reads
+                // them.
+                "type" | "code" => {
+                    let (v, m) = parse_flower_u8_dec(need_value()?, key, None)?;
+                    f = if key == "type" { f.icmp_type(v, m) } else { f.icmp_code(v, m) };
+                    i += 2;
+                }
+                "ip_flags" => {
+                    let (v, m) = parse_flower_ip_flags(need_value()?)?;
+                    f = f.ip_flags(v, m);
+                    i += 2;
+                }
+                "ct_state" => {
+                    let (v, m) = parse_flower_ct_state(need_value()?)?;
+                    f = f.ct_state(v, m);
+                    i += 2;
+                }
+                "ct_zone" => {
+                    let (v, m) = parse_flower_masked_any(need_value()?, key, u16::MAX.into())?;
+                    f = f.ct_zone(v as u16, m as u16);
+                    i += 2;
+                }
+                "ct_mark" => {
+                    let (v, m) = parse_flower_masked_any(need_value()?, key, u32::MAX)?;
+                    f = f.ct_mark(v, m);
+                    i += 2;
+                }
+                "ct_label" => {
+                    let (v, m) = parse_flower_ct_label(need_value()?)?;
+                    f = f.ct_labels(v, m);
+                    i += 2;
+                }
+                "indev" => {
+                    f = f.indev(need_value()?);
+                    i += 2;
+                }
+                "vlan_ethtype" | "cvlan_ethtype" => {
+                    let t = EthProto::new(parse_flower_eth_type(need_value()?)?);
+                    f = if key == "vlan_ethtype" { f.vlan_ethtype(t) } else { f.cvlan_ethtype(t) };
+                    i += 2;
+                }
+                "cvlan_id" => {
+                    let s = need_value()?;
+                    let id = s.parse::<u16>().ok().filter(|id| *id < 4096).ok_or_else(|| {
+                        Error::invalid_message(format!("flower: invalid cvlan_id `{s}` (expected 0-4095)"))
+                    })?;
+                    f = f.cvlan_id(id);
+                    i += 2;
+                }
+                "cvlan_prio" | "mpls_tc" | "mpls_bos" | "mpls_ttl" => {
+                    let s = need_value()?;
+                    let max = match key {
+                        "mpls_bos" => 1,
+                        "mpls_ttl" => 255,
+                        _ => 7,
+                    };
+                    let v = s.parse::<u8>().ok().filter(|v| *v <= max).ok_or_else(|| {
+                        Error::invalid_message(format!("flower: invalid {key} `{s}` (expected 0-{max})"))
+                    })?;
+                    f = match key {
+                        "cvlan_prio" => f.cvlan_prio(v),
+                        "mpls_tc" => f.mpls_tc(v),
+                        "mpls_bos" => f.mpls_bos(v),
+                        _ => f.mpls_ttl(v),
+                    };
+                    i += 2;
+                }
+                "mpls_label" => {
+                    let s = need_value()?;
+                    let label = s.parse::<u32>().ok().filter(|l| *l <= 0xF_FFFF).ok_or_else(|| {
+                        Error::invalid_message(format!("flower: invalid mpls_label `{s}` (expected 0-1048575)"))
+                    })?;
+                    f = f.mpls_label(label);
+                    i += 2;
+                }
+                "arp_op" => {
+                    let names = |s: &str| match s {
+                        "request" => Some(1),
+                        "reply" => Some(2),
+                        _ => None,
+                    };
+                    let (v, m) = parse_flower_u8_dec(need_value()?, key, Some(&names))?;
+                    if v > 2 {
+                        return Err(Error::invalid_message(format!(
+                            "flower: invalid arp_op `{v}` (expected request, reply, 1 or 2)"
+                        )));
+                    }
+                    f = f.arp_op(v, m);
+                    i += 2;
+                }
+                "arp_sip" | "arp_tip" => {
+                    let (addr, plen) = parse_ipv4_with_prefix(need_value()?)?;
+                    f = if key == "arp_sip" { f.arp_sip(addr, plen) } else { f.arp_tip(addr, plen) };
+                    i += 2;
+                }
+                "arp_sha" | "arp_tha" => {
+                    let (mac, mask) = parse_flower_mac(need_value()?, key)?;
+                    f = if key == "arp_sha" { f.arp_sha(mac, mask) } else { f.arp_tha(mac, mask) };
+                    i += 2;
+                }
+                "enc_key_id" => {
+                    let s = need_value()?;
+                    let id = s.parse::<u32>().map_err(|_| {
+                        Error::invalid_message(format!("flower: invalid enc_key_id `{s}`"))
+                    })?;
+                    f = f.enc_key_id(id);
+                    i += 2;
+                }
+                "enc_src_ip" | "enc_dst_ip" => {
+                    let s = need_value()?;
+                    let (addr, plen) = if s.contains(':') {
+                        let (a, p) = parse_ipv6_with_prefix(s)?;
+                        (IpAddr::V6(a), p)
+                    } else {
+                        let (a, p) = parse_ipv4_with_prefix(s)?;
+                        (IpAddr::V4(a), p)
+                    };
+                    f = if key == "enc_src_ip" { f.enc_src_ip(addr, plen) } else { f.enc_dst_ip(addr, plen) };
+                    i += 2;
+                }
+                "enc_dst_port" => {
+                    let s = need_value()?;
+                    let port = s.parse::<u16>().map_err(|_| {
+                        Error::invalid_message(format!("flower: invalid enc_dst_port `{s}`"))
+                    })?;
+                    f = f.enc_dst_port(port);
+                    i += 2;
+                }
+                "enc_tos" | "enc_ttl" => {
+                    let (v, m) = parse_value_mask_u8(need_value()?, key)?;
+                    f = if key == "enc_tos" { f.enc_tos(v, m) } else { f.enc_ttl(v, m) };
+                    i += 2;
                 }
                 "action" | "actions" => {
                     return Err(Error::invalid_message(format!(
@@ -1699,6 +2379,207 @@ impl FlowerFilter {
             }
         }
         Ok(f)
+    }
+
+    /// The filter as the tokens [`parse_params`](Self::parse_params) reads,
+    /// its inverse (#645). Its actions are not in that grammar and are not
+    /// written; its protocol and priority go beside the tokens.
+    pub fn to_params(&self) -> crate::Result<Vec<String>> {
+        let mut out = Vec::new();
+        let mut put = |k: &str, v: String| {
+            out.push(k.to_string());
+            out.push(v);
+        };
+        if let Some(c) = self.classid {
+            put("classid", classid_param(c));
+        }
+        if let Some(t) = self.eth_type {
+            put("eth_type", EthProto::from(t).to_string());
+        }
+        if let Some(p) = self.ip_proto {
+            let name = match p {
+                flower::IPPROTO_TCP => "tcp".to_string(),
+                flower::IPPROTO_UDP => "udp".to_string(),
+                flower::IPPROTO_SCTP => "sctp".to_string(),
+                flower::IPPROTO_ICMP => "icmp".to_string(),
+                flower::IPPROTO_ICMPV6 => "icmpv6".to_string(),
+                other => format!("0x{other:x}"),
+            };
+            put("ip_proto", name);
+        }
+        for (key, v4, v6) in [
+            ("src_ip", self.src_ipv4, self.src_ipv6),
+            ("dst_ip", self.dst_ipv4, self.dst_ipv6),
+        ] {
+            if let Some((a, l)) = v4 {
+                put(key, format!("{a}/{l}"));
+            }
+            if let Some((a, l)) = v6 {
+                put(key, format!("{a}/{l}"));
+            }
+        }
+        for (key, one, range) in [
+            ("src_port", self.src_port, self.src_port_range),
+            ("dst_port", self.dst_port, self.dst_port_range),
+        ] {
+            if let Some(p) = one {
+                put(key, p.to_string());
+            }
+            if let Some((lo, hi)) = range {
+                put(key, format!("{lo}-{hi}"));
+            }
+        }
+        let mac = |m: [u8; 6]| {
+            m.iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(":")
+        };
+        let masked_mac = |m: [u8; 6], mask: Option<[u8; 6]>| match mask {
+            Some(k) if k != [0xFF; 6] => format!("{}/{}", mac(m), mac(k)),
+            _ => mac(m),
+        };
+        if let Some(m) = self.src_mac {
+            put("src_mac", masked_mac(m, self.src_mac_mask));
+        }
+        if let Some(m) = self.dst_mac {
+            put("dst_mac", masked_mac(m, self.dst_mac_mask));
+        }
+        if let Some(v) = self.vlan_id {
+            put("vlan_id", v.to_string());
+        }
+        if let Some(p) = self.vlan_prio {
+            put("vlan_prio", p.to_string());
+        }
+        if let Some((v, m)) = self.ip_tos {
+            put("ip_tos", format!("{v}/0x{m:x}"));
+        }
+        if let Some((v, m)) = self.ip_ttl {
+            put("ip_ttl", format!("{v}/0x{m:x}"));
+        }
+        if let Some((v, m)) = self.tcp_flags {
+            put("tcp_flags", format!("0x{v:x}/0x{m:x}"));
+        }
+        // The keys #827 added, in tc-flower(8)'s words.
+        if let Some((v, m)) = self.icmp_type {
+            put("type", format!("{v}/{m}"));
+        }
+        if let Some((v, m)) = self.icmp_code {
+            put("code", format!("{v}/{m}"));
+        }
+        if let Some((v, m)) = self.ip_flags {
+            let mut words = Vec::new();
+            for (flag, name) in [
+                (flower::TCA_FLOWER_KEY_FLAGS_IS_FRAGMENT, "frag"),
+                (flower::TCA_FLOWER_KEY_FLAGS_FRAG_IS_FIRST, "firstfrag"),
+            ] {
+                if m & flag != 0 {
+                    words.push(if v & flag != 0 { name.to_string() } else { format!("no{name}") });
+                }
+            }
+            if m & !(flower::TCA_FLOWER_KEY_FLAGS_IS_FRAGMENT | flower::TCA_FLOWER_KEY_FLAGS_FRAG_IS_FIRST) != 0 {
+                return Err(Error::not_supported(format!("flower: ip_flags mask {m:#x} has no token")));
+            }
+            put("ip_flags", words.join("/"));
+        }
+        if let Some((v, m)) = self.ct_state {
+            const STATES: [(&str, u16); 6] = [
+                ("trk", flower::TCA_FLOWER_KEY_CT_FLAGS_TRACKED),
+                ("new", flower::TCA_FLOWER_KEY_CT_FLAGS_NEW),
+                ("est", flower::TCA_FLOWER_KEY_CT_FLAGS_ESTABLISHED),
+                ("rel", flower::TCA_FLOWER_KEY_CT_FLAGS_RELATED),
+                ("inv", flower::TCA_FLOWER_KEY_CT_FLAGS_INVALID),
+                ("rpl", flower::TCA_FLOWER_KEY_CT_FLAGS_REPLY),
+            ];
+            let words: String = STATES
+                .iter()
+                .filter(|(_, f)| m & f != 0)
+                .map(|(n, f)| format!("{}{n}", if v & f != 0 { '+' } else { '-' }))
+                .collect();
+            put("ct_state", words);
+        }
+        if let Some((v, m)) = self.ct_zone {
+            put("ct_zone", format!("{v}/0x{m:x}"));
+        }
+        if let Some((v, m)) = self.ct_mark {
+            put("ct_mark", format!("{v}/0x{m:x}"));
+        }
+        if let Some((v, m)) = self.ct_labels {
+            let hex = |b: [u8; 16]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+            put("ct_label", format!("{}/{}", hex(v), hex(m)));
+        }
+        if let Some(dev) = &self.indev {
+            put("indev", dev.clone());
+        }
+        if let Some(t) = self.vlan_ethtype {
+            put("vlan_ethtype", EthProto::from(t).to_string());
+        }
+        if let Some(v) = self.cvlan_id {
+            put("cvlan_id", v.to_string());
+        }
+        if let Some(p) = self.cvlan_prio {
+            put("cvlan_prio", p.to_string());
+        }
+        if let Some(t) = self.cvlan_ethtype {
+            put("cvlan_ethtype", EthProto::from(t).to_string());
+        }
+        for (key, v) in [
+            ("mpls_label", self.mpls_label),
+            ("mpls_tc", self.mpls_tc.map(u32::from)),
+            ("mpls_bos", self.mpls_bos.map(u32::from)),
+            ("mpls_ttl", self.mpls_ttl.map(u32::from)),
+        ] {
+            if let Some(v) = v {
+                put(key, v.to_string());
+            }
+        }
+        if let Some((v, m)) = self.arp_op {
+            put("arp_op", format!("{v}/{m}"));
+        }
+        if let Some((a, l)) = self.arp_sip {
+            put("arp_sip", format!("{a}/{l}"));
+        }
+        if let Some((a, l)) = self.arp_tip {
+            put("arp_tip", format!("{a}/{l}"));
+        }
+        if let Some((m, k)) = self.arp_sha {
+            put("arp_sha", masked_mac(m, Some(k)));
+        }
+        if let Some((m, k)) = self.arp_tha {
+            put("arp_tha", masked_mac(m, Some(k)));
+        }
+        if let Some(id) = self.enc_key_id {
+            put("enc_key_id", id.to_string());
+        }
+        if let Some((a, l)) = self.enc_src_ip {
+            put("enc_src_ip", format!("{a}/{l}"));
+        }
+        if let Some((a, l)) = self.enc_dst_ip {
+            put("enc_dst_ip", format!("{a}/{l}"));
+        }
+        if let Some(p) = self.enc_dst_port {
+            put("enc_dst_port", p.to_string());
+        }
+        if let Some((v, m)) = self.enc_tos {
+            put("enc_tos", format!("{v}/0x{m:x}"));
+        }
+        if let Some((v, m)) = self.enc_ttl {
+            put("enc_ttl", format!("{v}/0x{m:x}"));
+        }
+        if let Some(c) = self.chain {
+            put("chain", c.to_string());
+        }
+        if let Some(c) = self.goto_chain {
+            put("goto_chain", c.to_string());
+        }
+        out.extend(skip_flags_params("flower", self.flags)?);
+        Ok(out)
+    }
+
+    /// Its actions, if any.
+    #[cfg_attr(not(feature = "serde"), allow(dead_code))]
+    pub(crate) fn action_list(&self) -> Option<&ActionList> {
+        self.actions.as_ref()
     }
 }
 
@@ -1837,6 +2718,157 @@ fn parse_value_mask_u8(s: &str, label: &str) -> crate::Result<(u8, u8)> {
     Ok((value, mask))
 }
 
+/// The `TCA_FLOWER_KEY_ETH_TYPE` a dump reports for a flower that wrote a
+/// `TCA_FLOWER_KEY_VLAN_ETH_TYPE`, from the attributes it wrote (`get`):
+/// the kernel keeps the innermost protocol in `n_proto` and dumps that, so
+/// a tag written outermost reads back as `vlan_ethtype`, or under two tags
+/// as `cvlan_ethtype`, absent when none was given (#827). `None` when the
+/// filter wrote no `vlan_ethtype`: the dump is what was written.
+pub(crate) fn flower_dumped_eth_type(get: impl Fn(u16) -> Option<[u8; 2]>) -> Option<Option<[u8; 2]>> {
+    let inner = get(flower::TCA_FLOWER_KEY_VLAN_ETH_TYPE)?;
+    Some(match u16::from_be_bytes(inner) {
+        0x8100 | 0x88A8 => get(flower::TCA_FLOWER_KEY_CVLAN_ETH_TYPE),
+        _ => Some(inner),
+    })
+}
+
+/// Maps a word, such as an ARP opcode's name, to its value.
+type ValueNames<'a> = &'a dyn Fn(&str) -> Option<u8>;
+
+/// A `u8` with an optional `/MASK`, both decimal, as tc-flower's
+/// `flower_parse_u8()` reads them; `names` maps words such as `request`.
+fn parse_flower_u8_dec(s: &str, label: &str, names: Option<ValueNames<'_>>) -> crate::Result<(u8, u8)> {
+    use crate::Error;
+    let invalid = |t: &str| Error::invalid_message(format!("flower: invalid {label} `{t}`"));
+    let (v, m) = s.split_once('/').map_or((s, None), |(v, m)| (v, Some(m)));
+    let value = match names.and_then(|n| n(v)) {
+        Some(v) => v,
+        None => v.parse::<u8>().map_err(|_| invalid(v))?,
+    };
+    let mask = m.map_or(Ok(u8::MAX), |m| m.parse::<u8>().map_err(|_| invalid(m)))?;
+    Ok((value, mask))
+}
+
+/// A value with an optional `/MASK`, both in any base, as tc-flower's
+/// `flower_parse_u16()`/`flower_parse_u32()` read them; `max` is the
+/// field's all-ones.
+fn parse_flower_masked_any(s: &str, label: &str, max: u32) -> crate::Result<(u32, u32)> {
+    use crate::Error;
+    let one = |t: &str| {
+        parse_u32_any("flower", label, t).ok().filter(|v| *v <= max).ok_or_else(|| {
+            Error::invalid_message(format!("flower: invalid {label} `{t}` (expected up to {max:#x})"))
+        })
+    };
+    match s.split_once('/') {
+        Some((v, m)) => Ok((one(v)?, one(m)?)),
+        None => Ok((one(s)?, max)),
+    }
+}
+
+/// `frag`, `firstfrag` and their `no` forms, joined by `/`, as tc-flower's
+/// `ip_flags`: the flags, and the mask of those named.
+fn parse_flower_ip_flags(s: &str) -> crate::Result<(u32, u32)> {
+    use crate::Error;
+    let (mut flags, mut mask) = (0u32, 0u32);
+    for token in s.split('/') {
+        let (no, name) = match token.strip_prefix("no") {
+            Some(rest) => (true, rest),
+            None => (false, token),
+        };
+        let flag = match name {
+            "frag" => flower::TCA_FLOWER_KEY_FLAGS_IS_FRAGMENT,
+            "firstfrag" => flower::TCA_FLOWER_KEY_FLAGS_FRAG_IS_FIRST,
+            _ => {
+                return Err(Error::invalid_message(format!(
+                    "flower: invalid ip_flags `{s}` (expected frag, firstfrag or their no forms, joined by /)"
+                )));
+            }
+        };
+        if no {
+            flags &= !flag;
+        } else {
+            flags |= flag;
+        }
+        mask |= flag;
+    }
+    Ok((flags, mask))
+}
+
+/// `+trk+est-new`: the conntrack states set and the mask of those named.
+fn parse_flower_ct_state(s: &str) -> crate::Result<(u16, u16)> {
+    use crate::Error;
+    const STATES: [(&str, u16); 6] = [
+        ("trk", flower::TCA_FLOWER_KEY_CT_FLAGS_TRACKED),
+        ("new", flower::TCA_FLOWER_KEY_CT_FLAGS_NEW),
+        ("est", flower::TCA_FLOWER_KEY_CT_FLAGS_ESTABLISHED),
+        ("rel", flower::TCA_FLOWER_KEY_CT_FLAGS_RELATED),
+        ("inv", flower::TCA_FLOWER_KEY_CT_FLAGS_INVALID),
+        ("rpl", flower::TCA_FLOWER_KEY_CT_FLAGS_REPLY),
+    ];
+    let invalid = || {
+        Error::invalid_message(format!(
+            "flower: invalid ct_state `{s}` (expected +/- before each of trk, new, est, rel, inv, rpl)"
+        ))
+    };
+    let (mut flags, mut mask) = (0u16, 0u16);
+    let mut rest = s;
+    while !rest.is_empty() {
+        let on = match rest.as_bytes()[0] {
+            b'+' => true,
+            b'-' => false,
+            _ => return Err(invalid()),
+        };
+        let (name, flag) = STATES.iter().find(|(n, _)| rest[1..].starts_with(n)).ok_or_else(invalid)?;
+        if on {
+            flags |= flag;
+        }
+        mask |= flag;
+        rest = &rest[1 + name.len()..];
+    }
+    Ok((flags, mask))
+}
+
+/// A conntrack label, up to 32 hex digits, with an optional `/MASK`. Sent
+/// as all 16 bytes, padded with zeros, which the kernel reads in full.
+fn parse_flower_ct_label(s: &str) -> crate::Result<([u8; 16], [u8; 16])> {
+    use crate::Error;
+    let bytes = |t: &str| -> Option<[u8; 16]> {
+        if t.len() > 32 || !t.len().is_multiple_of(2) {
+            return None;
+        }
+        let mut out = [0u8; 16];
+        for (n, pair) in t.as_bytes().chunks(2).enumerate() {
+            out[n] = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+        }
+        Some(out)
+    };
+    let invalid = || Error::invalid_message(format!("flower: invalid ct_label `{s}` (expected up to 32 hex digits)"));
+    match s.split_once('/') {
+        Some((v, m)) => Ok((bytes(v).ok_or_else(invalid)?, bytes(m).ok_or_else(invalid)?)),
+        None => Ok((bytes(s).ok_or_else(invalid)?, [0xFF; 16])),
+    }
+}
+
+/// A MAC with an optional `/MASK`: a MAC, or a count of leading one bits.
+fn parse_flower_mac(s: &str, label: &str) -> crate::Result<([u8; 6], [u8; 6])> {
+    use crate::Error;
+    let (mac, mask) = s.split_once('/').map_or((s, None), |(m, k)| (m, Some(k)));
+    let mac = parse_mac(mac)?;
+    let mask = match mask {
+        None => [0xFF; 6],
+        Some(k) => match k.parse::<u32>() {
+            Ok(bits) if bits <= 48 => {
+                let m = u64::MAX.checked_shl(64 - bits).unwrap_or(0) >> 16;
+                let b = m.to_be_bytes();
+                [b[2], b[3], b[4], b[5], b[6], b[7]]
+            }
+            Ok(_) => return Err(Error::invalid_message(format!("flower: invalid {label} mask `{k}`"))),
+            Err(_) => parse_mac(k)?,
+        },
+    };
+    Ok((mac, mask))
+}
+
 fn parse_value_mask_u16_hex(s: &str, label: &str) -> crate::Result<(u16, u16)> {
     use crate::Error;
     let parse_one = |t: &str| -> crate::Result<u16> {
@@ -1928,6 +2960,8 @@ fn ipv6_mask(prefix_len: u8) -> Ipv6Addr {
 }
 
 impl FilterConfig for FlowerFilter {
+    from_actions!();
+
     fn kind(&self) -> &'static str {
         "flower"
     }
@@ -1972,7 +3006,67 @@ impl FilterConfig for FlowerFilter {
         // VLAN tag: nlink writes no TCA_FLOWER_KEY_VLAN_ETH_TYPE, so
         // `n_proto` is never set to the inner protocol) (#424).
         let eth_type = self.effective_eth_type();
-        if !matches!(eth_type, Some(0x0800 | 0x86DD)) {
+        // Under a VLAN tag the kernel takes the network protocol from
+        // TCA_FLOWER_KEY_VLAN_ETH_TYPE, and under a second tag from
+        // TCA_FLOWER_KEY_CVLAN_ETH_TYPE (`fl_set_key`, #827).
+        let is_vlan = |t: Option<u16>| matches!(t, Some(0x8100 | 0x88A8));
+        let l3_type = if !is_vlan(eth_type) {
+            eth_type
+        } else if is_vlan(self.vlan_ethtype) {
+            self.cvlan_ethtype
+        } else {
+            self.vlan_ethtype
+        };
+        if self.vlan_ethtype.is_some() && !is_vlan(eth_type) {
+            return Err(Error::invalid_message(
+                "flower: vlan_ethtype needs an 802.1Q or 802.1AD ethertype — cls_flower reads it only under a VLAN tag".to_string(),
+            ));
+        }
+        if (self.cvlan_id.is_some() || self.cvlan_prio.is_some() || self.cvlan_ethtype.is_some())
+            && !(is_vlan(eth_type) && is_vlan(self.vlan_ethtype))
+        {
+            return Err(Error::invalid_message(
+                "flower: cvlan_id, cvlan_prio and cvlan_ethtype need a VLAN ethertype and a VLAN vlan_ethtype \
+                 (QinQ) — cls_flower reads them only under two tags"
+                    .to_string(),
+            ));
+        }
+        // ARP and MPLS keys are read only under their own ethertypes, and
+        // the ICMP keys only under IPv4 with ip_proto icmp or IPv6 with
+        // icmpv6: anywhere else the kernel drops them into a match-all.
+        let arp = [self.arp_op.is_some(), self.arp_sip.is_some(), self.arp_tip.is_some(), self.arp_sha.is_some(), self.arp_tha.is_some()];
+        if arp.contains(&true) && !matches!(l3_type, Some(0x0806 | 0x8035)) {
+            return Err(Error::invalid_message(
+                "flower: arp_op, arp_sip, arp_tip, arp_sha and arp_tha need the ARP or RARP ethertype".to_string(),
+            ));
+        }
+        let mpls = [self.mpls_label.is_some(), self.mpls_tc.is_some(), self.mpls_bos.is_some(), self.mpls_ttl.is_some()];
+        if mpls.contains(&true) && !matches!(l3_type, Some(0x8847 | 0x8848)) {
+            return Err(Error::invalid_message(
+                "flower: mpls_label, mpls_tc, mpls_bos and mpls_ttl need an MPLS ethertype (mpls_uc or mpls_mc)".to_string(),
+            ));
+        }
+        let icmp_keys = match (l3_type, self.ip_proto) {
+            (Some(0x0800), Some(flower::IPPROTO_ICMP)) => Some((
+                flower::TCA_FLOWER_KEY_ICMPV4_TYPE,
+                flower::TCA_FLOWER_KEY_ICMPV4_TYPE_MASK,
+                flower::TCA_FLOWER_KEY_ICMPV4_CODE,
+                flower::TCA_FLOWER_KEY_ICMPV4_CODE_MASK,
+            )),
+            (Some(0x86DD), Some(flower::IPPROTO_ICMPV6)) => Some((
+                flower::TCA_FLOWER_KEY_ICMPV6_TYPE,
+                flower::TCA_FLOWER_KEY_ICMPV6_TYPE_MASK,
+                flower::TCA_FLOWER_KEY_ICMPV6_CODE,
+                flower::TCA_FLOWER_KEY_ICMPV6_CODE_MASK,
+            )),
+            _ => None,
+        };
+        if (self.icmp_type.is_some() || self.icmp_code.is_some()) && icmp_keys.is_none() {
+            return Err(Error::invalid_message(
+                "flower: an ICMP type or code needs ip_proto icmp under IPv4, or icmpv6 under IPv6".to_string(),
+            ));
+        }
+        if !matches!(l3_type, Some(0x0800 | 0x86DD)) {
             let unusable = [
                 self.ip_proto.map(|_| "ip_proto"),
                 self.src_port.map(|_| "src_port"),
@@ -1987,7 +3081,8 @@ impl FilterConfig for FlowerFilter {
             .flatten()
             .collect::<Vec<_>>();
             if !unusable.is_empty() {
-                let other = match eth_type {
+                let other = match l3_type {
+                    Some(t) if Some(t) != eth_type => format!(" (the one inside the VLAN tag is {t:#06x})"),
                     Some(t) => format!(" (this one is {t:#06x})"),
                     None => String::new(),
                 };
@@ -2032,8 +3127,7 @@ impl FilterConfig for FlowerFilter {
             return Err(Error::invalid_message(format!(
                 "flower: {what} needs an 802.1Q or 802.1AD ethertype, not {ethertype} — \
                  cls_flower reads VLAN keys only under a VLAN tag, and would install this \
-                 as a match-all. Matching an IP header inside a VLAN \
-                 (TCA_FLOWER_KEY_VLAN_ETH_TYPE) is not modelled by FlowerFilter"
+                 as a match-all. Match an IP header inside a VLAN with vlan_ethtype"
             )));
         }
 
@@ -2170,12 +3264,12 @@ impl FilterConfig for FlowerFilter {
         // Add MAC addresses
         if let Some(mac) = self.src_mac {
             builder.append_attr(flower::TCA_FLOWER_KEY_ETH_SRC, &mac);
-            builder.append_attr(flower::TCA_FLOWER_KEY_ETH_SRC_MASK, &[0xFF; 6]);
+            builder.append_attr(flower::TCA_FLOWER_KEY_ETH_SRC_MASK, &self.src_mac_mask.unwrap_or([0xFF; 6]));
         }
 
         if let Some(mac) = self.dst_mac {
             builder.append_attr(flower::TCA_FLOWER_KEY_ETH_DST, &mac);
-            builder.append_attr(flower::TCA_FLOWER_KEY_ETH_DST_MASK, &[0xFF; 6]);
+            builder.append_attr(flower::TCA_FLOWER_KEY_ETH_DST_MASK, &self.dst_mac_mask.unwrap_or([0xFF; 6]));
         }
 
         // Add VLAN
@@ -2203,6 +3297,129 @@ impl FilterConfig for FlowerFilter {
         if let Some((flags, mask)) = self.tcp_flags {
             builder.append_attr(flower::TCA_FLOWER_KEY_TCP_FLAGS, &flags.to_be_bytes());
             builder.append_attr(flower::TCA_FLOWER_KEY_TCP_FLAGS_MASK, &mask.to_be_bytes());
+        }
+
+        // The keys #827 added, as tc-flower writes them.
+        if let Some((t_key, t_mask, c_key, c_mask)) = icmp_keys {
+            if let Some((v, m)) = self.icmp_type {
+                builder.append_attr(t_key, &[v]);
+                builder.append_attr(t_mask, &[m]);
+            }
+            if let Some((v, m)) = self.icmp_code {
+                builder.append_attr(c_key, &[v]);
+                builder.append_attr(c_mask, &[m]);
+            }
+        }
+        if let Some((v, m)) = self.ip_flags {
+            builder.append_attr(flower::TCA_FLOWER_KEY_FLAGS, &v.to_be_bytes());
+            builder.append_attr(flower::TCA_FLOWER_KEY_FLAGS_MASK, &m.to_be_bytes());
+        }
+        if let Some((v, m)) = self.ct_state {
+            builder.append_attr(flower::TCA_FLOWER_KEY_CT_STATE, &v.to_ne_bytes());
+            builder.append_attr(flower::TCA_FLOWER_KEY_CT_STATE_MASK, &m.to_ne_bytes());
+        }
+        if let Some((v, m)) = self.ct_zone {
+            builder.append_attr(flower::TCA_FLOWER_KEY_CT_ZONE, &v.to_ne_bytes());
+            builder.append_attr(flower::TCA_FLOWER_KEY_CT_ZONE_MASK, &m.to_ne_bytes());
+        }
+        if let Some((v, m)) = self.ct_mark {
+            builder.append_attr(flower::TCA_FLOWER_KEY_CT_MARK, &v.to_ne_bytes());
+            builder.append_attr(flower::TCA_FLOWER_KEY_CT_MARK_MASK, &m.to_ne_bytes());
+        }
+        if let Some((v, m)) = self.ct_labels {
+            builder.append_attr(flower::TCA_FLOWER_KEY_CT_LABELS, &v);
+            builder.append_attr(flower::TCA_FLOWER_KEY_CT_LABELS_MASK, &m);
+        }
+        if let Some(dev) = &self.indev {
+            builder.append_attr_str(flower::TCA_FLOWER_INDEV, dev);
+        }
+        if let Some(t) = self.vlan_ethtype {
+            builder.append_attr(flower::TCA_FLOWER_KEY_VLAN_ETH_TYPE, &t.to_be_bytes());
+        }
+        if let Some(id) = self.cvlan_id {
+            builder.append_attr(flower::TCA_FLOWER_KEY_CVLAN_ID, &id.to_ne_bytes());
+        }
+        if let Some(prio) = self.cvlan_prio {
+            builder.append_attr(flower::TCA_FLOWER_KEY_CVLAN_PRIO, &[prio]);
+        }
+        if let Some(t) = self.cvlan_ethtype {
+            builder.append_attr(flower::TCA_FLOWER_KEY_CVLAN_ETH_TYPE, &t.to_be_bytes());
+        }
+        if let Some(label) = self.mpls_label {
+            builder.append_attr(flower::TCA_FLOWER_KEY_MPLS_LABEL, &label.to_ne_bytes());
+        }
+        if let Some(tc) = self.mpls_tc {
+            builder.append_attr(flower::TCA_FLOWER_KEY_MPLS_TC, &[tc]);
+        }
+        if let Some(bos) = self.mpls_bos {
+            builder.append_attr(flower::TCA_FLOWER_KEY_MPLS_BOS, &[bos]);
+        }
+        if let Some(ttl) = self.mpls_ttl {
+            builder.append_attr(flower::TCA_FLOWER_KEY_MPLS_TTL, &[ttl]);
+        }
+        if let Some((op, mask)) = self.arp_op {
+            builder.append_attr(flower::TCA_FLOWER_KEY_ARP_OP, &[op]);
+            builder.append_attr(flower::TCA_FLOWER_KEY_ARP_OP_MASK, &[mask]);
+        }
+        for (addr, key, mask_key) in [
+            (self.arp_sip, flower::TCA_FLOWER_KEY_ARP_SIP, flower::TCA_FLOWER_KEY_ARP_SIP_MASK),
+            (self.arp_tip, flower::TCA_FLOWER_KEY_ARP_TIP, flower::TCA_FLOWER_KEY_ARP_TIP_MASK),
+        ] {
+            if let Some((addr, plen)) = addr {
+                builder.append_attr(key, &addr.octets());
+                builder.append_attr(mask_key, &ipv4_mask(plen).octets());
+            }
+        }
+        for (mac, key, mask_key) in [
+            (self.arp_sha, flower::TCA_FLOWER_KEY_ARP_SHA, flower::TCA_FLOWER_KEY_ARP_SHA_MASK),
+            (self.arp_tha, flower::TCA_FLOWER_KEY_ARP_THA, flower::TCA_FLOWER_KEY_ARP_THA_MASK),
+        ] {
+            if let Some((mac, mask)) = mac {
+                builder.append_attr(key, &mac);
+                builder.append_attr(mask_key, &mask);
+            }
+        }
+        if let Some(id) = self.enc_key_id {
+            builder.append_attr(flower::TCA_FLOWER_KEY_ENC_KEY_ID, &id.to_be_bytes());
+        }
+        for (addr, v4, v4_mask, v6, v6_mask) in [
+            (
+                self.enc_src_ip,
+                flower::TCA_FLOWER_KEY_ENC_IPV4_SRC,
+                flower::TCA_FLOWER_KEY_ENC_IPV4_SRC_MASK,
+                flower::TCA_FLOWER_KEY_ENC_IPV6_SRC,
+                flower::TCA_FLOWER_KEY_ENC_IPV6_SRC_MASK,
+            ),
+            (
+                self.enc_dst_ip,
+                flower::TCA_FLOWER_KEY_ENC_IPV4_DST,
+                flower::TCA_FLOWER_KEY_ENC_IPV4_DST_MASK,
+                flower::TCA_FLOWER_KEY_ENC_IPV6_DST,
+                flower::TCA_FLOWER_KEY_ENC_IPV6_DST_MASK,
+            ),
+        ] {
+            match addr {
+                Some((IpAddr::V4(a), plen)) => {
+                    builder.append_attr(v4, &a.octets());
+                    builder.append_attr(v4_mask, &ipv4_mask(plen).octets());
+                }
+                Some((IpAddr::V6(a), plen)) => {
+                    builder.append_attr(v6, &a.octets());
+                    builder.append_attr(v6_mask, &ipv6_mask(plen).octets());
+                }
+                None => {}
+            }
+        }
+        if let Some(port) = self.enc_dst_port {
+            builder.append_attr(flower::TCA_FLOWER_KEY_ENC_UDP_DST_PORT, &port.to_be_bytes());
+        }
+        if let Some((v, m)) = self.enc_tos {
+            builder.append_attr(flower::TCA_FLOWER_KEY_ENC_IP_TOS, &[v]);
+            builder.append_attr(flower::TCA_FLOWER_KEY_ENC_IP_TOS_MASK, &[m]);
+        }
+        if let Some((v, m)) = self.enc_ttl {
+            builder.append_attr(flower::TCA_FLOWER_KEY_ENC_IP_TTL, &[v]);
+            builder.append_attr(flower::TCA_FLOWER_KEY_ENC_IP_TTL_MASK, &[m]);
         }
 
         // Actions and goto_chain share `TCA_FLOWER_ACT`, so they share one
@@ -2439,9 +3656,35 @@ impl MatchallFilter {
         }
         Ok(f)
     }
+
+    /// The filter as the tokens [`parse_params`](Self::parse_params) reads,
+    /// its inverse (#645). Its actions are not in that grammar and are not
+    /// written.
+    pub fn to_params(&self) -> crate::Result<Vec<String>> {
+        let mut out = Vec::new();
+        if let Some(c) = self.classid {
+            out.extend(["classid".to_string(), classid_param(c)]);
+        }
+        if let Some(c) = self.chain {
+            out.extend(["chain".to_string(), c.to_string()]);
+        }
+        if let Some(c) = self.goto_chain {
+            out.extend(["goto_chain".to_string(), c.to_string()]);
+        }
+        out.extend(skip_flags_params("matchall", self.flags)?);
+        Ok(out)
+    }
+
+    /// Its actions, if any.
+    #[cfg_attr(not(feature = "serde"), allow(dead_code))]
+    pub(crate) fn action_list(&self) -> Option<&ActionList> {
+        self.actions.as_ref()
+    }
 }
 
 impl FilterConfig for MatchallFilter {
+    from_actions!();
+
     fn kind(&self) -> &'static str {
         "matchall"
     }
@@ -2544,6 +3787,9 @@ pub struct FwFilter {
     classid: Option<u32>,
     /// Chain index for this filter.
     chain: Option<u32>,
+    /// Match only packets that arrived on this device (tc(8)'s `indev`,
+    /// #829); the kernel resolves the name in the filter's namespace.
+    indev: Option<String>,
 }
 
 impl FwFilter {
@@ -2556,6 +3802,7 @@ impl FwFilter {
             mask: 0xFFFFFFFF,
             classid: None,
             chain: None,
+            indev: None,
         }
     }
 
@@ -2580,6 +3827,12 @@ impl FwFilter {
         self
     }
 
+    /// Match only packets that arrived on `dev`.
+    pub fn indev(mut self, dev: impl Into<String>) -> Self {
+        self.indev = Some(dev.into());
+        self
+    }
+
     /// Build the filter configuration.
     pub fn build(self) -> Self {
         self
@@ -2591,6 +3844,7 @@ impl FwFilter {
     ///
     /// - `classid <handle>` (alias `flowid`) — target class id.
     /// - `mask <hex|dec>` — mask for the firewall mark.
+    /// - `indev <dev>` — the device packets arrived on (#829).
     /// - `chain <n>` — chain index.
     ///
     /// Stricter than the legacy parser: unknown tokens, missing
@@ -2643,6 +3897,10 @@ impl FwFilter {
                         })?);
                     i += 2;
                 }
+                "indev" => {
+                    f = f.indev(need_value()?);
+                    i += 2;
+                }
                 other => {
                     return Err(Error::invalid_message(format!(
                         "fw: unknown token `{other}`"
@@ -2651,6 +3909,25 @@ impl FwFilter {
             }
         }
         Ok(f)
+    }
+
+    /// The filter as the tokens [`parse_params`](Self::parse_params) reads,
+    /// its inverse (#645).
+    pub fn to_params(&self) -> crate::Result<Vec<String>> {
+        let mut out = Vec::new();
+        if let Some(c) = self.classid {
+            out.extend(["classid".to_string(), classid_param(c)]);
+        }
+        if self.mask != 0xFFFF_FFFF {
+            out.extend(["mask".to_string(), format!("0x{:x}", self.mask)]);
+        }
+        if let Some(dev) = &self.indev {
+            out.extend(["indev".to_string(), dev.clone()]);
+        }
+        if let Some(c) = self.chain {
+            out.extend(["chain".to_string(), c.to_string()]);
+        }
+        Ok(out)
     }
 }
 
@@ -2684,6 +3961,10 @@ impl FilterConfig for FwFilter {
 
         if self.mask != 0xFFFFFFFF {
             builder.append_attr_u32(fw::TCA_FW_MASK, self.mask);
+        }
+
+        if let Some(dev) = &self.indev {
+            builder.append_attr_str(fw::TCA_FW_INDEV, dev);
         }
 
         Ok(())
@@ -3280,7 +4561,10 @@ pub struct EmatchCmp {
 }
 
 /// `u32` ematch — same selector primitive as `cls_u32`'s key, but
-/// embedded in a `cls_basic` ematch tree.
+/// embedded in a `cls_basic` ematch tree: the 32-bit word at `offset` (a
+/// multiple of four, from the network header) under `mask` equals
+/// `value`. `mask` and `value` are that word in host order; the writer
+/// sends it big-endian, as the packet holds it (#828).
 #[derive(Debug, Clone)]
 pub struct EmatchU32 {
     pub mask: u32,
@@ -3463,15 +4747,13 @@ impl BasicFilter {
     ///   `tcp`, `udp`, `icmp`, `icmpv6`, `sctp`, `ah`, `esp`,
     ///   `gre`. Numeric: 0–255.
     ///
-    /// # Not yet typed-modelled
-    ///
-    /// The full ematch DSL (`match cmp(...)`, `match u32(...)`,
-    /// AND/OR composition with paren grouping) is intentionally
-    /// not parsed here. The tc(8) ematch syntax doesn't tokenise
-    /// cleanly through `bins/tc`'s flat `&[String]` interface —
-    /// it relies on shell-quoted expressions. Use the typed
-    /// builder API ([`BasicFilter::ematch`], [`Ematch::cmp`],
-    /// [`Ematch::u32`]) for non-trivial trees.
+    /// - `match EXPR` — a tc-ematch(8) expression (#828): `cmp(...)` and
+    ///   `u32(...)` matches, each optionally `not`, joined by `and` or
+    ///   `or`, read as tc reads them. A match may be one argument
+    ///   (`'cmp(u8 at 9 layer network eq 6)'`, as the shell passes a
+    ///   quoted one) or several. Parenthesised groups, `meta(...)` and
+    ///   the other modules are not modelled; build those with
+    ///   [`BasicFilter::ematch`].
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut f = Self::new();
         let mut i = 0;
@@ -3491,6 +4773,13 @@ impl BasicFilter {
                     f = f.chain(parse_u32_int("basic", "chain", s)?);
                     i += 2;
                 }
+                "match" => {
+                    let (matches, used) = parse_ematch_expr("basic", &params[i + 1..])?;
+                    for m in matches {
+                        f = f.ematch(m);
+                    }
+                    i += 1 + used;
+                }
                 "ip_proto_eq" => {
                     let s = need_value(params, i, "basic", key)?;
                     let proto = parse_ip_proto_name_or_num(s).map_err(|e| {
@@ -3503,7 +4792,7 @@ impl BasicFilter {
                 }
                 other => {
                     return Err(Error::invalid_message(format!(
-                        "basic: unknown token `{other}` (recognised: classid/flowid, chain, ip_proto_eq; complex ematch trees go through the typed builder)"
+                        "basic: unknown token `{other}` (recognised: classid/flowid, chain, match, ip_proto_eq)"
                     )));
                 }
             }
@@ -3557,6 +4846,214 @@ impl FilterConfig for BasicFilter {
     }
 }
 
+/// One lexeme of a tc-ematch(8) expression, and the argument it came from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum EmLex<'a> {
+    Open,
+    Close,
+    And,
+    Or,
+    Not,
+    Word(&'a str),
+}
+
+/// Split the arguments after `match` into lexemes, as tc's lexer does:
+/// `(` and `)` stand alone wherever they are, words split on spaces.
+fn ematch_lex<'a>(params: &[&'a str]) -> Vec<(EmLex<'a>, usize)> {
+    let mut out = Vec::new();
+    for (n, p) in params.iter().enumerate() {
+        let mut word_start = None;
+        let flush = |out: &mut Vec<(EmLex<'a>, usize)>, start: Option<usize>, end: usize| {
+            if let Some(start) = start {
+                let w = &p[start..end];
+                let lex = match w {
+                    "and" | "AND" | "&&" => EmLex::And,
+                    "or" | "OR" | "||" => EmLex::Or,
+                    "not" | "NOT" | "!" => EmLex::Not,
+                    _ => EmLex::Word(w),
+                };
+                out.push((lex, n));
+            }
+        };
+        for (at, c) in p.char_indices() {
+            match c {
+                '(' | ')' => {
+                    flush(&mut out, word_start.take(), at);
+                    out.push((if c == '(' { EmLex::Open } else { EmLex::Close }, n));
+                }
+                c if c.is_whitespace() => flush(&mut out, word_start.take(), at),
+                _ => {
+                    word_start.get_or_insert(at);
+                }
+            }
+        }
+        flush(&mut out, word_start, p.len());
+    }
+    out
+}
+
+/// Parse a tc-ematch(8) expression from the arguments after `match`, as
+/// tc's grammar reads it: matches, each optionally `not`, joined by `and`
+/// or `or`, ending at the first argument that does not continue it.
+/// Returns the matches and how many arguments they took (#828).
+fn parse_ematch_expr(kind: &str, params: &[&str]) -> Result<(Vec<Ematch>, usize)> {
+    let err = |msg: String| Error::invalid_message(format!("{kind}: match: {msg}"));
+    let lex = ematch_lex(params);
+    let mut at = 0;
+    let mut matches = Vec::new();
+    loop {
+        let negate = matches!(lex.get(at), Some((EmLex::Not, _)));
+        if negate {
+            at += 1;
+        }
+        let (module, args_from) = match (lex.get(at), lex.get(at + 1)) {
+            (Some((EmLex::Word(m), _)), Some((EmLex::Open, _))) => (*m, at + 2),
+            (Some((EmLex::Open, _)), _) => {
+                return Err(err("parenthesised groups are not modelled; build them with BasicFilter::ematch".into()));
+            }
+            _ => return Err(err("expected `module(args)`, such as `cmp(u8 at 9 layer network eq 6)`".into())),
+        };
+        let close = lex[args_from..]
+            .iter()
+            .position(|(l, _)| *l == EmLex::Close)
+            .map(|n| args_from + n)
+            .ok_or_else(|| err(format!("`{module}(` has no `)`")))?;
+        let args: Vec<&str> = lex[args_from..close]
+            .iter()
+            .map(|(l, _)| match l {
+                EmLex::Word(w) => Ok(*w),
+                _ => Err(err(format!("unexpected token in `{module}(...)`"))),
+            })
+            .collect::<Result<_>>()?;
+        let mut m = match module {
+            "cmp" => Ematch::cmp(parse_em_cmp(&err, &args)?),
+            "u32" => Ematch::u32(parse_em_u32(&err, &args)?),
+            other => {
+                return Err(err(format!(
+                    "the `{other}` ematch is not modelled (cmp and u32 are); build it with BasicFilter::ematch"
+                )));
+            }
+        };
+        if negate {
+            m = m.negate();
+        }
+        at = close + 1;
+        match lex.get(at) {
+            Some((EmLex::And, _)) => {
+                matches.push(m);
+                at += 1;
+            }
+            Some((EmLex::Or, _)) => {
+                matches.push(m.or());
+                at += 1;
+            }
+            _ => {
+                matches.push(m);
+                break;
+            }
+        }
+    }
+    // The expression ends with the argument its last `)` is in, which
+    // must end there.
+    let (_, last) = lex[at - 1];
+    if lex.get(at).is_some_and(|(_, n)| *n == last) {
+        return Err(err(format!("unexpected `{}` after the expression", params[last])));
+    }
+    Ok((matches, last + 1))
+}
+
+/// A number as tc's ematch modules read one: `strtoul(.., 0)`.
+fn em_number(err: &dyn Fn(String) -> Error, what: &str, s: &str) -> Result<u32> {
+    parse_u32_any("ematch", what, s).map_err(|_| err(format!("invalid {what} `{s}`")))
+}
+
+/// `cmp(ALIGN at OFFSET [layer LAYER] [mask MASK] [trans] eq|gt|lt VALUE)`,
+/// as tc's `em_cmp.c` reads it. An offset and a value are required.
+fn parse_em_cmp(err: &dyn Fn(String) -> Error, args: &[&str]) -> Result<EmatchCmp> {
+    let align = match args.first() {
+        Some(&"u8") => CmpAlign::U8,
+        Some(&"u16") => CmpAlign::U16,
+        Some(&"u32") => CmpAlign::U32,
+        _ => return Err(err("cmp: expected an alignment, u8, u16 or u32, first".into())),
+    };
+    let (mut offset, mut value, mut layer, mut mask, mut trans, mut op) = (None, None, CmpLayer::Network, 0, false, CmpOp::Eq);
+    let mut i = 1;
+    while i < args.len() {
+        let next = || args.get(i + 1).copied().ok_or_else(|| err(format!("cmp: `{}` requires a value", args[i])));
+        match args[i] {
+            "at" => {
+                let off = em_number(err, "cmp offset", next()?)?;
+                offset = Some(u16::try_from(off).map_err(|_| err(format!("cmp: offset {off} is past 65535")))?);
+                i += 2;
+            }
+            "layer" => {
+                layer = match next()? {
+                    "link" | "0" => CmpLayer::Link,
+                    "network" | "1" => CmpLayer::Network,
+                    "transport" | "2" => CmpLayer::Transport,
+                    other => return Err(err(format!("cmp: invalid layer `{other}` (expected link, network or transport)"))),
+                };
+                i += 2;
+            }
+            "mask" => {
+                mask = em_number(err, "cmp mask", next()?)?;
+                i += 2;
+            }
+            "trans" => {
+                trans = true;
+                i += 1;
+            }
+            w @ ("eq" | "gt" | "lt") => {
+                op = match w {
+                    "eq" => CmpOp::Eq,
+                    "gt" => CmpOp::Gt,
+                    _ => CmpOp::Lt,
+                };
+                value = Some(em_number(err, "cmp value", next()?)?);
+                i += 2;
+            }
+            other => return Err(err(format!("cmp: unknown parameter `{other}`"))),
+        }
+    }
+    let (Some(offset), Some(value)) = (offset, value) else {
+        return Err(err("cmp: an offset (`at`) and a value (`eq`, `gt` or `lt`) are required".into()));
+    };
+    Ok(EmatchCmp { layer, align, offset, mask, value, op, trans })
+}
+
+/// `u32(ALIGN KEY MASK at OFFSET)`, packed into the 32-bit word at the
+/// offset rounded down to four, as tc's `em_u32.c` packs it. An offset
+/// from the next header (`nexthdr+`) is not modelled.
+fn parse_em_u32(err: &dyn Fn(String) -> Error, args: &[&str]) -> Result<EmatchU32> {
+    let [align, key, mask, at, off] = args else {
+        return Err(err("u32: expected `u32(ALIGN KEY MASK at OFFSET)`".into()));
+    };
+    if *at != "at" {
+        return Err(err(format!("u32: expected `at`, not `{at}`")));
+    }
+    if off.starts_with("nexthdr+") {
+        return Err(err("u32: an offset from the next header is not modelled".into()));
+    }
+    let (key, mask, off) = (em_number(err, "u32 key", key)?, em_number(err, "u32 mask", mask)?, em_number(err, "u32 offset", off)?);
+    let (key, mask, off) = match *align {
+        "u8" if key <= 0xFF && mask <= 0xFF => {
+            let shift = 24 - (off & 3) * 8;
+            (key << shift, mask << shift, off & !3)
+        }
+        "u16" if key <= 0xFFFF && mask <= 0xFFFF => {
+            let shift = if off & 3 == 0 { 16 } else { 0 };
+            (key << shift, mask << shift, off & !3)
+        }
+        "u32" => (key, mask, off),
+        "u8" | "u16" => return Err(err(format!("u32: key or mask is wider than {align}"))),
+        other => return Err(err(format!("u32: invalid alignment `{other}` (expected u8, u16 or u32)"))),
+    };
+    if off % 4 != 0 {
+        return Err(err(format!("u32: offset {off} is not a multiple of 4")));
+    }
+    Ok(EmatchU32 { mask, value: key & mask, offset: off })
+}
+
 /// Encode an ematch tree under `TCA_BASIC_EMATCHES`.
 fn write_ematch_tree(builder: &mut MessageBuilder, matches: &[Ematch]) {
     let outer = builder.nest_start(basic::TCA_BASIC_EMATCHES);
@@ -3599,11 +5096,15 @@ fn write_ematch_tree(builder: &mut MessageBuilder, matches: &[Ematch]) {
 
         match &m.kind {
             EmatchKind::Cmp(c) => payload.extend_from_slice(encode_cmp(c).as_bytes()),
+            // The kernel's `struct tc_u32_key`, all 16 bytes, its word
+            // big-endian as the packet holds it; nlink sent 12 bytes,
+            // which `tcf_em_validate` refuses (#828).
             EmatchKind::U32(u) => {
                 let body = ematch::TcfEmU32 {
-                    mask: u.mask,
-                    val: u.value,
+                    mask: u.mask.to_be(),
+                    val: (u.value & u.mask).to_be(),
                     off: u.offset,
+                    offmask: 0,
                 };
                 payload.extend_from_slice(body.as_bytes());
             }
@@ -3750,6 +5251,8 @@ impl CgroupFilter {
 }
 
 impl FilterConfig for CgroupFilter {
+    from_actions!();
+
     fn kind(&self) -> &'static str {
         "cgroup"
     }
@@ -3820,6 +5323,9 @@ pub struct RouteFilter {
     actions: Option<super::action::ActionList>,
     /// Chain index for this filter.
     chain: Option<u32>,
+    /// The filter's order among route filters, bits 8–14 of its handle
+    /// (tc(8)'s `order`, #829).
+    order: Option<u32>,
 }
 
 impl RouteFilter {
@@ -3848,10 +5354,18 @@ impl RouteFilter {
 
     /// Match traffic arriving from a specific interface by name.
     ///
-    /// Note: The interface name will be resolved when the filter is added.
-    /// For namespace operations, prefer `from_if_index()` with a pre-resolved index.
+    /// The connection that installs the filter resolves the name, in its
+    /// own namespace (#645). Until 0.32 nothing did, and a filter with a
+    /// name here could not be installed at all.
     pub fn from_if(mut self, dev: impl Into<String>) -> Self {
         self.from_if = Some(InterfaceRef::Name(dev.into()));
+        self
+    }
+
+    /// Set the filter's order among route filters (tc(8)'s `order`), which
+    /// goes in its handle.
+    pub fn order(mut self, order: u32) -> Self {
+        self.order = Some(order);
         self
     }
 
@@ -3900,9 +5414,10 @@ impl RouteFilter {
     /// - `classid <handle>` (alias `flowid`) — target class id.
     /// - `to <realm>` — match destination routing realm.
     /// - `from <realm>` — match source routing realm.
-    /// - `iif <dev>` — match input interface by name. Resolved at
-    ///   filter-add time; for namespace operations prefer setting
-    ///   `from_if_index()` on the typed builder directly.
+    /// - `fromif <dev>` (or `iif`) — match input interface by name.
+    ///   Resolved at filter-add time; for namespace operations prefer
+    ///   setting `from_if_index()` on the typed builder directly.
+    /// - `order <n>` — the filter's order, which goes in its handle.
     /// - `chain <n>` — chain index.
     ///
     /// Action attachment is not parsed here; build the filter typed
@@ -3946,9 +5461,17 @@ impl RouteFilter {
                     })?);
                     i += 2;
                 }
-                "iif" => {
+                // tc(8) says `fromif`; `iif` is nlink's (#829).
+                "fromif" | "iif" => {
                     let s = need_value()?;
                     f = f.from_if(s);
+                    i += 2;
+                }
+                "order" => {
+                    let s = need_value()?;
+                    f = f.order(s.parse().map_err(|_| {
+                        Error::invalid_message(format!("route: invalid order `{s}`"))
+                    })?);
                     i += 2;
                 }
                 "chain" => {
@@ -3970,6 +5493,56 @@ impl RouteFilter {
 }
 
 impl FilterConfig for RouteFilter {
+    fn estimator(&self) -> Option<Estimator> {
+        self.actions.as_ref().and_then(ActionList::estimator)
+    }
+
+    fn device_names(&self) -> Vec<&str> {
+        let mut names = match &self.from_if {
+            Some(InterfaceRef::Name(name)) => vec![name.as_str()],
+            _ => Vec::new(),
+        };
+        names.extend(self.actions.as_ref().map(ActionList::device_names).unwrap_or_default());
+        names
+    }
+
+    /// tc(8)'s: `to`'s realm in the low byte, `from`'s realm or
+    /// `0x8000 | ifindex` for an input interface in the upper half, `order`
+    /// in bits 8–14, from `0xFFFF8000` (#825).
+    fn default_handle(&self) -> Option<TcHandle> {
+        let mut fh: u32 = 0xFFFF_8000;
+        if let Some(to) = self.to_realm {
+            fh &= !0x80FF;
+            fh |= to & 0xFF;
+        }
+        if let Some(from) = self.from_realm {
+            fh &= 0xFFFF;
+            fh |= from << 16;
+        }
+        if let Some(InterfaceRef::Index(ifindex)) = self.from_if {
+            fh &= 0xFFFF;
+            fh |= (0x8000 | ifindex) << 16;
+        }
+        if let Some(order) = self.order.filter(|o| *o != 0) {
+            fh &= !0x7F00;
+            fh |= (order << 8) & 0x7F00;
+        }
+        Some(TcHandle::from_raw(fh))
+    }
+
+    fn resolve_devices(&mut self, ifindexes: &HashMap<String, u32>) -> Result<()> {
+        if let Some(InterfaceRef::Name(name)) = &self.from_if {
+            let ifindex = *ifindexes
+                .get(name)
+                .ok_or_else(|| Error::interface_not_found(name).with_context("route filter"))?;
+            self.from_if = Some(InterfaceRef::Index(ifindex));
+        }
+        match &mut self.actions {
+            Some(actions) => actions.resolve_devices(ifindexes),
+            None => Ok(()),
+        }
+    }
+
     fn kind(&self) -> &'static str {
         "route"
     }
@@ -4006,8 +5579,8 @@ impl FilterConfig for RouteFilter {
                 InterfaceRef::Index(idx) => *idx,
                 InterfaceRef::Name(name) => {
                     return Err(Error::invalid_message(format!(
-                        "RouteFilter from_if interface '{}' must be resolved to index before use. \
-                         Use from_if_index() or resolve the name via Connection::get_link_by_name()",
+                        "RouteFilter from_if interface '{}' is resolved by the connection that \
+                         installs the filter; install it through one, or use from_if_index()",
                         name
                     )));
                 }
@@ -4240,6 +5813,8 @@ impl RsvpFilter {
 }
 
 impl FilterConfig for RsvpFilter {
+    from_actions!();
+
     fn kind(&self) -> &'static str {
         if self.is_v6() { "rsvp6" } else { "rsvp" }
     }
@@ -4558,7 +6133,7 @@ impl FlowFilter {
     ///
     /// Recognised tokens:
     ///
-    /// - `keys <key1>,<key2>,...` — comma-separated list of flow
+    /// - `keys <key1>,<key2>,...` (or `key`) — comma-separated list of flow
     ///   keys (e.g. `src,dst,proto`, `nfct-src,nfct-dst`). Each key
     ///   is the lowercase tc-style name; supported names: `src`,
     ///   `dst`, `proto`, `proto-src`, `proto-dst`, `iif`, `priority`,
@@ -4571,8 +6146,8 @@ impl FlowFilter {
     /// - `perturb <seconds>` — hash perturbation interval.
     /// - `rshift <n>` — right-shift amount.
     /// - `addend <n>` — additive constant.
-    /// - `mask <hex>` — bitwise AND mask (0x-prefix or decimal).
-    /// - `xor <hex>` — bitwise XOR value.
+    /// - `and <n>` (or `mask`), `or <n>`, `xor <n>` — bit operations,
+    ///   folded into one mask and xor in order, as tc(8) folds them (#829).
     /// - `chain <n>` — chain index.
     ///
     /// **Net new CLI capability**: the legacy filter dispatcher's
@@ -4583,6 +6158,7 @@ impl FlowFilter {
     pub fn parse_params(params: &[&str]) -> crate::Result<Self> {
         use crate::Error;
         let mut f = Self::new();
+        let mut bitop = (u32::MAX, 0u32);
         let mut i = 0;
         while i < params.len() {
             let key = params[i];
@@ -4593,7 +6169,8 @@ impl FlowFilter {
                     .ok_or_else(|| Error::invalid_message(format!("flow: `{key}` requires a value")))
             };
             match key {
-                "keys" => {
+                // tc(8) matches a prefix: `key` is `keys` (#829).
+                "keys" | "key" => {
                     let s = need_value()?;
                     for k in s.split(',') {
                         f = f.key(parse_flow_key(k.trim())?);
@@ -4644,14 +6221,17 @@ impl FlowFilter {
                     })?);
                     i += 2;
                 }
-                "mask" => {
-                    let s = need_value()?;
-                    f = f.mask(parse_flow_u32_hex_or_dec(s, "mask")?);
-                    i += 2;
-                }
-                "xor" => {
-                    let s = need_value()?;
-                    f = f.xor(parse_flow_u32_hex_or_dec(s, "xor")?);
+                // tc(8)'s `and`, `or` and `xor`, folded into one mask and
+                // xor as its transfer_bitop() folds them (#829). `mask` is
+                // nlink's word for `and`.
+                "and" | "mask" | "or" | "xor" => {
+                    let v = parse_flow_u32_hex_or_dec(need_value()?, key)?;
+                    let (m, x) = match key {
+                        "or" => (!v, v),
+                        "xor" => (u32::MAX, v),
+                        _ => (v, 0),
+                    };
+                    bitop = (bitop.0 & m, x ^ (bitop.1 & m));
                     i += 2;
                 }
                 "chain" => {
@@ -4668,6 +6248,9 @@ impl FlowFilter {
                 }
             }
         }
+        if bitop != (u32::MAX, 0) {
+            f = f.mask(bitop.0).xor(bitop.1);
+        }
         Ok(f)
     }
 
@@ -4678,6 +6261,8 @@ impl FlowFilter {
 }
 
 impl FilterConfig for FlowFilter {
+    from_actions!();
+
     fn kind(&self) -> &'static str {
         "flow"
     }
@@ -4858,8 +6443,10 @@ impl Connection<Route> {
         mut config: impl FilterConfig,
     ) -> Result<()> {
         config.set_protocol(protocol);
+        let names = self.ifindexes_of(&config.device_names()).await?;
+        config.resolve_devices(&names)?;
         let parent_handle = parent.as_raw();
-        let filter_handle = handle.map(|h| h.as_raw()).unwrap_or(0);
+        let filter_handle = handle.or_else(|| config.default_handle()).map_or(0, |h| h.as_raw());
 
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
@@ -4876,6 +6463,7 @@ impl Connection<Route> {
         if let Some(chain) = config.chain() {
             builder.append_attr_u32(TcaAttr::Chain as u16, chain);
         }
+        write_estimator(&mut builder, &config);
 
         let options_token = builder.nest_start(TcaAttr::Options as u16);
         config.write_options(&mut builder)?;
@@ -4986,8 +6574,10 @@ impl Connection<Route> {
         mut config: impl FilterConfig,
     ) -> Result<()> {
         config.set_protocol(protocol);
+        let names = self.ifindexes_of(&config.device_names()).await?;
+        config.resolve_devices(&names)?;
         let parent_handle = parent.as_raw();
-        let filter_handle = handle.map(|h| h.as_raw()).unwrap_or(0);
+        let filter_handle = handle.or_else(|| config.default_handle()).map_or(0, |h| h.as_raw());
 
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
@@ -5004,6 +6594,7 @@ impl Connection<Route> {
         if let Some(chain) = config.chain() {
             builder.append_attr_u32(TcaAttr::Chain as u16, chain);
         }
+        write_estimator(&mut builder, &config);
 
         let options_token = builder.nest_start(TcaAttr::Options as u16);
         config.write_options(&mut builder)?;
@@ -5095,8 +6686,10 @@ impl Connection<Route> {
         mut config: impl FilterConfig,
     ) -> Result<()> {
         config.set_protocol(protocol);
+        let names = self.ifindexes_of(&config.device_names()).await?;
+        config.resolve_devices(&names)?;
         let parent_handle = parent.as_raw();
-        let filter_handle = handle.map(|h| h.as_raw()).unwrap_or(0);
+        let filter_handle = handle.or_else(|| config.default_handle()).map_or(0, |h| h.as_raw());
 
         let tcmsg = TcMsg::new()
             .with_ifindex(ifindex as i32)
@@ -5113,6 +6706,7 @@ impl Connection<Route> {
         if let Some(chain) = config.chain() {
             builder.append_attr_u32(TcaAttr::Chain as u16, chain);
         }
+        write_estimator(&mut builder, &config);
 
         let options_token = builder.nest_start(TcaAttr::Options as u16);
         config.write_options(&mut builder)?;
@@ -5191,6 +6785,33 @@ impl Connection<Route> {
                 q.handle().major() == parent.major()
             }
         }))
+    }
+
+    /// Delete a filter in a chain by interface index (tc(8)
+    /// `chain N`, #793). [`del_filter_by_index`](Self::del_filter_by_index)
+    /// deletes in chain 0, and a filter in another chain at the same
+    /// priority and protocol is a different filter.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_filter_in_chain_by_index"))]
+    pub async fn del_filter_in_chain_by_index(
+        &self,
+        ifindex: u32,
+        parent: TcHandle,
+        chain: u32,
+        protocol: EthProto,
+        priority: FilterPriority,
+    ) -> Result<()> {
+        let tcmsg = TcMsg::new()
+            .with_ifindex(ifindex as i32)
+            .with_parent(parent.as_raw())
+            .with_filter_info(protocol.as_u16(), priority.as_u16());
+
+        let mut builder = create_request(NlMsgType::RTM_DELTFILTER);
+        builder.append(&tcmsg);
+        builder.append_attr_u32(TcaAttr::Chain as u16, chain);
+
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("del_filter"))
     }
 
     /// Delete a filter by interface index.
@@ -5900,24 +7521,128 @@ mod tests {
         assert!(err.to_string().contains("unknown token"));
     }
 
+    /// The options a flower writes, by attribute type.
+    fn flower_attrs(f: &FlowerFilter) -> std::collections::HashMap<u16, Vec<u8>> {
+        let mut b = MessageBuilder::new(0, 0);
+        f.write_options(&mut b).unwrap();
+        let bytes = b.finish()[16..].to_vec();
+        crate::netlink::attr::AttrIter::new(&bytes).map(|(ty, p)| (ty & 0x3fff, p.to_vec())).collect()
+    }
+
+    /// tc-ematch(8) expressions after `match`, as tc reads them (#828).
     #[test]
-    fn flower_parse_params_unsupported_features_rejected() {
-        for unsup in [
-            "ct_state",
-            "ct_zone",
-            "ct_mark",
-            "enc_key_id",
-            "enc_dst_ip",
-            "enc_src_ip",
-            "enc_dst_port",
-            "indev",
+    fn basic_reads_tcs_ematch_expressions() {
+        // One argument per match, as the shell passes a quoted one, or
+        // split across several; the expression ends where it stops.
+        let quoted = BasicFilter::parse_params(&["match", "cmp(u8 at 9 layer network eq 6)", "classid", "1:10"]).unwrap();
+        let split = BasicFilter::parse_params(&["match", "cmp(", "u8", "at", "9", "layer", "network", "eq", "6", ")", "classid", "1:10"]).unwrap();
+        assert_eq!(format!("{:?}", quoted.matches), format!("{:?}", split.matches));
+        assert_eq!(quoted.classid, Some(TcHandle::new(1, 0x10).as_raw()));
+        let f = BasicFilter::parse_params(&["match", "not", "cmp(u8 at 9 layer network eq 17)", "or", "u32(u8 0x06 0xff at 9)"]).unwrap();
+        assert_eq!(f.matches.len(), 2);
+        assert!(f.matches[0].negate && f.matches[0].op == EmatchOp::Or);
+        let EmatchKind::U32(u) = &f.matches[1].kind else { panic!() };
+        // The protocol byte, the second of the word at 8.
+        assert_eq!((u.mask, u.value, u.offset), (0x00ff_0000, 0x0006_0000, 8));
+        let f = BasicFilter::parse_params(&["match", "cmp(u32 at 12 mask 0xffffff00 trans gt 167772160)"]).unwrap();
+        let EmatchKind::Cmp(c) = &f.matches[0].kind else { panic!() };
+        assert_eq!((c.offset, c.mask, c.value, c.op, c.trans), (12, 0xffff_ff00, 167_772_160, CmpOp::Gt, true));
+
+        for (bad, says) in [
+            (&["match", "(cmp(u8 at 9 eq 6))"][..], "groups"),
+            (&["match", "meta(priority eq 5)"], "not modelled"),
+            (&["match", "cmp(u8 at 9 eq 6"], "no `)`"),
+            (&["match", "cmp(u8 eq 6)"], "required"),
+            (&["match", "u32(u8 0x106 0xff at 9)"], "wider"),
+            (&["match", "u32(u8 1 0xff at nexthdr+0)"], "next header"),
+            (&["match", "cmp(u8 at 9 eq 6) classid"], "unexpected"),
         ] {
-            let err = FlowerFilter::parse_params(&[unsup, "x"]).unwrap_err();
-            assert!(
-                err.to_string().contains("not modelled"),
-                "expected not-modelled for `{unsup}`, got: {err}"
-            );
+            let err = BasicFilter::parse_params(bad).unwrap_err().to_string();
+            assert!(err.contains(says), "{bad:?}: {err}");
         }
+    }
+
+    /// A u32 ematch's key is the kernel's whole `struct tc_u32_key`, its
+    /// word big-endian (#828).
+    #[test]
+    fn a_u32_ematchs_key_is_tcs() {
+        let f = BasicFilter::new().ematch(Ematch::u32(EmatchU32 { mask: 0x00ff_0000, value: 0x0006_0000, offset: 8 }));
+        let mut b = MessageBuilder::new(0, 0);
+        f.write_options(&mut b).unwrap();
+        let bytes = b.finish();
+        let needle = [0x00, 0xff, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 8, 0, 0, 0, 0, 0, 0, 0];
+        assert!(bytes.windows(16).any(|w| w == needle), "{bytes:02x?}");
+        assert_eq!(ematch::TcfEmU32::SIZE, 16);
+    }
+
+    /// tc-flower(8)'s other keys, written as f_flower.c writes them (#827).
+    #[test]
+    fn flower_reads_and_writes_tcs_other_keys() {
+        let parse = |w: &[&str], proto: u16| {
+            let mut f = FlowerFilter::parse_params(w).unwrap();
+            f.set_protocol(EthProto::new(proto));
+            flower_attrs(&f)
+        };
+        let a = parse(&["ip_proto", "icmp", "type", "8", "code", "0/255"], 0x0800);
+        assert_eq!((&a[&flower::TCA_FLOWER_KEY_ICMPV4_TYPE], &a[&flower::TCA_FLOWER_KEY_ICMPV4_CODE_MASK]), (&vec![8], &vec![255]));
+        let a = parse(&["ip_proto", "icmpv6", "type", "128"], 0x86DD);
+        assert_eq!(a[&flower::TCA_FLOWER_KEY_ICMPV6_TYPE], [128]);
+        let a = parse(&["ip_flags", "frag/nofirstfrag"], 0x0800);
+        assert_eq!((&a[&flower::TCA_FLOWER_KEY_FLAGS], &a[&flower::TCA_FLOWER_KEY_FLAGS_MASK]), (&1u32.to_be_bytes().to_vec(), &3u32.to_be_bytes().to_vec()));
+        let a = parse(&["ct_state", "+trk+est-new", "ct_zone", "3", "ct_mark", "5/0xff"], 0x0800);
+        assert_eq!(a[&flower::TCA_FLOWER_KEY_CT_STATE], 0b1010u16.to_ne_bytes());
+        assert_eq!(a[&flower::TCA_FLOWER_KEY_CT_STATE_MASK], 0b1011u16.to_ne_bytes());
+        assert_eq!(a[&flower::TCA_FLOWER_KEY_CT_ZONE_MASK], u16::MAX.to_ne_bytes());
+        assert_eq!(a[&flower::TCA_FLOWER_KEY_CT_MARK_MASK], 0xffu32.to_ne_bytes());
+        let a = parse(&["enc_key_id", "100", "enc_dst_ip", "10.0.0.0/24", "enc_dst_port", "4789"], 0x0800);
+        assert_eq!(a[&flower::TCA_FLOWER_KEY_ENC_KEY_ID], 100u32.to_be_bytes());
+        assert_eq!(a[&flower::TCA_FLOWER_KEY_ENC_IPV4_DST_MASK], [255, 255, 255, 0]);
+        assert_eq!(a[&flower::TCA_FLOWER_KEY_ENC_UDP_DST_PORT], 4789u16.to_be_bytes());
+        let a = parse(&["src_mac", "02:00:00:00:00:00/24"], 0x0800);
+        assert_eq!(a[&flower::TCA_FLOWER_KEY_ETH_SRC_MASK], [0xff, 0xff, 0xff, 0, 0, 0]);
+        let a = parse(&["vlan_id", "10", "vlan_ethtype", "ip", "src_ip", "10.0.0.1"], 0x8100);
+        assert_eq!(a[&flower::TCA_FLOWER_KEY_ETH_TYPE], 0x8100u16.to_be_bytes());
+        assert_eq!(a[&flower::TCA_FLOWER_KEY_VLAN_ETH_TYPE], 0x0800u16.to_be_bytes());
+        let a = parse(&["arp_op", "request", "arp_tip", "10.0.0.0/8"], 0x0806);
+        assert_eq!((&a[&flower::TCA_FLOWER_KEY_ARP_OP], &a[&flower::TCA_FLOWER_KEY_ARP_TIP_MASK]), (&vec![1], &vec![255, 0, 0, 0]));
+        let a = parse(&["mpls_label", "100", "mpls_bos", "1"], 0x8847);
+        assert_eq!(a[&flower::TCA_FLOWER_KEY_MPLS_LABEL], 100u32.to_ne_bytes());
+
+        // The text round trips.
+        for words in [
+            &["ip_proto", "icmp", "type", "8/255", "ct_state", "+trk-est", "ct_label", "01/ff"][..],
+            &["arp_op", "reply", "arp_sha", "02:00:00:00:00:01/ff:ff:ff:00:00:00", "indev", "lo"],
+            &["enc_src_ip", "fd00::/64", "enc_tos", "16/0xfc", "ip_flags", "nofrag"],
+        ] {
+            let f = FlowerFilter::parse_params(words).unwrap();
+            let back = f.to_params().unwrap();
+            let refs: Vec<&str> = back.iter().map(String::as_str).collect();
+            assert_eq!(FlowerFilter::parse_params(&refs).unwrap().to_params().unwrap(), back, "{words:?}");
+        }
+        assert!(FlowerFilter::parse_params(&["ct_state", "+bogus"]).is_err());
+        assert!(FlowerFilter::parse_params(&["ip_flags", "csum"]).is_err());
+        assert!(FlowerFilter::parse_params(&["mpls_tc", "8"]).is_err());
+    }
+
+    /// The kernel reads ARP, MPLS and ICMP keys only under their own
+    /// ethertypes, and the inner VLAN keys only under two tags: anywhere
+    /// else it drops them and installs a match-all, so they are refused.
+    #[test]
+    fn flower_refuses_keys_the_kernel_would_drop() {
+        let refused = |w: &[&str], proto: u16| {
+            let mut f = FlowerFilter::parse_params(w).unwrap();
+            f.set_protocol(EthProto::new(proto));
+            let mut b = MessageBuilder::new(0, 0);
+            f.write_options(&mut b).unwrap_err().to_string()
+        };
+        assert!(refused(&["arp_op", "request"], 0x0800).contains("ARP"));
+        assert!(refused(&["mpls_label", "5"], 0x0800).contains("MPLS"));
+        assert!(refused(&["ip_proto", "tcp", "type", "8"], 0x0800).contains("ICMP"));
+        assert!(refused(&["ip_proto", "icmp", "type", "8"], 0x86DD).contains("ICMP"));
+        assert!(refused(&["vlan_ethtype", "ip"], 0x0800).contains("vlan_ethtype"));
+        assert!(refused(&["vlan_id", "1", "vlan_ethtype", "ip", "cvlan_id", "2"], 0x8100).contains("cvlan"));
+        // Under a VLAN, the L3 keys follow vlan_ethtype.
+        assert!(refused(&["vlan_id", "1", "vlan_ethtype", "arp", "ip_proto", "tcp"], 0x8100).contains("inside the VLAN"));
     }
 
     #[test]
@@ -6383,7 +8108,53 @@ mod tests {
     fn u32_parse_params_match_invalid_hex_errors() {
         let err =
             U32Filter::parse_params(&["match", "u32", "notahex", "0xFF", "at", "0"]).unwrap_err();
-        assert!(err.to_string().contains("expected hex value"));
+        assert!(err.to_string().contains("expected unsigned integer"), "{err}");
+        let err = U32Filter::parse_params(&["match", "u32", "1", "notahex", "at", "0"]).unwrap_err();
+        assert!(err.to_string().contains("expected hex value"), "{err}");
+    }
+
+    /// An offset with a sign, in any base, as tc's `get_integer(.., 0)`
+    /// reads it (#835): before the network header for a negative one.
+    #[test]
+    fn u32_offsets_take_a_sign() {
+        let f = U32Filter::parse_params(&["match", "u16", "0x0800", "0xffff", "at", "-2"]).unwrap();
+        assert_eq!((f.keys[0].off, f.keys[0].mask), (-4, 0xffffu32.to_be()));
+        let f = U32Filter::parse_params(&["match", "u8", "2", "0xff", "at", "-0xe"]).unwrap();
+        assert_eq!(f.keys[0].off, -16);
+        for (s, want) in [("010", 8), ("+4", 4), ("-0", 0)] {
+            assert_eq!(parse_offset("u32", s).unwrap(), want, "{s}");
+        }
+        for bad in ["--2", "-+2", "x", "-"] {
+            assert!(parse_offset("u32", bad).is_err(), "{bad}");
+        }
+    }
+
+    /// A value in any base and a mask in hex, as tc's `get_u32(.., 0)` and
+    /// `get_u32(.., 16)` read them (#831): `80` is port 80, not 0x80.
+    #[test]
+    fn u32_values_read_as_tc_reads_them() {
+        let f = U32Filter::parse_params(&["match", "u16", "80", "ffff", "at", "22"]).unwrap();
+        assert_eq!(f.keys[0].val, 80u32.to_be());
+        let f = U32Filter::parse_params(&["match", "mark", "16", "255"]).unwrap();
+        assert_eq!(f.mark, Some((16, 255)));
+        assert!(U32Filter::parse_params(&["match", "mark", "0x100", "0xff"]).is_err());
+        // A /0 is mask 0.
+        let f = U32Filter::parse_params(&["match", "ip", "dst", "0.0.0.0/0"]).unwrap();
+        assert_eq!((f.keys[0].val, f.keys[0].mask), (0, 0));
+        // Keys at one offset merge, as tc's pack_key() merges them.
+        let f = U32Filter::parse_params(&["match", "ip", "sport", "80", "0xffff", "match", "ip", "dport", "443", "0xffff"]).unwrap();
+        assert_eq!(f.keys.len(), 1);
+        assert_eq!((f.keys[0].val, f.keys[0].mask), (((80u32 << 16) | 443).to_be(), u32::MAX));
+        assert!(U32Filter::parse_params(&["match", "ip", "dport", "80", "match", "ip", "dport", "81"]).is_err());
+        // ether dst spans -14..-9: two keys after merging.
+        let f = U32Filter::parse_params(&["match", "ether", "dst", "02:00:00:00:00:01"]).unwrap();
+        let offs: Vec<i32> = f.keys.iter().map(|k| k.off).collect();
+        assert_eq!(offs, [-16, -12]);
+        // ip6 src /40: a whole word and eight bits of the next.
+        let f = U32Filter::parse_params(&["match", "ip6", "src", "fd00:1::/40"]).unwrap();
+        assert_eq!((f.keys.len(), f.keys[1].off, f.keys[1].mask), (2, 12, 0xFF00_0000u32.to_be()));
+        let f = U32Filter::parse_params(&["match", "ip", "nofrag"]).unwrap();
+        assert_eq!((f.keys[0].off, f.keys[0].mask), (4, 0x3FFFu32.to_be()));
     }
 
     #[test]
@@ -6663,7 +8434,7 @@ mod tests {
     #[test]
     fn u32_parse_params_match_ip_dport_invalid_port_errors() {
         let err = U32Filter::parse_params(&["match", "ip", "dport", "70000"]).unwrap_err();
-        assert!(err.to_string().contains("expected port 0–65535"));
+        assert!(err.to_string().contains("wider than 16 bits"), "{err}");
     }
 
     #[test]
@@ -7491,4 +9262,117 @@ fn flower_parse_params_points_action_at_the_builder() {
         "{err}"
     );
 }
+}
+
+/// `to_params` is `parse_params`' inverse for the filters a declared tree
+/// holds (#645): the tokens parse back to a filter that writes the same
+/// request, and the same tokens.
+#[cfg(test)]
+mod params_tests {
+    use super::*;
+
+    /// What `f` writes installed under `protocol`, as the tree installs
+    /// it (flower takes its ethertype from the protocol).
+    fn bytes(f: &(impl FilterConfig + Clone), protocol: EthProto) -> Vec<u8> {
+        let mut f = f.clone();
+        f.set_protocol(protocol);
+        let mut b = MessageBuilder::new(0, 0);
+        let start = b.len();
+        f.write_options(&mut b).unwrap();
+        b.as_bytes()[start..].to_vec()
+    }
+
+    macro_rules! round_trips {
+        ($ty:ident, $f:expr) => {
+            round_trips!($ty, $f, EthProto::IP)
+        };
+        ($ty:ident, $f:expr, $proto:expr) => {{
+            let f: $ty = $f;
+            let tokens = f.to_params().unwrap_or_else(|e| panic!("{e}"));
+            let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+            let back = $ty::parse_params(&refs).unwrap_or_else(|e| panic!("{tokens:?}: {e}"));
+            assert_eq!(back.to_params().unwrap(), tokens);
+            assert_eq!(bytes(&back, $proto), bytes(&f, $proto), "{tokens:?}");
+            tokens
+        }};
+    }
+
+    #[test]
+    fn flower_round_trips() {
+        let h = |m, n| TcHandle::new(m, n);
+        assert_eq!(
+            round_trips!(FlowerFilter, FlowerFilter::new().ip_proto_tcp().dst_port(22).classid(h(1, 0x10))),
+            ["classid", "1:10", "ip_proto", "tcp", "dst_port", "22"]
+        );
+        round_trips!(
+            FlowerFilter,
+            FlowerFilter::new()
+                .ip_proto(47)
+                .src_ipv6("2001:db8:1::".parse().unwrap(), 48)
+                .dst_ipv6("2001:db8::".parse().unwrap(), 32),
+            EthProto::IPV6
+        );
+        round_trips!(
+            FlowerFilter,
+            FlowerFilter::new()
+                .ip_proto_tcp()
+                .src_ipv4("10.0.0.0".parse().unwrap(), 8)
+                .src_port_range(1000, 2000)
+                .src_mac([0xaa, 0xbb, 0xcc, 0, 1, 2])
+                .dst_mac([2, 0, 0, 0, 0, 1])
+                .ip_tos(0x10, 0xfc)
+                .ip_ttl(64, 0xff)
+                .tcp_flags(0x12, 0x3f)
+                .chain(2)
+                .goto_chain(5)
+                .skip_hw()
+        );
+        round_trips!(
+            FlowerFilter,
+            FlowerFilter::new().vlan_id(42).vlan_prio(3),
+            EthProto::VLAN_8021Q
+        );
+        let mut eth = FlowerFilter::new();
+        eth.eth_type = Some(0x88cc);
+        round_trips!(FlowerFilter, eth, EthProto::ALL);
+    }
+
+    #[test]
+    fn matchall_fw_and_u32_round_trip() {
+        let h = |m, n| TcHandle::new(m, n);
+        assert_eq!(
+            round_trips!(MatchallFilter, MatchallFilter::new().classid(h(1, 0x20)).skip_sw()),
+            ["classid", "1:20", "skip_sw"]
+        );
+        round_trips!(MatchallFilter, MatchallFilter::new().chain(1).goto_chain(3));
+        assert_eq!(
+            round_trips!(FwFilter, FwFilter::new().classid(h(1, 5)).mask(0xff00)),
+            ["classid", "1:5", "mask", "0xff00"]
+        );
+        round_trips!(FwFilter, FwFilter::new().chain(4));
+
+        // Named matches pack into raw keys; nexthdr+ offsets included.
+        let named = U32Filter::parse_params(&[
+            "match", "ip", "src", "10.1.0.0/16", "match", "ip", "protocol", "6", "0xff", "match",
+            "tcp", "dport", "22", "0xffff", "match", "u16", "0x0016", "0xffff", "at",
+            "nexthdr+2", "classid", "1:10",
+        ])
+        .unwrap();
+        let tokens = round_trips!(U32Filter, named);
+        assert!(tokens.iter().any(|t| t.starts_with("nexthdr+")), "{tokens:?}");
+        round_trips!(
+            U32Filter,
+            U32Filter::new()
+                .match_mark(0x10, 0xff)
+                .divisor(256)
+                .ht(U32Filter::handle(2, 0, 0))
+                .link(U32Filter::handle(3, 0, 0))
+                .hashkey(0x0000_00ff, 16)
+                .offset_plus(4)
+                .offset_at(0, 0x0f00, 6)
+                .eat()
+                .chain(9)
+                .skip_hw()
+        );
+    }
 }

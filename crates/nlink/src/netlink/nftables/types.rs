@@ -1085,6 +1085,109 @@ pub enum PayloadBase {
     Transport = 2,
 }
 
+/// The checksum a payload write updates (`enum nft_payload_csum_types`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u32)]
+#[non_exhaustive]
+pub enum PayloadCsum {
+    /// None.
+    None = 0,
+    /// The Internet checksum at the expression's checksum offset.
+    Inet = 1,
+    /// SCTP's CRC32c.
+    Sctp = 2,
+}
+
+impl PayloadCsum {
+    pub(crate) fn from_u32(v: u32) -> Option<Self> {
+        Some(match v {
+            0 => Self::None,
+            1 => Self::Inet,
+            2 => Self::Sctp,
+            _ => return None,
+        })
+    }
+}
+
+/// What [`Rule::match_socket`] compares (#703).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SocketMatch {
+    /// `socket transparent 0|1`.
+    Transparent(bool),
+    /// `socket wildcard 0|1`.
+    Wildcard(bool),
+    /// `socket mark <mark>`.
+    Mark(u32),
+}
+
+/// A value a rule computes into its first register (#703): a `numgen`,
+/// a `jhash` of packet fields or a `symhash`. See [`Rule::generate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Generated {
+    /// `numgen inc|random mod <modulus> [offset <offset>]`.
+    Numgen {
+        /// Counting up, or at random.
+        kind: super::expr::NumgenKind,
+        /// Modulo this.
+        modulus: u32,
+        /// Plus this.
+        offset: u32,
+    },
+    /// `jhash <field> [. <field> …] mod <modulus> [seed <seed>] [offset
+    /// <offset>]`.
+    Jhash {
+        /// The fields hashed, behind their guards.
+        fields: Vec<PacketField>,
+        /// Modulo this.
+        modulus: u32,
+        /// The seed; `None`, the kernel's.
+        seed: Option<u32>,
+        /// Plus this.
+        offset: u32,
+    },
+    /// `symhash mod <modulus> [offset <offset>]`.
+    Symhash {
+        /// Modulo this.
+        modulus: u32,
+        /// Plus this.
+        offset: u32,
+    },
+}
+
+/// A header field a rule writes, with its value (#703): what nft's
+/// `<field> set <value>` statements write, through
+/// [`Rule::set_header`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HeaderWrite {
+    /// `ip dscp set <0..63>`.
+    IpDscp(u8),
+    /// `ip ttl set <ttl>`.
+    IpTtl(u8),
+    /// `ip saddr set <addr>`.
+    IpSaddr(std::net::Ipv4Addr),
+    /// `ip daddr set <addr>`.
+    IpDaddr(std::net::Ipv4Addr),
+    /// `ip6 dscp set <0..63>`.
+    Ip6Dscp(u8),
+    /// `ip6 hoplimit set <hops>`.
+    Ip6HopLimit(u8),
+    /// `ip6 saddr set <addr>`.
+    Ip6Saddr(std::net::Ipv6Addr),
+    /// `ip6 daddr set <addr>`.
+    Ip6Daddr(std::net::Ipv6Addr),
+    /// `tcp sport set <port>`.
+    TcpSport(u16),
+    /// `tcp dport set <port>`.
+    TcpDport(u16),
+    /// `udp sport set <port>`.
+    UdpSport(u16),
+    /// `udp dport set <port>`.
+    UdpDport(u16),
+}
+
 impl PayloadBase {
     /// Reverse mapping for the expression decoder (#164).
     pub(crate) fn from_u32(v: u32) -> Option<Self> {
@@ -1890,7 +1993,7 @@ pub struct Chain {
     pub(crate) priority: Option<Priority>,
     pub(crate) chain_type: Option<ChainType>,
     pub(crate) policy: Option<Policy>,
-    pub(crate) device: Option<String>,
+    pub(crate) devices: Vec<String>,
     pub(crate) comment: Option<String>,
     /// Tag it as the declarative apply's own (#527).
     pub(crate) owned: bool,
@@ -1920,7 +2023,7 @@ impl Chain {
             priority: None,
             chain_type: None,
             policy: None,
-            device: None,
+            devices: Vec::new(),
             comment: None,
             owned: false,
         })
@@ -1964,13 +2067,17 @@ impl Chain {
         self
     }
 
-    /// Bind a base chain to a specific interface (`type filter hook
-    /// ingress device eth0 priority -150`). **Required** for the netdev
-    /// hooks ([`Hook::NetdevIngress`]/[`Hook::NetdevEgress`]) and for
+    /// Bind a base chain to an interface (`type filter hook ingress device
+    /// eth0 priority -150`). **Required** for the netdev hooks
+    /// ([`Hook::NetdevIngress`]/[`Hook::NetdevEgress`]) and for
     /// [`Hook::InetIngress`] — without it the kernel rejects the chain.
     /// On any other hook a recent kernel refuses it (`EOPNOTSUPP`).
+    ///
+    /// Call it again to bind the chain to several devices (`devices = {
+    /// eth0, eth1 }`, #703): one goes as `NFTA_HOOK_DEV`, several as
+    /// `NFTA_HOOK_DEVS`, as nft writes them. It used to replace the device.
     pub fn device(mut self, dev: impl Into<String>) -> Self {
-        self.device = Some(dev.into());
+        self.devices.push(dev.into());
         self
     }
 }
@@ -2218,6 +2325,353 @@ impl Rule {
 
     /// Push `meta <key> == <value>` (a 1-byte metadata load + Eq compare
     /// in `R0`) — the shared shape of the nfproto/l4proto matcher guards.
+    /// Hand the packet to a local socket (#703): `tproxy [ip|ip6] to
+    /// [<addr>][:<port>]`. The socket is the one listening at `addr`
+    /// (or the packet's destination) and `port` (or the packet's), and
+    /// must have `IP_TRANSPARENT`; the packet keeps its destination.
+    /// `family` is the table's address family — `Ip`, `Ip6`, or `Inet` for
+    /// either (then without an address); an address must be of it.
+    pub fn tproxy(mut self, family: Family, addr: Option<std::net::IpAddr>, port: Option<u16>) -> Self {
+        let nfproto = match (family, addr) {
+            (Family::Ip, None | Some(std::net::IpAddr::V4(_))) => NFPROTO_IPV4,
+            (Family::Ip6, None | Some(std::net::IpAddr::V6(_))) => NFPROTO_IPV6,
+            (Family::Inet, None) => 0,
+            (Family::Inet, Some(std::net::IpAddr::V4(_))) => NFPROTO_IPV4,
+            (Family::Inet, Some(std::net::IpAddr::V6(_))) => NFPROTO_IPV6,
+            (family, addr) => {
+                self.error.get_or_insert(format!(
+                    "tproxy: {addr:?} in a {family:?} table (an address of the table's family, \
+                     in an ip, ip6 or inet table)"
+                ));
+                return self;
+            }
+        };
+        let mut next = [Register::R0, Register::R1].into_iter();
+        let mut load = |data: Vec<u8>| {
+            let r = next.next().expect("two at most");
+            self.exprs.push(Expr::Immediate { dreg: r, data });
+            r
+        };
+        let sreg_addr = addr.map(|a| {
+            load(match a {
+                std::net::IpAddr::V4(a) => a.octets().to_vec(),
+                std::net::IpAddr::V6(a) => a.octets().to_vec(),
+            })
+        });
+        let sreg_port = port.map(|p| load(p.to_be_bytes().to_vec()));
+        self.exprs.push(Expr::Tproxy {
+            family: nfproto,
+            sreg_addr,
+            sreg_port,
+        });
+        self
+    }
+
+    /// Match the operating system a TCP SYN's fingerprint names (#703):
+    /// `osf [ttl loose|skip] [version] name "<name>"` — `Linux`, or with
+    /// `version` `Linux:3.11`. Only a SYN matches, and only in a
+    /// prerouting, input or forward chain. Without fingerprints loaded
+    /// (`nfnl_osf -f pf.os`) every SYN is `unknown`. A name over 15 bytes
+    /// is refused.
+    pub fn match_osf(mut self, name: &str, ttl: super::expr::OsfTtl, version: bool) -> Self {
+        use super::expr::Expr;
+        if name.len() >= super::NFT_OSF_MAXGENRELEN {
+            self.error.get_or_insert(format!(
+                "osf name `{name}` is longer than {} bytes",
+                super::NFT_OSF_MAXGENRELEN - 1
+            ));
+        }
+        self.exprs.push(Expr::Osf {
+            dreg: Register::R0,
+            ttl,
+            version,
+        });
+        let mut data = name.as_bytes().to_vec();
+        data.resize(super::NFT_OSF_MAXGENRELEN, 0);
+        self.exprs.push(Expr::Cmp {
+            sreg: Register::R0,
+            op: CmpOp::Eq,
+            data,
+        });
+        self
+    }
+
+    /// Match the packet's local socket (#703): `socket transparent 1`,
+    /// `socket wildcard 0`, `socket mark 7`. A packet with no local
+    /// socket does not match.
+    pub fn match_socket(mut self, m: SocketMatch) -> Self {
+        let (key, data) = match m {
+            SocketMatch::Transparent(on) => (super::expr::SocketKey::Transparent, vec![u8::from(on)]),
+            SocketMatch::Wildcard(on) => (super::expr::SocketKey::Wildcard, vec![u8::from(on)]),
+            SocketMatch::Mark(mark) => (super::expr::SocketKey::Mark, mark.to_ne_bytes().to_vec()),
+        };
+        self.exprs.push(Expr::Socket {
+            dreg: Register::R0,
+            key,
+        });
+        self.exprs.push(Expr::Cmp {
+            sreg: Register::R0,
+            op: CmpOp::Eq,
+            data,
+        });
+        self
+    }
+
+    /// Compute a value into the first register (#703) — a `numgen`, a
+    /// `jhash` of fields, a `symhash` — for the statement after it to
+    /// use: [`set_meta_from`](Self::set_meta_from),
+    /// [`set_ct_from`](Self::set_ct_from), or a
+    /// [`QueueExpr::register`](super::expr::QueueExpr::register).
+    ///
+    /// ```
+    /// use nlink::netlink::nftables::{Generated, MetaKey, NumgenKind, Rule};
+    ///
+    /// // meta mark set numgen inc mod 2
+    /// let r = Rule::new("t", "c")
+    ///     .generate(Generated::Numgen { kind: NumgenKind::Incremental, modulus: 2, offset: 0 })
+    ///     .set_meta_from(MetaKey::Mark);
+    /// # let _ = r;
+    /// ```
+    pub fn generate(mut self, generated: Generated) -> Self {
+        let dreg = Register::R0;
+        let expr = match generated {
+            Generated::Numgen {
+                kind,
+                modulus,
+                offset,
+            } => Expr::Numgen {
+                dreg,
+                kind,
+                modulus,
+                offset,
+            },
+            Generated::Jhash {
+                fields,
+                modulus,
+                seed,
+                offset,
+            } => {
+                // Each field in a 32-bit word of its own, from R0.
+                self.push_concat_load(&fields);
+                Expr::Hash {
+                    dreg,
+                    kind: super::expr::HashKind::Jenkins,
+                    sreg: Some(Register::R0),
+                    len: 4 * u32::try_from(fields.len()).unwrap_or(u32::MAX),
+                    modulus,
+                    seed,
+                    offset,
+                }
+            }
+            Generated::Symhash { modulus, offset } => Expr::Hash {
+                dreg,
+                kind: super::expr::HashKind::Sym,
+                sreg: None,
+                len: 0,
+                modulus,
+                seed: None,
+                offset,
+            },
+        };
+        self.exprs.push(expr);
+        self
+    }
+
+    /// Write the first register into packet metadata: `meta <key> set`
+    /// what [`generate`](Self::generate) computed.
+    pub fn set_meta_from(mut self, key: MetaKey) -> Self {
+        self.exprs.push(Expr::MetaSet {
+            key,
+            sreg: Register::R0,
+        });
+        self
+    }
+
+    /// Write the first register into the conntrack entry: `ct <key> set`
+    /// what [`generate`](Self::generate) computed.
+    pub fn set_ct_from(mut self, key: CtKey) -> Self {
+        self.exprs.push(Expr::CtSet {
+            key,
+            sreg: Register::R0,
+        });
+        self
+    }
+
+    /// Send a copy of the packet (#703): `dup to <addr> [device <dev>]` in
+    /// an `ip`/`ip6` chain, routed to `addr` as its gateway, out of the
+    /// device with ifindex `dev` when one is given. The copy leaves as it
+    /// is; the original goes on.
+    pub fn dup_to(mut self, addr: std::net::IpAddr, dev: Option<u32>) -> Self {
+        let octets = match addr {
+            std::net::IpAddr::V4(a) => a.octets().to_vec(),
+            std::net::IpAddr::V6(a) => a.octets().to_vec(),
+        };
+        self.exprs.push(Expr::Immediate {
+            dreg: Register::R0,
+            data: octets,
+        });
+        if let Some(dev) = dev {
+            self.exprs.push(Expr::Immediate {
+                dreg: Register::R1,
+                data: dev.to_ne_bytes().to_vec(),
+            });
+        }
+        self.exprs.push(Expr::Dup {
+            sreg_addr: Some(Register::R0),
+            sreg_dev: dev.map(|_| Register::R1),
+        });
+        self
+    }
+
+    /// Send a copy of the packet out of the device with ifindex `dev`
+    /// (#703): `dup to <dev>`, in a `netdev` chain.
+    pub fn dup_to_device(mut self, dev: u32) -> Self {
+        self.exprs.push(Expr::Immediate {
+            dreg: Register::R0,
+            data: dev.to_ne_bytes().to_vec(),
+        });
+        self.exprs.push(Expr::Dup {
+            sreg_addr: None,
+            sreg_dev: Some(Register::R0),
+        });
+        self
+    }
+
+    /// Send the packet out of the device with ifindex `dev` (#703): `fwd
+    /// to <dev>`, in a `netdev` chain. The packet is gone from this path.
+    pub fn fwd_to(mut self, dev: u32) -> Self {
+        self.exprs.push(Expr::Immediate {
+            dreg: Register::R0,
+            data: dev.to_ne_bytes().to_vec(),
+        });
+        self.exprs.push(Expr::Fwd {
+            sreg_dev: Register::R0,
+            sreg_addr: None,
+        });
+        self
+    }
+
+    /// Send the packet out of the device with ifindex `dev` to the next hop
+    /// `addr`, resolving its link-layer address (#703): `fwd ip to <addr>
+    /// device <dev>`, in a `netdev` chain.
+    pub fn fwd_ip_to(mut self, addr: std::net::IpAddr, dev: u32) -> Self {
+        let (octets, family) = match addr {
+            std::net::IpAddr::V4(a) => (a.octets().to_vec(), NFPROTO_IPV4),
+            std::net::IpAddr::V6(a) => (a.octets().to_vec(), NFPROTO_IPV6),
+        };
+        self.exprs.push(Expr::Immediate {
+            dreg: Register::R0,
+            data: dev.to_ne_bytes().to_vec(),
+        });
+        self.exprs.push(Expr::Immediate {
+            dreg: Register::R1,
+            data: octets,
+        });
+        self.exprs.push(Expr::Fwd {
+            sreg_dev: Register::R0,
+            sreg_addr: Some((Register::R1, family)),
+        });
+        self
+    }
+
+    /// Write a header field (#703): `ip dscp set cs1`, `tcp dport set
+    /// 8080`, `ip saddr set 10.0.0.9`, … — as nft writes it, behind the
+    /// guard nft puts before it (`meta nfproto`, `meta l4proto`), with the
+    /// checksums the field is in updated: the IPv4 header's for its
+    /// fields, TCP's for a port, and a transport checksum's pseudo-header
+    /// for an address. A field narrower than the 16 bits a checksum update
+    /// takes (DSCP, TTL) is read, masked and written back whole.
+    pub fn set_header(mut self, write: HeaderWrite) -> Self {
+        use HeaderWrite as W;
+        use PayloadBase::{Network, Transport};
+        let (base, offset, len, csum, csum_offset, pseudo) = match write {
+            W::IpDscp(_) => (Network, 0, 2, PayloadCsum::Inet, 10, false),
+            W::IpTtl(_) => (Network, 8, 2, PayloadCsum::Inet, 10, false),
+            W::IpSaddr(_) => (Network, 12, 4, PayloadCsum::Inet, 10, true),
+            W::IpDaddr(_) => (Network, 16, 4, PayloadCsum::Inet, 10, true),
+            W::Ip6Dscp(_) => (Network, 0, 2, PayloadCsum::None, 0, false),
+            W::Ip6HopLimit(_) => (Network, 7, 1, PayloadCsum::None, 0, false),
+            W::Ip6Saddr(_) => (Network, 8, 16, PayloadCsum::None, 0, true),
+            W::Ip6Daddr(_) => (Network, 24, 16, PayloadCsum::None, 0, true),
+            W::TcpSport(_) => (Transport, 0, 2, PayloadCsum::Inet, 16, false),
+            W::TcpDport(_) => (Transport, 2, 2, PayloadCsum::Inet, 16, false),
+            W::UdpSport(_) => (Transport, 0, 2, PayloadCsum::None, 0, true),
+            W::UdpDport(_) => (Transport, 2, 2, PayloadCsum::None, 0, true),
+        };
+        match write {
+            W::IpDscp(_) | W::IpTtl(_) | W::IpSaddr(_) | W::IpDaddr(_) => {
+                self.push_meta_eq(MetaKey::NfProto, NFPROTO_IPV4)
+            }
+            W::Ip6Dscp(_) | W::Ip6HopLimit(_) | W::Ip6Saddr(_) | W::Ip6Daddr(_) => {
+                self.push_meta_eq(MetaKey::NfProto, NFPROTO_IPV6)
+            }
+            W::TcpSport(_) | W::TcpDport(_) => self.push_meta_eq(MetaKey::L4Proto, IPPROTO_TCP),
+            W::UdpSport(_) | W::UdpDport(_) => self.push_meta_eq(MetaKey::L4Proto, IPPROTO_UDP),
+        }
+        // Read-modify-write: the 16 bits around the field, what keeps them
+        // as `mask`, the field's new bits as `xor`.
+        let mut masked = |mask: [u8; 2], xor: [u8; 2]| {
+            self.exprs.push(Expr::Payload {
+                dreg: Register::R0,
+                base,
+                offset,
+                len,
+            });
+            self.exprs.push(Expr::Bitwise {
+                sreg: Register::R0,
+                dreg: Register::R0,
+                len,
+                mask: mask.to_vec(),
+                xor: xor.to_vec(),
+            });
+        };
+        let immediate = |data: Vec<u8>| {
+            Some(Expr::Immediate {
+                dreg: Register::R0,
+                data,
+            })
+        };
+        let dscp = |d: u8| (d <= 63).then_some(d);
+        let load = match write {
+            W::IpDscp(d) | W::Ip6Dscp(d) if dscp(d).is_none() => {
+                self.error.get_or_insert(format!("set_header: DSCP {d} is past 63"));
+                return self;
+            }
+            // DSCP is the top six bits of the TOS byte; ECN stays.
+            W::IpDscp(d) => {
+                masked([0xff, 0x03], [0, d << 2]);
+                None
+            }
+            W::IpTtl(t) => {
+                masked([0x00, 0xff], [t, 0]);
+                None
+            }
+            // The traffic class straddles the first two bytes, after the
+            // version: its DSCP is bits 4..10, its ECN 10..12.
+            W::Ip6Dscp(d) => {
+                masked([0xf0, 0x3f], [d >> 2, (d & 3) << 6]);
+                None
+            }
+            W::Ip6HopLimit(h) => immediate(vec![h]),
+            W::IpSaddr(a) | W::IpDaddr(a) => immediate(a.octets().to_vec()),
+            W::Ip6Saddr(a) | W::Ip6Daddr(a) => immediate(a.octets().to_vec()),
+            W::TcpSport(p) | W::TcpDport(p) | W::UdpSport(p) | W::UdpDport(p) => {
+                immediate(p.to_be_bytes().to_vec())
+            }
+        };
+        self.exprs.extend(load);
+        self.exprs.push(Expr::PayloadSet {
+            sreg: Register::R0,
+            base,
+            offset,
+            len,
+            csum,
+            csum_offset,
+            l4_pseudo_header: pseudo,
+        });
+        self
+    }
+
     fn push_meta_eq(&mut self, key: MetaKey, value: u8) {
         self.exprs.push(Expr::Meta {
             dreg: Register::R0,
@@ -2609,6 +3063,46 @@ impl Rule {
         self
     }
 
+    /// Match `field` in an interval set ([`Set::interval`], #703): what
+    /// [`match_in_set`](Self::match_in_set) is for a set of ranges. A
+    /// host-order field — a mark, an interface index, a class id — is put
+    /// in network order first, as nft does, because an interval set stores
+    /// those keys that way so their ranges compare as numbers. For any other
+    /// field it is `match_in_set`.
+    pub fn match_in_interval_set(mut self, field: PacketField, set: &str) -> Self {
+        self.push_interval_key(field);
+        self.exprs
+            .push(super::expr::LookupExpr::new(set, Register::R0).into());
+        self
+    }
+
+    /// [`match_in_interval_set`](Self::match_in_interval_set), inverted:
+    /// `<field> != @<set>`.
+    pub fn match_not_in_interval_set(mut self, field: PacketField, set: &str) -> Self {
+        self.push_interval_key(field);
+        self.exprs.push(
+            super::expr::LookupExpr::new(set, Register::R0)
+                .invert()
+                .into(),
+        );
+        self
+    }
+
+    /// Load `field` into `R0` as an interval set keeps it.
+    fn push_interval_key(&mut self, field: PacketField) {
+        use super::expr::Expr;
+        self.push_field_load(field);
+        if field.key_type().is_host_order() {
+            self.exprs.push(Expr::Byteorder {
+                sreg: Register::R0,
+                dreg: Register::R0,
+                op: ByteorderOp::Hton,
+                len: field.len(),
+                size: field.len(),
+            });
+        }
+    }
+
     /// Match `field` when it is *not* in a named set: `<field> != @<set>` —
     /// iptables `-m set ! --match-set`. Packets that fail the field's
     /// protocol guard (an IPv6 packet, for an IPv4 field) do not match.
@@ -2725,6 +3219,22 @@ impl Rule {
         self.objref(super::object::ObjectType::Limit, name)
     }
 
+    /// `meta secmark set "<name>"`: give the packet the security mark of the
+    /// named secmark object (`ObjectConfig::Secmark`, #703), which the LSM
+    /// (SELinux, AppArmor) then mediates.
+    pub fn set_secmark(self, name: &str) -> Self {
+        self.objref(super::object::ObjectType::Secmark, name)
+    }
+
+    /// `ct helper set "<name>"`: assign the named conntrack helper object
+    /// ([`CtHelperObject`](super::CtHelperObject)) to the packet's
+    /// connection (#703). The kernel attaches it only while the connection
+    /// is unconfirmed, on its first packet, so the rule goes in a
+    /// prerouting or output chain.
+    pub fn set_ct_helper(self, name: &str) -> Self {
+        self.objref(super::object::ObjectType::CtHelper, name)
+    }
+
     /// `counter name <field> map @<map>` (and the same for quotas and
     /// limits): use the object the object map holds for `field` — one
     /// counter per address, ipset's per-element `counters`. A packet whose
@@ -2793,6 +3303,27 @@ impl Rule {
     /// `SET --del-set`. Kernel 5.4+.
     pub fn delete_from_set(self, field: PacketField, set: &str) -> Self {
         self.push_dynset(super::expr::DynsetOp::Delete, field, set, None)
+    }
+
+    /// `<op> @<set> { <field> [timeout T] [statements] }`: the general form
+    /// of [`add_to_set`](Self::add_to_set), [`update_in_set`](Self::update_in_set)
+    /// and [`delete_from_set`](Self::delete_from_set), for a `dynset` with
+    /// per-element statements (#703). Loads `field` and sets the dynset's
+    /// key register to it.
+    ///
+    /// ```no_run
+    /// # use nlink::netlink::nftables::{DynsetExpr, DynsetOp, LimitExpr};
+    /// # use nlink::netlink::nftables::types::{LimitUnit, PacketField, Register, Rule};
+    /// // update @flood { ip saddr limit rate over 10/second } drop
+    /// let flood = DynsetExpr::new(DynsetOp::Update, "flood", Register::R0)
+    ///     .statement(LimitExpr::packets(10, LimitUnit::Second).over());
+    /// let rule = Rule::new("filter", "input").dynset(PacketField::Ip4Saddr, flood).drop();
+    /// ```
+    pub fn dynset(mut self, field: PacketField, mut dynset: super::expr::DynsetExpr) -> Self {
+        self.push_field_load(field);
+        dynset.sreg_key = Register::R0;
+        self.exprs.push(dynset.into());
+        self
     }
 
     fn push_dynset(
@@ -4011,6 +4542,32 @@ impl PacketField {
     }
 }
 
+/// What the kernel picks a set's backend for (`NFTA_SET_POLICY`, #703):
+/// lookup speed, the default, or memory.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(u32)]
+#[non_exhaustive]
+pub enum SetPolicy {
+    /// `policy performance`, the default; the kernel does not dump it.
+    #[default]
+    Performance = 0,
+    /// `policy memory`.
+    Memory = 1,
+}
+
+impl SetPolicy {
+    pub(crate) fn from_u32(v: u32) -> Option<Self> {
+        match v {
+            0 => Some(Self::Performance),
+            1 => Some(Self::Memory),
+            _ => None,
+        }
+    }
+}
+
 /// Set flags — `NFTA_SET_FLAGS`, the `NFT_SET_*` bits, in the shape of
 /// [`CtState`] and [`TcpFlags`]. Combine with `|`.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -4123,6 +4680,9 @@ pub struct Set {
     pub(crate) comment: Option<String>,
     /// Tag it as the declarative apply's own (#527).
     pub(crate) owned: bool,
+    pub(crate) policy: Option<SetPolicy>,
+    /// What every element gets (#703).
+    pub(crate) statements: Vec<super::expr::ElementStatement>,
 }
 
 impl Set {
@@ -4140,7 +4700,34 @@ impl Set {
             data_type: None,
             comment: None,
             owned: false,
+            policy: None,
+            statements: Vec::new(),
         }
+    }
+
+    /// `policy memory`: let the kernel pick the set's backend for memory
+    /// rather than lookup speed (#703). Written when the set is created;
+    /// the declarative diff recreates a set whose declared policy changed.
+    pub fn policy(mut self, policy: SetPolicy) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+
+    /// Give every element a `statement` of its own (#703): `set s { …;
+    /// counter; }`, ipset's `counters`. The kernel adds it to each element,
+    /// whether a control-plane add or a [`DynsetExpr`](super::DynsetExpr)
+    /// puts it there, and a lookup that matches the element updates it:
+    /// [`SetElement::counter`] reads what it counted. Written when the set
+    /// is created; the declarative diff recreates a set whose statements
+    /// changed.
+    pub fn statement(mut self, statement: impl Into<super::expr::ElementStatement>) -> Self {
+        self.statements.push(statement.into());
+        self
+    }
+
+    /// A `counter` on every element: [`statement`](Self::statement).
+    pub fn counter(self) -> Self {
+        self.statement(super::expr::ElementStatement::Counter)
     }
 
     /// Give the set a comment, which `nft list` shows (#528). Written when
@@ -4270,17 +4857,37 @@ impl Set {
     /// The flags as written; see [`wire_flags`]. A set with a data type is
     /// a map, whatever its flags say.
     pub(crate) fn wire_flags(&self) -> SetFlags {
-        let flags = wire_flags(&self.key_type, self.flags);
-        match &self.data_type {
-            Some(data) => flags | data.flag(),
-            None => flags,
+        let mut flags = wire_flags(&self.key_type, self.flags);
+        if let Some(data) = &self.data_type {
+            flags |= data.flag();
         }
+        // Several statements are NFTA_SET_EXPRESSIONS, which the kernel
+        // takes only with NFT_SET_EXPR, and keeps.
+        if self.statements.len() > 1 {
+            flags |= SetFlags::EXPR;
+        }
+        flags
     }
 
     /// See [`ranges_per_field`].
     pub(crate) fn ranges_per_field(&self) -> bool {
         ranges_per_field(&self.key_type, self.flags)
     }
+
+    /// Whether this interval set stores host-order keys in network order
+    /// ([`SetElement::host_to_wire`]), as nft does (#703).
+    pub(crate) fn swaps_range_keys(&self) -> bool {
+        swaps_range_keys(&self.key_type, self.flags)
+    }
+}
+
+/// Whether an interval set of `key_type` keeps its keys in network order
+/// although the field is in host order: a mark, an ifindex, a class id. A
+/// concatenation with such a field is not modelled.
+pub(crate) fn swaps_range_keys(key_type: &SetKeyType, flags: SetFlags) -> bool {
+    flags.contains(SetFlags::INTERVAL)
+        && key_type.concat_fields().is_none()
+        && key_type.is_host_order()
 }
 
 /// Whether a set holds ranges as a start and an inclusive end in one
@@ -4324,6 +4931,10 @@ pub struct SetElement {
     flags: u32,
     /// Its comment (#528).
     comment: Option<String>,
+    /// Its counter's packets and bytes, as the kernel reports them (#703).
+    counter: Option<(u64, u64)>,
+    /// Its quota's bytes used, as the kernel reports them (#703).
+    quota_used: Option<u64>,
 }
 
 /// What a map element maps its key to.
@@ -4351,6 +4962,8 @@ impl SetElement {
             expiration: None,
             flags: 0,
             comment: None,
+            counter: None,
+            quota_used: None,
         }
     }
 
@@ -4425,6 +5038,14 @@ impl SetElement {
     /// A port range, inclusive (`1000-2000`).
     pub fn port_range(start: u16, end: u16) -> Self {
         Self::range(start.to_be_bytes().to_vec(), end.to_be_bytes().to_vec())
+    }
+
+    /// A range of marks, `start` to `end` inclusive, for an interval set of
+    /// marks (#703): written in network order, as nft writes it, and read
+    /// back in host order like [`mark`](Self::mark). Match it with
+    /// [`Rule::match_in_interval_set`].
+    pub fn mark_range(start: u32, end: u32) -> Self {
+        Self::range(start.to_ne_bytes().to_vec(), end.to_ne_bytes().to_vec())
     }
 
     /// An IPv4 prefix (`10.0.0.0/8`) as the range it covers. Host bits in
@@ -4540,6 +5161,20 @@ impl SetElement {
         self.expiration
     }
 
+    /// The packets and bytes the element's own counter has counted, as read
+    /// back from the kernel (#703): a set with a counter on every element
+    /// ([`Set::counter`]), or one a [`DynsetExpr`](super::DynsetExpr) gave
+    /// it.
+    pub fn counter(&self) -> Option<(u64, u64)> {
+        self.counter
+    }
+
+    /// The bytes the element's own quota has used, as read back from the
+    /// kernel (#703).
+    pub fn quota_used(&self) -> Option<u64> {
+        self.quota_used
+    }
+
     /// Whether this is a raw interval-end marker (`NFT_SET_ELEM_INTERVAL_END`),
     /// as an element event reports it.
     pub fn is_interval_end(&self) -> bool {
@@ -4588,14 +5223,21 @@ impl SetElement {
                 Some(fields) => fields.iter().map(|f| f.len().next_multiple_of(4) as usize).collect(),
                 None => vec![self.key.len()],
             };
+            // A host-order key compares as the number it is (#703).
+            let (key, end) = if set.swaps_range_keys() {
+                let wire = self.host_to_wire();
+                (wire.key, wire.key_end.unwrap_or_default())
+            } else {
+                (self.key.clone(), end.clone())
+            };
             let mut at = 0;
             for width in widths {
                 let field = at..at + width;
                 at += width;
-                if end.len() != self.key.len() || end[field.clone()] < self.key[field] {
+                if end.len() != key.len() || end[field.clone()] < key[field] {
                     return Err(Error::invalid_message(format!(
-                        "set {}: range end {end:02x?} is not at or after its start {:02x?}",
-                        set.name, self.key
+                        "set {}: range end {end:02x?} is not at or after its start {key:02x?}",
+                        set.name
                     )));
                 }
             }
@@ -4669,12 +5311,50 @@ impl SetElement {
         self
     }
 
+    /// With the live state of its statements, as dumped.
+    pub(crate) fn with_statements(mut self, statements: &[super::expr::RuleExpr]) -> Self {
+        use super::expr::RuleExpr;
+        for statement in statements {
+            match statement {
+                RuleExpr::Counter { packets, bytes } => self.counter = Some((*packets, *bytes)),
+                RuleExpr::Quota { consumed, .. } => self.quota_used = Some(*consumed),
+                _ => {}
+            }
+        }
+        self
+    }
+
     /// With the range end read back (`NFTA_SET_ELEM_KEY_END`). An end equal
     /// to the key is a single key — what `nft` writes for one — so it reads
     /// back as one.
     pub(crate) fn with_key_end(mut self, key_end: Option<Vec<u8>>) -> Self {
         self.key_end = key_end.filter(|end| *end != self.key);
         self
+    }
+
+    /// A host-order key (a mark, an ifindex, a class id) as an interval set
+    /// stores it: in network order, so its ranges compare as numbers (#703).
+    pub(crate) fn host_to_wire(&self) -> Self {
+        self.with_keys(|k| u32::from_ne_bytes(k).to_be_bytes())
+    }
+
+    /// The inverse of [`host_to_wire`](Self::host_to_wire).
+    pub(crate) fn wire_to_host(&self) -> Self {
+        self.with_keys(|k| u32::from_be_bytes(k).to_ne_bytes())
+    }
+
+    fn with_keys(&self, swap: impl Fn([u8; 4]) -> [u8; 4]) -> Self {
+        let swap = |key: &[u8]| match <[u8; 4]>::try_from(key) {
+            Ok(word) => swap(word).to_vec(),
+            Err(_) => key.to_vec(),
+        };
+        let key = swap(&self.key);
+        Self {
+            // A range of one value is that value, as `with_key_end` has it.
+            key_end: self.key_end.as_deref().map(swap).filter(|end| *end != key),
+            key,
+            ..self.clone()
+        }
     }
 }
 
@@ -4720,6 +5400,11 @@ pub struct SetInfo {
     /// Created by nlink's declarative apply: it carries nlink's
     /// ownership tag (#527).
     pub managed: bool,
+    /// Its backend policy (#703).
+    pub policy: SetPolicy,
+    /// The statements every element gets (#703), as their templates dump:
+    /// a counter at zero.
+    pub statements: Vec<super::expr::RuleExpr>,
 }
 
 /// The inclusive range a prefix covers: `addr` with its host bits cleared,
@@ -5320,6 +6005,50 @@ mod tests {
         );
     }
 
+    /// What the guards of a rule become in each family (#708): said once,
+    /// dropped where the family implies them, an ethertype in bridge and
+    /// netdev tables.
+    #[test]
+    fn guards_are_written_as_the_family_needs_them() {
+        use super::super::expr::exprs_for_family;
+        let v4: Ipv4Addr = "10.0.0.1".parse().unwrap();
+        let rule = Rule::new("f", "c")
+            .match_saddr_v4(v4, 32)
+            .match_daddr_v4(v4, 32)
+            .match_tcp_dport(22)
+            .match_tcp_sport(1);
+        let guards = |family| -> Vec<(MetaKey, Vec<u8>)> {
+            let exprs = exprs_for_family(&rule.exprs, family);
+            exprs
+                .windows(2)
+                .filter_map(|w| match (&w[0], &w[1]) {
+                    (Expr::Meta { key, .. }, Expr::Cmp { data, .. })
+                        if matches!(key, MetaKey::NfProto | MetaKey::L4Proto | MetaKey::Protocol) =>
+                    {
+                        Some((*key, data.clone()))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            guards(Family::Inet),
+            [(MetaKey::NfProto, vec![NFPROTO_IPV4]), (MetaKey::L4Proto, vec![IPPROTO_TCP])]
+        );
+        assert_eq!(guards(Family::Ip), [(MetaKey::L4Proto, vec![IPPROTO_TCP])]);
+        for family in [Family::Bridge, Family::Netdev] {
+            assert_eq!(
+                guards(family),
+                [(MetaKey::Protocol, vec![0x08, 0x00]), (MetaKey::L4Proto, vec![IPPROTO_TCP])]
+            );
+        }
+        // An ip6 field in an ip table keeps its guard: the rule can never
+        // match, and says so.
+        let v6 = Rule::new("f", "c").match_saddr_v6("2001:db8::1".parse().unwrap(), 64);
+        let lowered = exprs_for_family(&v6.exprs, Family::Ip);
+        assert!(matches!(lowered.first(), Some(Expr::Meta { key: MetaKey::NfProto, .. })));
+    }
+
     #[test]
     fn prefix_to_mask_boundaries() {
         // v4 widths
@@ -5343,5 +6072,151 @@ mod tests {
         assert_eq!(prefix_to_mask(16, 68), sixty_eight);
         // Clamp: out-of-range prefix saturates to all-ones.
         assert_eq!(prefix_to_mask(16, 200), vec![0xff; 16]);
+    }
+}
+
+/// #703: each header write is what nft writes for the same statement
+/// (`nft --debug=netlink`, nft 1.1.3): the guard, the value or the
+/// read-modify-write, and the payload write with its checksums.
+#[cfg(test)]
+mod header_write_tests {
+    use super::*;
+    use crate::netlink::nftables::{RuleExpr, expr::Expr};
+
+    fn write(
+        base: PayloadBase,
+        offset: u32,
+        len: u32,
+        csum: PayloadCsum,
+        csum_offset: u32,
+        pseudo: bool,
+    ) -> Expr {
+        Expr::PayloadSet {
+            sreg: Register::R0,
+            base,
+            offset,
+            len,
+            csum,
+            csum_offset,
+            l4_pseudo_header: pseudo,
+        }
+    }
+
+    fn guard(key: MetaKey, value: u8) -> [Expr; 2] {
+        [
+            Expr::Meta {
+                dreg: Register::R0,
+                key,
+            },
+            Expr::Cmp {
+                sreg: Register::R0,
+                op: CmpOp::Eq,
+                data: vec![value],
+            },
+        ]
+    }
+
+    fn exprs(w: HeaderWrite) -> Vec<Expr> {
+        let r = Rule::new("t", "c").set_header(w);
+        assert!(r.error.is_none(), "{:?}", r.error);
+        r.exprs
+    }
+
+    #[test]
+    fn header_writes_are_what_nft_writes() {
+        use PayloadBase::{Network, Transport};
+        let imm = |data: &[u8]| Expr::Immediate {
+            dreg: Register::R0,
+            data: data.to_vec(),
+        };
+        let rmw = |base, offset, mask: [u8; 2], xor: [u8; 2]| {
+            [
+                Expr::Payload {
+                    dreg: Register::R0,
+                    base,
+                    offset,
+                    len: 2,
+                },
+                Expr::Bitwise {
+                    sreg: Register::R0,
+                    dreg: Register::R0,
+                    len: 2,
+                    mask: mask.to_vec(),
+                    xor: xor.to_vec(),
+                },
+            ]
+        };
+        let v4 = guard(MetaKey::NfProto, NFPROTO_IPV4);
+        let v6 = guard(MetaKey::NfProto, NFPROTO_IPV6);
+        let tcp = guard(MetaKey::L4Proto, IPPROTO_TCP);
+        let udp = guard(MetaKey::L4Proto, IPPROTO_UDP);
+        let cat = |parts: &[&[Expr]]| parts.concat();
+
+        // tcp dport set 8080: immediate 0x1f90, 2b @ th + 2, inet csum at 16.
+        assert_eq!(
+            exprs(HeaderWrite::TcpDport(8080)),
+            cat(&[&tcp, &[imm(&[0x1f, 0x90]), write(Transport, 2, 2, PayloadCsum::Inet, 16, false)]])
+        );
+        // udp sport set 53: no checksum type, the pseudo-header flag.
+        assert_eq!(
+            exprs(HeaderWrite::UdpSport(53)),
+            cat(&[&udp, &[imm(&[0, 53]), write(Transport, 0, 2, PayloadCsum::None, 0, true)]])
+        );
+        // ip ttl set 64: 2b @ nh + 8, & 0x00ff ^ 0x4000 (bytes), inet csum at 10.
+        assert_eq!(
+            exprs(HeaderWrite::IpTtl(64)),
+            cat(&[&v4, &rmw(Network, 8, [0x00, 0xff], [64, 0]), &[write(Network, 8, 2, PayloadCsum::Inet, 10, false)]])
+        );
+        // ip dscp set cs1 (8): 2b @ nh + 0, keep version/ihl and ECN.
+        assert_eq!(
+            exprs(HeaderWrite::IpDscp(8)),
+            cat(&[&v4, &rmw(Network, 0, [0xff, 0x03], [0x00, 0x20]), &[write(Network, 0, 2, PayloadCsum::Inet, 10, false)]])
+        );
+        // ip saddr set 10.0.0.9: the L4 pseudo-header changes too.
+        assert_eq!(
+            exprs(HeaderWrite::IpSaddr("10.0.0.9".parse().unwrap())),
+            cat(&[&v4, &[imm(&[10, 0, 0, 9]), write(Network, 12, 4, PayloadCsum::Inet, 10, true)]])
+        );
+        // ip6 dscp set af21 (18): bytes [f0 3f] kept, [04 80] set.
+        assert_eq!(
+            exprs(HeaderWrite::Ip6Dscp(18)),
+            cat(&[&v6, &rmw(Network, 0, [0xf0, 0x3f], [0x04, 0x80]), &[write(Network, 0, 2, PayloadCsum::None, 0, false)]])
+        );
+        assert_eq!(
+            exprs(HeaderWrite::Ip6HopLimit(9)),
+            cat(&[&v6, &[imm(&[9]), write(Network, 7, 1, PayloadCsum::None, 0, false)]])
+        );
+        let a: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+        assert_eq!(
+            exprs(HeaderWrite::Ip6Daddr(a)),
+            cat(&[&v6, &[imm(&a.octets()), write(Network, 24, 16, PayloadCsum::None, 0, true)]])
+        );
+
+        let r = Rule::new("t", "c").set_header(HeaderWrite::IpDscp(64));
+        assert_eq!(r.error.as_deref(), Some("set_header: DSCP 64 is past 63"));
+    }
+
+    #[test]
+    fn a_payload_write_reads_back() {
+        use crate::netlink::{builder::MessageBuilder, nftables::expr};
+        let exprs = Rule::new("t", "c").set_header(HeaderWrite::IpSaddr("10.0.0.9".parse().unwrap())).exprs;
+        let mut b = MessageBuilder::new(0, 0);
+        expr::write_expressions(&mut b, &exprs);
+        let back = expr::parse_expressions(&b.as_bytes()[20..]);
+        assert!(
+            back.iter().any(|e| matches!(
+                e,
+                RuleExpr::PayloadSet {
+                    base: PayloadBase::Network,
+                    offset: 12,
+                    len: 4,
+                    csum: PayloadCsum::Inet,
+                    csum_offset: 10,
+                    l4_pseudo_header: true,
+                    ..
+                }
+            )),
+            "{back:?}"
+        );
     }
 }

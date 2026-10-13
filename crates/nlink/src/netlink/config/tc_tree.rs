@@ -46,7 +46,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crate::netlink::{
-    action::{ActionList, MirredAction},
+    action::{ActionList, Estimator, MirredAction},
     attr::AttrIter,
     builder::MessageBuilder,
     connection::Connection,
@@ -376,10 +376,26 @@ impl ClassSpec {
         };
         match self {
             Self::Htb(c) => {
+                // The quantum, mpu and overhead are dumped back too, and a
+                // drift in them used to go unseen (#789).
+                let parms = attrs
+                    .get(&crate::netlink::types::tc::qdisc::htb::TCA_HTB_PARMS)
+                    .and_then(|p| {
+                        <crate::netlink::types::tc::qdisc::htb::TcHtbOpt as zerocopy::FromBytes>::read_from_prefix(p)
+                            .ok()
+                    })
+                    .map(|(o, _)| o);
+                let (mpu, overhead) = c.mpu_and_overhead();
                 htb_class_matches(live, c)
                     && htb_class_options(live).is_some_and(|o| {
                         c.priority().is_none_or(|p| o.priority == p)
                             && c.cburst_as_dumped().is_none_or(|b| o.cburst == b)
+                    })
+                    && parms.is_some_and(|p| {
+                        c.quantum_declared().is_none_or(|q| p.quantum == q)
+                            && (p.rate.mpu, p.rate.overhead) == (mpu, overhead)
+                            && (p.ceil.mpu, p.ceil.overhead) == (mpu, overhead)
+                            && p.rate.linklayer == c.linklayer_wire()
                     })
             }
             // The kernel keeps a curve in its own units, rounding up, and
@@ -442,6 +458,9 @@ pub struct DeclaredFilter {
 /// A filter's kind, keys and actions.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
+// A flower's keys make its variant the largest by far (#827); a tree
+// declares a handful of filters, so boxing one would buy nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum FilterSpec {
     /// A flower filter.
     Flower(FlowerFilter),
@@ -458,14 +477,27 @@ pub enum FilterSpec {
 }
 
 impl PartialEq for FilterSpec {
-    /// Two specs are equal when they encode the same request; a redirect
-    /// compares by its target's name.
+    /// Two specs are equal when they encode the same request; a redirect,
+    /// and an action that names its target, compare by the target's name.
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::RedirectTo(a), Self::RedirectTo(b)) => a == b,
             (Self::RedirectTo(_), _) | (_, Self::RedirectTo(_)) => false,
             (a, b) => {
-                a.kind() == b.kind() && a.options_bytes(&HashMap::new()) == b.options_bytes(&HashMap::new())
+                // Each name both name stands for the same made-up index,
+                // so the bytes differ where the names do.
+                let mut names: Vec<&str> = a.device_names();
+                names.extend(b.device_names());
+                names.sort_unstable();
+                names.dedup();
+                let stand_in: HashMap<String, u32> = names
+                    .iter()
+                    .zip(1..)
+                    .map(|(n, i)| (n.to_string(), i))
+                    .collect();
+                a.kind() == b.kind()
+                    && a.estimator() == b.estimator()
+                    && a.options_bytes(&stand_in) == b.options_bytes(&stand_in)
             }
         }
     }
@@ -493,14 +525,57 @@ impl FilterSpec {
         }
     }
 
-    /// The config to install, with a redirect's target resolved through
-    /// `ifindexes`; `None` when the target does not exist (yet).
+    /// Its chain (tc(8) `chain`), 0 unless set (#793).
+    pub(crate) fn chain(&self) -> u32 {
+        match self {
+            Self::Flower(f) => f.chain(),
+            Self::Matchall(f) => f.chain(),
+            Self::Fw(f) => f.chain(),
+            Self::U32(f) => f.chain(),
+            Self::RedirectTo(_) => None,
+        }
+        .unwrap_or(0)
+    }
+
+    /// Its actions' rate estimator (#792), which goes on the request
+    /// rather than in `TCA_OPTIONS`. The kernel does not report it, so a
+    /// diff cannot compare it.
+    pub(crate) fn estimator(&self) -> Option<Estimator> {
+        match self {
+            Self::Flower(f) => f.estimator(),
+            Self::Matchall(f) => f.estimator(),
+            Self::Fw(_) | Self::U32(_) | Self::RedirectTo(_) => None,
+        }
+    }
+
+    /// The devices it names: a redirect's target, the targets of
+    /// [`MirredAction::to_dev`] actions.
+    pub(crate) fn device_names(&self) -> Vec<&str> {
+        match self {
+            Self::Flower(f) => f.device_names(),
+            Self::Matchall(f) => f.device_names(),
+            Self::Fw(f) => f.device_names(),
+            Self::U32(f) => f.device_names(),
+            Self::RedirectTo(dev) => vec![dev.as_str()],
+        }
+    }
+
+    /// The config to install, with the devices it names resolved through
+    /// `ifindexes`; `None` when one does not exist (yet).
     fn resolve(&self, ifindexes: &HashMap<String, u32>) -> Option<Box<dyn FilterConfigBoxed>> {
+        fn resolved<F: FilterConfig + Clone + 'static>(
+            f: &F,
+            ifindexes: &HashMap<String, u32>,
+        ) -> Option<Box<dyn FilterConfigBoxed>> {
+            let mut f = f.clone();
+            f.resolve_devices(ifindexes).ok()?;
+            Some(Box::new(f))
+        }
         Some(match self {
-            Self::Flower(f) => Box::new(f.clone()),
-            Self::Matchall(f) => Box::new(f.clone()),
-            Self::Fw(f) => Box::new(f.clone()),
-            Self::U32(f) => Box::new(f.clone()),
+            Self::Flower(f) => resolved(f, ifindexes)?,
+            Self::Matchall(f) => resolved(f, ifindexes)?,
+            Self::Fw(f) => resolved(f, ifindexes)?,
+            Self::U32(f) => resolved(f, ifindexes)?,
             Self::RedirectTo(dev) => {
                 let target = *ifindexes.get(dev)?;
                 Box::new(
@@ -568,9 +643,199 @@ impl<F: FilterConfig + Clone + 'static> FilterConfigBoxed for F {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ActionSummary {
     Mirred { eaction: i32, ifindex: u32, action: i32 },
-    Gact { action: i32 },
-    Police { rate: u64, burst: u32, mtu: u32, action: i32 },
-    Other(String),
+    /// Its verdict, and a random or deterministic one with its
+    /// probability (`TCA_GACT_PROB`: type, value, verdict), #791.
+    Gact { action: i32, prob: Option<(u16, u16, i32)> },
+    /// Its rate, burst and mtu, its exceed and conform verdicts, peakrate
+    /// and average rate (#791).
+    Police { rate: u64, burst: u32, mtu: u32, action: i32, conform: u32, peakrate: u32, avrate: u32 },
+    /// A gate's schedule as the kernel keeps it (#813): its verdict,
+    /// priority, base time, cycle and extension, flags and clock, and each
+    /// entry's state, interval, IPV and octet limit, with the kernel's
+    /// defaults for what was not sent.
+    Gate {
+        action: i32,
+        priority: i32,
+        base: u64,
+        cycle: u64,
+        ext: u64,
+        flags: u32,
+        clockid: i32,
+        entries: Vec<(bool, u32, i32, i32)>,
+    },
+    /// A bpf action's verdict, program and name (#813). A request names
+    /// its program by fd and a dump by id, so the fd is read as the id of
+    /// the program it holds.
+    Bpf { action: i32, prog: Option<u32>, name: Option<String> },
+    /// Any other kind (#791): its options' attributes, but for its
+    /// timestamps and padding and the bookkeeping at the head of its parms
+    /// (index, capabilities, references), which tell two installs of one
+    /// action apart. A kind [`action_layout`] does not know is its kind
+    /// alone.
+    Other { kind: String, attrs: BTreeMap<u16, Vec<u8>> },
+}
+
+/// How a kind's options read, for the kinds compared by their attributes
+/// (#791): what to leave out, its timestamps, padding and counters
+/// (`TCA_<KIND>_TM`, `_PAD`, ctinfo's `_STATS_*`), and its parms, the
+/// structs that start with `struct tc_gen`. Not `bpf`, which is sent a
+/// program's fd and reports the program's id, nor `gate`, whose echo
+/// fills each entry and the cycle in: those have summaries of their own
+/// (#813).
+fn action_layout(kind: &str) -> Option<(&'static [u16], &'static [u16])> {
+    Some(match kind {
+        "vlan" => (&[1, 5], &[2]),
+        "mpls" => (&[1, 3], &[2]),
+        "skbmod" | "skbedit" | "sample" => (&[1, 6], &[2]),
+        "tunnel_key" => (&[1, 8], &[2]),
+        "nat" | "connmark" | "csum" => (&[2, 3], &[1]),
+        "ctinfo" => (&[1, 2, 8, 9, 10], &[3]),
+        "ife" => (&[2, 7], &[1]),
+        "ct" => (&[2, 15], &[1]),
+        // `TCA_PEDIT_PARMS_EX` carries the parms with the extended keys.
+        "pedit" => (&[1, 3], &[2, 4]),
+        // `TCA_DEF_*`.
+        "simple" => (&[1, 4], &[2]),
+        _ => return None,
+    })
+}
+
+/// A gate's schedule as [`ActionSummary::Gate`] compares it (#813), from
+/// what is sent or reported: `act_gate`'s defaults stand in for what a
+/// request leaves out (`gate_setup_*`: priority, IPV and octet limit -1,
+/// the cycle the sum of the intervals, `CLOCK_TAI`). An entry's index is
+/// its place in the list, which the kernel numbers itself.
+fn gate_summary(opts: &[u8]) -> Option<ActionSummary> {
+    use crate::netlink::types::tc::action::gate::*;
+    use zerocopy::FromBytes;
+    const CLOCK_TAI: i32 = 11;
+    let find = |id: u16| AttrIter::new(opts).find(|(t, _)| t & 0x7FFF == id).map(|(_, p)| p);
+    let u32_of = |p: &[u8]| p.get(..4).map(|b| u32::from_ne_bytes(b.try_into().unwrap()));
+    let u64_of = |p: &[u8]| p.get(..8).map(|b| u64::from_ne_bytes(b.try_into().unwrap()));
+    let (parms, _) = TcGate::read_from_prefix(find(TCA_GATE_PARMS)?).ok()?;
+    let entries: Vec<(bool, u32, i32, i32)> = find(TCA_GATE_ENTRY_LIST)
+        .map(|list| {
+            AttrIter::new(list)
+                .map(|(_, one)| {
+                    let field = |id: u16| AttrIter::new(one).find(|(t, _)| t & 0x7FFF == id).map(|(_, p)| p);
+                    (
+                        field(TCA_GATE_ENTRY_GATE).is_some(),
+                        field(TCA_GATE_ENTRY_INTERVAL).and_then(u32_of).unwrap_or(0),
+                        field(TCA_GATE_ENTRY_IPV).and_then(u32_of).map_or(-1, |v| v as i32),
+                        field(TCA_GATE_ENTRY_MAX_OCTETS).and_then(u32_of).map_or(-1, |v| v as i32),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let sum: u64 = entries.iter().map(|e| u64::from(e.1)).sum();
+    Some(ActionSummary::Gate {
+        action: parms.action,
+        priority: find(TCA_GATE_PRIORITY).and_then(u32_of).map_or(-1, |v| v as i32),
+        base: find(TCA_GATE_BASE_TIME).and_then(u64_of).unwrap_or(0),
+        cycle: find(TCA_GATE_CYCLE_TIME).and_then(u64_of).filter(|c| *c != 0).unwrap_or(sum),
+        ext: find(TCA_GATE_CYCLE_TIME_EXT).and_then(u64_of).unwrap_or(0),
+        flags: find(TCA_GATE_FLAGS).and_then(u32_of).unwrap_or(0),
+        clockid: find(TCA_GATE_CLOCKID).and_then(u32_of).map_or(CLOCK_TAI, |v| v as i32),
+        entries,
+    })
+}
+
+/// A bpf action as [`ActionSummary::Bpf`] compares it (#813): the
+/// program by the id a dump reports, or by the fd a request sends.
+fn bpf_summary(opts: &[u8]) -> Option<ActionSummary> {
+    use crate::netlink::types::tc::action::bpf_act::*;
+    use zerocopy::FromBytes;
+    let find = |id: u16| AttrIter::new(opts).find(|(t, _)| t & 0x7FFF == id).map(|(_, p)| p);
+    let u32_of = |p: &[u8]| p.get(..4).map(|b| u32::from_ne_bytes(b.try_into().unwrap()));
+    let (parms, _) = crate::netlink::types::tc::action::TcGen::read_from_prefix(find(TCA_ACT_BPF_PARMS)?).ok()?;
+    let prog = find(TCA_ACT_BPF_ID).and_then(u32_of).or_else(|| {
+        let fd = find(TCA_ACT_BPF_FD).and_then(u32_of)?;
+        crate::netlink::bpf_fd::prog_id(fd as std::os::fd::RawFd)
+    });
+    Some(ActionSummary::Bpf {
+        action: parms.action,
+        prog,
+        name: find(TCA_ACT_BPF_NAME).map(|p| String::from_utf8_lossy(p).trim_end_matches('\0').to_string()),
+    })
+}
+
+/// An action's attributes, as [`ActionSummary::Other`] compares them.
+fn action_attrs(kind: &str, opts: &[u8]) -> BTreeMap<u16, Vec<u8>> {
+    let Some((skip, parms)) = action_layout(kind) else {
+        return BTreeMap::new();
+    };
+    AttrIter::new(opts)
+        .map(|(t, p)| (t & 0x7FFF, p))
+        .filter(|(t, _)| !skip.contains(t))
+        .map(|(t, p)| {
+            let mut v = unflag_nests(p);
+            // `struct tc_gen`: index, capab, action, refcnt, bindcnt.
+            if parms.contains(&t) && v.len() >= 20 {
+                v[..8].fill(0);
+                v[12..20].fill(0);
+            }
+            (t, v)
+        })
+        .collect()
+}
+
+/// A payload with `NLA_F_NESTED` cleared on every attribute in it that
+/// carries the flag, and in theirs: nlink sets it on the nests it sends
+/// (a pedit's extended keys), and the kernel does not on the ones it
+/// reports. A payload that does not walk as attributes is kept as it is.
+fn unflag_nests(payload: &[u8]) -> Vec<u8> {
+    const NLA_F_NESTED: u16 = 0x8000;
+    let mut out = payload.to_vec();
+    let mut at = 0;
+    while at + 4 <= out.len() {
+        let len = usize::from(u16::from_ne_bytes([out[at], out[at + 1]]));
+        let ty = u16::from_ne_bytes([out[at + 2], out[at + 3]]);
+        if len < 4 || at + len > out.len() {
+            return payload.to_vec();
+        }
+        if ty & NLA_F_NESTED != 0 {
+            out[at + 2..at + 4].copy_from_slice(&(ty & !NLA_F_NESTED).to_ne_bytes());
+            let inner = unflag_nests(&out[at + 4..at + len]);
+            out[at + 4..at + len].copy_from_slice(&inner);
+        }
+        at += (len + 3) & !3;
+    }
+    out
+}
+
+/// What the kernel reports for an attribute a request leaves out, by kind
+/// (#791): the default it gives one not sent, which is not a difference.
+/// Each is what a sweep of every kind, applied twice, read back.
+fn kernel_default(kind: &str, id: u16, value: &[u8]) -> bool {
+    match (kind, id) {
+        // `TCA_VLAN_PUSH_VLAN_PRIORITY`: 0.
+        ("vlan", 6) => value == [0],
+        // `TCA_MPLS_PROTO` of a push: `ETH_P_MPLS_UC`.
+        ("mpls", 4) => value == 0x8847u16.to_be_bytes(),
+        // `TCA_CT_ZONE`: 0.
+        ("ct", 4) => value == [0, 0],
+        // `TCA_IFE_TYPE`: `ETH_P_IFE`.
+        ("ife", 5) => value == 0xED3Eu16.to_ne_bytes(),
+        _ => false,
+    }
+}
+
+/// Whether a live action is the declared one (#791). For a kind read as
+/// attributes: every attribute the declaration sends, as sent, and any
+/// other the kernel reports at the default it gives one not sent.
+fn action_matches(want: &ActionSummary, have: &ActionSummary) -> bool {
+    match (want, have) {
+        (
+            ActionSummary::Other { kind: wk, attrs: wa },
+            ActionSummary::Other { kind: hk, attrs: ha },
+        ) => {
+            wk == hk
+                && wa.iter().all(|(id, v)| ha.get(id) == Some(v))
+                && ha.iter().all(|(id, v)| wa.contains_key(id) || kernel_default(wk, *id, v))
+        }
+        _ => want == have,
+    }
 }
 
 /// The attribute that carries a filter kind's actions.
@@ -618,6 +883,8 @@ fn split_filter(kind: &str, options: &[u8]) -> (BTreeMap<u16, Vec<u8>>, Vec<Acti
                     .map(|(_, p)| p)
             };
             let summary = match kind.as_str() {
+                "gate" => gate_summary(opts),
+                "bpf" => bpf_summary(opts),
                 "mirred" => find(mirred::TCA_MIRRED_PARMS)
                     .and_then(|p| mirred::TcMirred::read_from_prefix(p).ok())
                     .map(|(m, _)| ActionSummary::Mirred {
@@ -627,23 +894,44 @@ fn split_filter(kind: &str, options: &[u8]) -> (BTreeMap<u16, Vec<u8>>, Vec<Acti
                     }),
                 "gact" => find(gact::TCA_GACT_PARMS)
                     .and_then(|p| gact::TcGact::read_from_prefix(p).ok())
-                    .map(|(g, _)| ActionSummary::Gact { action: g.action }),
+                    .map(|(g, _)| ActionSummary::Gact {
+                        action: g.action,
+                        prob: find(gact::TCA_GACT_PROB)
+                            .and_then(|p| gact::TcGactP::read_from_prefix(p).ok())
+                            .map(|(p, _)| (p.ptype, p.pval, p.paction))
+                            .filter(|p| p.0 != 0),
+                    }),
                 "police" => find(police::TCA_POLICE_TBF)
                     .and_then(|p| police::TcPolice::read_from_prefix(p).ok())
                     .map(|(p, _)| {
                         let rate64 = find(police::TCA_POLICE_RATE64)
                             .and_then(|b| b.get(..8))
                             .map(|b| u64::from_ne_bytes(b.try_into().unwrap()));
+                        let u32_of = |id| find(id).and_then(|b| b.get(..4)).map(|b| u32::from_ne_bytes(b.try_into().unwrap()));
                         ActionSummary::Police {
                             rate: rate64.unwrap_or(u64::from(p.rate.rate)),
                             burst: p.burst,
-                            mtu: p.mtu,
+                            // An mtu of 0 is the kernel's to pick, as tc(8)
+                            // leaves it (#800): `255 << cell_log` from the
+                            // rate table, no limit without one.
+                            mtu: match p.mtu {
+                                0 if p.rate.rate > 0 => 255 << p.rate.cell_log,
+                                0 => u32::MAX,
+                                mtu => mtu,
+                            },
                             action: p.action,
+                            // Absent is 0: the kernel dumps each only when set.
+                            conform: u32_of(police::TCA_POLICE_RESULT).unwrap_or(0),
+                            peakrate: p.peakrate.rate,
+                            avrate: u32_of(police::TCA_POLICE_AVRATE).unwrap_or(0),
                         }
                     }),
                 _ => None,
             };
-            actions.push(summary.unwrap_or(ActionSummary::Other(kind)));
+            actions.push(summary.unwrap_or_else(|| ActionSummary::Other {
+                attrs: action_attrs(&kind, opts),
+                kind,
+            }));
         }
     }
     (attrs, actions)
@@ -661,6 +949,40 @@ fn value_keys(kind: &str) -> Vec<u16> {
         "flower" => {
             let mut keys = RECIPE_FLOWER_VALUE_KEYS.to_vec();
             keys.extend([flower::TCA_FLOWER_CLASSID, flower::TCA_FLOWER_INDEV]);
+            // The keys #827 added: a live filter with one the declaration
+            // does not write matches less than declared.
+            keys.extend([
+                flower::TCA_FLOWER_KEY_ICMPV4_TYPE,
+                flower::TCA_FLOWER_KEY_ICMPV4_CODE,
+                flower::TCA_FLOWER_KEY_ICMPV6_TYPE,
+                flower::TCA_FLOWER_KEY_ICMPV6_CODE,
+                flower::TCA_FLOWER_KEY_FLAGS,
+                flower::TCA_FLOWER_KEY_CT_STATE,
+                flower::TCA_FLOWER_KEY_CT_ZONE,
+                flower::TCA_FLOWER_KEY_CT_MARK,
+                flower::TCA_FLOWER_KEY_CT_LABELS,
+                flower::TCA_FLOWER_KEY_VLAN_ETH_TYPE,
+                flower::TCA_FLOWER_KEY_CVLAN_ID,
+                flower::TCA_FLOWER_KEY_CVLAN_PRIO,
+                flower::TCA_FLOWER_KEY_CVLAN_ETH_TYPE,
+                flower::TCA_FLOWER_KEY_MPLS_LABEL,
+                flower::TCA_FLOWER_KEY_MPLS_TC,
+                flower::TCA_FLOWER_KEY_MPLS_BOS,
+                flower::TCA_FLOWER_KEY_MPLS_TTL,
+                flower::TCA_FLOWER_KEY_ARP_OP,
+                flower::TCA_FLOWER_KEY_ARP_SIP,
+                flower::TCA_FLOWER_KEY_ARP_TIP,
+                flower::TCA_FLOWER_KEY_ARP_SHA,
+                flower::TCA_FLOWER_KEY_ARP_THA,
+                flower::TCA_FLOWER_KEY_ENC_KEY_ID,
+                flower::TCA_FLOWER_KEY_ENC_IPV4_SRC,
+                flower::TCA_FLOWER_KEY_ENC_IPV4_DST,
+                flower::TCA_FLOWER_KEY_ENC_IPV6_SRC,
+                flower::TCA_FLOWER_KEY_ENC_IPV6_DST,
+                flower::TCA_FLOWER_KEY_ENC_UDP_DST_PORT,
+                flower::TCA_FLOWER_KEY_ENC_IP_TOS,
+                flower::TCA_FLOWER_KEY_ENC_IP_TTL,
+            ]);
             keys
         }
         "matchall" => vec![matchall::TCA_MATCHALL_CLASSID],
@@ -685,7 +1007,10 @@ impl DeclaredFilter {
     /// not exist matches nothing.
     pub(crate) fn matches(&self, live: &TcMessage, ifindexes: &HashMap<String, u32>) -> bool {
         let kind = self.spec.kind();
-        if live.kind() != Some(kind) || live.protocol() != self.protocol {
+        if live.kind() != Some(kind)
+            || live.protocol() != self.protocol
+            || live.chain().unwrap_or(0) != self.spec.chain()
+        {
             return false;
         }
         let Some(mut cfg) = self.spec.resolve(ifindexes) else {
@@ -697,15 +1022,25 @@ impl DeclaredFilter {
         if cfg.write(&mut b).is_err() {
             return false;
         }
-        let (want_attrs, want_actions) = split_filter(kind, &b.as_bytes()[start..]);
+        let (mut want_attrs, want_actions) = split_filter(kind, &b.as_bytes()[start..]);
         let (have_attrs, have_actions) = split_filter(kind, live.raw_options().unwrap_or(&[]));
+        if kind == "flower" {
+            use crate::netlink::{filter::flower_dumped_eth_type, types::tc::filter::flower::TCA_FLOWER_KEY_ETH_TYPE};
+            let echo = flower_dumped_eth_type(|id| want_attrs.get(&id).and_then(|v| v.get(..2)?.try_into().ok()));
+            match echo {
+                Some(Some(t)) => _ = want_attrs.insert(TCA_FLOWER_KEY_ETH_TYPE, t.to_vec()),
+                Some(None) => _ = want_attrs.remove(&TCA_FLOWER_KEY_ETH_TYPE),
+                None => {}
+            }
+        }
         want_attrs
             .iter()
             .all(|(id, want)| have_attrs.get(id) == Some(want))
             && value_keys(kind)
                 .iter()
                 .all(|id| !have_attrs.contains_key(id) || want_attrs.contains_key(id))
-            && want_actions == have_actions
+            && want_actions.len() == have_actions.len()
+            && want_actions.iter().zip(&have_actions).all(|(w, h)| action_matches(w, h))
     }
 }
 
@@ -728,9 +1063,48 @@ pub struct TcTreeDiff {
     pub leaves_to_remove: Vec<(TcHandle, TcHandle)>,
     /// Filters to add, or replace one of the same name that differs.
     pub filters_to_set: Vec<DeclaredFilter>,
-    /// Filters at a parent the tree owns that it does not declare:
-    /// `(parent, priority, protocol)`.
-    pub filters_to_remove: Vec<(TcHandle, FilterPriority, EthProto)>,
+    /// Filters to remove: at a parent the tree owns, ones it does not
+    /// declare, and ones of a declared filter's name in another chain.
+    pub filters_to_remove: Vec<FilterKey>,
+}
+
+/// A live filter's name: where it hangs, its chain, its priority and
+/// protocol (#793). A declared filter is named by the three without the
+/// chain; one of that name in another chain is a different filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FilterKey {
+    /// The qdisc or hook it hangs off.
+    pub parent: TcHandle,
+    /// tc(8) `chain`; 0 unless set.
+    pub chain: u32,
+    /// Its priority.
+    pub priority: FilterPriority,
+    /// Its protocol.
+    pub protocol: EthProto,
+}
+
+impl FilterKey {
+    /// A live filter's.
+    fn of(live: &TcMessage) -> Self {
+        Self {
+            parent: live.parent(),
+            chain: live.chain().unwrap_or(0),
+            priority: live.priority(),
+            protocol: live.protocol(),
+        }
+    }
+}
+
+impl std::fmt::Display for FilterKey {
+    /// tc(8)'s words: `1: chain 5 prio 1 ip`, without a chain 0.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.parent)?;
+        if self.chain != 0 {
+            write!(f, " chain {}", self.chain)?;
+        }
+        write!(f, " prio {} {}", self.priority, self.protocol)
+    }
 }
 
 impl TcTreeDiff {
@@ -762,8 +1136,8 @@ impl std::fmt::Display for TcTreeDiff {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let dev = &self.dev;
         let mut lines = Vec::new();
-        for (parent, priority, protocol) in &self.filters_to_remove {
-            lines.push(format!("- filter at {parent} prio {priority} {protocol} on {dev}"));
+        for key in &self.filters_to_remove {
+            lines.push(format!("- filter at {key} on {dev}"));
         }
         for (class, handle) in &self.leaves_to_remove {
             lines.push(format!("- qdisc {handle} in class {class} on {dev}"));
@@ -937,23 +1311,34 @@ pub(crate) fn diff_tree(
         .collect();
     let recreated_major = |parent: TcHandle| destroyed.contains(&parent.major());
     for f in &tree.filters {
-        let live = live_filters.iter().find(|l| {
+        let chain = f.spec.chain();
+        let named = |l: &&TcMessage| {
             l.parent() == f.parent && l.priority() == f.priority && l.protocol() == f.protocol
-        });
+        };
+        // One of its name in another chain is another filter, and goes
+        // (#793): the lookup used to take it for this one.
+        for l in live_filters.iter().filter(named) {
+            if l.chain().unwrap_or(0) != chain {
+                diff.filters_to_remove.push(FilterKey::of(l));
+            }
+        }
+        let live = live_filters
+            .iter()
+            .filter(named)
+            .find(|l| l.chain().unwrap_or(0) == chain);
         if let Some(l) = live
             && recreated_major(f.parent)
         {
-            diff.filters_to_remove
-                .push((l.parent(), l.priority(), l.protocol()));
+            diff.filters_to_remove.push(FilterKey::of(l));
             diff.filters_to_set.push(f.clone());
         } else if live.is_none_or(|l| !f.matches(l, ifindexes)) {
             diff.filters_to_set.push(f.clone());
         }
     }
     for l in live_filters {
-        let key = (l.parent(), l.priority(), l.protocol());
+        let key = FilterKey::of(l);
         if (tree.owns_filter(l.parent()) || previous.is_some_and(|p| p.owns_filter(l.parent())))
-            && !tree.declares_filter(key.0, key.1, key.2)
+            && !tree.declares_filter(key.parent, key.priority, key.protocol)
             && !diff.filters_to_remove.contains(&key)
         {
             diff.filters_to_remove.push(key);
@@ -1062,14 +1447,14 @@ async fn apply_tree(
     };
     let mut changes = 0;
 
-    for (parent, priority, protocol) in &diff.filters_to_remove {
+    for k in &diff.filters_to_remove {
         gone_is_ok(
-            conn.del_filter_by_index(ifindex, *parent, *protocol, *priority)
+            conn.del_filter_in_chain_by_index(ifindex, k.parent, k.chain, k.protocol, k.priority)
                 .await,
         )
         .map_err(|e| {
             e.with_context(format!("tc {}: remove filter", diff.dev))
-                .with_object(filter(*parent, *priority, *protocol))
+                .with_object(filter(k.parent, k.priority, k.protocol))
         })?;
         changes += 1;
     }
@@ -1154,16 +1539,14 @@ async fn apply_tree(
 
     for f in &diff.filters_to_set {
         let cfg = f.spec.resolve(names).ok_or_else(|| {
-            let FilterSpec::RedirectTo(dev) = &f.spec else {
-                unreachable!("only a redirect resolves to nothing")
-            };
-            conn.interface_not_found(dev)
+            let missing = f.spec.device_names().into_iter().find(|d| !names.contains_key(*d));
+            conn.interface_not_found(missing.unwrap_or_default())
         })?;
         // A filter of the same name that differs goes first: the kernel
         // refuses another kind at a priority and protocol, and a replace
         // keeps what it is not sent.
         gone_is_ok(
-            conn.del_filter_by_index(ifindex, f.parent, f.protocol, f.priority)
+            conn.del_filter_in_chain_by_index(ifindex, f.parent, f.spec.chain(), f.protocol, f.priority)
                 .await,
         )
         .map_err(|e| e.with_object(filter(f.parent, f.priority, f.protocol)))?;
@@ -1418,14 +1801,18 @@ mod tests {
         let d = diff_tree(&t, None, &classes, &[], &filters, &HashMap::new());
         assert_eq!(d.classes_to_remove, vec![h(1, 0x20)]);
         assert!(d.classes_to_add.is_empty(), "{d}");
-        assert_eq!(d.filters_to_remove, vec![(h(1, 0), FilterPriority::new(2), EthProto::IP)]);
+        assert_eq!(
+            d.filters_to_remove,
+            vec![FilterKey { parent: h(1, 0), chain: 0, priority: FilterPriority::new(2), protocol: EthProto::IP }]
+        );
         assert!(d.filters_to_set.is_empty(), "{d}");
 
         // What the previous config owned and this one dropped goes too.
         let prev = tree(|t| t.class(h(2, 0), h(2, 1), HtbClassConfig::new(Rate::mbit(10))));
         let d = diff_tree(&t, Some(&prev), &classes, &[], &filters, &HashMap::new());
         assert!(d.classes_to_remove.contains(&h(2, 1)), "{d}");
-        assert!(d.filters_to_remove.contains(&(h(2, 0), FilterPriority::new(1), EthProto::IP)), "{d}");
+        let key = FilterKey { parent: h(2, 0), chain: 0, priority: FilterPriority::new(1), protocol: EthProto::IP };
+        assert!(d.filters_to_remove.contains(&key), "{d}");
     }
 
     #[test]
@@ -1470,6 +1857,33 @@ mod tests {
             .qdisc("d0", |q| q.ingress())
             .tc("d0", |t| t.redirect_ingress_to("ifb0"));
         assert_eq!(cfg.tc_trees()[0].filters()[0].parent, TcHandle::INGRESS);
+    }
+
+    /// #645: a filter whose mirred names its target compares by the name,
+    /// and matches the kernel's filter through the target's current index.
+    #[test]
+    fn a_mirred_by_name_compares_by_name_and_matches_by_index() {
+        let to = |dev: &str| {
+            FilterSpec::from(MatchallFilter::new().actions(
+                ActionList::new().with(MirredAction::redirect_to_egress(0).to_dev(dev)),
+            ))
+        };
+        assert_eq!(to("ifb0"), to("ifb0"));
+        assert_ne!(to("ifb0"), to("ifb1"));
+        assert_eq!(to("ifb0").device_names(), ["ifb0"]);
+
+        let t = tree(|t| t.filter(h(1, 0), FilterPriority::new(1), EthProto::ALL, match to("ifb0") {
+            FilterSpec::Matchall(m) => m,
+            _ => unreachable!(),
+        }));
+        let f = &t.filters[0];
+        let by_index = MatchallFilter::new()
+            .actions(ActionList::new().with(MirredAction::redirect_to_egress(7)));
+        let live = live_filter(&by_index, "matchall", h(1, 0), 1, EthProto::ALL);
+        assert!(f.matches(&live, &HashMap::from([("ifb0".to_string(), 7)])));
+        // Recreated with another index, or gone: not this filter any more.
+        assert!(!f.matches(&live, &HashMap::from([("ifb0".to_string(), 8)])));
+        assert!(!f.matches(&live, &HashMap::new()));
     }
 
     #[test]
@@ -1540,7 +1954,10 @@ mod tests {
         assert_eq!(added, vec![h(1, 1), h(1, 0x20)]);
         assert!(d.classes_to_change.is_empty(), "{d}");
         assert_eq!(d.leaves_to_set.len(), 1, "{d}");
-        assert_eq!(d.filters_to_remove, vec![(h(1, 0), FilterPriority::new(2), EthProto::IP)]);
+        assert_eq!(
+            d.filters_to_remove,
+            vec![FilterKey { parent: h(1, 0), chain: 0, priority: FilterPriority::new(2), protocol: EthProto::IP }]
+        );
         assert_eq!(d.filters_to_set.len(), 1, "{d}");
         assert!(d.to_string().contains("+ class hfsc 1:1 under 1: on d0"), "{d}");
     }

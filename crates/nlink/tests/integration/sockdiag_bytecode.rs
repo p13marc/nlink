@@ -245,3 +245,172 @@ async fn cc_info_struct_matches_congestion_name() -> nlink::Result<()> {
     }
     Ok(())
 }
+
+/// #166: the `tcp_info` fields kernels appended after `snd_wnd` read back.
+/// An idle loopback pair's advertised receive window is `ss -ti`'s
+/// `rcv_wnd` (where this `ss` prints it), and a fresh pair has seen no RTO
+/// and no rehash.
+#[tokio::test]
+async fn tcp_info_reads_the_receive_window_and_rto_counters() -> nlink::Result<()> {
+    use std::io::{Read, Write};
+    require_root!();
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    let (mut server, _) = listener.accept().expect("accept");
+    client.write_all(&[0u8; 1000]).expect("send");
+    let mut buf = [0u8; 1000];
+    server.read_exact(&mut buf).expect("receive");
+
+    let conn = Connection::<SockDiag>::new()?;
+    let filter = SocketFilter {
+        kind: FilterKind::Inet(InetFilter {
+            protocol: Protocol::Tcp,
+            states: TcpState::all_mask(),
+            local_port: Some(port),
+            extensions: nlink::sockdiag::InetExtension::Info.mask(),
+            ..Default::default()
+        }),
+    };
+    let got = conn.query(&filter).await?;
+    let info = got
+        .iter()
+        .filter_map(|s| s.as_inet())
+        .find(|s| s.state == nlink::sockdiag::SocketState::Tcp(TcpState::Established))
+        .and_then(|s| s.tcp_info.clone())
+        .expect("the server side's tcp_info");
+    assert!(info.rcv_wnd > 0, "{info:?}");
+    assert_eq!((info.total_rto, info.total_rto_time, info.rehash), (0, 0, 0));
+
+    let ss = std::process::Command::new("ss")
+        .args(["-tin", "state", "established", "sport", &format!("= :{port}")])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    if let Some(shown) = ss.split_whitespace().find_map(|w| w.strip_prefix("rcv_wnd:")) {
+        assert_eq!(shown.parse::<u32>().ok(), Some(info.rcv_wnd), "{ss}");
+    }
+    drop(client);
+    Ok(())
+}
+
+/// Every ss(8) filter expression selects, through nlink's `FilterExpr`, the
+/// sockets ss selects with it. ss takes `state` as arguments before its
+/// expression, where `FilterExpr` takes it inside one, so a row gives
+/// both. The sockets are a namespace's own: listeners on 127.0.0.1 and
+/// ::1, and an established pair.
+#[tokio::test]
+async fn every_ss_expression_selects_what_ss_selects() -> nlink::Result<()> {
+    use std::net::{SocketAddr, TcpStream};
+
+    use crate::common::{
+        TestNamespace,
+        traffic::{in_ns, lo_up},
+    };
+    require_root!();
+
+    let ns = TestNamespace::new("ss-parity")?;
+    lo_up(&ns).await?;
+    // Kept open for the length of the test.
+    let _sockets = in_ns(&ns, || {
+        let l1 = TcpListener::bind("127.0.0.1:8001").expect("bind 8001");
+        let l2 = TcpListener::bind("127.0.0.1:8002").expect("bind 8002");
+        let l3 = TcpListener::bind("127.0.0.1:9000").expect("bind 9000");
+        let l6 = TcpListener::bind("[::1]:8003").expect("bind ::1");
+        let client = TcpStream::connect("127.0.0.1:8001").expect("connect");
+        let (server, _) = l1.accept().expect("accept");
+        (l1, l2, l3, l6, client, server)
+    });
+
+    // (ss's arguments after -Htan, nlink's expression)
+    let rows: &[(&[&str], &str)] = &[
+        (&["sport = :8001"], "sport = :8001"),
+        (&["dport = :8001"], "dport = :8001"),
+        (&["sport > :8001"], "sport > :8001"),
+        (&["sport >= :8002"], "sport >= :8002"),
+        (&["sport < :8002"], "sport < :8002"),
+        (&["sport <= :8002"], "sport <= :8002"),
+        (&["sport != :8001"], "sport != :8001"),
+        (&["sport eq :8001"], "sport eq :8001"),
+        (&["sport gt :8001"], "sport gt :8001"),
+        (&["sport ne :8001"], "sport ne :8001"),
+        (&["( sport = :8001 or sport = :8002 )"], "( sport = :8001 or sport = :8002 )"),
+        (&["not sport = :8001"], "not sport = :8001"),
+        (&["sport = :8001 and dport = :0"], "sport = :8001 and dport = :0"),
+        (&["src 127.0.0.1"], "src 127.0.0.1"),
+        (&["src 127.0.0.0/8"], "src 127.0.0.0/8"),
+        (&["dst 127.0.0.1"], "dst 127.0.0.1"),
+        (&["src [::1]"], "src [::1]"),
+        (&["src 127.0.0.1:8001"], "src 127.0.0.1:8001"),
+        (&["dst 127.0.0.1:8001"], "dst 127.0.0.1:8001"),
+        (&["sport = :8001 or src [::1]"], "sport = :8001 or src [::1]"),
+        (&["src *:8001"], "src *:8001"),
+        (&["src 127.0.0.0/8:8002"], "src 127.0.0.0/8:8002"),
+        (&["src [::1]:8003"], "src [::1]:8003"),
+        (&["dst [::1]:8003"], "dst [::1]:8003"),
+        (&["state", "listening"], "state listening"),
+        (&["state", "established"], "state established"),
+        (&["state", "established", "dport = :8001"], "state established and dport = :8001"),
+    ];
+
+    let conn: Connection<SockDiag> = ns.connection_for()?;
+    // A socket as `local peer`, a wildcard peer port as `*`.
+    let show = |local: SocketAddr, peer: SocketAddr| {
+        let port = |a: SocketAddr| if a.port() == 0 { "*".to_string() } else { a.port().to_string() };
+        let ip = |a: SocketAddr| match a {
+            SocketAddr::V4(v4) => v4.ip().to_string(),
+            SocketAddr::V6(v6) => format!("[{}]", v6.ip()),
+        };
+        format!("{}:{} {}:{}", ip(local), port(local), ip(peer), port(peer))
+    };
+    let mut failed = Vec::new();
+    for (ss_args, expr) in rows {
+        let mut args = vec!["-Htan"];
+        args.extend(*ss_args);
+        let out = match ns.exec("ss", &args) {
+            Ok(out) => out,
+            Err(e) => {
+                failed.push(format!("{expr}: ss refused it: {e}"));
+                continue;
+            }
+        };
+        // The local and peer addresses are the last two columns: ss
+        // leaves out the State one when it is given a single state.
+        let mut theirs: Vec<String> = out
+            .lines()
+            .filter_map(|l| {
+                let f: Vec<&str> = l.split_whitespace().collect();
+                Some(format!("{} {}", f.get(f.len().checked_sub(2)?)?, f.last()?))
+            })
+            .collect();
+        let filter = match FilterExpr::parse(expr) {
+            Ok(e) => SocketFilter {
+                kind: FilterKind::Inet(InetFilter {
+                    protocol: Protocol::Tcp,
+                    states: TcpState::all_mask(),
+                    expr: Some(e),
+                    ..Default::default()
+                }),
+            },
+            Err(e) => {
+                failed.push(format!("{expr}: nlink refused it: {e}"));
+                continue;
+            }
+        };
+        let mut ours: Vec<String> = match conn.query(&filter).await {
+            Ok(sockets) => sockets.iter().filter_map(|s| s.as_inet().map(|i| show(i.local, i.remote))).collect(),
+            Err(e) => {
+                failed.push(format!("{expr}: the kernel refused nlink's: {e}"));
+                continue;
+            }
+        };
+        theirs.sort();
+        ours.sort();
+        if theirs != ours {
+            failed.push(format!("{expr}:\n  ss:    {theirs:?}\n  nlink: {ours:?}"));
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+    Ok(())
+}

@@ -98,6 +98,29 @@ use crate::netlink::{
     },
 };
 
+/// A veth's or netkit's peer the apply renames to the name its pair
+/// declares (#804). The peer is down for the rename, which the kernel
+/// refuses on a running device, and comes back up after it.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LinkRename {
+    /// The name it has.
+    pub from: String,
+    /// The name it is given.
+    pub to: String,
+    /// The veth or netkit link whose peer it is.
+    pub peer_of: String,
+}
+
+impl std::fmt::Display for LinkRename {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "~ link {} -> {} (peer of {})", self.from, self.to, self.peer_of)
+    }
+}
+
 /// A link the apply deletes and creates again, because a declared
 /// parameter cannot be changed on a live link.
 ///
@@ -134,6 +157,21 @@ pub struct LinkRecreate {
     /// ([`Owned`]) or the [`RecreatePolicy`] lets go: for the caller to put
     /// back (#513).
     pub destroys: Vec<Blocker>,
+    /// The link's TC tree that the config does not declare, kept to be put
+    /// back after the recreate, with
+    /// [`PlanOptions::preserve_undeclared_tc`](super::PlanOptions::preserve_undeclared_tc)
+    /// (#645).
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub preserved_tc: Option<super::preserve::PreservedTc>,
+    /// What the recreate deletes, read back as declarations: what its
+    /// inverse puts back (#745). On the recreated link the others were
+    /// stacked on; `None` on those, and when something cannot be put back.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub restore: Option<Box<super::restore::LinkRestore>>,
+    /// What the recreate deletes that no declaration can put back, which
+    /// leaves it without an inverse (#745).
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Vec::is_empty"))]
+    pub unrestorable: Vec<String>,
 }
 
 /// How sure an offline prediction is (#513).
@@ -208,8 +246,6 @@ impl std::fmt::Display for OfflineDiff {
 /// read back as a dump. Nothing about the live state can be known, so
 /// only recreates are predicted, not what would block them (#513).
 pub(crate) fn diff_against(config: &NetworkConfig, previous: &NetworkConfig) -> OfflineDiff {
-    use crate::netlink::interface_ref::InterfaceRef;
-
     // An ifindex for every name either config mentions, so parents and
     // underlays resolve as they do in a dump.
     let mut index: HashMap<String, u32> = HashMap::new();
@@ -228,42 +264,7 @@ pub(crate) fn diff_against(config: &NetworkConfig, previous: &NetworkConfig) -> 
     }
     let names: HashMap<u32, &str> = index.iter().map(|(n, i)| (*i, n.as_str())).collect();
 
-    let synthesize = |prev: &DeclaredLink| -> Option<LinkMessage> {
-        let mut prev = prev.clone();
-        // What the kernel dumps for a parameter left out: its fixed
-        // default, which `compare` takes as declared.
-        match &mut prev.link_type {
-            DeclaredLinkType::Vlan { protocol, .. } => {
-                protocol.get_or_insert(crate::netlink::link::VlanProtocol::Dot1q);
-            }
-            DeclaredLinkType::Netkit {
-                mode,
-                primary_policy,
-                peer_policy,
-                ..
-            } => {
-                mode.get_or_insert(crate::netlink::link::NetkitMode::L3);
-                primary_policy.get_or_insert(crate::netlink::link::NetkitPolicy::Forward);
-                peer_policy.get_or_insert(crate::netlink::link::NetkitPolicy::Forward);
-            }
-            _ => {}
-        }
-        let link_config = super::apply::link_config(&prev)?;
-        let parent = link_config.parent_ref().and_then(|r| match r {
-            InterfaceRef::Name(n) => index.get(n.as_str()).copied(),
-            InterfaceRef::Index(i) => Some(*i),
-        });
-        let mut b = crate::netlink::builder::MessageBuilder::new(
-            crate::netlink::message::NlMsgType::RTM_NEWLINK,
-            0,
-        );
-        b.append(
-            &crate::netlink::types::link::IfInfoMsg::new().with_index(index[&prev.name] as i32),
-        );
-        link_config.write_to(&mut b, parent);
-        let bytes = b.finish();
-        <LinkMessage as crate::netlink::parse::FromNetlink>::from_bytes(&bytes[16..]).ok()
-    };
+    let synthesize = |prev: &DeclaredLink| synthesize(prev, &index);
 
     let mut recreates: Vec<OfflineRecreate> = Vec::new();
     for link in &config.links {
@@ -324,6 +325,48 @@ pub(crate) fn diff_against(config: &NetworkConfig, previous: &NetworkConfig) -> 
         }
     }
     OfflineDiff { recreates }
+}
+
+/// The link the kernel holds for a declaration: encoded as `create_link`
+/// sends it, with `index` for the ifindexes of the links it names, and read
+/// back as a dump. What the kernel dumps for a parameter left out is its
+/// fixed default, which `compare` takes as declared (#513).
+pub(super) fn synthesize(prev: &DeclaredLink, index: &HashMap<String, u32>) -> Option<LinkMessage> {
+    use crate::netlink::interface_ref::InterfaceRef;
+    let mut prev = prev.clone();
+    // What the kernel dumps for a parameter left out: its fixed
+    // default, which `compare` takes as declared.
+    match &mut prev.link_type {
+        DeclaredLinkType::Vlan { protocol, .. } => {
+            protocol.get_or_insert(crate::netlink::link::VlanProtocol::Dot1q);
+        }
+        DeclaredLinkType::Netkit {
+            mode,
+            primary_policy,
+            peer_policy,
+            ..
+        } => {
+            mode.get_or_insert(crate::netlink::link::NetkitMode::L3);
+            primary_policy.get_or_insert(crate::netlink::link::NetkitPolicy::Forward);
+            peer_policy.get_or_insert(crate::netlink::link::NetkitPolicy::Forward);
+        }
+        _ => {}
+    }
+    let link_config = super::apply::link_config(&prev)?;
+    let parent = link_config.parent_ref().and_then(|r| match r {
+        InterfaceRef::Name(n) => index.get(n.as_str()).copied(),
+        InterfaceRef::Index(i) => Some(*i),
+    });
+    let mut b = crate::netlink::builder::MessageBuilder::new(
+        crate::netlink::message::NlMsgType::RTM_NEWLINK,
+        0,
+    );
+    b.append(
+        &crate::netlink::types::link::IfInfoMsg::new().with_index(index[&prev.name] as i32),
+    );
+    link_config.write_to(&mut b, parent);
+    let bytes = b.finish();
+    <LinkMessage as crate::netlink::parse::FromNetlink>::from_bytes(&bytes[16..]).ok()
 }
 
 /// A recreating parameter the new config declares and the previous one
@@ -506,6 +549,15 @@ pub struct LinkRemoval {
     /// What deleting it destroys that the caller owns or the
     /// [`RecreatePolicy`] lets go (#513).
     pub destroys: Vec<Blocker>,
+    /// What deleting it takes, read back as declarations: what its inverse
+    /// puts back (#745). On the removed link the others were stacked on;
+    /// `None` on those, and when something cannot be put back.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub restore: Option<Box<super::restore::LinkRestore>>,
+    /// What deleting it takes that no declaration can put back, which
+    /// leaves the removal without an inverse (#745).
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Vec::is_empty"))]
+    pub unrestorable: Vec<String>,
 }
 
 impl LinkRemoval {
@@ -801,7 +853,11 @@ impl LinkRecreate {
 impl std::fmt::Display for LinkRecreate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.blocked_by.is_empty() {
-            write!(f, "-/+ link {} (recreate: {})", self.name, self.reason)
+            write!(f, "-/+ link {} (recreate: {})", self.name, self.reason)?;
+            match &self.preserved_tc {
+                Some(tc) => write!(f, ", keeping its TC tree: {tc}"),
+                None => Ok(()),
+            }
         } else {
             write!(
                 f,
@@ -855,13 +911,13 @@ pub(crate) enum KindAttr {
 
 /// How a declared link's kind parameters differ from the live link's.
 #[derive(Debug, Default)]
-struct KindDiff {
+pub(super) struct KindDiff {
     /// Parameters the kernel cannot change on a live link.
-    recreate: Vec<String>,
+    pub(super) recreate: Vec<String>,
     /// Parameters that cannot change, where a recreate is refused too.
-    refuse: Vec<String>,
+    pub(super) refuse: Vec<String>,
     /// Parameters changed in place.
-    update: Option<KindUpdate>,
+    pub(super) update: Option<KindUpdate>,
 }
 
 impl KindAttr {
@@ -926,51 +982,51 @@ impl KindDiff {
 }
 
 /// A live link's `IFLA_INFO_DATA`, by attribute type.
-struct InfoData<'a>(HashMap<u16, &'a [u8]>);
+pub(super) struct InfoData<'a>(pub(super) HashMap<u16, &'a [u8]>);
 
 impl<'a> InfoData<'a> {
-    fn of(link: &'a LinkMessage) -> Self {
+    pub(super) fn of(link: &'a LinkMessage) -> Self {
         let data = link.link_info().and_then(|i| i.data()).unwrap_or(&[]);
         Self(AttrIter::new(data).collect())
     }
 
     /// The link's `IFLA_INFO_SLAVE_DATA`: a bridge port's options.
-    fn slave_of(link: &'a LinkMessage) -> Self {
+    pub(super) fn slave_of(link: &'a LinkMessage) -> Self {
         let data = link.link_info().and_then(|i| i.slave_data()).unwrap_or(&[]);
         Self(AttrIter::new(data).collect())
     }
 
-    fn u8(&self, t: u16) -> Option<u8> {
+    pub(super) fn u8(&self, t: u16) -> Option<u8> {
         self.0.get(&t).and_then(|p| p.first().copied())
     }
 
-    fn u16_ne(&self, t: u16) -> Option<u16> {
+    pub(super) fn u16_ne(&self, t: u16) -> Option<u16> {
         let p = self.0.get(&t)?;
         Some(u16::from_ne_bytes(p.get(..2)?.try_into().ok()?))
     }
 
-    fn u16_be(&self, t: u16) -> Option<u16> {
+    pub(super) fn u16_be(&self, t: u16) -> Option<u16> {
         let p = self.0.get(&t)?;
         Some(u16::from_be_bytes(p.get(..2)?.try_into().ok()?))
     }
 
-    fn u32(&self, t: u16) -> Option<u32> {
+    pub(super) fn u32(&self, t: u16) -> Option<u32> {
         let p = self.0.get(&t)?;
         Some(u32::from_ne_bytes(p.get(..4)?.try_into().ok()?))
     }
 
-    fn u32_be(&self, t: u16) -> Option<u32> {
+    pub(super) fn u32_be(&self, t: u16) -> Option<u32> {
         let p = self.0.get(&t)?;
         Some(u32::from_be_bytes(p.get(..4)?.try_into().ok()?))
     }
 
-    fn ipv4(&self, t: u16) -> Option<Ipv4Addr> {
+    pub(super) fn ipv4(&self, t: u16) -> Option<Ipv4Addr> {
         let p = self.0.get(&t)?;
         let octets: [u8; 4] = p.get(..4)?.try_into().ok()?;
         Some(Ipv4Addr::from(octets))
     }
 
-    fn ipv6(&self, t: u16) -> Option<Ipv6Addr> {
+    pub(super) fn ipv6(&self, t: u16) -> Option<Ipv6Addr> {
         let p = self.0.get(&t)?;
         let octets: [u8; 16] = p.get(..16)?.try_into().ok()?;
         Some(Ipv6Addr::from(octets))
@@ -1033,7 +1089,7 @@ pub(super) fn kernel_bond_mode(mode: super::types::BondMode) -> KernelBondMode {
 /// The name of the link `live`'s `IFLA_LINK` names, when that is a link in
 /// this namespace. `None` for a lower device in another namespace — a
 /// declaration made here cannot name it.
-fn lower_name<'n>(live: &LinkMessage, names: &HashMap<u32, &'n str>) -> Option<&'n str> {
+pub(super) fn lower_name<'n>(live: &LinkMessage, names: &HashMap<u32, &'n str>) -> Option<&'n str> {
     if live.link_netnsid.is_some() {
         return None;
     }
@@ -1041,7 +1097,7 @@ fn lower_name<'n>(live: &LinkMessage, names: &HashMap<u32, &'n str>) -> Option<&
 }
 
 /// Compare a declared link's kind parameters with the live link's.
-fn compare(declared: &DeclaredLink, live: &LinkMessage, names: &HashMap<u32, &str>) -> KindDiff {
+pub(super) fn compare(declared: &DeclaredLink, live: &LinkMessage, names: &HashMap<u32, &str>) -> KindDiff {
     let mut d = KindDiff::default();
     let Some(want_kind) = declared.link_type.kind() else {
         // `Physical`: an existing device, configured but never created, so
@@ -1270,6 +1326,12 @@ fn compare(declared: &DeclaredLink, live: &LinkMessage, names: &HashMap<u32, &st
                 .and_then(|f| f.get(..2))
                 .is_some_and(|f| u16::from_be_bytes([f[0], f[1]]) & GRE_KEY != 0);
             let have_key = keyed.then(|| data.u32_be(IKEY)).flatten();
+            let okeyed = data
+                .0
+                .get(&OFLAGS)
+                .and_then(|f| f.get(..2))
+                .is_some_and(|f| u16::from_be_bytes([f[0], f[1]]) & GRE_KEY != 0);
+            let have_okey = okeyed.then(|| data.u32_be(OKEY)).flatten();
             let show = |v: Option<String>| v.unwrap_or_else(|| "none".into());
             let mut changes = Vec::new();
             let mut note = |what: &str, have: String, want: String| {
@@ -1285,7 +1347,7 @@ fn compare(declared: &DeclaredLink, live: &LinkMessage, names: &HashMap<u32, &st
             if let Some(want) = p.encap_limit {
                 note("encaplimit", show(data.u8(ENCAP_LIMIT).map(|v| v.to_string())), want.to_string());
             }
-            note("key", show(have_key.map(|k| k.to_string())), show(p.key.map(|k| k.to_string())));
+            note("key", keys_text(have_key, have_okey), show(p.key.map(|k| k.to_string())));
             note("dev", show(have_dev.map(str::to_string)), show(p.underlay_dev.clone()));
             if !changes.is_empty() {
                 let mut attrs = Vec::new();
@@ -1824,6 +1886,8 @@ pub(crate) struct KindPlan {
     /// Links the previous config declared and this one does not, and the
     /// ones stacked on them, in deletion order; and the ones refused (#512).
     pub(crate) remove: Vec<LinkRemoval>,
+    /// Peers here renamed to the name their pair declares (#804).
+    pub(crate) renames: Vec<LinkRename>,
 }
 
 /// What hangs off the links beyond the four dumps every diff takes (links,
@@ -1843,6 +1907,9 @@ pub(crate) struct LinkExtras {
     /// declaration describes either (#472).
     pub(crate) classes: Vec<TcMessage>,
     pub(crate) filters: Vec<TcMessage>,
+    /// Every bridge port's VLANs, which a deleted bridge takes and an undo
+    /// puts back (#745).
+    pub(crate) bridge_vlans: Vec<crate::netlink::bridge_vlan::BridgeVlanEntry>,
 }
 
 impl LinkExtras {
@@ -1875,6 +1942,7 @@ impl LinkExtras {
             nexthops,
             classes,
             filters,
+            bridge_vlans: conn.get_bridge_vlans_dump().await?,
         })
     }
 }
@@ -1982,7 +2050,7 @@ fn loose_binding(vlan_link: &LinkMessage) -> bool {
 
 /// The devices each nexthop object sends through: its own, or for a group
 /// its members' (the kernel does not nest groups).
-fn nexthop_devices(nexthops: &[Nexthop]) -> HashMap<u32, Vec<u32>> {
+pub(super) fn nexthop_devices(nexthops: &[Nexthop]) -> HashMap<u32, Vec<u32>> {
     let own: HashMap<u32, u32> = nexthops
         .iter()
         .filter_map(|nh| nh.ifindex().map(|dev| (nh.id(), dev)))
@@ -2003,7 +2071,7 @@ fn nexthop_devices(nexthops: &[Nexthop]) -> HashMap<u32, Vec<u32>> {
 /// one of its multipath nexthops, or the nexthop object it uses. The last
 /// two dump no `RTA_OIF` (a nexthop object's only while
 /// `nexthop_compat_mode` is on), so checking `oif` alone missed them.
-fn route_through(
+pub(super) fn route_through(
     r: &RouteMessage,
     dev: u32,
     nh_devs: &HashMap<u32, Vec<u32>>,
@@ -2040,21 +2108,21 @@ fn route_label(r: &RouteMessage, name: &str, how: &str) -> Blocker {
 }
 
 #[cfg(feature = "serde")]
-fn deserialize_protocol<'de, D: serde::Deserializer<'de>>(
+pub(super) fn deserialize_protocol<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> std::result::Result<RouteProtocol, D::Error> {
     <u8 as serde::Deserialize>::deserialize(d).map(RouteProtocol::from)
 }
 
 #[cfg(feature = "serde")]
-fn serialize_protocol<S: serde::Serializer>(
+pub(super) fn serialize_protocol<S: serde::Serializer>(
     p: &RouteProtocol,
     s: S,
 ) -> std::result::Result<S::Ok, S::Error> {
     s.serialize_u8(p.number())
 }
 
-fn mac_str(mac: &[u8]) -> String {
+pub(super) fn mac_str(mac: &[u8]) -> String {
     mac.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":")
 }
 
@@ -2075,7 +2143,7 @@ fn mac_str(mac: &[u8]) -> String {
 ///   being no link's MAC; a multicast one cannot be told apart;
 /// - in a bridge's database, a port's or the bridge's own MAC, which the
 ///   bridge adds as a `local` entry, dumped as permanent (`fdb_to_nud`).
-fn fdb_entry_is_users(
+pub(super) fn fdb_entry_is_users(
     e: &NeighborMessage,
     by_index: &HashMap<u32, &LinkMessage>,
     link_macs: &HashSet<&[u8]>,
@@ -2281,6 +2349,27 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
                 d.recreate.push(format!("veth peer {} -> in {want}", here(have)));
             }
         }
+        // The peer's name, when the peer is here (#793): renamed in place
+        // (#804), unless another link has the name, when the pair is made
+        // again. A peer elsewhere may have been renamed there, by a CNI for
+        // one, and is left alone.
+        if let DeclaredLinkType::Veth { peer, .. } | DeclaredLinkType::Netkit { peer, .. } =
+            &link.link_type
+            && link.peer_netns().is_none_or(|n| n.is_default())
+            && live.link_netnsid.is_none()
+            && let Some(have) = live.link().and_then(|i| names.get(&i))
+            && *have != peer.as_str()
+        {
+            if by_name.contains_key(peer.as_str()) {
+                d.recreate.push(format!("peer {have} -> {peer}"));
+            } else {
+                plan.renames.push(LinkRename {
+                    from: have.to_string(),
+                    to: peer.clone(),
+                    peer_of: link.name.clone(),
+                });
+            }
+        }
         if !d.recreate.is_empty() || !d.refuse.is_empty() {
             let mut reasons = d.refuse.clone();
             reasons.extend(d.recreate.iter().cloned());
@@ -2365,6 +2454,14 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
             })
     };
 
+    let dumps = super::restore::Dumps {
+        links,
+        addresses,
+        routes,
+        qdiscs,
+        extras,
+        names: &names,
+    };
     for (seed, reason, refuse, remove) in seeds {
         if plan.gone.contains(&seed.ifindex()) {
             continue;
@@ -2388,6 +2485,7 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
             .into_iter()
             .map(|reason| Blocker::Unsupported { reason })
             .collect();
+        let mut preserved: HashMap<String, super::preserve::PreservedTc> = HashMap::new();
         for (l, lower) in &closure {
             let name = name_of(l.ifindex());
             // A veth's (or vxcan's) peer in another namespace is not in the
@@ -2458,6 +2556,13 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
                 .chain(previous.iter().flat_map(|p| p.tc.iter()))
                 .filter(|t| t.dev == name)
                 .collect();
+            // With `preserve_undeclared_tc`, what can be replayed is kept
+            // rather than refusing the recreate (#645).
+            let preserving = opts.preserve_undeclared_tc && !remove;
+            let mut kept = super::preserve::PreservedTc {
+                dev: name.to_string(),
+                ..Default::default()
+            };
             for q in qdiscs.iter().filter(|q| q.ifindex() == l.ifindex()) {
                 // A qdisc with handle 0: is the kernel's default for the
                 // device, recreated with it.
@@ -2476,6 +2581,11 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
                     if trees.iter().any(|t| t.owns_leaf(q.parent())) {
                         continue;
                     }
+                    if let Some(o) = preserving.then(|| super::preserve::TcObject::qdisc(q)).flatten()
+                    {
+                        kept.qdiscs.push(o);
+                        continue;
+                    }
                     blocked_by.push(Blocker::Qdisc {
                         dev: name.to_string(),
                         qdisc: q.kind().unwrap_or("?").to_string(),
@@ -2488,7 +2598,12 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
                     .iter()
                     .any(|d| d.dev == name && d.effective_parent() == parent)
                     || (remove && previously_declared_qdisc(name, parent));
-                if !is_declared {
+                let kept_qdisc = (!is_declared && preserving)
+                    .then(|| super::preserve::TcObject::qdisc(q))
+                    .flatten();
+                if let Some(o) = kept_qdisc {
+                    kept.qdiscs.push(o);
+                } else if !is_declared {
                     blocked_by.push(Blocker::Qdisc {
                         dev: name.to_string(),
                         qdisc: q.kind().unwrap_or("?").to_string(),
@@ -2506,6 +2621,13 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
                     && matches!(c.kind(), Some("htb" | "hfsc" | "drr" | "qfq" | "cbq"))
                     && !trees.iter().any(|t| t.owns_class(c.handle()))
             }) {
+                if preserving {
+                    // HFSC's root class comes back with its qdisc.
+                    if c.handle().minor() != 0 {
+                        kept.classes.push(super::preserve::TcObject::from_live(c));
+                    }
+                    continue;
+                }
                 blocked_by.push(Blocker::Class {
                     dev: name.to_string(),
                     qdisc: c.kind().unwrap_or("?").to_string(),
@@ -2515,12 +2637,24 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
             for f in extras.filters.iter().filter(|f| {
                 f.ifindex() == l.ifindex() && !trees.iter().any(|t| t.owns_filter(f.parent()))
             }) {
+                if preserving && super::preserve::replayable_filter(f) {
+                    if !super::preserve::automatic_u32_table(f) {
+                        for target in super::preserve::mirred_targets(f) {
+                            kept.targets.insert(target, name_of(target).to_string());
+                        }
+                        kept.filters.push(super::preserve::TcObject::from_live(f));
+                    }
+                    continue;
+                }
                 blocked_by.push(Blocker::Filter {
                     dev: name.to_string(),
                     filter: f.kind().unwrap_or("?").to_string(),
                     priority: f.priority().as_u16(),
                     parent: f.parent(),
                 });
+            }
+            if !kept.is_empty() {
+                preserved.insert(name.to_string(), kept);
             }
             // The link's FDB entries, and — for a bridge — every entry in
             // its database, whichever port it is on.
@@ -2591,7 +2725,7 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
             .collect();
         let mut flushed: Vec<u32> = with_vlans_on(links, &flushing).into_iter().collect();
         flushed.sort_unstable();
-        for ifindex in flushed {
+        for &ifindex in &flushed {
             let name = name_of(ifindex);
             for a in addresses.iter().filter(|a| a.ifindex() == ifindex) {
                 let Some(addr) = a.address.filter(|a| a.is_ipv6()) else { continue };
@@ -2642,14 +2776,32 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
             destroys.append(&mut blocked_by);
         }
 
+        // What the deletion takes, read back for its inverse (#745). A link
+        // an earlier seed's deletion took is that one's to put back.
+        let read_back = |gone: &HashSet<u32>| {
+            let deleting: Vec<&LinkMessage> = closure
+                .iter()
+                .map(|(l, _)| *l)
+                .filter(|l| !gone.contains(&l.ifindex()))
+                .collect();
+            let released: Vec<&LinkMessage> = ports.iter().map(|(_, p)| *p).collect();
+            match super::restore::capture(&dumps, &deleting, &released, &flushed, gone) {
+                Ok(r) => (Some(Box::new(r)), Vec::new()),
+                Err(why) => (None, why),
+            }
+        };
+
         if remove {
             let refused = !blocked_by.is_empty();
+            let (restore, unrestorable) = if refused { (None, Vec::new()) } else { read_back(&plan.gone) };
             plan.remove.push(LinkRemoval {
                 name: name_of(seed.ifindex()).to_string(),
                 link_kind: seed.kind().unwrap_or("link").to_string(),
                 stacked_on: None,
                 blocked_by,
                 destroys: if refused { Vec::new() } else { destroys },
+                restore,
+                unrestorable,
             });
             if refused {
                 continue;
@@ -2663,6 +2815,8 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
                         stacked_on: Some(name_of(*lower).to_string()),
                         blocked_by: Vec::new(),
                         destroys: Vec::new(),
+                        restore: None,
+                        unrestorable: Vec::new(),
                     });
                 }
             }
@@ -2683,11 +2837,16 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
                 blocked_by,
                 resets: Vec::new(),
                 destroys: Vec::new(),
+                preserved_tc: None,
+                restore: None,
+                unrestorable: Vec::new(),
             });
             continue;
         }
-        // The seed's entry, first in the closure, carries what it destroys.
+        // The seed's entry, first in the closure, carries what it destroys
+        // and what puts it all back.
         let mut destroys = Some(destroys);
+        let mut read = Some(read_back(&plan.gone));
 
         for (l, lower) in &closure {
             let name = name_of(l.ifindex());
@@ -2719,6 +2878,9 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
                 blocked_by: Vec::new(),
                 resets,
                 destroys: destroys.take().unwrap_or_default(),
+                preserved_tc: preserved.remove(name),
+                restore: read.as_mut().and_then(|(r, _)| r.take()),
+                unrestorable: read.take().map(|(_, why)| why).unwrap_or_default(),
             });
         }
         for (master, port) in &ports {
@@ -2774,6 +2936,7 @@ fn compare_vti6(
     const REMOTE: u16 = 5;
     let addr = |t| data.ipv6(t).filter(|a| !a.is_unspecified());
     let have_key = data.u32_be(IKEY).filter(|k| *k != 0);
+    let have_okey = data.u32_be(OKEY).filter(|k| *k != 0);
     let have_dev = data.u32(LINK).filter(|i| *i != 0).and_then(|i| names.get(&i).copied());
     let show = |v: Option<String>| v.unwrap_or_else(|| "none".into());
     let mut changes = Vec::new();
@@ -2784,7 +2947,7 @@ fn compare_vti6(
     };
     note("local", show(addr(LOCAL).map(|a| a.to_string())), show(p.local.map(|a| a.to_string())));
     note("remote", show(addr(REMOTE).map(|a| a.to_string())), show(p.remote.map(|a| a.to_string())));
-    note("key", show(have_key.map(|k| k.to_string())), show(p.key.map(|k| k.to_string())));
+    note("key", keys_text(have_key, have_okey), show(p.key.map(|k| k.to_string())));
     note("dev", show(have_dev.map(str::to_string)), show(p.underlay_dev.clone()));
     if changes.is_empty() {
         return;
@@ -2870,7 +3033,9 @@ fn compare_erspan(
     if let Some(want) = p.ttl {
         note("ttl", show(data.u8(TTL).map(|v| v.to_string())), want.to_string());
     }
-    note("session", show(data.u32_be(IKEY).map(|k| k.to_string())), p.session.to_string());
+    // The session is the key both ways: the output key is compared too
+    // (#782).
+    note("session", keys_text(data.u32_be(IKEY), data.u32_be(OKEY)), p.session.to_string());
     note("version", show(have_version.map(|v| format!("{v:?}"))), format!("{:?}", p.version));
     note("dev", show(have_dev.map(str::to_string)), show(p.underlay_dev.clone()));
     if changes.is_empty() {
@@ -2913,6 +3078,15 @@ fn compare_erspan(
     if let Some(u) = d.update.as_mut() {
         let set = [IFLAGS, OFLAGS, IKEY, OKEY, LOCAL, REMOTE, TTL, ERSPAN_INDEX, ERSPAN_VER, ERSPAN_DIR, ERSPAN_HWID];
         u.was = Some(live_set(data, &set, Some(LINK), names));
+    }
+}
+
+/// A tunnel's keys as `ip -d link` would name them: one key, when it is the
+/// same both ways, as a declared key is (#782).
+fn keys_text(ikey: Option<u32>, okey: Option<u32>) -> String {
+    match (ikey, okey) {
+        (i, o) if i == o => i.map_or_else(|| "none".to_string(), |k| k.to_string()),
+        (i, o) => format!("ikey {} okey {}", or_none(i), or_none(o)),
     }
 }
 
@@ -2974,15 +3148,19 @@ fn compare_tunnel(
     let have_local = data.ipv4(ids.local).filter(|a| !a.is_unspecified());
     let have_remote = data.ipv4(ids.remote).filter(|a| !a.is_unspecified());
     let have_ttl = ids.ttl.and_then(|t| data.u8(t)).filter(|t| *t != 0);
-    let have_key = ids.keys.and_then(|(ikey, _, flags)| {
+    // Each way's key: a GRE key is there when its flags say so, a VTI key
+    // when it is not 0.
+    let key_of = |key: u16, flags: Option<u16>| {
         let keyed = match flags {
-            Some((iflags, _)) => data.0.get(&iflags).and_then(|f| f.get(..2)).is_some_and(|f| {
+            Some(flags) => data.0.get(&flags).and_then(|f| f.get(..2)).is_some_and(|f| {
                 u16::from_be_bytes([f[0], f[1]]) & GRE_KEY != 0
             }),
-            None => data.u32_be(ikey).is_some_and(|k| k != 0),
+            None => data.u32_be(key).is_some_and(|k| k != 0),
         };
-        keyed.then(|| data.u32_be(ikey)).flatten()
-    });
+        keyed.then(|| data.u32_be(key)).flatten()
+    };
+    let have_key = ids.keys.and_then(|(ikey, _, flags)| key_of(ikey, flags.map(|(i, _)| i)));
+    let have_okey = ids.keys.and_then(|(_, okey, flags)| key_of(okey, flags.map(|(_, o)| o)));
     let have_dev = data
         .u32(ids.link)
         .filter(|i| *i != 0)
@@ -3001,7 +3179,7 @@ fn compare_tunnel(
         note("ttl", show(have_ttl.map(|t| t.to_string())), show(p.ttl.map(|t| t.to_string())));
     }
     if ids.keys.is_some() {
-        note("key", show(have_key.map(|k| k.to_string())), show(p.key.map(|k| k.to_string())));
+        note("key", keys_text(have_key, have_okey), show(p.key.map(|k| k.to_string())));
     }
     note("dev", show(have_dev.map(str::to_string)), show(p.underlay_dev.clone()));
     if changes.is_empty() {
@@ -3322,6 +3500,7 @@ mod tests {
             scope: 0,
             blackhole: false,
             fdb: false,
+            encap_type: None,
             group: group.map(|ids| {
                 ids.into_iter()
                     .map(|id| crate::netlink::nexthop::NexthopGroupMember { id, weight: 1 })
@@ -3336,6 +3515,8 @@ mod tests {
             weight: 1,
             flags: 0,
             gateway: None,
+            encap_type: None,
+            flow: None,
         };
 
         let single = RouteMessageBuilder::new().oif(2).build();
@@ -3616,6 +3797,9 @@ mod tests {
             }],
             resets: Vec::new(),
             destroys: Vec::new(),
+            preserved_tc: None,
+            restore: None,
+            unrestorable: Vec::new(),
         };
         assert!(r.is_refused());
         let shown = r.to_string();

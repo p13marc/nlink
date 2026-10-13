@@ -54,7 +54,11 @@ mod apply;
 mod diff;
 mod kind;
 mod plan;
+mod preserve;
+mod restore;
 mod tc_tree;
+#[cfg(feature = "serde")]
+mod tc_tree_serde;
 mod types;
 
 // `ApplyError` is a field of `ApplyResult` and `LinkChanges` a field of
@@ -69,13 +73,15 @@ pub use diff::{
     ConfigDiff, LinkChanges, NexthopConflict, PlanOptions, RouteConflict, Snapshot, VethPeerChange,
 };
 pub use kind::{
-    Blocker, BlockerFilter, Certainty, LinkRecreate, LinkRemoval, OfflineDiff, OfflineRecreate, Owned,
+    Blocker, BlockerFilter, Certainty, LinkRecreate, LinkRemoval, LinkRename, OfflineDiff, OfflineRecreate, Owned,
     RecreatePolicy,
 };
 pub use plan::{JournalEntry, Plan, Step};
+pub use preserve::{PreservedTc, TcObject, Underneath};
+pub use restore::{LinkRestore, RestoredNexthop, RestoredRoute};
 pub use tc_tree::{
-    ClassSpec, DeclaredClass, DeclaredFilter, DeclaredLeaf, DeclaredTc, FilterSpec, TcBuilder,
-    TcTreeDiff,
+    ClassSpec, DeclaredClass, DeclaredFilter, DeclaredLeaf, DeclaredTc, FilterKey, FilterSpec,
+    TcBuilder, TcTreeDiff,
 };
 pub use types::*;
 

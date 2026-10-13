@@ -784,3 +784,239 @@ async fn comments_on_every_object_are_written_and_read() -> nlink::Result<()> {
     })
     .await
 }
+
+/// #703: the kernel keeps a comment as it was created. With
+/// `recreate_on_comment_change`, a changed comment on a chain, a set or a
+/// table is applied by creating it again — with its rules, its elements,
+/// everything declared in the table — and the next diff is empty. Without
+/// the option the diff does not compare comments, as before.
+#[tokio::test]
+async fn a_changed_comment_is_applied_by_recreating_with_the_option() -> nlink::Result<()> {
+    use nlink::netlink::nftables::config::NftDiffOptions;
+    use nlink::netlink::nftables::types::PacketField;
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let ns = TestNamespace::new("nft-echo-recomment")?;
+    let conn = ns.connection_for::<Nftables>()?;
+    let cfg = |table: &str, chain: &str, set: &str| {
+        let (table, chain, set) = (table.to_string(), chain.to_string(), set.to_string());
+        NftablesConfig::new().table("c", Family::Inet, move |t| {
+            t.comment(table)
+                .chain("input", move |c| {
+                    c.hook(Hook::Input)
+                        .priority(Priority::Filter)
+                        .chain_type(ChainType::Filter)
+                        .comment(chain)
+                })
+                .set("blocked", move |s| {
+                    s.key_type(SetKeyType::Ipv4Addr)
+                        .comment(set)
+                        .ipv4(Ipv4Addr::new(10, 0, 0, 1))
+                })
+                .rule_keyed("input", "drop", |r| {
+                    r.match_in_set(PacketField::Ip4Saddr, "blocked").drop()
+                })
+        })
+    };
+    let on = NftDiffOptions::default().recreate_on_comment_change(true);
+    with_timeout(async {
+        let first = cfg("t1", "c1", "s1");
+        first.diff(&conn).await?.apply(&conn).await?;
+        assert!(first.diff_with_options(&conn, &on).await?.is_empty());
+
+        // Without the option, a changed comment is not seen.
+        let chain = cfg("t1", "c2", "s1");
+        assert!(chain.diff(&conn).await?.is_empty());
+
+        let diff = chain.diff_with_options(&conn, &on).await?;
+        assert_eq!(diff.chains_to_recreate.len(), 1, "{diff}");
+        // The chain, and its rule put back.
+        assert_eq!(diff.change_count(), 2, "{diff}");
+        diff.apply(&conn).await?;
+        let again = chain.diff_with_options(&conn, &on).await?;
+        assert!(again.is_empty(), "second diff must be empty: {again}");
+
+        let set = cfg("t1", "c2", "s2");
+        let diff = set.diff_with_options(&conn, &on).await?;
+        assert_eq!(diff.sets_to_delete.len(), 1, "{diff}");
+        diff.apply(&conn).await?;
+        let again = set.diff_with_options(&conn, &on).await?;
+        assert!(again.is_empty(), "second diff must be empty: {again}");
+
+        let table = cfg("t2", "c2", "s2");
+        let diff = table.diff_with_options(&conn, &on).await?;
+        assert_eq!(diff.tables_to_recreate.len(), 1, "{diff}");
+        diff.apply(&conn).await?;
+        let again = table.diff_with_options(&conn, &on).await?;
+        assert!(again.is_empty(), "second diff must be empty: {again}");
+
+        let listed = ns.exec("nft", &["list", "table", "inet", "c"])?;
+        for want in [
+            "comment \"t2\"",
+            "comment \"c2\"",
+            "comment \"s2\"",
+            "elements = { 10.0.0.1 }",
+            "ip saddr @blocked drop",
+        ] {
+            assert!(listed.contains(want), "nft does not list {want:?}:\n{listed}");
+        }
+        Ok(())
+    })
+    .await
+}
+
+// ============================================================================
+// #708 — protocol guards as each family needs them
+// ============================================================================
+
+/// The protocol guards `nft --debug=netlink` shows for a chain's rules:
+/// each `meta load` and the compare after it. (nft merges adjacent payload
+/// loads, which nlink does not, so the rest of the rules differ.)
+fn debug_guards(ns: &TestNamespace, family: &str, table: &str, chain: &str) -> nlink::Result<Vec<String>> {
+    let lines = debug_exprs(ns, family, table, chain)?;
+    Ok(lines
+        .windows(2)
+        .filter(|w| w[0].contains("meta load"))
+        .map(|w| format!("{} {}", w[0], w[1]))
+        .collect())
+}
+
+/// The expressions `nft --debug=netlink` shows for a chain's rules.
+fn debug_exprs(ns: &TestNamespace, family: &str, table: &str, chain: &str) -> nlink::Result<Vec<String>> {
+    let out = ns.exec("nft", &["--debug=netlink", "list", "chain", family, table, chain])?;
+    Ok(out
+        .lines()
+        .filter(|l| l.trim_start().starts_with('['))
+        .map(|l| l.trim().to_string())
+        .collect())
+}
+
+/// #708: an address and two ports, matched in ip, inet, bridge and netdev
+/// tables: nlink writes the protocol guards nft writes — once each, none an
+/// ip table implies, the ethertype in bridge and netdev.
+#[tokio::test]
+async fn guards_are_written_as_nft_writes_them() -> nlink::Result<()> {
+    use nlink::netlink::link::DummyLink;
+    use nlink::netlink::nftables::Rule;
+    use nlink::netlink::Route;
+    require_root!();
+    nlink::require_modules!("nf_tables", "dummy", "bridge");
+
+    let ns = TestNamespace::new("nft-guards")?;
+    let route: Connection<Route> = ns.connection()?;
+    route.add_link(DummyLink::new("d0")).await?;
+    let nft = ns.connection_for::<Nftables>()?;
+    let line = "ip saddr 10.0.0.1 tcp dport 22 tcp sport 1 counter";
+    for (family, hook) in [
+        ("ip", "type filter hook input priority 0;"),
+        ("inet", "type filter hook input priority 0;"),
+        ("bridge", "type filter hook input priority 0;"),
+        ("netdev", "type filter hook ingress device d0 priority 0;"),
+    ] {
+        let script = format!(
+            "table {family} t {{\n chain a {{ {hook} {line}; }}\n chain b {{ {hook} }}\n}}\n"
+        );
+        let file = std::env::temp_dir().join(format!("nlink-guards-{family}-{}.nft", std::process::id()));
+        std::fs::write(&file, script).map_err(nlink::Error::from)?;
+        let installed = ns.exec("nft", &["-f", file.to_str().unwrap()]);
+        let _ = std::fs::remove_file(&file);
+        installed?;
+        let fam = match family {
+            "ip" => Family::Ip,
+            "inet" => Family::Inet,
+            "bridge" => Family::Bridge,
+            _ => Family::Netdev,
+        };
+        nft.add_rule(
+            Rule::new("t", "b")
+                .family(fam)
+                .match_saddr_v4(Ipv4Addr::new(10, 0, 0, 1), 32)
+                .match_tcp_dport(22)
+                .match_tcp_sport(1)
+                .counter(),
+        )
+        .await?;
+        assert_eq!(
+            debug_guards(&ns, family, "t", "b")?,
+            debug_guards(&ns, family, "t", "a")?,
+            "{family}: nlink's chain b, nft's chain a"
+        );
+    }
+    Ok(())
+}
+
+/// #708: in a netdev table `meta nfproto` is the table's family, so the
+/// IPv4 guard nlink put in front of an address never matched: an `ip
+/// saddr` rule at ingress counted nothing. With the ethertype it counts
+/// what the peer sends.
+#[tokio::test]
+async fn an_address_match_at_netdev_ingress_matches() -> nlink::Result<()> {
+    use crate::common::counters::rule_packets;
+    use crate::common::traffic::send_udp;
+    require_root!();
+    nlink::require_modules!("nf_tables", "veth");
+
+    let pair = crate::common::topo::NsPair::new("nftguard", 97).await?;
+    let a_addr = pair.a_addr;
+    let cfg = NftablesConfig::new().table("t", Family::Netdev, |t| {
+        t.chain("in", |c| c.hook(Hook::NetdevIngress).device(pair.b_if).priority(Priority::Filter))
+            .rule_keyed("in", "from-a", move |r| r.match_saddr_v4(a_addr, 32).match_l4proto(17).counter())
+    });
+    let nft = pair.b.connection_for::<Nftables>()?;
+    cfg.diff(&nft).await?.apply(&nft).await?;
+    let again = cfg.diff(&nft).await?;
+    assert!(again.is_empty(), "second diff must be empty: {again}");
+    send_udp(&pair.a, &[format!("{}:9", pair.b_addr)], 3);
+    assert_eq!(rule_packets(&nft, "t", Family::Netdev, "in", 0).await?, 3);
+    Ok(())
+}
+
+/// #708: a rule an older nlink installed with the guards it no longer
+/// writes — here an `ip` table's implied `meta nfproto ipv4`, written raw so
+/// that nothing drops it — is the rule declared without them: the diff is
+/// empty and nothing is replaced on upgrade. (Applying the declaration
+/// would replace nothing either; nft 1.0.6 cannot list such a rule at all.)
+#[tokio::test]
+async fn a_rule_installed_with_redundant_guards_diffs_empty() -> nlink::Result<()> {
+    use nlink::netlink::nftables::{RawExpr, Rule, RuleExpr};
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let ns = TestNamespace::new("nft-guards-old")?;
+    let nft = ns.connection_for::<Nftables>()?;
+    // `meta load nfproto => reg 1`, as attributes: DREG 1, KEY 15.
+    let mut meta = Vec::new();
+    for (ty, value) in [(1u16, 1u32), (2, 15)] {
+        meta.extend_from_slice(&8u16.to_ne_bytes());
+        meta.extend_from_slice(&ty.to_ne_bytes());
+        meta.extend_from_slice(&value.to_be_bytes());
+    }
+    let declare = |old: bool| {
+        let meta = meta.clone();
+        NftablesConfig::new().table("t", Family::Ip, move |t| {
+            t.chain("in", |c| c.hook(Hook::Input).priority(Priority::Filter).chain_type(ChainType::Filter))
+                .rule_keyed("in", "k", move |r: Rule| {
+                    let r = if old {
+                        r.expr(RawExpr::new("meta", meta.clone()))
+                            .expr(Expr::Cmp { sreg: Register::R0, op: CmpOp::Eq, data: vec![2] })
+                    } else {
+                        r
+                    };
+                    r.match_saddr_v4(Ipv4Addr::new(10, 0, 0, 1), 32).match_tcp_dport(22).accept()
+                })
+        })
+    };
+    declare(true).diff(&nft).await?.apply(&nft).await?;
+    // Read through nlink: nft 1.0.6 aborts listing this very rule, an ip
+    // table's payload behind a `meta nfproto` guard.
+    let installed = nft.list_rules("t", Family::Ip).await?;
+    let guarded = installed[0]
+        .expressions()
+        .iter()
+        .any(|e| matches!(e, RuleExpr::Meta { key: MetaKey::NfProto, .. }));
+    assert!(guarded, "{:?}", installed[0].expressions());
+    let diff = declare(false).diff(&nft).await?;
+    assert!(diff.is_empty(), "upgrading nlink must not replace the rule: {diff}");
+    Ok(())
+}

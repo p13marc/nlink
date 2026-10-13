@@ -60,6 +60,9 @@ mod config;
 #[path = "integration/network_config_apply.rs"]
 mod network_config_apply;
 
+#[path = "integration/config_undo.rs"]
+mod config_undo;
+
 #[path = "integration/ratelimit.rs"]
 mod ratelimit;
 
@@ -318,6 +321,15 @@ mod tc_tree;
 // `Stack::plan_in` → `StackPlan::apply`: one diff of every layer (#519).
 #[path = "integration/stack_plan.rs"]
 mod stack_plan;
+
+// The netdev GENL family: features, queues, NAPI, queue statistics (#166).
+#[path = "integration/genl_netdev.rs"]
+mod genl_netdev;
+
+// Record a connection's traffic in a namespace, replay it without one (#168).
+#[cfg(feature = "replay")]
+#[path = "integration/replay.rs"]
+mod replay;
 
 // The helpers in `common/` checked against themselves, including where
 // each must fail: a helper that cannot fail turns every test built on it

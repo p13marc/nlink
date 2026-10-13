@@ -366,9 +366,7 @@ impl Connection<Nftables> {
             builder.append_attr_u32_be(NFTA_HOOK_HOOKNUM, hook.number(chain.family));
             let priority = chain.priority.unwrap_or(Priority::Filter).to_i32();
             builder.append_attr_u32_be(NFTA_HOOK_PRIORITY, priority as u32);
-            if let Some(dev) = &chain.device {
-                builder.append_attr_str(NFTA_HOOK_DEV, dev);
-            }
+            append_hook_devices(&mut builder, &chain.devices);
             builder.nest_end(hook_nest);
         }
 
@@ -623,6 +621,7 @@ impl Connection<Nftables> {
         append_set_data_type(&mut builder, &set);
         append_set_timeouts(&mut builder, &set);
         append_set_desc(&mut builder, &set);
+        append_set_statements(&mut builder, &set);
         append_userdata(&mut builder, NFTA_SET_USERDATA, NFTNL_UDATA_SET_COMMENT, set.comment.as_deref(), set.owned)?;
         // Set ID (arbitrary, used for referencing in same batch)
         builder.append_attr_u32_be(NFTA_SET_ID, 1);
@@ -870,14 +869,18 @@ impl Connection<Nftables> {
         // An interval set of concatenated keys (`NFT_SET_CONCAT`) holds each
         // range in one element already; another interval set holds starts
         // and end-plus-ones to pair.
-        let flags = self
-            .list_sets_in(table, family)
-            .await?
-            .iter()
-            .find(|s| s.name == set)
-            .map_or(SetFlags::empty(), |s| s.flags);
+        let sets = self.list_sets_in(table, family).await?;
+        let info = sets.iter().find(|s| s.name == set);
+        let flags = info.map_or(SetFlags::empty(), |s| s.flags);
         if flags.contains(SetFlags::INTERVAL) && !flags.contains(SetFlags::CONCAT) {
             elements = super::interval::pair_elements(&elements);
+            // Paired in network order, read in host order (#703).
+            let host_order = [SetKeyType::Mark, SetKeyType::IfIndex, SetKeyType::ClassId]
+                .iter()
+                .any(|t| info.is_some_and(|s| s.key_type == t.type_id()));
+            if host_order {
+                elements = elements.iter().map(SetElement::wire_to_host).collect();
+            }
         }
         Ok(elements)
     }
@@ -1859,10 +1862,19 @@ pub(crate) fn parse_set(data: &[u8], family: Family) -> Option<SetInfo> {
         object_type: None,
         comment: None,
         managed: false,
+        policy: SetPolicy::Performance,
+        statements: Vec::new(),
     };
 
     for (attr_type, payload) in AttrIter::new(data) {
         match attr_type & 0x7FFF {
+            // Dumped only when it is not the default.
+            NFTA_SET_POLICY if payload.len() >= 4 => {
+                let policy = u32::from_be_bytes(payload[..4].try_into().unwrap());
+                set.policy = SetPolicy::from_u32(policy).unwrap_or_default();
+            }
+            NFTA_SET_EXPR => set.statements.extend(super::expr::parse_elem(payload)),
+            NFTA_SET_EXPRESSIONS => set.statements.extend(super::expr::parse_expressions(payload)),
             NFTA_SET_USERDATA => {
                 set.comment = super::userdata::comment_of(payload, super::userdata::NFTNL_UDATA_SET_COMMENT);
                 set.managed = super::userdata::is_owned(payload);
@@ -1955,6 +1967,7 @@ fn parse_set_elem(elem: &[u8]) -> Option<SetElement> {
     let mut expiration = None;
     let mut data = None;
     let mut comment = None;
+    let mut statements = Vec::new();
     let millis = |payload: &[u8]| {
         payload
             .get(..8)
@@ -1985,6 +1998,8 @@ fn parse_set_elem(elem: &[u8]) -> Option<SetElement> {
                 data = attr_str(payload).map(SetElementData::Object);
             }
             NFTA_SET_ELEM_EXPIRATION => expiration = millis(payload),
+            NFTA_SET_ELEM_EXPR => statements.extend(super::expr::parse_elem(payload)),
+            NFTA_SET_ELEM_EXPRESSIONS => statements.extend(super::expr::parse_expressions(payload)),
             NFTA_SET_ELEM_USERDATA => {
                 comment = super::userdata::comment_of(payload, super::userdata::NFTNL_UDATA_COMMENT);
             }
@@ -1999,6 +2014,7 @@ fn parse_set_elem(elem: &[u8]) -> Option<SetElement> {
             let element = SetElement::from_wire(key, flags)
                 .with_key_end(key_end)
                 .with_timers(timeout, expiration)
+                .with_statements(&statements)
                 .with_data(data);
             Some(match comment {
                 Some(comment) => element.with_comment(comment),
@@ -2162,9 +2178,7 @@ impl Transaction {
             builder.append_attr_u32_be(NFTA_HOOK_HOOKNUM, hook.number(chain.family));
             let priority = chain.priority.unwrap_or(Priority::Filter).to_i32();
             builder.append_attr_u32_be(NFTA_HOOK_PRIORITY, priority as u32);
-            if let Some(dev) = &chain.device {
-                builder.append_attr_str(NFTA_HOOK_DEV, dev);
-            }
+            append_hook_devices(&mut builder, &chain.devices);
             builder.nest_end(hook_nest);
         }
 
@@ -2284,8 +2298,20 @@ impl Transaction {
     }
 
     /// Add a table deletion to the batch.
-    pub fn del_table(mut self, name: &str, family: Family) -> Self {
-        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_DELTABLE), NLM_F_REQUEST);
+    pub fn del_table(self, name: &str, family: Family) -> Self {
+        self.push_table_delete(NFT_MSG_DELTABLE, name, family)
+    }
+
+    /// Like [`del_table`](Self::del_table), but a table that is already
+    /// gone is not an error: `NFT_MSG_DESTROYTABLE` (#703). The `destroy_*`
+    /// deletes need kernel 6.3+, and an older kernel refuses the whole
+    /// batch; see [`kernel_has_destroy`].
+    pub fn destroy_table(self, name: &str, family: Family) -> Self {
+        self.push_table_delete(NFT_MSG_DESTROYTABLE, name, family)
+    }
+
+    fn push_table_delete(mut self, msg: u8, name: &str, family: Family) -> Self {
+        let mut builder = MessageBuilder::new(nft_msg_type(msg), NLM_F_REQUEST);
         let nfgenmsg = NfGenMsg::new(family);
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_TABLE_NAME, name);
@@ -2349,8 +2375,18 @@ impl Transaction {
 
     /// Add a chain deletion to the batch. Mirrors the imperative
     /// [`Connection::<Nftables>::del_chain`](Connection) shape.
-    pub fn del_chain(mut self, table: &str, name: &str, family: Family) -> Self {
-        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_DELCHAIN), NLM_F_REQUEST);
+    pub fn del_chain(self, table: &str, name: &str, family: Family) -> Self {
+        self.push_chain_delete(NFT_MSG_DELCHAIN, table, name, family)
+    }
+
+    /// Like [`del_chain`](Self::del_chain), but a chain that is already
+    /// gone is not an error: `NFT_MSG_DESTROYCHAIN`, kernel 6.3+ (#703).
+    pub fn destroy_chain(self, table: &str, name: &str, family: Family) -> Self {
+        self.push_chain_delete(NFT_MSG_DESTROYCHAIN, table, name, family)
+    }
+
+    fn push_chain_delete(mut self, msg: u8, table: &str, name: &str, family: Family) -> Self {
+        let mut builder = MessageBuilder::new(nft_msg_type(msg), NLM_F_REQUEST);
         let nfgenmsg = NfGenMsg::new(family);
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_CHAIN_TABLE, table);
@@ -2362,8 +2398,25 @@ impl Transaction {
     /// Add a rule deletion to the batch (by kernel handle).
     /// Mirrors the imperative
     /// [`Connection::<Nftables>::del_rule`](Connection).
-    pub fn del_rule(mut self, table: &str, chain: &str, family: Family, handle: u64) -> Self {
-        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_DELRULE), NLM_F_REQUEST);
+    pub fn del_rule(self, table: &str, chain: &str, family: Family, handle: u64) -> Self {
+        self.push_rule_delete(NFT_MSG_DELRULE, table, chain, family, handle)
+    }
+
+    /// Like [`del_rule`](Self::del_rule), but a rule that is already gone
+    /// is not an error: `NFT_MSG_DESTROYRULE`, kernel 6.3+ (#703).
+    pub fn destroy_rule(self, table: &str, chain: &str, family: Family, handle: u64) -> Self {
+        self.push_rule_delete(NFT_MSG_DESTROYRULE, table, chain, family, handle)
+    }
+
+    fn push_rule_delete(
+        mut self,
+        msg: u8,
+        table: &str,
+        chain: &str,
+        family: Family,
+        handle: u64,
+    ) -> Self {
+        let mut builder = MessageBuilder::new(nft_msg_type(msg), NLM_F_REQUEST);
         let nfgenmsg = NfGenMsg::new(family);
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_RULE_TABLE, table);
@@ -2438,8 +2491,19 @@ impl Transaction {
 
     /// Add a flowtable deletion to the batch. Mirrors the
     /// imperative [`Connection::<Nftables>::del_flowtable`](Connection).
-    pub fn del_flowtable(mut self, family: Family, table: &str, name: &str) -> Self {
-        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_DELFLOWTABLE), NLM_F_REQUEST);
+    pub fn del_flowtable(self, family: Family, table: &str, name: &str) -> Self {
+        self.push_flowtable_delete(NFT_MSG_DELFLOWTABLE, family, table, name)
+    }
+
+    /// Like [`del_flowtable`](Self::del_flowtable), but a flowtable that is
+    /// already gone is not an error: `NFT_MSG_DESTROYFLOWTABLE`, kernel
+    /// 6.3+ (#703).
+    pub fn destroy_flowtable(self, family: Family, table: &str, name: &str) -> Self {
+        self.push_flowtable_delete(NFT_MSG_DESTROYFLOWTABLE, family, table, name)
+    }
+
+    fn push_flowtable_delete(mut self, msg: u8, family: Family, table: &str, name: &str) -> Self {
+        let mut builder = MessageBuilder::new(nft_msg_type(msg), NLM_F_REQUEST);
         let nfgenmsg = NfGenMsg::new(family);
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_FLOWTABLE_TABLE, table);
@@ -2499,6 +2563,7 @@ impl Transaction {
             self.defer(e);
         }
         append_set_desc(&mut builder, &set);
+        append_set_statements(&mut builder, &set);
         builder.append_attr_u32_be(NFTA_SET_ID, set_id);
         self.push(builder);
         self
@@ -2506,8 +2571,18 @@ impl Transaction {
 
     /// Add a set deletion to the batch. Mirrors the imperative
     /// [`Connection::<Nftables>::del_set`](Connection).
-    pub fn del_set(mut self, table: &str, name: &str, family: Family) -> Self {
-        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_DELSET), NLM_F_REQUEST);
+    pub fn del_set(self, table: &str, name: &str, family: Family) -> Self {
+        self.push_set_delete(NFT_MSG_DELSET, table, name, family)
+    }
+
+    /// Like [`del_set`](Self::del_set), but a set that is already gone is
+    /// not an error: `NFT_MSG_DESTROYSET`, kernel 6.3+ (#703).
+    pub fn destroy_set(self, table: &str, name: &str, family: Family) -> Self {
+        self.push_set_delete(NFT_MSG_DESTROYSET, table, name, family)
+    }
+
+    fn push_set_delete(mut self, msg: u8, table: &str, name: &str, family: Family) -> Self {
+        let mut builder = MessageBuilder::new(nft_msg_type(msg), NLM_F_REQUEST);
         let nfgenmsg = NfGenMsg::new(family);
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_SET_TABLE, table);
@@ -2582,13 +2657,37 @@ impl Transaction {
     /// Add an object deletion to the batch. Mirrors
     /// [`Connection::<Nftables>::del_object`](Connection).
     pub fn del_object(
-        mut self,
+        self,
         table: &str,
         name: &str,
         object_type: ObjectType,
         family: Family,
     ) -> Self {
-        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_DELOBJ), NLM_F_REQUEST);
+        self.push_object_delete(NFT_MSG_DELOBJ, table, name, object_type, family)
+    }
+
+    /// Like [`del_object`](Self::del_object), but an object that is
+    /// already gone is not an error: `NFT_MSG_DESTROYOBJ`, kernel 6.3+
+    /// (#703).
+    pub fn destroy_object(
+        self,
+        table: &str,
+        name: &str,
+        object_type: ObjectType,
+        family: Family,
+    ) -> Self {
+        self.push_object_delete(NFT_MSG_DESTROYOBJ, table, name, object_type, family)
+    }
+
+    fn push_object_delete(
+        mut self,
+        msg: u8,
+        table: &str,
+        name: &str,
+        object_type: ObjectType,
+        family: Family,
+    ) -> Self {
+        let mut builder = MessageBuilder::new(nft_msg_type(msg), NLM_F_REQUEST);
         append_object_key(&mut builder, table, name, object_type, family);
         self.push(builder);
         self
@@ -2669,7 +2768,7 @@ fn append_object(builder: &mut MessageBuilder, object: &Object) -> Result<()> {
         object.config.object_type(),
         object.family,
     );
-    super::object::append_object_data(builder, &object.config);
+    super::object::append_object_data(builder, &object.config, object.family);
     append_userdata(builder, NFTA_OBJ_USERDATA, NFTNL_UDATA_COMMENT, object.comment.as_deref(), object.owned)
 }
 
@@ -2769,6 +2868,22 @@ fn append_set_desc(builder: &mut MessageBuilder, set: &Set) {
     builder.nest_end(desc);
 }
 
+/// Append the set's policy, if declared, and the statements every element
+/// gets (#703) — sent again, the same, on an update: the kernel refuses
+/// (`EEXIST`) one that differs.
+fn append_set_statements(builder: &mut MessageBuilder, set: &Set) {
+    if let Some(policy) = set.policy {
+        builder.append_attr_u32_be(NFTA_SET_POLICY, policy as u32);
+    }
+    super::expr::write_statements(
+        builder,
+        &set.statements,
+        NFTA_SET_EXPR,
+        NFTA_SET_EXPRESSIONS,
+        super::expr::WireForm::Request,
+    );
+}
+
 /// Whether elements are being added or deleted: a delete names elements by
 /// key alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2781,15 +2896,17 @@ pub(crate) enum ElementWrite {
 /// cannot encode is an error, never something dropped. Shared by the
 /// element writers and `NftablesConfig::validate`.
 pub(crate) fn check_elements(set: &Set, elements: &[SetElement], write: ElementWrite) -> Result<()> {
-    // Ranges are compared and incremented as big-endian numbers, which a
-    // host-order key is not; `nft` byte-swaps those, nlink does not model
-    // that.
+    // Ranges are compared and incremented as big-endian numbers. A
+    // host-order key goes in network order, as nft writes it (#703); in a
+    // concatenation that is not modelled.
     if !elements.is_empty()
         && set.flags.contains(SetFlags::INTERVAL)
         && set.key_type.is_host_order()
+        && !set.swaps_range_keys()
     {
         return Err(Error::invalid_message(format!(
-            "set {}: interval sets of {:?} keys are not modelled (host byte order)",
+            "set {}: interval sets of {:?} keys are not modelled (a host-order field in a \
+             concatenation)",
             set.name, set.key_type
         )));
     }
@@ -2823,6 +2940,13 @@ fn append_set_elements(
     write: ElementWrite,
 ) -> Result<()> {
     check_elements(set, elements, write)?;
+    let in_wire_order: Vec<SetElement>;
+    let elements = if set.swaps_range_keys() {
+        in_wire_order = elements.iter().map(SetElement::host_to_wire).collect();
+        &in_wire_order[..]
+    } else {
+        elements
+    };
     // A delete names the element by its key (and range end); its data and
     // timeout are the kernel's business, not the request's.
     let carry = |e: &SetElement| match write {
@@ -2946,6 +3070,23 @@ pub fn kernel_has_destroy() -> bool {
         let minor: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
         (major, minor) >= (6, 3)
     })
+}
+
+/// A base chain's devices, as nft writes them (#703): one as
+/// `NFTA_HOOK_DEV`, several as `NFTA_HOOK_DEVS` of `NFTA_DEVICE_NAME`s —
+/// which the kernel dumps the same way.
+fn append_hook_devices(builder: &mut MessageBuilder, devices: &[String]) {
+    match devices {
+        [] => {}
+        [one] => builder.append_attr_str(NFTA_HOOK_DEV, one),
+        several => {
+            let nest = builder.nest_start(NFTA_HOOK_DEVS | 0x8000);
+            for dev in several {
+                builder.append_attr_str(NFTA_DEVICE_NAME, dev);
+            }
+            builder.nest_end(nest);
+        }
+    }
 }
 
 /// A flowtable's devices: one `NFTA_DEVICE_NAME` each, directly in the
@@ -3120,6 +3261,30 @@ mod transaction_tests {
         let hook_nest = find_attr(body, NFTA_CHAIN_HOOK).expect("NFTA_CHAIN_HOOK missing");
         let dev = find_attr(&hook_nest, NFTA_HOOK_DEV).expect("NFTA_HOOK_DEV missing");
         assert_eq!(&dev[..dev.len().saturating_sub(1)], b"eth0");
+    }
+
+    /// Two devices go as NFTA_HOOK_DEVS of NFTA_DEVICE_NAMEs, as nft
+    /// writes them (#703); one stays NFTA_HOOK_DEV.
+    #[test]
+    fn add_chain_emits_nfta_hook_devs_for_two_devices() {
+        let chain = Chain::new("ft", "ingress")
+            .unwrap()
+            .family(Family::Netdev)
+            .hook(Hook::NetdevIngress)
+            .device("eth0")
+            .device("eth1");
+        let tx = new_tx().add_chain(chain);
+        let body = body_after_nfgenmsg(&tx.messages[0]);
+        let hook_nest = find_attr(body, NFTA_CHAIN_HOOK).expect("NFTA_CHAIN_HOOK missing");
+        assert!(find_attr(&hook_nest, NFTA_HOOK_DEV).is_none());
+        let devs = find_attr(&hook_nest, NFTA_HOOK_DEVS).expect("NFTA_HOOK_DEVS missing");
+        let names: Vec<(u16, Vec<u8>)> = crate::netlink::attr::AttrIter::new(&devs)
+            .map(|(t, v)| (t & 0x7FFF, v.to_vec()))
+            .collect();
+        assert_eq!(
+            names,
+            [(NFTA_DEVICE_NAME, b"eth0\0".to_vec()), (NFTA_DEVICE_NAME, b"eth1\0".to_vec())]
+        );
     }
 
     #[test]
@@ -3423,9 +3588,13 @@ mod transaction_tests {
         // A range that runs backwards.
         let back = SetElement::ipv4_range(v4, std::net::Ipv4Addr::new(10, 0, 0, 0));
         assert!(refused(&Set::new("t", "s").interval(), back));
-        // Host-order keys do not compare as numbers.
+        // A host-order key goes in network order (#703); in a concatenation
+        // that is not modelled.
         let marks = Set::new("t", "s").key_type(SetKeyType::Mark).interval();
-        assert!(refused(&marks, SetElement::mark(1)));
+        assert!(!refused(&marks, SetElement::mark(1)));
+        let mark_and_addr = SetKeyType::Concat(vec![SetKeyType::Ipv4Addr, SetKeyType::Mark]);
+        let concat = Set::new("t", "s").key_type(mark_and_addr).interval();
+        assert!(refused(&concat, SetElement::concat([SetElement::ipv4(v4), SetElement::mark(1)])));
         // A prefix longer than the address.
         assert!(SetElement::ipv4_prefix(v4, 33).is_err());
     }
@@ -3476,6 +3645,83 @@ mod transaction_tests {
         assert!(find_attr(&desc, NFTA_SET_DESC_SIZE).is_some());
     }
 
+    /// A set's statements go as nft writes them (#703): one in
+    /// NFTA_SET_EXPR, several in NFTA_SET_EXPRESSIONS with NFT_SET_EXPR;
+    /// a declared policy goes too. Both read back.
+    #[test]
+    fn set_statements_and_policy_are_written_and_read_back() {
+        use super::super::expr::{ElementStatement, LimitExpr, QuotaExpr};
+        use super::super::types::{LimitUnit, SetPolicy};
+        let one = Set::new("t", "c").counter();
+        let several = Set::new("t", "m")
+            .policy(SetPolicy::Memory)
+            .counter()
+            .statement(QuotaExpr::new(1000));
+        let tx = new_tx().add_set(one).add_set(several);
+        let flags = |body: &[u8]| {
+            u32::from_be_bytes(find_attr(body, NFTA_SET_FLAGS).unwrap().try_into().unwrap())
+        };
+
+        let body = body_after_nfgenmsg(&tx.messages[0]);
+        assert!(find_attr(body, NFTA_SET_EXPR).is_some());
+        assert!(find_attr(body, NFTA_SET_EXPRESSIONS).is_none());
+        assert!(find_attr(body, NFTA_SET_POLICY).is_none());
+        assert_eq!(flags(body), 0);
+        let set = parse_set(body, Family::Inet).unwrap();
+        assert_eq!(set.policy, SetPolicy::Performance);
+        assert_eq!(set.statements.len(), 1);
+
+        let body = body_after_nfgenmsg(&tx.messages[1]);
+        assert!(find_attr(body, NFTA_SET_EXPRESSIONS).is_some());
+        assert_eq!(flags(body), NFT_SET_EXPR);
+        let set = parse_set(body, Family::Inet).unwrap();
+        assert_eq!(set.policy, SetPolicy::Memory);
+        let read: Vec<_> = set
+            .statements
+            .iter()
+            .filter_map(ElementStatement::from_rule_expr)
+            .collect();
+        assert_eq!(read, [ElementStatement::Counter, QuotaExpr::new(1000).into()]);
+
+        // A packet limit's burst of 0 is the kernel's 5.
+        let limit = ElementStatement::from(LimitExpr::packets(10, LimitUnit::Second));
+        assert_eq!(
+            limit.kernel_form(),
+            LimitExpr::packets(10, LimitUnit::Second).burst(5).into()
+        );
+    }
+
+    /// An element's counter and quota read back from its dump (#703).
+    #[test]
+    fn an_element_reads_back_its_counter_and_quota() {
+        let mut b = MessageBuilder::new(0, 0);
+        let key = b.nest_start(NFTA_SET_ELEM_KEY | 0x8000);
+        b.append_attr(NFTA_DATA_VALUE, &[127, 0, 0, 1]);
+        b.nest_end(key);
+        let list = b.nest_start(NFTA_SET_ELEM_EXPRESSIONS | 0x8000);
+        for (name, attrs) in [
+            ("counter", vec![(NFTA_COUNTER_BYTES, 336u64), (NFTA_COUNTER_PACKETS, 4)]),
+            ("quota", vec![(NFTA_QUOTA_BYTES, 1000), (NFTA_QUOTA_CONSUMED, 336)]),
+        ] {
+            let elem = b.nest_start(NFTA_LIST_ELEM | 0x8000);
+            b.append_attr_str(NFTA_EXPR_NAME, name);
+            let data = b.nest_start(NFTA_EXPR_DATA | 0x8000);
+            for (attr, value) in attrs {
+                b.append_attr_u64_be(attr, value);
+            }
+            if name == "quota" {
+                b.append_attr_u32_be(NFTA_QUOTA_FLAGS, 0);
+            }
+            b.nest_end(data);
+            b.nest_end(elem);
+        }
+        b.nest_end(list);
+        let element = parse_set_elem(&b.as_bytes()[16..]).unwrap();
+        assert_eq!(element.counter(), Some((4, 336)));
+        assert_eq!(element.quota_used(), Some(336));
+        assert_eq!(SetElement::ipv4(std::net::Ipv4Addr::LOCALHOST).counter(), None);
+    }
+
     #[test]
     fn a_hash_set_of_concatenated_keys_has_no_concat_flag() {
         // As nft: without the interval flag the kernel hashes the whole
@@ -3508,6 +3754,44 @@ mod transaction_tests {
         assert_eq!(wire[0].key_end(), Some(&[10, 0, 0, 255, 0x07, 0xd0, 0, 0][..]));
         // A single key has no KEY_END.
         assert_eq!(wire[1], one);
+    }
+
+    /// A mark range goes in network order, as nft writes it, its end plus
+    /// one counted as a number; a hash set of marks keeps host order (#703).
+    #[test]
+    fn mark_ranges_go_out_in_network_order() {
+        let set = Set::new("t", "m").key_type(SetKeyType::Mark).interval();
+        let tx = new_tx().add_set_elements(&set, &[SetElement::mark_range(1, 255), SetElement::mark(0x100)]);
+        assert!(tx.error.is_none(), "{:?}", tx.error);
+        let mut wire = Vec::new();
+        super::parse_set_elements(body_after_nfgenmsg(&tx.messages[0]), &mut wire);
+        let keys: Vec<(&[u8], bool)> = wire.iter().map(|e| (e.key(), e.is_interval_end())).collect();
+        assert_eq!(
+            keys,
+            [
+                (&[0, 0, 0, 1][..], false),
+                (&[0, 0, 1, 0][..], true),
+                (&[0, 0, 1, 0][..], false),
+                (&[0, 0, 1, 1][..], true),
+            ]
+        );
+        // Paired and read back: host order again.
+        let paired: Vec<SetElement> = super::super::interval::pair_elements(&wire)
+            .iter()
+            .map(SetElement::wire_to_host)
+            .collect();
+        assert_eq!(paired[0].key(), 1u32.to_ne_bytes());
+        assert_eq!(paired[0].key_end(), Some(&255u32.to_ne_bytes()[..]));
+
+        let hash = Set::new("t", "h").key_type(SetKeyType::Mark);
+        let tx = new_tx().add_set_elements(&hash, &[SetElement::mark(1)]);
+        let mut wire = Vec::new();
+        super::parse_set_elements(body_after_nfgenmsg(&tx.messages[0]), &mut wire);
+        assert_eq!(wire[0].key(), 1u32.to_ne_bytes());
+
+        // A range runs forwards as a number, whatever its bytes.
+        assert!(SetElement::mark_range(255, 256).check_for(&set, false).is_ok());
+        assert!(SetElement::mark_range(256, 255).check_for(&set, false).is_err());
     }
 
     #[test]

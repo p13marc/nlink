@@ -55,8 +55,9 @@ jobs:
           # assertion fails), which the flag below used to hide (#350).
           # nftables: tests that need a rule nlink did not write add it the
           # way a person does, with `nft` (#459).
+          # ethtool: nlink's ethtool getters are compared with the CLI's (#839).
           apt-get install -y --no-install-recommends iproute2 conntrack nodejs git iputils-ping \
-            nftables
+            nftables ethtool
       - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - name: Guard that kernel modules are available on the runner VM
         shell: bash
@@ -85,7 +86,14 @@ jobs:
                    act_gact act_police cls_fw sch_prio sch_sfq sch_tbf sch_pie sch_fq_pie sch_plug \
                    bonding macvlan macvtap ipvlan netkit vxlan geneve macsec ip_gre ipip sit ip_vti ip6_vti ip6_tunnel xfrm_interface mpls_router mpls_iptunnel ip6_gre \
                    nft_ct nft_log nft_masq nft_nat nft_redir sch_cake nft_fib_inet nft_connlimit nfnetlink_log \
-                   cls_bpf act_bpf sch_hfsc sch_drr sch_qfq; do
+                   cls_bpf act_bpf sch_hfsc sch_drr sch_qfq act_gate act_ct nf_log_syslog \
+                   nft_queue nfnetlink_queue nft_dup_ipv4 nft_dup_netdev nft_fwd_netdev nft_numgen nft_hash \
+                   nft_tproxy nft_socket nft_synproxy nf_conntrack_ftp nf_conntrack_tftp \
+                   nft_osf apparmor act_tunnel_key \
+                   act_vlan act_mpls act_skbmod act_skbedit act_connmark act_csum act_nat act_pedit \
+                   act_simple act_sample act_ctinfo act_ife \
+                   sch_multiq sch_red sch_choke sch_gred sch_sfb sch_codel sch_fq sch_hhf sch_etf sch_cbs \
+                   sch_skbprio sch_ets sch_mqprio sch_taprio cls_route cls_basic cls_flow em_cmp em_u32; do
             if [ -d "/sys/module/$m" ] || grep -qE "(^|/)$m\.ko" $idx 2>/dev/null; then
               continue
             fi
@@ -93,7 +101,7 @@ jobs:
           done
       - name: Build with lab feature
         shell: bash
-        run: cargo build -p nlink --features lab,sockdiag,namespace_watcher,process,serde --tests
+        run: cargo build -p nlink --features lab,sockdiag,namespace_watcher,process,serde,replay --tests
       # This step gates. It carried `continue-on-error: true` from its
       # first run until #350, nominally waiting on #293/#294 — both long
       # fixed — and the flag did exactly what it says: this step's result
@@ -120,7 +128,14 @@ jobs:
             act_gact,act_police,cls_fw,sch_prio,sch_sfq,sch_tbf,sch_pie,sch_fq_pie,sch_plug,
             bonding,macvlan,macvtap,ipvlan,netkit,vxlan,geneve,macsec,vrf,ip_gre,ipip,sit,ip_vti,ip6_vti,ip6_tunnel,xfrm_interface,mpls_router,mpls_iptunnel,ip6_gre,
             nft_ct,nft_log,nft_masq,nft_nat,nft_redir,sch_cake,nft_fib_inet,nft_connlimit,nfnetlink_log,
-            cls_bpf,act_bpf,sch_hfsc,sch_drr,sch_qfq
+            cls_bpf,act_bpf,sch_hfsc,sch_drr,sch_qfq,act_gate,act_ct,nf_log_syslog,
+            nft_queue,nfnetlink_queue,nft_dup_ipv4,nft_dup_netdev,nft_fwd_netdev,nft_numgen,nft_hash,
+            nft_tproxy,nft_socket,nft_synproxy,nf_conntrack_ftp,nf_conntrack_tftp,
+            nft_osf,apparmor,act_tunnel_key,
+            act_vlan,act_mpls,act_skbmod,act_skbedit,act_connmark,act_csum,act_nat,act_pedit,
+            act_simple,act_sample,act_ctinfo,act_ife,
+            sch_multiq,sch_red,sch_choke,sch_gred,sch_sfb,sch_codel,sch_fq,sch_hhf,sch_etf,sch_cbs,
+            sch_skbprio,sch_ets,sch_mqprio,sch_taprio,cls_route,cls_basic,cls_flow,em_cmp,em_u32
           # NLINK_TEST_STRICT_HOST_ROOT is deliberately NOT set. This
           # lane's containers are rootless: uid 0 here is the runner's
           # unprivileged user wearing a mapping, and six tests need root
@@ -131,7 +146,7 @@ jobs:
           # privileged trial reached the same conclusion. Set it to 1 on
           # a lane that does run as host root, and those skips become
           # failures.
-        run: cargo test -p nlink --features lab,sockdiag,namespace_watcher,process,serde -- --test-threads=1 --nocapture
+        run: cargo test -p nlink --features lab,sockdiag,namespace_watcher,process,serde,replay -- --test-threads=1 --nocapture
       - name: Library tests
         shell: bash
         run: cargo test -p nlink --lib

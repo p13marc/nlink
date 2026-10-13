@@ -89,6 +89,10 @@ mod per_peer_impairment {}
 #[doc = include_str!("../../../docs/recipes/per-process-bandwidth.md")]
 mod per_process_bandwidth {}
 
+#[cfg(all(feature = "replay", feature = "lab"))]
+#[doc = include_str!("../../../docs/recipes/replay-testing.md")]
+mod replay_testing {}
+
 #[doc = include_str!("../../../docs/recipes/tx-hw-shaping.md")]
 mod tx_hw_shaping {}
 

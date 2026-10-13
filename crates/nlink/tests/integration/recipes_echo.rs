@@ -14,6 +14,7 @@ use std::time::Duration;
 use nlink::netlink::impair::{PeerImpairment, PerPeerImpairer};
 use nlink::netlink::ratelimit::{PerHostLimiter, RateLimiter};
 use nlink::netlink::tc::{NetemConfig, NetemLossModel};
+use nlink::netlink::config::NetworkConfig;
 use nlink::netlink::{Connection, Route};
 use nlink::{Bytes, Percent, Rate, ReconcileReport};
 
@@ -35,6 +36,30 @@ impl Recipe {
             Recipe::Rate(r) => r.reconcile(conn).await,
             Recipe::Host(r) => r.reconcile(conn).await,
             Recipe::Peer(r) => r.reconcile(conn).await,
+        }
+    }
+
+    async fn reconcile_dry_run(&self, conn: &Connection<Route>) -> nlink::Result<ReconcileReport> {
+        match self {
+            Recipe::Rate(r) => r.reconcile_dry_run(conn).await,
+            Recipe::Host(r) => r.reconcile_dry_run(conn).await,
+            Recipe::Peer(r) => r.reconcile_dry_run(conn).await,
+        }
+    }
+
+    async fn apply(&self, conn: &Connection<Route>) -> nlink::Result<()> {
+        match self {
+            Recipe::Rate(r) => r.apply(conn).await,
+            Recipe::Host(r) => r.apply(conn).await,
+            Recipe::Peer(r) => r.apply(conn).await,
+        }
+    }
+
+    fn to_config(&self) -> nlink::Result<NetworkConfig> {
+        match self {
+            Recipe::Rate(r) => Ok(r.to_config()),
+            Recipe::Host(r) => r.to_config(),
+            Recipe::Peer(r) => r.to_config(),
         }
     }
 }
@@ -95,6 +120,105 @@ async fn assert_converges(prefix: &str, cases: Vec<Case>) -> nlink::Result<()> {
         failures.len(),
         failures.join("\n\n")
     );
+    Ok(())
+}
+
+/// A recipe and its declaration (#645) install the same tree: installed
+/// imperatively, the declaration diffs empty; applied from the
+/// declaration, the recipe's reconcile has nothing to do.
+async fn agrees_both_ways(prefix: &str, recipe: &Recipe) -> Result<(), String> {
+    fn e(what: &'static str) -> impl Fn(nlink::Error) -> String {
+        move |err| format!("{what}: {err}")
+    }
+    let cfg = recipe.to_config().map_err(e("to_config"))?;
+    for declared_first in [false, true] {
+        let ns = TestNamespace::new(prefix).map_err(e("namespace"))?;
+        let conn = ns.connection().map_err(e("connection"))?;
+        conn.add_link(nlink::netlink::link::DummyLink::new("d0"))
+            .await
+            .map_err(e("d0"))?;
+        conn.set_link_up("d0").await.map_err(e("d0 up"))?;
+        if declared_first {
+            let applied = cfg.apply(&conn).await.map_err(e("declarative apply"))?;
+            if !applied.is_success() {
+                return Err(format!("declarative apply: {:?}", applied.errors));
+            }
+            let report = recipe.reconcile_dry_run(&conn).await.map_err(e("dry run"))?;
+            if !report.is_noop() {
+                return Err(format!("applied from the declaration, reconcile would change: {report:?}"));
+            }
+        } else {
+            recipe.apply(&conn).await.map_err(e("imperative apply"))?;
+        }
+        let diff = cfg.diff(&conn).await.map_err(e("diff"))?;
+        if !diff.is_empty() {
+            let how = if declared_first { "declaratively" } else { "imperatively" };
+            return Err(format!("installed {how}, the declaration differs:\n{diff}"));
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn recipes_as_declarations_agree_both_ways() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!(
+        "dummy", "ifb", "sch_htb", "sch_fq_codel", "sch_netem", "sch_ingress", "cls_flower",
+        "cls_matchall", "act_mirred"
+    );
+
+    let rl = || RateLimiter::new("d0");
+    let ph = || PerHostLimiter::new("d0", Rate::mbit(10));
+    let pp = || PerPeerImpairer::new("d0");
+    let delay = || NetemConfig::new().delay(Duration::from_millis(20)).build();
+    let mac = [0x02, 0x00, 0x5e, 0x10, 0x00, 0x09];
+    let cases = vec![
+        ("rate-egress", Recipe::Rate(rl().egress(Rate::mbit(10)))),
+        (
+            "rate-tuned",
+            Recipe::Rate(
+                rl().egress(Rate::mbit(10))
+                    .ingress(Rate::mbit(20))
+                    .burst_to(Rate::mbit(40))
+                    .burst_size(Bytes::kib(64))
+                    .latency(Duration::from_millis(8)),
+            ),
+        ),
+        ("rate-ingress", Recipe::Rate(rl().ingress(Rate::mbit(20)))),
+        (
+            "host-rules",
+            Recipe::Host(
+                ph().limit_ip(v4(10, 0, 0, 1), Rate::mbit(100))
+                    .limit_subnet("fd00:5::7/64", Rate::mbit(50))?
+                    .limit_port(80, Rate::mbit(5))
+                    .limit_port_range(8000, 8100, Rate::mbit(5))
+                    .limit_src_ip(v6("fd00::9"), Rate::mbit(7))
+                    .latency(Duration::from_millis(3)),
+            ),
+        ),
+        ("host-none", Recipe::Host(ph())),
+        (
+            "peer-rules",
+            Recipe::Peer(
+                pp().impair_dst_ip(v4(10, 0, 0, 1), delay())
+                    .impair_dst_subnet("fd00:7::9/64", delay())?
+                    .impair_dst_mac(mac, delay())
+                    .impair_src_ip(v4(10, 0, 0, 2), PeerImpairment::new(delay()).rate_cap(Rate::mbit(10)))
+                    .default_impairment(PeerImpairment::new(delay()).rate_cap(Rate::mbit(50))),
+            ),
+        ),
+        ("peer-one", Recipe::Peer(pp().impair_dst_ip(v6("fd00::1"), delay()))),
+    ];
+    let mut failures = Vec::new();
+    for (name, recipe) in &cases {
+        if let Err(why) = agrees_both_ways("rce-decl", recipe).await {
+            failures.push(format!("[{name}] {why}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+
+    // A declaration names its device.
+    assert!(PerPeerImpairer::new_by_index(7).to_config().is_err());
     Ok(())
 }
 

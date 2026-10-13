@@ -59,10 +59,12 @@ use super::{
 };
 
 mod command;
+mod vrf_exec;
 mod netns;
 
 pub use netns::{Netns, NetnsId, NetnsRef, NetnsTarget, Sysctl};
 pub use command::{NetnsCommand, Overlay, etc_overlay_supported};
+pub use vrf_exec::vrf_cgroup;
 
 /// Specification for which network namespace to use.
 ///
@@ -622,6 +624,33 @@ pub fn enter_path<P: AsRef<Path>>(path: P) -> Result<NamespaceGuard> {
         original: Some(original),
         _thread_pinned: std::marker::PhantomData,
     })
+}
+
+/// Put a worker thread back in the namespace it started in when dropped
+/// (#797). A thread that exits inside a namespace holds it for a moment
+/// after `join` returns: the kernel wakes the joiner when it clears the
+/// thread's TID (`exit_mm`), before it releases the thread's namespaces
+/// (`exit_task_namespaces`). For that moment `Netns::pids` lists the
+/// process, and a namespace being deleted looks held. Leaving first makes
+/// the worker's return the end of its stay. Made before the `setns` in;
+/// panics included.
+pub(crate) struct ReturnHome(Option<File>);
+
+impl ReturnHome {
+    /// The calling thread's namespace, to come back to.
+    pub(crate) fn new() -> Self {
+        Self(File::open("/proc/thread-self/ns/net").ok())
+    }
+}
+
+impl Drop for ReturnHome {
+    fn drop(&mut self) {
+        if let Some(home) = &self.0 {
+            // SAFETY: switches only the calling thread, back to the
+            // namespace it was in; the fd is open.
+            unsafe { libc::setns(home.as_raw_fd(), libc::CLONE_NEWNET) };
+        }
+    }
 }
 
 /// A guard that restores the original namespace when dropped.
@@ -1513,8 +1542,9 @@ where
     let thread_result = worker
         .spawn(move || -> Result<T> {
         let target = File::open(&path).map_err(|e| namespace_open_error(&path, e))?;
+        let _home = ReturnHome::new();
         // SAFETY: setns switches only this freshly-spawned worker thread,
-        // which exits right after `f` returns.
+        // which leaves again before it returns (#797).
         let ret = unsafe { libc::setns(target.as_raw_fd(), libc::CLONE_NEWNET) };
         if ret < 0 {
             return Err(Error::from(std::io::Error::last_os_error()));

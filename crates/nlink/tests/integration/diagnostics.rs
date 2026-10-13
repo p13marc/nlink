@@ -444,6 +444,218 @@ async fn a_genl_lookup_by_index_resolves_in_its_own_namespace() -> nlink::Result
     Ok(())
 }
 
+/// Three ethtool bugs, each silent until a test read a value back:
+/// - every getter sent a dump, which ethtool answers for every device, and
+///   kept the first: `lo`'s features, rings and link state, whatever the
+///   name;
+/// - `set_features` failed on every device: FEATURES_SET answers with a
+///   reply message unless asked not to, and the request expected only its
+///   ACK;
+/// - `get_features` read every listed feature as off: the kernel lists a
+///   feature bitset's set bits without a value flag.
+///
+/// `lo` has `loopback` and the veth does not; the veth's tx checksumming
+/// goes off and on again, read back each time.
+#[tokio::test]
+async fn ethtool_reads_and_sets_the_named_devices_features() -> nlink::Result<()> {
+    use nlink::netlink::{Connection, Ethtool, link::VethLink};
+    require_root!();
+    nlink::require_module!("veth");
+
+    let ns = TestNamespace::new("ns-ethfeat")?;
+    let conn = ns.connection()?;
+    conn.add_link(VethLink::new("ve0", "ve1")).await?;
+    let ethtool: Connection<Ethtool> = nlink::Connection::new_in_async(ns.name()).await?;
+    assert!(ethtool.get_features("lo").await?.active.is_set("loopback"));
+    assert!(!ethtool.get_features("ve0").await?.active.is_set("loopback"), "lo's features");
+
+    let feature = "tx-checksum-ip-generic";
+    for on in [false, true] {
+        ethtool
+            .set_features("ve0", |f| if on { f.enable(feature) } else { f.disable(feature) })
+            .await?;
+        let active = ethtool.get_features("ve0").await?.active;
+        assert_eq!(active.is_set(feature), on, "{feature} should be {}", if on { "on" } else { "off" });
+    }
+    Ok(())
+}
+
+/// nlink's ethtool getters read what the ethtool CLI reads, on `lo`, a veth
+/// and a dummy: every feature's state and whether it is fixed (`-k`), the
+/// speed, duplex, autonegotiation and carrier (`ethtool DEV`), and the
+/// channels (`-l`), or both refuse.
+#[tokio::test]
+async fn ethtool_reads_what_the_ethtool_cli_reads() -> nlink::Result<()> {
+    use nlink::netlink::{
+        Connection, Ethtool,
+        genl::ethtool::Duplex,
+        link::{DummyLink, VethLink},
+    };
+    require_root!();
+    nlink::require_modules!("veth", "dummy");
+
+    let ns = TestNamespace::new("ns-ethcli")?;
+    let conn = ns.connection()?;
+    conn.add_link(VethLink::new("ve0", "ve1")).await?;
+    conn.add_link(DummyLink::new("d0")).await?;
+    for dev in ["lo", "ve0", "ve1", "d0"] {
+        conn.set_link_up(dev).await?;
+    }
+    let ethtool: Connection<Ethtool> = nlink::Connection::new_in_async(ns.name()).await?;
+    let mut failed = Vec::new();
+    for dev in ["lo", "ve0", "d0"] {
+        // Features, as `ethtool --json -k` gives them, without ethtool's
+        // legacy group names (its `off_flag_def`), which are not the
+        // kernel's features.
+        const LEGACY: [&str; 12] = [
+            "rx-checksumming", "tx-checksumming", "scatter-gather", "tcp-segmentation-offload",
+            "udp-fragmentation-offload", "generic-segmentation-offload", "generic-receive-offload",
+            "large-receive-offload", "rx-vlan-offload", "tx-vlan-offload", "ntuple-filters", "receive-hashing",
+        ];
+        let cli = ns.exec("ethtool", &["--json", "-k", dev])?;
+        let cli: serde_json::Value = serde_json::from_str(&cli).map_err(|e| nlink::Error::invalid_message(e.to_string()))?;
+        let features = ethtool.get_features(dev).await?;
+        for (name, v) in cli[0].as_object().into_iter().flatten() {
+            let (Some(on), Some(fixed)) = (v["active"].as_bool(), v["fixed"].as_bool()) else { continue };
+            if LEGACY.contains(&name.as_str()) {
+                continue;
+            }
+            if features.is_active(name) != on || features.is_changeable(name) == fixed {
+                failed.push(format!(
+                    "{dev} {name}: ethtool says active {on} fixed {fixed}, nlink active {} fixed {}",
+                    features.is_active(name),
+                    !features.is_changeable(name)
+                ));
+            }
+        }
+
+        // Settings and carrier. ethtool fails on a device whose settings
+        // it cannot read, after printing what it could (the carrier).
+        let mut cmd = std::process::Command::new("ethtool");
+        cmd.arg(dev);
+        let cli = String::from_utf8_lossy(&ns.spawn_output(cmd)?.stdout).into_owned();
+        let field = |key: &str| cli.lines().find_map(|l| l.trim().strip_prefix(key).map(str::trim).map(str::to_string));
+        match ethtool.get_link_modes(dev).await {
+            Ok(modes) => {
+                let speed = modes.speed.map_or("Unknown!".to_string(), |s| format!("{s}Mb/s"));
+                if field("Speed:").as_deref() != Some(&*speed) {
+                    failed.push(format!("{dev} speed: ethtool says {:?}, nlink {speed}", field("Speed:")));
+                }
+                let duplex = match modes.duplex {
+                    Some(Duplex::Full) => "Full",
+                    Some(Duplex::Half) => "Half",
+                    _ => "Unknown!",
+                };
+                if !field("Duplex:").is_some_and(|d| d.starts_with(duplex)) {
+                    failed.push(format!("{dev} duplex: ethtool says {:?}, nlink {duplex}", field("Duplex:")));
+                }
+                let autoneg = if modes.autoneg { "on" } else { "off" };
+                if field("Auto-negotiation:").as_deref() != Some(autoneg) {
+                    failed.push(format!("{dev} autoneg: ethtool says {:?}, nlink {autoneg}", field("Auto-negotiation:")));
+                }
+            }
+            Err(e) if field("Speed:").is_some() => failed.push(format!("{dev}: ethtool reads its settings, nlink refused: {e}")),
+            Err(_) => {}
+        }
+        // No "Link detected" when the driver cannot tell (#839).
+        let link = ethtool.get_link_state(dev).await?.link.map(|l| if l { "yes" } else { "no" });
+        if field("Link detected:").as_deref() != link {
+            failed.push(format!("{dev} link: ethtool says {:?}, nlink {link:?}", field("Link detected:")));
+        }
+
+        // Channels: maximums, then the current values; `n/a` is absent.
+        let cli = ns.exec("ethtool", &["-l", dev]);
+        let ours = ethtool.get_channels(dev).await;
+        match (cli, ours) {
+            (Ok(cli), Ok(ch)) => {
+                let values: Vec<Option<u32>> = cli
+                    .lines()
+                    .filter_map(|l| l.split_once(':'))
+                    .filter(|(k, _)| matches!(k.trim(), "RX" | "TX" | "Other" | "Combined"))
+                    .map(|(_, v)| v.trim().parse().ok())
+                    .collect();
+                let mine = vec![
+                    ch.rx_max, ch.tx_max, ch.other_max, ch.combined_max, ch.rx_count, ch.tx_count, ch.other_count,
+                    ch.combined_count,
+                ];
+                if values != mine {
+                    failed.push(format!("{dev} channels: ethtool says {values:?}, nlink {mine:?}"));
+                }
+            }
+            (Err(_), Err(_)) => {}
+            (cli, ours) => failed.push(format!("{dev} channels: ethtool {:?}, nlink {:?}", cli.is_ok(), ours.map(|_| ()))),
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+    Ok(())
+}
+
+/// `get_eth_stats` sent its request as a dump, which ethtool answers for
+/// every device in the namespace, ignoring the one it names, and kept the
+/// first answer: `lo`'s, whatever the device (#773). The reply's header
+/// names the device it is about.
+#[tokio::test]
+async fn ethtool_reads_the_named_devices_stats() -> nlink::Result<()> {
+    use nlink::netlink::{Connection, Ethtool, link::VethLink};
+    require_root!();
+    nlink::require_module!("veth");
+
+    let ns = TestNamespace::new("ns-ethstats")?;
+    let conn = ns.connection()?;
+    conn.add_link(VethLink::new("ve0", "ve1")).await?;
+    let ethtool: Connection<Ethtool> = nlink::Connection::new_in_async(ns.name()).await?;
+    let stats = ethtool.get_eth_stats("ve0").await?;
+    assert_eq!(stats.ifname.as_deref(), Some("ve0"), "{stats:?}");
+    Ok(())
+}
+
+/// #166: a veth's timestamping is the kernel's software-only default
+/// (`ethtool_op_get_ts_info`): transmit, receive and the system clock in
+/// software, no hardware modes or filters, no PTP clock. Where the ethtool
+/// CLI is installed, `ethtool -T` lists the same capabilities.
+#[tokio::test]
+async fn ethtool_reads_a_devices_timestamping() -> nlink::Result<()> {
+    use nlink::netlink::{Connection, Ethtool, link::VethLink};
+    require_root!();
+    nlink::require_module!("veth");
+
+    let ns = TestNamespace::new("ns-tsinfo")?;
+    let conn = ns.connection()?;
+    conn.add_link(VethLink::new("ve0", "ve1")).await?;
+    let ethtool: Connection<Ethtool> = nlink::Connection::new_in_async(ns.name()).await?;
+    let ts = ethtool.get_tsinfo("ve0").await?;
+    let mut caps = ts.timestamping.active_names();
+    caps.sort_unstable();
+    assert_eq!(caps, ["software-receive", "software-system-clock", "software-transmit"]);
+    assert!(ts.tx_types.active_names().is_empty(), "{:?}", ts.tx_types.active_names());
+    assert!(ts.rx_filters.active_names().is_empty(), "{:?}", ts.rx_filters.active_names());
+    assert_eq!(ts.phc_index, None);
+    if let Ok(cli) = ns.exec("ethtool", &["-T", "ve0"]) {
+        for cap in &caps {
+            assert!(cli.contains(cap), "ethtool -T lists {cap}:\n{cli}");
+        }
+    }
+    Ok(())
+}
+
+/// #166: PHY_GET answers for the named link, and a veth, being virtual,
+/// has no PHY: the list is empty, not an error, whether asked for the link
+/// or for the whole namespace.
+#[tokio::test]
+async fn ethtool_lists_a_links_phys() -> nlink::Result<()> {
+    use nlink::netlink::{Connection, Ethtool, link::VethLink};
+    require_root!();
+    nlink::require_module!("veth");
+
+    let ns = TestNamespace::new("ns-phys")?;
+    let conn = ns.connection()?;
+    conn.add_link(VethLink::new("ve0", "ve1")).await?;
+    let ethtool: Connection<Ethtool> = nlink::Connection::new_in_async(ns.name()).await?;
+    assert_eq!(ethtool.get_phys("ve0").await?, Vec::new());
+    assert_eq!(ethtool.dump_phys().await?, Vec::new());
+    Ok(())
+}
+
 /// `Diagnostics::watch()` subscribed on a new connection in the process's
 /// namespace, so `Diagnostics::new(lab_conn).watch()` watched the host. And
 /// it named a removed address's interface through the host's sysfs.

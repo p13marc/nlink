@@ -500,6 +500,8 @@ pub mod qdisc {
         pub const TCA_FQ_CODEL_CE_THRESHOLD: u16 = 7;
         pub const TCA_FQ_CODEL_DROP_BATCH_SIZE: u16 = 8;
         pub const TCA_FQ_CODEL_MEMORY_LIMIT: u16 = 9;
+        pub const TCA_FQ_CODEL_CE_THRESHOLD_SELECTOR: u16 = 10;
+        pub const TCA_FQ_CODEL_CE_THRESHOLD_MASK: u16 = 11;
     }
 
     /// ETS (Enhanced Transmission Selection) qdisc attributes
@@ -606,7 +608,14 @@ pub mod qdisc {
             pub scell_log: u8,
             pub flags: u8,
             pub max_p: u32,
-            // ... additional fields omitted for simplicity
+            /// `struct tc_sfqred_stats`. Without it the struct is short of
+            /// `sizeof(tc_sfq_qopt_v1)`, and `sfq_change()` reads it as the
+            /// v0 struct, ignoring depth and head drop (#806).
+            pub stats: [u32; 6],
+        }
+
+        impl TcSfqQoptV1 {
+            pub const SIZE: usize = std::mem::size_of::<Self>();
         }
 
         /// SFQ basic parameters (struct tc_sfq_qopt).
@@ -1436,6 +1445,10 @@ pub mod qdisc {
         pub const TCA_TAPRIO_ATTR_TXTIME_DELAY: u16 = 11;
         pub const TCA_TAPRIO_ATTR_TC_ENTRY: u16 = 12;
 
+        /// The type of each entry nested in `TCA_TAPRIO_ATTR_SCHED_ENTRY_LIST`
+        /// (`TCA_TAPRIO_SCHED_ENTRY`); the kernel skips any other (#823).
+        pub const TCA_TAPRIO_SCHED_ENTRY: u16 = 1;
+
         /// Schedule entry attributes.
         pub const TCA_TAPRIO_SCHED_ENTRY_UNSPEC: u16 = 0;
         pub const TCA_TAPRIO_SCHED_ENTRY_INDEX: u16 = 1;
@@ -1667,6 +1680,7 @@ pub mod filter {
         pub const TCA_U32_PCNT: u16 = 9;
         pub const TCA_U32_MARK: u16 = 10;
         pub const TCA_U32_FLAGS: u16 = 11;
+        pub const TCA_U32_PAD: u16 = 12;
 
         /// U32 selector flags.
         pub const TC_U32_TERMINAL: u8 = 1;
@@ -1879,6 +1893,8 @@ pub mod filter {
         pub const TCA_FLOWER_KEY_UDP_SRC: u16 = 20;
         pub const TCA_FLOWER_KEY_UDP_DST: u16 = 21;
         pub const TCA_FLOWER_FLAGS: u16 = 22;
+        /// How many devices offloaded the filter: a dump's, not a request's.
+        pub const TCA_FLOWER_IN_HW_COUNT: u16 = 86;
         pub const TCA_FLOWER_KEY_VLAN_ID: u16 = 23;
         pub const TCA_FLOWER_KEY_VLAN_PRIO: u16 = 24;
         pub const TCA_FLOWER_KEY_VLAN_ETH_TYPE: u16 = 25;
@@ -1962,6 +1978,10 @@ pub mod filter {
         pub const TCA_CLS_FLAGS_IN_HW: u32 = 1 << 2;
         pub const TCA_CLS_FLAGS_NOT_IN_HW: u32 = 1 << 3;
         pub const TCA_CLS_FLAGS_VERBOSE: u32 = 1 << 4;
+
+        /// `TCA_FLOWER_KEY_FLAGS` bits (#827).
+        pub const TCA_FLOWER_KEY_FLAGS_IS_FRAGMENT: u32 = 1 << 0;
+        pub const TCA_FLOWER_KEY_FLAGS_FRAG_IS_FIRST: u32 = 1 << 1;
 
         /// Connection tracking state flags.
         pub const TCA_FLOWER_KEY_CT_FLAGS_NEW: u16 = 1 << 0;
@@ -2143,6 +2163,9 @@ pub mod filter {
             pub mask: u32,
             pub val: u32,
             pub off: u32,
+            /// The kernel's `struct tc_u32_key` ends with it; without it
+            /// `tcf_em_validate` refused every u32 ematch (#828).
+            pub offmask: i32,
         }
 
         impl TcfEmU32 {
@@ -2338,24 +2361,31 @@ pub mod action {
     /// Goto chain (opcode, chain is encoded in upper bits).
     pub const TC_ACT_GOTO_CHAIN: i32 = 0x20000000;
 
+    /// `TC_ACT_EXT_VAL_MASK`: the low 28 bits of an extended verdict
+    /// carry its value (a goto's chain), the high four its opcode.
+    pub const TC_ACT_EXT_VAL_MASK: i32 = 0x0FFF_FFFF;
+
     /// Encode a goto_chain action value.
     ///
-    /// The chain number is encoded in the lower 24 bits.
+    /// The chain number is encoded in the lower 28 bits
+    /// (`TC_ACT_EXT_VAL_MASK`); it used to be cut to 24.
     #[inline]
     pub const fn tc_act_goto_chain(chain: u32) -> i32 {
-        TC_ACT_GOTO_CHAIN | (chain as i32 & 0x00FFFFFF)
+        TC_ACT_GOTO_CHAIN | (chain as i32 & TC_ACT_EXT_VAL_MASK)
     }
 
     /// Decode the chain number from a goto_chain action.
     #[inline]
     pub const fn tc_act_chain(action: i32) -> u32 {
-        (action & 0x00FFFFFF) as u32
+        (action & TC_ACT_EXT_VAL_MASK) as u32
     }
 
-    /// Check if an action is a goto_chain.
+    /// Check if an action is a goto_chain: its opcode, the high four
+    /// bits, is `TC_ACT_GOTO_CHAIN` (the kernel's `TC_ACT_EXT_CMP`). It
+    /// used to test one bit, which `TC_ACT_UNSPEC` (-1, `continue`) has.
     #[inline]
     pub const fn is_goto_chain(action: i32) -> bool {
-        (action & TC_ACT_GOTO_CHAIN) != 0
+        (action & !TC_ACT_EXT_VAL_MASK) == TC_ACT_GOTO_CHAIN
     }
 
     /// Parse action result from string.
@@ -2982,6 +3012,7 @@ pub mod action {
         pub const TCA_CONNMARK_UNSPEC: u16 = 0;
         pub const TCA_CONNMARK_PARMS: u16 = 1;
         pub const TCA_CONNMARK_TM: u16 = 2;
+        pub const TCA_CONNMARK_PAD: u16 = 3;
 
         /// Connmark action parameters (struct tc_connmark).
         #[repr(C)]
@@ -3189,6 +3220,7 @@ pub mod action {
         pub const TCA_CSUM_UNSPEC: u16 = 0;
         pub const TCA_CSUM_PARMS: u16 = 1;
         pub const TCA_CSUM_TM: u16 = 2;
+        pub const TCA_CSUM_PAD: u16 = 3;
 
         /// Update flags for checksum recalculation.
         pub const TCA_CSUM_UPDATE_FLAG_IPV4HDR: u32 = 1;
@@ -3240,6 +3272,7 @@ pub mod action {
         pub const TCA_SAMPLE_RATE: u16 = 3;
         pub const TCA_SAMPLE_TRUNC_SIZE: u16 = 4;
         pub const TCA_SAMPLE_PSAMPLE_GROUP: u16 = 5;
+        pub const TCA_SAMPLE_PAD: u16 = 6;
 
         /// Sample action parameters (struct tc_sample - just tc_gen).
         #[repr(C)]

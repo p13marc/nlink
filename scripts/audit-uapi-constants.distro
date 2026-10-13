@@ -1,0 +1,22 @@
+# Kernel constants a distribution's headers number differently from upstream.
+#
+# A distribution can backport a feature into an older kernel without the
+# attributes upstream added before it, so its headers give the backported
+# constant the next free number, not upstream's. nlink follows upstream: a
+# kernel built from upstream sources, which is what nlink talks to, uses
+# upstream's number.
+#
+# Each line names the constant and its upstream value. On a host whose headers
+# disagree, the audit accepts nlink's value only when it is this one, and says
+# so; on a host whose headers agree with upstream, the constant is checked as
+# any other. A drift in nlink's own value is caught on every host: either the
+# headers or this file disagree with it.
+#
+# Add an entry only with the distribution, the header package and both values.
+#
+# Format: `NAME VALUE`, one per line, `#` comments.
+
+# Per-CPU SAs (RFC 9611, linux 6.13): upstream numbers it after XFRMA_SA_DIR
+# (33) and XFRMA_NAT_KEEPALIVE_INTERVAL (34), both linux 6.10. Ubuntu 24.04's
+# linux-libc-dev 6.8.0 backports it without them, as 33.
+XFRMA_SA_PCPU 35

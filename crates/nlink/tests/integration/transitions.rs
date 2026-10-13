@@ -2214,7 +2214,7 @@ async fn multipath_routes_change_and_come_back_after_a_recreate() -> nlink::Resu
     require_root!();
     nlink::require_modules!("dummy", "8021q");
 
-    let step = |vlan: u16, weights: (u8, u8), multipath: bool| {
+    let step = |vlan: u16, weights: (u16, u16), multipath: bool| {
         let c = NetworkConfig::new()
             .link("d0", |l| l.dummy().up())
             .link("b1", |l| l.dummy().up())

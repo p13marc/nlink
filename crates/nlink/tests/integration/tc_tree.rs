@@ -4,6 +4,7 @@
 
 use std::net::SocketAddr;
 
+use nlink::netlink::action::{ActionList, MirredAction};
 use nlink::netlink::config::{ApplyOptions, NetworkConfig, QdiscBuilder};
 use nlink::netlink::filter::{FlowerFilter, MatchallFilter};
 use nlink::netlink::tc::{
@@ -429,6 +430,229 @@ async fn an_ifb_redirect_shapes_what_a_device_receives() -> nlink::Result<()> {
         Ok(())
     })
     .await
+}
+
+/// A mirred action that names its target (#645): resolved in the
+/// namespace, and again after the target is deleted and created with
+/// another ifindex, which leaves the kernel's action pointing at nothing.
+/// Through `parse_params`, a `dev` only the namespace has is found there;
+/// it used to be looked up in the host's.
+#[tokio::test]
+async fn a_mirred_by_name_follows_its_target() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("dummy", "ifb", "sch_ingress", "cls_flower", "cls_matchall", "act_mirred");
+
+    let ns = TestNamespace::new("tt-mirred")?;
+    let conn = ns.connection()?;
+    let to_ifb = || {
+        FlowerFilter::new()
+            .ip_proto_udp()
+            .dst_port(53)
+            .actions(ActionList::new().with(MirredAction::mirror_to_egress(0).to_dev("nlkifb7")))
+    };
+    let cfg = NetworkConfig::new()
+        .link("d0", |l| l.dummy().up())
+        .link("nlkifb7", |l| l.ifb().up())
+        .qdisc("d0", |q| q.ingress())
+        .tc("d0", |t| t.filter(TcHandle::INGRESS, FilterPriority::new(10), EthProto::IP, to_ifb()));
+    let shown = |ns: &TestNamespace| tc_text(ns, "filter", "d0", &["parent", "ffff:"]);
+    let ifindex = async |name: &str| -> nlink::Result<u32> {
+        Ok(conn.get_link_by_name(name).await?.expect(name).ifindex())
+    };
+
+    let mut first = 0;
+    for round in ["installed", "after the target came back"] {
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{round}: {:?}", applied.errors);
+        let diff = cfg.diff(&conn).await?;
+        assert!(diff.is_empty(), "{round}: does not converge:\n{diff}");
+        let text = shown(&ns).map_err(nlink::Error::invalid_message)?;
+        assert!(text.contains("to device nlkifb7"), "{round}: {text}");
+        if round == "installed" {
+            first = ifindex("nlkifb7").await?;
+            conn.del_link("nlkifb7").await?;
+            let diff = cfg.diff(&conn).await?;
+            assert!(
+                diff.to_string().contains("+ filter flower at ingress prio 10"),
+                "the target is gone, and the filter's diff does not see it:\n{diff}"
+            );
+        }
+    }
+    assert_ne!(ifindex("nlkifb7").await?, first, "the IFB came back with its old ifindex");
+
+    // Imperatively, through parse_params: a device only this namespace has.
+    let mirred = MirredAction::parse_params(&["egress", "mirror", "dev", "nlkifb7"])?;
+    let d0 = ifindex("d0").await?;
+    let at = |prio| (d0, TcHandle::INGRESS, None, EthProto::IP, FilterPriority::new(prio));
+    let (i, p, h, e, f) = at(20);
+    conn.add_filter_by_index_full(i, p, h, e, f, MatchallFilter::new().actions(ActionList::new().with(mirred)))
+        .await?;
+    let text = shown(&ns).map_err(nlink::Error::invalid_message)?;
+    assert!(
+        text.lines().any(|l| l.contains("pref 20")) && text.matches("to device nlkifb7").count() == 2,
+        "{text}"
+    );
+    let (i, p, h, e, f) = at(30);
+    let nowhere = ActionList::new().with(MirredAction::redirect_to_egress(0).to_dev("nlk-nope0"));
+    let err = conn
+        .add_filter_by_index_full(i, p, h, e, f, MatchallFilter::new().actions(nowhere))
+        .await
+        .expect_err("a target the namespace does not have");
+    assert!(err.is_not_found(), "{err}");
+    Ok(())
+}
+
+/// A tree read back from its JSON (#645) applies, and the config it was
+/// written from then diffs empty: classes, a leaf, a flower that mirrors
+/// to an IFB by name, a matchall, and the IFB redirect.
+#[cfg(feature = "serde")]
+#[tokio::test]
+async fn a_tree_read_back_from_json_applies() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!(
+        "dummy", "ifb", "sch_htb", "sch_fq_codel", "sch_ingress", "cls_flower", "cls_matchall",
+        "act_mirred", "act_gact"
+    );
+
+    let cfg = NetworkConfig::new()
+        .link("d0", |l| l.dummy().up())
+        .link("nlkifb8", |l| l.ifb().up())
+        .qdisc("d0", |q: QdiscBuilder| q.htb().default_class(0x20))
+        .qdisc("d0", |q: QdiscBuilder| q.clsact())
+        .tc("d0", |t| {
+            t.class(h(1, 0), h(1, 1), HtbClassConfig::new(Rate::mbit(100)))
+                .class(h(1, 1), h(1, 0x10), HtbClassConfig::new(Rate::mbit(60)).ceil(Rate::mbit(100)))
+                .class(h(1, 1), h(1, 0x20), HtbClassConfig::new(Rate::mbit(40)))
+                .leaf(h(1, 0x10), h(0x10, 0), FqCodelConfig::new())
+                .filter(
+                    h(1, 0),
+                    FilterPriority::new(1),
+                    EthProto::IP,
+                    ssh_to(22, h(1, 0x10)).actions(
+                        ActionList::new().with(MirredAction::mirror_to_egress(0).to_dev("nlkifb8")),
+                    ),
+                )
+                .filter(h(1, 0), FilterPriority::new(2), EthProto::ALL, MatchallFilter::new().classid(h(1, 0x20)))
+                .redirect_ingress_to("nlkifb8")
+        });
+    let json = cfg.to_json_string()?;
+    let back = NetworkConfig::from_json_str(&json)?;
+
+    let ns = TestNamespace::new("tt-json")?;
+    let conn = ns.connection()?;
+    let applied = back.apply(&conn).await?;
+    assert!(applied.is_success(), "{:?}", applied.errors);
+    let diff = cfg.diff(&conn).await?;
+    assert!(diff.is_empty(), "the tree read back is not the one written:\n{diff}\n{json}");
+    // And the diff serializes in the same words.
+    let changed = NetworkConfig::from_json_str(&json.replace("rate 60mbit", "rate 30mbit"))?;
+    let diff = changed.diff(&conn).await?;
+    let written = serde_json::to_string(&diff).map_err(|e| nlink::Error::invalid_message(e.to_string()))?;
+    assert!(written.contains(r#""classes-to-change":[{"parent":"1:1","id":"1:10","kind":"htb","params":"rate 30mbit ceil 100mbit"}]"#), "{written}");
+    let filters = filters_at(&ns, "d0", "1:").map_err(nlink::Error::invalid_message)?;
+    assert_eq!(filters, [(1, "flower".to_string()), (2, "matchall".to_string())]);
+    Ok(())
+}
+
+/// `tc <args>` in `ns`, as text with what differs between two installs of
+/// the same thing taken out: action indexes and references, and HTB's
+/// `direct_packets_stat`. That one counts what the qdisc sent past its
+/// classes, which on a link that is up includes IPv6's own packets sent
+/// between the qdisc's install and its default class's: one in three
+/// integration runs failed on it under load (#771).
+fn tc_shown(ns: &TestNamespace, args: &[&str]) -> Result<String, String> {
+    let out = ns.exec("tc", args).map_err(|e| e.to_string())?;
+    Ok(out
+        .lines()
+        .map(|l| {
+            let mut words: Vec<&str> = l.split_whitespace().collect();
+            while let Some(i) = words
+                .iter()
+                .position(|w| matches!(*w, "index" | "ref" | "bind" | "direct_packets_stat"))
+            {
+                words.drain(i..(i + 2).min(words.len()));
+            }
+            words.join(" ")
+        })
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// #645: with `preserve_undeclared_tc`, a link recreated for a kind change
+/// keeps the TC tree no config declares — HTB classes, fq_codel and netem
+/// leaves, flower and u32 filters, a clsact with mirred (one to the
+/// recreated link itself, whose ifindex changes) and ct actions — where
+/// the recreate used to be refused, or, allowed, to destroy it.
+#[tokio::test]
+async fn an_undeclared_tc_tree_is_kept_across_a_recreate() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!(
+        "dummy", "8021q", "ifb", "sch_htb", "sch_fq_codel", "sch_netem", "sch_ingress",
+        "cls_flower", "cls_u32", "cls_matchall", "act_mirred", "act_gact", "act_ct"
+    );
+
+    let vlan = |id: u16| {
+        NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .link("v0", move |l| l.vlan("d0", id).up())
+            .link("nlkifb9", |l| l.ifb().up())
+    };
+    let ns = TestNamespace::new("tt-keep")?;
+    let conn = ns.connection()?;
+    let applied = vlan(10).apply(&conn).await?;
+    assert!(applied.is_success(), "{:?}", applied.errors);
+    let tc = |args: &str| {
+        let args: Vec<&str> = args.split_whitespace().collect();
+        ns.exec("tc", &args).map(|_| ())
+    };
+    tc("qdisc add dev v0 root handle 1: htb default 20")?;
+    tc("class add dev v0 parent 1: classid 1:1 htb rate 100mbit")?;
+    tc("class add dev v0 parent 1:1 classid 1:10 htb rate 60mbit ceil 100mbit")?;
+    tc("class add dev v0 parent 1:1 classid 1:20 htb rate 40mbit")?;
+    tc("qdisc add dev v0 parent 1:10 handle 10: fq_codel")?;
+    tc("qdisc add dev v0 parent 1:20 handle 20: netem delay 10ms")?;
+    tc("filter add dev v0 parent 1: prio 1 protocol ip flower ip_proto tcp dst_port 22 classid 1:10 \
+        action mirred egress mirror dev nlkifb9 action gact pipe")?;
+    tc("filter add dev v0 parent 1: prio 2 protocol ip u32 match ip dst 10.0.0.0/8 classid 1:20")?;
+    tc("qdisc add dev v0 clsact")?;
+    tc("filter add dev v0 ingress prio 3 matchall action mirred egress mirror dev v0")?;
+    tc("filter add dev v0 ingress prio 4 protocol ip flower ip_proto udp action ct pipe")?;
+    let shown = || -> Result<Vec<String>, String> {
+        [
+            "qdisc show dev v0",
+            "class show dev v0",
+            "filter show dev v0 parent 1:",
+            "filter show dev v0 ingress",
+        ]
+        .iter()
+        .map(|a| tc_shown(&ns, &a.split_whitespace().collect::<Vec<_>>()))
+        .collect()
+    };
+    let before = shown().map_err(nlink::Error::invalid_message)?;
+    let first = conn.get_link_by_name("v0").await?.expect("v0").ifindex();
+
+    // Without the option, the tree refuses the recreate.
+    let refused = vlan(20).apply(&conn).await.expect_err("the recreate went ahead over a tree");
+    assert!(refused.is_not_supported(), "{refused}");
+
+    let kept = vlan(20)
+        .apply_with_options(&conn, ApplyOptions::default().with_preserve_undeclared_tc(true))
+        .await?;
+    assert!(kept.is_success(), "{:?}", kept.errors);
+    let summary = kept.summary_text();
+    assert!(
+        summary.contains("Restored 4 qdiscs, 3 classes and 4 filters on v0"),
+        "{summary}"
+    );
+    let v0 = conn.get_link_by_name("v0").await?.expect("v0").ifindex();
+    assert_ne!(v0, first, "v0 was not recreated");
+    let after = shown().map_err(nlink::Error::invalid_message)?;
+    assert_eq!(after, before, "the tree came back different");
+    assert!(after[3].contains("to device v0"), "{}", after[3]);
+    let diff = vlan(20).diff(&conn).await?;
+    assert!(diff.is_empty(), "{diff}");
+    Ok(())
 }
 
 /// A VLAN whose id changes is deleted and created again, which takes its

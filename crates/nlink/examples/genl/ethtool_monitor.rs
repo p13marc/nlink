@@ -56,7 +56,11 @@ fn print_event(event: &EthtoolEvent) {
             println!(
                 "[{}] Link state: {}",
                 name,
-                if state.link { "UP" } else { "DOWN" }
+                match state.link {
+                    Some(true) => "UP",
+                    Some(false) => "DOWN",
+                    None => "UNKNOWN",
+                }
             );
             if let Some(sqi) = state.sqi {
                 println!("       SQI: {}/{}", sqi, state.sqi_max.unwrap_or(100));

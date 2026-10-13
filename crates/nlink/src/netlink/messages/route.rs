@@ -23,6 +23,8 @@ mod attr_ids {
     pub const RTA_METRICS: u16 = 8;
     /// Plan 202 — multipath nexthop chain (`RTA_MULTIPATH`).
     pub const RTA_MULTIPATH: u16 = 9;
+    /// Realms (`RTA_FLOW`): the source and destination realm, 16 bits each.
+    pub const RTA_FLOW: u16 = 11;
     pub const RTA_TABLE: u16 = 15;
     /// A gateway of another family (`RTA_VIA`, RFC 5549): `struct rtvia`.
     pub const RTA_VIA: u16 = 18;
@@ -91,6 +93,13 @@ pub struct RouteMessage {
     pub(crate) encap_type: Option<u16>,
     /// The labels an MPLS encapsulation pushes, outermost first (#516).
     pub(crate) mpls_labels: Option<Vec<u32>>,
+    /// Realms (`RTA_FLOW`).
+    pub(crate) flow: Option<u32>,
+    /// The metrics locked against path discovery (`RTAX_LOCK`, a bit per
+    /// `RTAX_*`).
+    pub(crate) metrics_lock: Option<u32>,
+    /// The congestion control (`RTAX_CC_ALGO`).
+    pub(crate) congctl: Option<String>,
 }
 
 /// One nexthop parsed from an `RTA_MULTIPATH` chain. Plan 202.
@@ -101,18 +110,25 @@ pub struct RouteMessage {
 /// (which counts from 0; nlink's `NextHop::weight` counts from
 /// 1, matching `ip route` syntax).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ParsedNextHop {
     /// Output interface index (`rtnh_ifindex`).
     pub ifindex: u32,
-    /// Nexthop weight (1-based). Kernel stores as `rtnh_hops`
+    /// Nexthop weight (1-based), 1 to 256. Kernel stores as `rtnh_hops`
     /// (0-based); we add 1 on parse to match nlink's
-    /// imperative `NextHop::weight` convention + `ip route`.
-    pub weight: u8,
+    /// imperative `NextHop::weight` convention + `ip route`. A `u16`
+    /// since 0.32: as a `u8`, 256 read back as 255 (#783).
+    pub weight: u16,
     /// Kernel `rtnh_flags` byte.
     pub flags: u8,
     /// Nexthop gateway (`RTA_GATEWAY` nested within the
     /// `rtnexthop` block), if present.
     pub gateway: Option<IpAddr>,
+    /// The hop's encapsulation type (`RTA_ENCAP_TYPE`), when it has one
+    /// (#783).
+    pub encap_type: Option<u16>,
+    /// The hop's realms (`RTA_FLOW`), when it has them (#783).
+    pub flow: Option<u32>,
 }
 
 impl RouteMessage {
@@ -219,6 +235,24 @@ impl RouteMessage {
     /// Get the expiration time.
     pub fn expires(&self) -> Option<u32> {
         self.expires
+    }
+
+    /// Realms (`RTA_FLOW`, `ip route … realm`): the destination realm in
+    /// the low 16 bits, the source realm in the high (#783).
+    pub fn flow(&self) -> Option<u32> {
+        self.flow
+    }
+
+    /// The metrics locked against path discovery (`RTAX_LOCK`, `ip route …
+    /// mtu lock 1400`): one bit per `RTAX_*` (#783).
+    pub fn metrics_lock(&self) -> Option<u32> {
+        self.metrics_lock
+    }
+
+    /// The route's congestion control (`RTAX_CC_ALGO`, `ip route …
+    /// congctl bbr`), #783.
+    pub fn congctl(&self) -> Option<&str> {
+        self.congctl.as_deref()
     }
 
     /// Get the multipath nexthop list parsed from
@@ -526,6 +560,24 @@ impl FromNetlink for RouteMessage {
                 }
                 attr_ids::RTA_METRICS => {
                     msg.metrics = Some(crate::netlink::route::RouteMetrics::parse(attr_data));
+                    // What `RouteMetrics` does not hold (#783).
+                    use crate::netlink::{attr::AttrIter, route::rtax};
+                    for (ty, payload) in AttrIter::new(attr_data) {
+                        match ty & 0x3FFF {
+                            rtax::LOCK if payload.len() >= 4 => {
+                                msg.metrics_lock = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+                            }
+                            rtax::CC_ALGO => {
+                                msg.congctl = Some(
+                                    String::from_utf8_lossy(payload).trim_end_matches('\0').to_string(),
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                attr_ids::RTA_FLOW if attr_data.len() >= 4 => {
+                    msg.flow = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
                 }
                 attr_ids::RTA_MULTIPATH => {
                     // Plan 202 — parse the nexthop chain.
@@ -616,6 +668,8 @@ fn parse_multipath(data: &[u8], family: u8) -> Vec<ParsedNextHop> {
         let nested_start = offset + RTNH_HDRLEN;
         let nested_end = offset + rtnh_len;
         let mut gateway = None;
+        let mut encap_type = None;
+        let mut flow = None;
         let mut nested = nested_start;
         while nested + 4 <= nested_end {
             let nla_len =
@@ -631,6 +685,21 @@ fn parse_multipath(data: &[u8], family: u8) -> Vec<ParsedNextHop> {
             {
                 gateway = Some(addr);
             }
+            // A gateway of the other family (RFC 5549): `struct rtvia`,
+            // its family then its address (#786).
+            if (nla_type & 0x3FFF) == attr_ids::RTA_VIA
+                && let Some(via) = payload.get(..2)
+                && let Ok(addr) =
+                    parse_ip_addr(&payload[2..], u16::from_ne_bytes([via[0], via[1]]) as u8)
+            {
+                gateway = Some(addr);
+            }
+            if (nla_type & 0x3FFF) == attr_ids::RTA_ENCAP_TYPE && payload.len() >= 2 {
+                encap_type = Some(u16::from_ne_bytes([payload[0], payload[1]]));
+            }
+            if (nla_type & 0x3FFF) == attr_ids::RTA_FLOW && payload.len() >= 4 {
+                flow = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+            }
             // Align to 4 bytes for the next nested attr.
             let aligned = (nla_len + 3) & !3;
             nested += aligned.max(4); // never let `nested` stall
@@ -638,9 +707,11 @@ fn parse_multipath(data: &[u8], family: u8) -> Vec<ParsedNextHop> {
 
         out.push(ParsedNextHop {
             ifindex,
-            weight: hops.saturating_add(1),
+            weight: u16::from(hops) + 1,
             flags,
             gateway,
+            encap_type,
+            flow,
         });
 
         // Align to 4 bytes for the next nexthop entry.
@@ -849,7 +920,7 @@ fn write_attr_multipath(buf: &mut Vec<u8>, attr_type: u16, nexthops: &[ParsedNex
         // Convert nlink's 1-based weight to kernel's 0-based
         // `rtnh_hops`.
         buf.push(nh.flags);
-        buf.push(nh.weight.saturating_sub(1));
+        buf.push((nh.weight.clamp(1, 256) - 1) as u8);
         buf.extend_from_slice(&nh.ifindex.to_ne_bytes());
 
         if let Some(ref gw) = nh.gateway {
@@ -1056,12 +1127,16 @@ mod tests {
                 weight: 1,
                 flags: 0,
                 gateway: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+                encap_type: None,
+                flow: None,
             },
             ParsedNextHop {
                 ifindex: 9,
                 weight: 2,
                 flags: 0,
                 gateway: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1))),
+                encap_type: None,
+                flow: None,
             },
         ];
         let original = RouteMessageBuilder::new()
@@ -1133,6 +1208,8 @@ mod tests {
             weight: 1,
             flags: 0,
             gateway,
+            encap_type: None,
+            flow: None,
         };
         let full = |dst: IpAddr, gw: IpAddr, other: IpAddr| {
             RouteMessageBuilder::new()

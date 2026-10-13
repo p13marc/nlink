@@ -1200,6 +1200,145 @@ async fn the_previous_config_removes_its_neighbours() -> Result<()> {
     .await
 }
 
+/// A veth or netkit pair whose peer here has another name has its peer
+/// renamed to the declared one (#793, #804). The comparison looked at the
+/// peer's namespace and never its name, so a pair made with another peer
+/// name passed for the declared one (#793); then it was a recreate, which
+/// the apply refused while the old peer was undeclared. Renaming the peer in
+/// place converges in one apply and keeps what is on the peer; the undo
+/// renames it back.
+#[tokio::test]
+async fn a_pairs_peer_is_renamed_to_the_declared_name() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("veth", "netkit");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("peer-name")?;
+        let conn = conn_in_ns(&ns)?;
+        for (kind, cfg) in [
+            ("veth", NetworkConfig::new().link("v0", |l| l.veth("v0-p").up())),
+            ("netkit", NetworkConfig::new().link("v0", |l| l.netkit("v0-p").up())),
+        ] {
+            // iproute2 before 6.7 cannot make a netkit pair.
+            if kind == "veth" {
+                ns.exec("ip", &["link", "add", "v0", "type", kind, "peer", "name", "v0-x"])?;
+            } else {
+                conn.add_link(nlink::netlink::link::NetkitLink::new("v0", "v0-x")).await?;
+            }
+            ns.exec("ip", &["link", "set", "v0-x", "up"])?;
+            ns.exec("ip", &["addr", "add", "10.94.0.2/24", "dev", "v0-x"])?;
+            let diff = cfg.diff(&conn).await?;
+            assert_eq!(diff.links_to_rename.len(), 1, "{kind}: a peer v0-x passed for v0-p: {diff}");
+            assert!(diff.links_to_recreate.is_empty(), "{kind}: {diff}");
+            let applied = cfg.apply(&conn).await?;
+            assert!(applied.is_success(), "{kind}: {applied:?}");
+            let links = ns.exec("ip", &["-br", "link", "show"])?;
+            assert!(links.contains("v0-p@v0") && !links.contains("v0-x"), "{kind}: {links}");
+            let addrs = ns.exec("ip", &["-br", "addr", "show", "dev", "v0-p"])?;
+            assert!(addrs.contains("10.94.0.2/24") && addrs.contains("UP"), "{kind}: {addrs}");
+            assert!(cfg.diff(&conn).await?.is_empty(), "{kind}: did not converge");
+
+            let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
+            assert!(undone.is_success(), "{kind}: {undone:?}");
+            let links = ns.exec("ip", &["-br", "link", "show"])?;
+            assert!(links.contains("v0-x@v0"), "{kind}: the undo did not rename it back: {links}");
+            ns.exec("ip", &["link", "del", "v0"])?;
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// A bridge FDB entry declared without a VLAN is also one per VLAN of its
+/// port, and the diff sees one of those go (#793). `br_fdb_add` makes the
+/// untagged entry and one for each VLAN on the port, VLAN 1 by default,
+/// with or without VLAN filtering. The diff compared the untagged one only,
+/// so a deleted per-VLAN entry, and the traffic in that VLAN it was for,
+/// went unseen.
+#[tokio::test]
+async fn an_fdb_entry_without_a_vlan_is_one_per_port_vlan() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "bridge");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("fdb-vlans")?;
+        let conn = conn_in_ns(&ns)?;
+        let cfg = NetworkConfig::new()
+            .link("br0", |l| l.bridge().up())
+            .link("p0", |l| l.dummy().master("br0").up())
+            .fdb("p0", [0x02, 0, 0, 0, 0x93, 1], |e| e);
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        assert!(cfg.diff(&conn).await?.is_empty(), "the entry converges");
+        let fdb = || ns.exec("bridge", &["fdb", "show", "dev", "p0"]);
+        assert!(fdb()?.contains("02:00:00:00:93:01 vlan 1 master br0 static"), "{}", fdb()?);
+
+        ns.exec("bridge", &["fdb", "del", "02:00:00:00:93:01", "dev", "p0", "vlan", "1", "master"])?;
+        let diff = cfg.diff(&conn).await?;
+        assert_eq!(diff.fdb_to_set.len(), 1, "the VLAN 1 entry went unseen: {diff}");
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        assert!(fdb()?.contains("02:00:00:00:93:01 vlan 1 master br0 static"), "{}", fdb()?);
+        assert!(cfg.diff(&conn).await?.is_empty(), "did not converge");
+        Ok(())
+    })
+    .await
+}
+
+/// An FDB entry the apply moves is moved back by its undo, not deleted
+/// (#783). A bridge keeps one entry per MAC and VLAN, so setting one on a
+/// port takes it from another; a VXLAN device keeps one remote per unicast
+/// MAC, which a replace swaps. The diff looked for the entry on the
+/// declared port or remote alone, found nothing to replace, and the undo
+/// deleted the entry.
+#[tokio::test]
+async fn an_undo_moves_an_fdb_entry_back() -> Result<()> {
+    use std::net::{IpAddr, Ipv4Addr};
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "bridge", "vxlan");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("fdb-move")?;
+        let conn = conn_in_ns(&ns)?;
+        let ip = |h: u8| IpAddr::V4(Ipv4Addr::new(10, 86, 1, h));
+        let links = move || {
+            NetworkConfig::new()
+                .link("br0", |l| l.bridge().up())
+                .link("p0", |l| l.dummy().master("br0").up())
+                .link("p1", |l| l.dummy().master("br0").up())
+                .link("vx0", move |l| l.vxlan(7).vxlan_local(ip(1)).vxlan_port(4789))
+        };
+        let applied = links().apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        ns.exec("bridge", &["fdb", "add", "02:00:00:00:87:01", "dev", "p0", "master", "static"])?;
+        ns.exec("bridge", &["fdb", "add", "02:00:00:00:87:02", "dev", "vx0", "dst", "10.86.1.2"])?;
+        let entries = || -> Result<Vec<String>> {
+            let out = ns.exec("bridge", &["fdb", "show"])?;
+            let mut lines: Vec<String> =
+                out.lines().filter(|l| l.contains("02:00:00:00:87:0")).map(str::to_string).collect();
+            lines.sort();
+            Ok(lines)
+        };
+        let before = entries()?;
+
+        let cfg = links()
+            .fdb("p1", [0x02, 0, 0, 0, 0x87, 1], |e| e)
+            .fdb("vx0", [0x02, 0, 0, 0, 0x87, 2], move |e| e.dst(ip(3)));
+        let shown = cfg.diff(&conn).await?.to_string();
+        assert!(shown.contains("(was on p0)") && shown.contains("(was dst 10.86.1.2)"), "{shown}");
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let moved = entries()?;
+        assert!(moved.iter().any(|l| l.contains("87:01 dev p1")), "{moved:?}");
+        assert!(moved.iter().any(|l| l.contains("87:02 dev vx0 dst 10.86.1.3")), "{moved:?}");
+        let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
+        assert!(undone.is_success(), "{undone:?}");
+        assert_eq!(entries()?, before, "the undo did not move them back");
+        Ok(())
+    })
+    .await
+}
+
 /// FDB entries the previous config declared and this one does not are
 /// removed — one remote of a VXLAN flood entry, not the entry — and one
 /// nothing declared stays, even under a purge (#516). An entry moved to
@@ -1242,7 +1381,8 @@ async fn the_previous_config_removes_its_fdb_entries() -> Result<()> {
         assert_eq!(diff.fdb_to_remove.len(), 2, "{shown}");
         assert!(shown.contains("- fdb 02:00:00:00:86:02 dev p0 static"), "{shown}");
         assert!(shown.contains("- fdb 00:00:00:00:00:00 dev vx0 dst 10.86.0.3"), "{shown}");
-        assert!(shown.contains("+ fdb 02:00:00:00:86:01 dev p1 static"), "{shown}");
+        // A move, which an undo moves back (#783).
+        assert!(shown.contains("~ fdb 02:00:00:00:86:01 dev p1 static (was on p0)"), "{shown}");
         assert!(!shown.contains("- fdb 02:00:00:00:86:01"), "a moved entry is not removed: {shown}");
 
         let applied = b
@@ -1557,4 +1697,1235 @@ async fn a_failed_step_names_its_object() -> Result<()> {
         assert_eq!(json["errno"], serde_json::json!(failed.error.errno()), "{json}");
     }
     Ok(())
+}
+
+/// A route through a nexthop object with a gateway reads back as itself
+/// (#769): the kernel dumps the nexthop's gateway and device along with
+/// its id (`nexthop_compat_mode`), and read back with them, the route's
+/// delete matched no route, so a route the config stopped declaring stayed
+/// forever, and an undo that put it back sent both, which the kernel
+/// refuses ("Nexthop specification and nexthop id are mutually
+/// exclusive").
+#[tokio::test]
+async fn a_route_through_a_nexthop_reads_back_as_one() -> Result<()> {
+    use std::sync::Arc;
+    nlink::require_root!();
+    nlink::require_modules!("dummy");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("nhid-readback")?;
+        let conn = conn_in_ns(&ns)?;
+        let base = || -> Result<NetworkConfig> {
+            Ok(NetworkConfig::new()
+                .link("d0", |l| l.dummy().up())
+                .address("d0", "10.81.0.1/24")?
+                .nexthop(5, |n| n.via("10.81.0.2".parse().unwrap()).dev("d0")))
+        };
+        let routes = |ns: &TestNamespace| -> Result<serde_json::Value> {
+            crate::common::converge::ip_json(ns, &["route", "show", "10.82.0.0/16"])
+                .map_err(nlink::Error::invalid_message)
+        };
+        let a = Arc::new(base()?.route("10.82.0.0/16", |r| r.nhid(5))?);
+        let applied = a.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+
+        // Replaced by a route through a gateway, and the replace undone.
+        let b = base()?.route("10.82.0.0/16", |r| r.via("10.81.0.3").dev("d0"))?;
+        let applied = b.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        assert_eq!(routes(&ns)?[0]["gateway"], "10.81.0.3");
+        let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
+        assert!(undone.is_success(), "{undone:?}");
+        assert_eq!(routes(&ns)?[0]["nhid"], 5, "{}", routes(&ns)?);
+        let back = a.diff(&conn).await?;
+        assert!(back.is_empty(), "the undo left:\n{back}");
+
+        // Removed: the previous config declared it, this one does not.
+        let applied = base()?
+            .apply_with_options(&conn, ApplyOptions::default().with_previous(a.clone()))
+            .await?;
+        assert!(applied.is_success(), "{applied:?}");
+        assert_eq!(routes(&ns)?, serde_json::json!([]), "the route stayed");
+        Ok(())
+    })
+    .await
+}
+
+/// A nexthop's encap is echoed with the route too (#769): a route through
+/// an MPLS-encapsulating nexthop object never converged, the diff taking
+/// the echoed `encap mpls` for the route's own; and it read back with it,
+/// so the undo of its replace sent the encap with the id, which the
+/// kernel refuses as it refuses a gateway.
+#[tokio::test]
+async fn a_route_through_an_encap_nexthop_reads_back_as_one() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "mpls_router", "mpls_iptunnel");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("nhid-encap")?;
+        let conn = conn_in_ns(&ns)?;
+        let base = || -> Result<NetworkConfig> {
+            Ok(NetworkConfig::new()
+                .link("d0", |l| l.dummy().up())
+                .address("d0", "10.83.0.1/24")?)
+        };
+        let applied = base()?.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        ns.exec("ip", &["nexthop", "add", "id", "7", "encap", "mpls", "100", "via", "10.83.0.2", "dev", "d0"])?;
+        let routes = |ns: &TestNamespace| -> Result<serde_json::Value> {
+            crate::common::converge::ip_json(ns, &["route", "show", "10.84.0.0/16"])
+                .map_err(nlink::Error::invalid_message)
+        };
+        let a = base()?.route("10.84.0.0/16", |r| r.nhid(7))?;
+        let applied = a.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        // The echoed encap is the object's, not a difference.
+        let again = a.diff(&conn).await?;
+        assert!(again.is_empty(), "a route through the nexthop did not converge:\n{again}");
+
+        let b = base()?.route("10.84.0.0/16", |r| r.via("10.83.0.3").dev("d0"))?;
+        let applied = b.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
+        assert!(undone.is_success(), "{undone:?}");
+        assert_eq!(routes(&ns)?[0]["nhid"], 7, "{}", routes(&ns)?);
+        let back = a.diff(&conn).await?;
+        assert!(back.is_empty(), "the undo left:\n{back}");
+        Ok(())
+    })
+    .await
+}
+
+/// A route with what a declaration cannot say is not the declared one, and
+/// its replace is not undone as if it were (#783). The comparison and the
+/// read-back held six metrics, so a live route with an `rto_min` and a
+/// realm passed for its declaration, and the undo of a replace put back a
+/// route without them.
+#[tokio::test]
+async fn a_route_with_what_a_declaration_cannot_say_is_another() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("route-lost")?;
+        let conn = conn_in_ns(&ns)?;
+        let cfg = NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .address("d0", "10.85.0.1/24")?
+            .route("10.86.0.0/16", |r| r.via("10.85.0.2").dev("d0"))?;
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        ns.exec(
+            "ip",
+            &["route", "replace", "10.86.0.0/16", "via", "10.85.0.2", "dev", "d0", "rto_min", "50ms", "realm", "7", "proto", "boot"],
+        )?;
+        let diff = cfg.diff(&conn).await?;
+        assert_eq!(diff.routes_to_add.len(), 1, "a route with rto_min and a realm passed for one without: {diff}");
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let stuck: Vec<String> = applied.irreversible().map(|s| s.to_string()).collect();
+        assert_eq!(stuck.len(), 1, "the replace of what cannot be put back: {stuck:?}");
+        let shown = ns.exec("ip", &["route", "show", "10.86.0.0/16"])?;
+        assert!(!shown.contains("rto_min") && !shown.contains("realm"), "{shown}");
+        assert!(cfg.diff(&conn).await?.is_empty(), "did not converge");
+        Ok(())
+    })
+    .await
+}
+
+/// A route through a nexthop object reads back as unicast, and one stuck as
+/// a blackhole is not the declared route (#783). The kernel dumps the
+/// object's type while the object is a blackhole, so the read-back took a
+/// route through a blackhole nexthop for a blackhole route. Put back that
+/// way by an undo, it stayed a blackhole after its object got a gateway,
+/// and nothing compared it.
+#[tokio::test]
+async fn a_route_through_a_blackhole_nexthop_is_unicast() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("nh-blackhole")?;
+        let conn = conn_in_ns(&ns)?;
+        // A blackhole nexthop is on `lo`, which must be up.
+        ns.exec("ip", &["link", "set", "lo", "up"])?;
+        let base = |nh: fn(nlink::netlink::config::NexthopSpecBuilder) -> nlink::netlink::config::NexthopSpecBuilder| {
+            NetworkConfig::new()
+                .link("d0", |l| l.dummy().up())
+                .address("d0", "10.91.0.1/24")
+                .map(|c| c.nexthop(5, nh))
+        };
+        let via = |n: nlink::netlink::config::NexthopSpecBuilder| n.via("10.91.0.2".parse().unwrap()).dev("d0");
+        let a = base(|n| n.blackhole())?.route("10.90.0.0/16", |r| r.nhid(5))?;
+        let applied = a.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let b = base(|n| n.blackhole())?.route("10.90.0.0/16", |r| r.via("10.91.0.3").dev("d0"))?;
+        let applied = b.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
+        assert!(undone.is_success(), "{undone:?}");
+        // Give the object a gateway: the route put back follows it.
+        ns.exec("ip", &["nexthop", "replace", "id", "5", "via", "10.91.0.2", "dev", "d0", "proto", "boot"])?;
+        let shown = ns.exec("ip", &["-d", "route", "show", "10.90.0.0/16"])?;
+        assert!(shown.starts_with("unicast"), "the undo put it back as a blackhole: {shown}");
+
+        // A route added as a blackhole stays one: not the declared route.
+        ns.exec("ip", &["route", "replace", "blackhole", "10.90.0.0/16", "nhid", "5", "proto", "boot"])?;
+        let c = base(via)?.route("10.90.0.0/16", |r| r.nhid(5))?;
+        let diff = c.diff(&conn).await?;
+        assert_eq!(diff.routes_to_add.len(), 1, "a route stuck as a blackhole passed for the declared one: {diff}");
+        let applied = c.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let shown = ns.exec("ip", &["-d", "route", "show", "10.90.0.0/16"])?;
+        assert!(shown.starts_with("unicast"), "{shown}");
+        assert!(c.diff(&conn).await?.is_empty(), "did not converge");
+        Ok(())
+    })
+    .await
+}
+
+/// A multipath hop's weight of 256, its encap and its realms are read
+/// (#783). The weight was a `u8`, so 256 read back as 255 and passed for a
+/// declared 255. A hop's encap and realms were not read, so a route whose
+/// hop had them passed for its declaration.
+#[tokio::test]
+async fn a_multipath_hops_weight_encap_and_realms_are_read() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "mpls_router", "mpls_iptunnel");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("mp-hops")?;
+        let conn = conn_in_ns(&ns)?;
+        let cfg = |w: u16| -> Result<NetworkConfig> {
+            Ok(NetworkConfig::new()
+                .link("d0", |l| l.dummy().up())
+                .address("d0", "10.89.0.1/24")?
+                .route("10.88.0.0/16", move |r| {
+                    r.nexthop(move |h| h.via("10.89.0.2").dev("d0").weight(w))
+                        .nexthop(|h| h.via("10.89.0.3").dev("d0"))
+                })?)
+        };
+        let applied = cfg(255)?.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let replace = |hop: &[&str]| -> Result<String> {
+            let mut args = vec!["route", "replace", "10.88.0.0/16", "proto", "boot", "nexthop", "via", "10.89.0.2", "dev", "d0", "weight", "256"];
+            args.extend(hop);
+            args.extend(["nexthop", "via", "10.89.0.3", "dev", "d0"]);
+            ns.exec("ip", &args)
+        };
+        replace(&[])?;
+        assert!(!cfg(255)?.diff(&conn).await?.is_empty(), "a weight of 256 passed for 255");
+        assert!(cfg(256)?.diff(&conn).await?.is_empty(), "a declared 256 did not match");
+
+        for hop in [&["encap", "mpls", "100"][..], &["realm", "5"][..]] {
+            replace(hop)?;
+            let diff = cfg(256)?.diff(&conn).await?;
+            assert!(!diff.is_empty(), "a hop with {hop:?} passed for one without");
+            let applied = cfg(256)?.apply(&conn).await?;
+            assert!(applied.is_success(), "{applied:?}");
+            let shown = ns.exec("ip", &["route", "show", "10.88.0.0/16"])?;
+            assert!(!shown.contains(hop[0]), "{hop:?}: {shown}");
+            assert!(cfg(256)?.diff(&conn).await?.is_empty(), "{hop:?}: did not converge");
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// A nexthop with an encap is not a declared one (#783). A declaration has
+/// no encap, and the diff did not read the kernel's: `ip nexthop add id 7
+/// encap mpls 100 via …` passed for a declared nexthop 7 via the same
+/// gateway, so traffic through it went out with a label nothing declared.
+#[tokio::test]
+async fn a_nexthop_with_an_encap_is_not_a_declared_one() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "mpls_router", "mpls_iptunnel");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("nh-encap")?;
+        let conn = conn_in_ns(&ns)?;
+        let cfg = NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .address("d0", "10.83.1.1/24")?
+            .nexthop(7, |n| n.via("10.83.1.2".parse().unwrap()).dev("d0"));
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        ns.exec(
+            "ip",
+            &["nexthop", "replace", "id", "7", "encap", "mpls", "100", "via", "10.83.1.2", "dev", "d0", "proto", "boot"],
+        )?;
+        let diff = cfg.diff(&conn).await?;
+        assert_eq!(diff.nexthops_to_set.len(), 1, "a nexthop with an encap passed for one without: {diff}");
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let shown = ns.exec("ip", &["nexthop", "show", "id", "7"])?;
+        assert!(!shown.contains("encap"), "{shown}");
+        assert!(cfg.diff(&conn).await?.is_empty(), "did not converge");
+        Ok(())
+    })
+    .await
+}
+
+/// An address the apply removes comes back from its undo with what it had
+/// (#781): its label, metric, `noprefixroute` and broadcast (#783). The diff read a live
+/// address back bare, so the undo put back a plain address: no label, a
+/// metric-0 prefix route where there had been none.
+#[tokio::test]
+async fn an_undo_puts_back_an_address_with_its_attributes() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("addr-undo")?;
+        let conn = conn_in_ns(&ns)?;
+        let cfg = NetworkConfig::new().link("d0", |l| l.dummy().up());
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        ns.exec(
+            "ip",
+            &["addr", "add", "10.87.0.5/24", "brd", "10.87.0.255", "dev", "d0", "label", "d0:x", "metric", "50", "noprefixroute"],
+        )?;
+        let shown = |ns: &TestNamespace| -> Result<String> {
+            let addr = crate::common::converge::ip_json(ns, &["addr", "show", "dev", "d0"])
+                .map_err(nlink::Error::invalid_message)?;
+            let routes = crate::common::converge::ip_json(ns, &["route", "show", "dev", "d0"])
+                .map_err(nlink::Error::invalid_message)?;
+            let a: Vec<String> = addr[0]["addr_info"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|a| a["family"] == "inet")
+                .map(|a| format!("{} {} {} {} {}", a["local"], a["broadcast"], a["label"], a["metric"], a["noprefixroute"]))
+                .collect();
+            Ok(format!("{a:?} {routes}"))
+        };
+        let before = shown(&ns)?;
+
+        let applied = cfg.apply_with_options(&conn, ApplyOptions::default().with_purge(true)).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        assert!(!shown(&ns)?.contains("10.87.0.5"), "the purge removed it");
+        let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
+        assert!(undone.is_success(), "{undone:?}");
+        assert_eq!(shown(&ns)?, before);
+        Ok(())
+    })
+    .await
+}
+
+/// An sfq's divisor, depth and head drop, an fq_codel's drop batch and CE
+/// threshold selector, and a TBF's overhead, mpu and link layer are
+/// declared, converge, and are compared (#806). The configs could not say
+/// them, and the comparison did not read them.
+#[tokio::test]
+async fn sfq_fq_codel_and_tbf_settings_converge_and_are_compared() -> Result<()> {
+    use nlink::netlink::psched::LinkLayer;
+    use nlink::{Bytes, Rate};
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "sch_sfq", "sch_fq_codel", "sch_tbf");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("qdisc-settings")?;
+        let conn = conn_in_ns(&ns)?;
+        let link = || NetworkConfig::new().link("d0", |l| l.dummy().up());
+        let rows = [
+            (link().qdisc("d0", |q| q.sfq().divisor(512).depth(32).headdrop(true)), "replace", "sfq divisor 256 depth 32 headdrop"),
+            (link().qdisc("d0", |q| q.fq_codel().drop_batch(32)), "change", "fq_codel drop_batch 16"),
+            (
+                link().qdisc("d0", |q| {
+                    q.tbf(Rate::mbit(1), Bytes::kib(32))
+                        .limit_bytes(Bytes::kib(64))
+                        .overhead(24)
+                        .mpu(64)
+                        .linklayer(LinkLayer::Atm)
+                }),
+                "change",
+                "tbf rate 1mbit burst 32k limit 64k overhead 8 mpu 64 linklayer atm",
+            ),
+        ];
+        for (cfg, how, drift) in rows {
+            let applied = cfg.apply(&conn).await?;
+            assert!(applied.is_success(), "{drift}: {applied:?}");
+            let again = cfg.diff(&conn).await?;
+            assert!(again.is_empty(), "before `{drift}`: did not converge:\n{again}");
+            // sfq has no change operation: a new one stands in for it.
+            if how == "replace" {
+                ns.exec("tc", &["qdisc", "del", "dev", "d0", "root"])?;
+            }
+            let verb = if how == "replace" { "add" } else { "change" };
+            let mut args = vec!["qdisc", verb, "dev", "d0", "root"];
+            args.extend(drift.split_whitespace());
+            ns.exec("tc", &args)?;
+            assert!(!cfg.diff(&conn).await?.is_empty(), "`{drift}` compared equal to the declaration");
+            let applied = cfg.apply(&conn).await?;
+            assert!(applied.is_success(), "{drift}: {applied:?}");
+            let back = cfg.diff(&conn).await?;
+            assert!(back.is_empty(), "from `{drift}`, did not converge:\n{back}");
+            ns.exec("tc", &["qdisc", "del", "dev", "d0", "root"])?;
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// A replaced qdisc comes back from its undo as it was, settings a spec
+/// did not carry included (#783, #806). An sfq with another divisor,
+/// flows, depth or head drop read back as a plain sfq, so its replace's
+/// undo restored one with the kernel's defaults. #783 made such a replace
+/// irreversible; #806 has the spec carry them, so it comes back.
+#[tokio::test]
+async fn a_replaced_qdisc_comes_back_from_its_undo_as_it_was() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "sch_sfq", "sch_fq_codel", "sch_tbf");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("qdisc-lossy")?;
+        let conn = conn_in_ns(&ns)?;
+        let applied = NetworkConfig::new().link("d0", |l| l.dummy().up()).apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let shown = || -> Result<String> {
+            let out = ns.exec("tc", &["qdisc", "show", "dev", "d0"])?;
+            Ok(out.lines().next().unwrap_or_default().to_string())
+        };
+        // A qdisc tc makes, then a declared one of another kind replaces.
+        let fq_codel = || NetworkConfig::new().link("d0", |l| l.dummy().up()).qdisc("d0", |q| q.fq_codel());
+        let sfq = || NetworkConfig::new().link("d0", |l| l.dummy().up()).qdisc("d0", |q| q.sfq());
+        let rows = [
+            ("sfq divisor 512 flows 64 depth 32 headdrop", fq_codel()),
+            ("sfq perturb 10", fq_codel()),
+            ("tbf rate 1mbit burst 32k limit 64k overhead 24 mpu 64 linklayer atm", fq_codel()),
+            ("fq_codel drop_batch 32 ce_threshold 2ms ce_threshold_selector 0x01/0x01", sfq()),
+        ];
+        for (line, cfg) in rows {
+            // sfq has no change operation: a new one, not a replace.
+            let _ = ns.exec("tc", &["qdisc", "del", "dev", "d0", "root"]);
+            let mut add = vec!["qdisc", "add", "dev", "d0", "root", "handle", "1:"];
+            add.extend(line.split_whitespace());
+            ns.exec("tc", &add)?;
+            let before = shown()?;
+            let applied = cfg.apply(&conn).await?;
+            assert!(applied.is_success(), "{applied:?}");
+            assert_eq!(applied.irreversible().count(), 0, "{line}: {:?}", applied.journal);
+            let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
+            assert!(undone.is_success(), "{undone:?}");
+            assert_eq!(shown()?, before, "the undo put back another qdisc for `{line}`");
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// A declared IPv4 broadcast is installed and compared (#783), and one not
+/// declared is left alone. `DeclaredAddress` had no broadcast, so an undo or
+/// a #745 restore put an address back without the one it had, and without
+/// the broadcast route the kernel makes for it in the local table.
+#[tokio::test]
+async fn an_addresss_broadcast_is_declared_and_compared() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("addr-brd")?;
+        let conn = conn_in_ns(&ns)?;
+        let cfg = NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .address_with("d0", "10.87.1.5/24", |a| a.broadcast("10.87.1.255"))?;
+        let brd = || -> Result<String> {
+            let addr = crate::common::converge::ip_json(&ns, &["addr", "show", "dev", "d0"])
+                .map_err(nlink::Error::invalid_message)?;
+            Ok(addr[0]["addr_info"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|a| a["family"] == "inet")
+                .map(|a| a["broadcast"].to_string())
+                .collect())
+        };
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        assert_eq!(brd()?, "\"10.87.1.255\"");
+        assert!(cfg.diff(&conn).await?.is_empty(), "the declared broadcast converges");
+
+        ns.exec("ip", &["addr", "del", "10.87.1.5/24", "dev", "d0"])?;
+        ns.exec("ip", &["addr", "add", "10.87.1.5/24", "dev", "d0"])?;
+        assert!(!cfg.diff(&conn).await?.is_empty(), "an address without its broadcast compared equal");
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        assert_eq!(brd()?, "\"10.87.1.255\"");
+        assert!(cfg.diff(&conn).await?.is_empty(), "did not converge");
+
+        // Not declared, not compared: `brd +` and DHCP clients set one.
+        let plain = NetworkConfig::new().link("d0", |l| l.dummy().up()).address("d0", "10.87.1.5/24")?;
+        assert!(plain.diff(&conn).await?.is_empty(), "an undeclared broadcast was compared");
+        Ok(())
+    })
+    .await
+}
+
+/// A tunnel's output key is compared too (#782). A declared key is the
+/// key both ways, and the comparison read the input key alone: a gre,
+/// vti or ip6gre tunnel with another output key compared equal to its
+/// declaration and was never put right. The apply sends both now, and
+/// `ip` reads one key back.
+#[tokio::test]
+async fn a_tunnels_output_key_is_compared() -> Result<()> {
+    use std::net::Ipv6Addr;
+    nlink::require_root!();
+    nlink::require_modules!("ip_gre", "ip_vti", "ip6_gre", "ip6_vti");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("okey")?;
+        let conn = conn_in_ns(&ns)?;
+        for (kind, local, remote) in [("gre", "10.88.0.1", "10.88.0.2"), ("vti", "10.88.1.1", "10.88.1.2"), ("ip6gre", "fd88::1", "fd88::2"), ("vti6", "fd88:1::1", "fd88:1::2")] {
+            ns.exec("ip", &["link", "add", "t1", "type", kind, "local", local, "remote", remote, "ikey", "7", "okey", "8"])?;
+            let cfg = NetworkConfig::new().link("t1", |l| match kind {
+                "ip6gre" | "vti6" => (if kind == "ip6gre" { l.ip6gre() } else { l.vti6() })
+                    .ip6tnl_local(local.parse::<Ipv6Addr>().unwrap())
+                    .ip6tnl_remote(remote.parse::<Ipv6Addr>().unwrap())
+                    .tunnel_key(7),
+                _ => {
+                    let l = if kind == "gre" { l.gre() } else { l.vti() };
+                    l.tunnel_local(local.parse().unwrap()).tunnel_remote(remote.parse().unwrap()).tunnel_key(7)
+                }
+            });
+            let diff = cfg.diff(&conn).await?;
+            assert!(!diff.is_empty(), "{kind}: okey 8 compared equal to key 7");
+            let applied = cfg.apply(&conn).await?;
+            assert!(applied.is_success(), "{kind}: {applied:?}");
+            let link = crate::common::converge::ip_json(&ns, &["-d", "link", "show", "t1"])
+                .map_err(nlink::Error::invalid_message)?;
+            let data = &link[0]["linkinfo"]["info_data"];
+            assert_eq!((&data["ikey"], &data["okey"]), (&data["ikey"], &data["ikey"]), "{kind}: {data}");
+            assert!(cfg.diff(&conn).await?.is_empty(), "{kind} did not converge");
+            ns.exec("ip", &["link", "del", "t1"])?;
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// A qdisc the apply takes away takes its tree with it, and the undo puts
+/// both back (#783): an HTB root with classes, a leaf qdisc and filters,
+/// replaced by another kind of root, and removed when the previous config
+/// declared it. The undo used to add the bare qdisc back, and say nothing
+/// was lost.
+#[tokio::test]
+async fn an_undo_puts_back_the_tree_under_a_qdisc() -> Result<()> {
+    use std::sync::Arc;
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "sch_htb", "sch_fq_codel", "sch_netem", "cls_matchall", "cls_u32");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("qdisc-tree-undo")?;
+        let conn = conn_in_ns(&ns)?;
+        let htb = Arc::new(
+            NetworkConfig::new()
+                .link("d0", |l| l.dummy().up())
+                .qdisc("d0", |q| q.htb().default_class(0x10)),
+        );
+        let tc = |args: &str| ns.exec("tc", &args.split_whitespace().collect::<Vec<_>>()).map(drop);
+        let shown = || -> Result<Vec<String>> {
+            ["qdisc show dev d0", "class show dev d0", "filter show dev d0 parent 1:"]
+                .iter()
+                .map(|a| ns.exec("tc", &a.split_whitespace().collect::<Vec<_>>()))
+                .map(|r| {
+                    r.map(|out| {
+                        out.lines()
+                            .map(|l| {
+                                // Counters and per-install numbering are not state.
+                                let mut w: Vec<&str> = l.split_whitespace().collect();
+                                while let Some(i) = w.iter().position(|x| matches!(*x, "direct_packets_stat" | "index" | "ref" | "bind")) {
+                                    w.drain(i..(i + 2).min(w.len()));
+                                }
+                                w.join(" ")
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                })
+                .collect()
+        };
+        let fq = NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .qdisc("d0", |q| q.fq_codel());
+        let bare = NetworkConfig::new().link("d0", |l| l.dummy().up());
+        let previous = nlink::netlink::config::PlanOptions::default().previous(htb.clone());
+        let steps: [(&NetworkConfig, Option<&nlink::netlink::config::PlanOptions>); 2] = [(&fq, None), (&bare, Some(&previous))];
+        for (next, plan) in steps {
+            let applied = htb.apply(&conn).await?;
+            assert!(applied.is_success(), "{applied:?}");
+            tc("class add dev d0 parent 1: classid 1:10 htb rate 10mbit")?;
+            tc("class add dev d0 parent 1: classid 1:20 htb rate 20mbit")?;
+            tc("qdisc add dev d0 parent 1:20 handle 20: netem delay 5ms")?;
+            tc("filter add dev d0 parent 1: prio 1 protocol ip matchall classid 1:20")?;
+            tc("filter add dev d0 parent 1: prio 2 protocol ip u32 match ip dst 10.0.0.0/8 classid 1:10")?;
+            let before = shown()?;
+
+            let diff = match plan {
+                Some(p) => next.diff_with_options(&conn, p.clone()).await?,
+                None => next.diff(&conn).await?,
+            };
+            let applied = diff.apply(&conn, nlink::ExecOptions::new()).await?;
+            assert!(applied.is_success(), "{applied:?}");
+            assert!(!shown()?[1].contains("1:20"), "the tree went: {:?}", shown()?);
+            let stuck: Vec<String> = applied.irreversible().map(|s| s.to_string()).collect();
+            assert!(stuck.is_empty(), "{stuck:?}");
+            let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
+            assert!(undone.is_success(), "{undone:?}");
+            assert_eq!(shown()?, before);
+            ns.exec("tc", &["qdisc", "del", "dev", "d0", "root"])?;
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// An IPv4 multipath route through IPv6 gateways (RFC 5549) keeps them
+/// (#786). `Ipv4Route::multipath` sent a hop's IPv6 gateway nowhere, so
+/// the route went in through bare devices; and the parser read only
+/// `RTA_GATEWAY`, not the `RTA_VIA` the kernel dumps such a hop with, so a
+/// route `ip` made read back without its gateways, which a removal's undo
+/// then put back without.
+#[tokio::test]
+async fn ipv4_multipath_keeps_its_ipv6_gateways() -> Result<()> {
+    use nlink::netlink::route::{Ipv4Route, NextHop};
+    use std::net::{IpAddr, Ipv6Addr};
+    nlink::require_root!();
+    nlink::require_modules!("dummy");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("mp-via")?;
+        let conn = conn_in_ns(&ns)?;
+        let applied = NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .link("d1", |l| l.dummy().up())
+            .apply(&conn)
+            .await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let gw = |s: &str| s.parse::<Ipv6Addr>().unwrap();
+        conn.add_route(
+            Ipv4Route::new("10.89.0.0", 24).multipath(vec![
+                NextHop::new().gateway_v6(gw("fe80::1")).dev("d0"),
+                NextHop::new().gateway_v6(gw("fe80::2")).dev("d1"),
+            ]),
+        )
+        .await?;
+        let route = crate::common::converge::ip_json(&ns, &["route", "show", "10.89.0.0/24"])
+            .map_err(nlink::Error::invalid_message)?;
+        let vias: Vec<String> = route[0]["nexthops"]
+            .as_array()
+            .map(|h| h.iter().map(|h| h["via"]["host"].as_str().unwrap_or("none").to_string()).collect())
+            .unwrap_or_default();
+        assert_eq!(vias, ["fe80::1", "fe80::2"], "{route}");
+
+        let read: Vec<Option<IpAddr>> = conn
+            .get_routes()
+            .await?
+            .iter()
+            .find(|r| r.destination() == Some(&"10.89.0.0".parse().unwrap()))
+            .and_then(|r| r.multipath())
+            .unwrap_or_default()
+            .iter()
+            .map(|h| h.gateway)
+            .collect();
+        assert_eq!(read, [Some(gw("fe80::1").into()), Some(gw("fe80::2").into())]);
+        Ok(())
+    })
+    .await
+}
+
+/// A route an apply replaces or purges comes back from the undo with the
+/// protocol it had (#783). A config owns `static` routes as well as `boot`
+/// ones, so it replaces and purges `proto static` routes, systemd-networkd's
+/// among them; the undo put them back as the plan's `boot`.
+#[tokio::test]
+async fn an_undo_puts_a_route_back_with_its_protocol() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("route-proto-undo")?;
+        let conn = conn_in_ns(&ns)?;
+        let base = || -> Result<NetworkConfig> {
+            Ok(NetworkConfig::new().link("d0", |l| l.dummy().up()).address("d0", "10.90.0.1/24")?)
+        };
+        let applied = base()?.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let protocol = |dst: &str| -> Result<String> {
+            let r = crate::common::converge::ip_json(&ns, &["route", "show", dst])
+                .map_err(nlink::Error::invalid_message)?;
+            // `ip -j` leaves the protocol out for `boot`.
+            Ok(r[0]["protocol"].as_str().unwrap_or("boot").to_string())
+        };
+        ns.exec("ip", &["route", "add", "10.91.0.0/24", "via", "10.90.0.2", "proto", "static"])?;
+        ns.exec("ip", &["route", "add", "10.92.0.0/24", "via", "10.90.0.2", "proto", "static"])?;
+
+        // Replaced by a declared route, and the replace undone.
+        let replacing = base()?.route("10.91.0.0/24", |r| r.via("10.90.0.3"))?;
+        let applied = replacing.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        assert_eq!(protocol("10.91.0.0/24")?, "boot");
+        let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
+        assert!(undone.is_success(), "{undone:?}");
+        assert_eq!(protocol("10.91.0.0/24")?, "static", "the replaced route");
+
+        // Purged, and the purge undone.
+        let applied = base()?.apply_with_options(&conn, ApplyOptions::default().with_purge(true)).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
+        assert!(undone.is_success(), "{undone:?}");
+        assert_eq!(protocol("10.92.0.0/24")?, "static", "the purged route");
+        Ok(())
+    })
+    .await
+}
+
+/// What a link is declared with goes out when it is created, so one apply
+/// converges (#788): a gretap's, ip6gretap's, erspan's or macsec's MAC
+/// and a vti's MTU were left for a second apply's modify.
+#[tokio::test]
+async fn a_tunnels_mac_and_mtu_go_out_at_create() -> Result<()> {
+    use nlink::netlink::link::ErspanVersion;
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "ip_gre", "ip6_gre", "ip_vti", "macsec");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("create-mac")?;
+        let conn = conn_in_ns(&ns)?;
+        let mac = |n: u8| [0x02, 0, 0, 0, 0x89, n];
+        let cfg = NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .link("gt1", |l| l.gretap().tunnel_remote("10.93.0.2".parse().unwrap()).address(mac(1)))
+            .link("gt6", |l| l.ip6gretap().ip6tnl_remote("fd93::2".parse().unwrap()).address(mac(2)))
+            .link("er1", |l| {
+                l.erspan(5)
+                    .erspan_remote("10.93.0.3".parse::<std::net::Ipv4Addr>().unwrap())
+                    .erspan_version(ErspanVersion::V1 { index: 1 })
+                    .address(mac(3))
+            })
+            .link("ms1", |l| l.macsec("d0").macsec_port(9).address(mac(4)))
+            .link("vt1", |l| l.vti().tunnel_remote("10.93.0.4".parse().unwrap()).mtu(1300));
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let again = cfg.diff(&conn).await?;
+        assert!(again.is_empty(), "one apply did not converge:\n{again}");
+        Ok(())
+    })
+    .await
+}
+
+/// An ERSPAN tunnel's output key is compared too (#782): the session goes
+/// out as both keys, and the comparison read the input key alone, so an
+/// erspan whose output key differed converged as it was.
+#[tokio::test]
+async fn an_erspans_output_key_is_compared() -> Result<()> {
+    use nlink::netlink::link::ErspanVersion;
+    nlink::require_root!();
+    nlink::require_modules!("ip_gre");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("erspan-okey")?;
+        let conn = conn_in_ns(&ns)?;
+        ns.exec(
+            "ip",
+            &["link", "add", "er1", "type", "erspan", "seq", "ikey", "5", "okey", "6", "local", "10.94.0.1", "remote", "10.94.0.2", "erspan_ver", "1", "erspan", "3"],
+        )?;
+        let cfg = NetworkConfig::new().link("er1", |l| {
+            l.erspan(5)
+                .erspan_local("10.94.0.1".parse::<std::net::Ipv4Addr>().unwrap())
+                .erspan_remote("10.94.0.2".parse::<std::net::Ipv4Addr>().unwrap())
+                .erspan_version(ErspanVersion::V1 { index: 3 })
+        });
+        let diff = cfg.diff(&conn).await?;
+        assert!(!diff.is_empty(), "okey 6 compared equal to session 5");
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let link = crate::common::converge::ip_json(&ns, &["-d", "link", "show", "er1"])
+            .map_err(nlink::Error::invalid_message)?;
+        let data = &link[0]["linkinfo"]["info_data"];
+        assert_eq!(data["ikey"], data["okey"], "{data}");
+        assert!(cfg.diff(&conn).await?.is_empty(), "it did not converge");
+        Ok(())
+    })
+    .await
+}
+
+/// An HTB class's quantum, mpu and overhead are compared (#789). A
+/// declared class sends them, and the comparison looked at rate, ceil,
+/// bursts and priority only: a class whose quantum or overhead drifted
+/// matched its declaration and was never put right.
+#[tokio::test]
+async fn an_htb_classs_quantum_and_overhead_are_compared() -> Result<()> {
+    use nlink::netlink::tc::HtbClassConfig;
+    use nlink::{Rate, TcHandle};
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "sch_htb");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("htb-quantum")?;
+        let conn = conn_in_ns(&ns)?;
+        let h = |m: u16, n: u16| TcHandle::new(m, n);
+        let cfg = |class: HtbClassConfig| {
+            NetworkConfig::new()
+                .link("d0", |l| l.dummy().up())
+                .qdisc("d0", |q| q.htb().default_class(0x10))
+                .tc("d0", move |t| t.class(h(1, 0), h(1, 0x10), class))
+        };
+        let declared = || HtbClassConfig::new(Rate::mbit(10)).quantum(1514).overhead(4).mpu(64);
+        let applied = cfg(declared()).apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        assert!(cfg(declared()).diff(&conn).await?.is_empty(), "the declared class converges");
+        for drift in ["quantum 3000", "overhead 40", "mpu 128"] {
+            let mut args = vec!["class", "change", "dev", "d0", "parent", "1:", "classid", "1:10", "htb", "rate", "10mbit"];
+            for (k, v) in [("quantum", "1514"), ("overhead", "4"), ("mpu", "64")] {
+                if !drift.starts_with(k) {
+                    args.extend([k, v]);
+                }
+            }
+            args.extend(drift.split_whitespace());
+            ns.exec("tc", &args)?;
+            let diff = cfg(declared()).diff(&conn).await?;
+            assert!(!diff.is_empty(), "{drift} compared equal to the declaration");
+            let applied = cfg(declared()).apply(&conn).await?;
+            assert!(applied.is_success(), "{applied:?}");
+            assert!(cfg(declared()).diff(&conn).await?.is_empty(), "{drift}: did not converge");
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// A route or rule with a TOS is not the declared one (#793). A
+/// declaration has no TOS, so it is installed with 0, but the comparison
+/// ignored the TOS: a live `tos 0x10` route or rule at the declared key
+/// passed for it, and the declared one, for all other traffic, was never
+/// added.
+#[tokio::test]
+async fn a_route_or_rule_with_a_tos_is_another() -> Result<()> {
+    use std::net::Ipv4Addr;
+    nlink::require_root!();
+    nlink::require_modules!("dummy");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("route-tos")?;
+        let conn = conn_in_ns(&ns)?;
+        let cfg = NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .address("d0", "10.65.0.1/24")?
+            .route("10.66.0.0/16", |r| r.via("10.65.0.2").dev("d0"))?
+            .rule(100, |r| r.from(Ipv4Addr::new(10, 87, 0, 0), 16).table(100));
+        let applied = NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .address("d0", "10.65.0.1/24")?
+            .apply(&conn)
+            .await?;
+        assert!(applied.is_success(), "{applied:?}");
+        ns.exec("ip", &["route", "add", "10.66.0.0/16", "via", "10.65.0.2", "dev", "d0", "tos", "0x10", "proto", "boot"])?;
+        ns.exec("ip", &["rule", "add", "pref", "100", "from", "10.87.0.0/16", "tos", "0x10", "table", "100", "proto", "boot"])?;
+
+        let diff = cfg.diff(&conn).await?;
+        assert_eq!((diff.routes_to_add.len(), diff.rules_to_add.len()), (1, 1), "{diff}");
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let routes = ns.exec("ip", &["route", "show", "10.66.0.0/16"])?;
+        assert_eq!(routes.lines().count(), 2, "the TOS route and the declared one: {routes}");
+        let rules = ns.exec("ip", &["rule", "show", "pref", "100"])?;
+        assert_eq!(rules.lines().count(), 2, "the TOS rule and the declared one: {rules}");
+        assert!(cfg.diff(&conn).await?.is_empty(), "did not converge");
+        Ok(())
+    })
+    .await
+}
+
+/// A declared filter's chain is compared, and a filter of its name in
+/// another chain goes (#793). The live lookup was by parent, priority and
+/// protocol and the comparison left the chain out, so a filter in chain 0
+/// matched a declaration in chain 5. And the replace deleted in chain 0,
+/// whatever chain the filter it replaced was in.
+#[tokio::test]
+async fn a_filters_chain_is_compared() -> Result<()> {
+    use nlink::netlink::filter::MatchallFilter;
+    use nlink::netlink::tc::HtbClassConfig;
+    use nlink::{EthProto, FilterPriority, Rate, TcHandle};
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "sch_htb", "cls_matchall");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("filter-chain")?;
+        let conn = conn_in_ns(&ns)?;
+        let h = |m: u16, n: u16| TcHandle::new(m, n);
+        let cfg = |chain: Option<u32>| {
+            let filter = MatchallFilter::new().classid(h(1, 0x10));
+            let filter = match chain {
+                Some(c) => filter.chain(c),
+                None => filter,
+            };
+            NetworkConfig::new()
+                .link("d0", |l| l.dummy().up())
+                .qdisc("d0", |q| q.htb().default_class(0x10))
+                .tc("d0", move |t| {
+                    t.class(h(1, 0), h(1, 0x10), HtbClassConfig::new(Rate::mbit(10)))
+                        .filter(h(1, 0), FilterPriority::new(1), EthProto::IP, filter)
+                })
+        };
+        // The chains of the filters at 1:, as tc lists them.
+        let chains = || -> Result<Vec<u64>> {
+            let out = ns.exec("tc", &["-j", "filter", "show", "dev", "d0", "parent", "1:"])?;
+            let listed: serde_json::Value = serde_json::from_str(&out)
+                .map_err(|e| nlink::Error::invalid_message(format!("{e}: {out}")))?;
+            Ok(listed
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|f| f.get("options").is_some())
+                .map(|f| f["chain"].as_u64().unwrap_or(0))
+                .collect())
+        };
+        // Declared in chain 5, made in chain 0; then declared in chain 0,
+        // made in chain 5.
+        for (declared, made) in [(Some(5), "0"), (None, "5")] {
+            let applied = cfg(None).apply(&conn).await?;
+            assert!(applied.is_success(), "{applied:?}");
+            ns.exec("tc", &["filter", "del", "dev", "d0", "parent", "1:"])?;
+            ns.exec(
+                "tc",
+                &["filter", "add", "dev", "d0", "parent", "1:", "chain", made, "prio", "1", "protocol", "ip", "matchall", "classid", "1:10"],
+            )?;
+            let diff = cfg(declared).diff(&conn).await?;
+            assert!(!diff.is_empty(), "chain {made} compared equal to chain {declared:?}");
+            let applied = cfg(declared).apply(&conn).await?;
+            assert!(applied.is_success(), "{applied:?}");
+            assert_eq!(chains()?, [u64::from(declared.unwrap_or(0))], "after the apply");
+            assert!(cfg(declared).diff(&conn).await?.is_empty(), "chain {declared:?}: did not converge");
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// A police action read from tc(8)'s words makes what tc makes of them,
+/// and a declaration of it converges (#800). `parse_params` started from
+/// nlink's own defaults: what exceeded was dropped where tc reclassifies
+/// it, and the mtu was 2047 where tc leaves it to the kernel, which a
+/// rate-less policer then held every larger packet to.
+#[tokio::test]
+async fn a_police_from_tcs_words_is_tcs_and_converges() -> Result<()> {
+    use nlink::netlink::action::{ActionList, Estimator, PoliceAction};
+    use nlink::netlink::filter::MatchallFilter;
+    use nlink::netlink::tc::HtbClassConfig;
+    use nlink::{EthProto, FilterPriority, Rate, TcHandle};
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "sch_htb", "cls_matchall", "act_police");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("police-tc-words")?;
+        let conn = conn_in_ns(&ns)?;
+        let h = |m: u16, n: u16| TcHandle::new(m, n);
+        // The kernel's mtu: `255 << cell_log` with a rate table, none without.
+        for (line, mtu) in [("rate 1mbit burst 32k", "mtu 2Kb"), ("avrate 1mbit", "mtu 4096Mb")] {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            let police = PoliceAction::parse_params(&words)?;
+            let estimator = Estimator::parse_params(&["1sec", "8sec"])?;
+            let cfg = NetworkConfig::new()
+                .link("d0", |l| l.dummy().up())
+                .qdisc("d0", |q| q.htb().default_class(0x10))
+                .tc("d0", move |t| {
+                    t.class(h(1, 0), h(1, 0x10), HtbClassConfig::new(Rate::mbit(10))).filter(
+                        h(1, 0),
+                        FilterPriority::new(1),
+                        EthProto::IP,
+                        MatchallFilter::new()
+                            .classid(h(1, 0x10))
+                            .actions(ActionList::new().with_estimator(estimator).with(police.clone())),
+                    )
+                });
+            let applied = cfg.apply(&conn).await?;
+            assert!(applied.is_success(), "{line}: {applied:?}");
+            let shown = ns.exec("tc", &["filter", "show", "dev", "d0", "parent", "1:"])?;
+            assert!(shown.contains("action reclassify") && shown.contains(mtu), "{line}: {shown}");
+            let diff = cfg.diff(&conn).await?;
+            assert!(diff.is_empty(), "{line}: the declaration did not converge: {diff:?}");
+            ns.exec("tc", &["filter", "del", "dev", "d0", "parent", "1:"])?;
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// Every action kind is compared by what it does (#791), and converges.
+/// Only mirred, gact and police were; every other kind was compared by its
+/// kind alone, so a filter whose vlan action pushed another id, or whose
+/// skbedit set another mark, matched its declaration and was never put
+/// right. Each row declares a filter with the action, applies twice, then
+/// replaces the filter with a drifted action, which the diff must see and
+/// the apply must put back. A gate is read as the schedule the kernel keeps
+/// (#813); bpf, which needs a program, has a test of its own.
+#[tokio::test]
+async fn every_action_kind_is_compared_and_converges() -> Result<()> {
+    use nlink::netlink::action::{
+        ActionList, ConnmarkAction, CsumAction, CtAction, CtinfoAction, GateAction, IfeAction, MplsAction,
+        NatAction, PeditAction, SampleAction, SimpleAction, SkbeditAction, SkbmodAction, TunnelKeyAction,
+        VlanAction,
+    };
+    use nlink::netlink::filter::MatchallFilter;
+    use nlink::{EthProto, FilterPriority, TcHandle};
+    nlink::require_root!();
+    nlink::require_modules!(
+        "dummy", "sch_ingress", "cls_matchall", "act_vlan", "act_mpls", "act_skbmod", "act_skbedit", "act_connmark",
+        "act_csum", "act_nat", "act_tunnel_key", "act_ct", "act_pedit", "act_simple", "act_sample", "act_gate",
+        "act_ctinfo", "act_ife"
+    );
+
+    fn list(kind: &str, line: &str) -> nlink::Result<ActionList> {
+        let w: Vec<&str> = line.split_whitespace().collect();
+        Ok(match kind {
+            "vlan" => ActionList::new().with(VlanAction::parse_params(&w)?),
+            "mpls" => ActionList::new().with(MplsAction::parse_params(&w)?),
+            "skbmod" => ActionList::new().with(SkbmodAction::parse_params(&w)?),
+            "skbedit" => ActionList::new().with(SkbeditAction::parse_params(&w)?),
+            "connmark" => ActionList::new().with(ConnmarkAction::parse_params(&w)?),
+            "csum" => ActionList::new().with(CsumAction::parse_params(&w)?),
+            "nat" => ActionList::new().with(NatAction::parse_params(&w)?),
+            "tunnel_key" => ActionList::new().with(TunnelKeyAction::parse_params(&w)?),
+            "ct" => ActionList::new().with(CtAction::parse_params(&w)?),
+            "pedit" => ActionList::new().with(PeditAction::parse_params(&w)?),
+            "simple" => ActionList::new().with(SimpleAction::parse_params(&w)?),
+            "sample" => ActionList::new().with(SampleAction::parse_params(&w)?),
+            "gate" => ActionList::new().with(GateAction::parse_params(&w)?),
+            "ctinfo" => ActionList::new().with(CtinfoAction::parse_params(&w)?),
+            "ife" => ActionList::new().with(IfeAction::parse_params(&w)?),
+            other => panic!("no row for {other}"),
+        })
+    }
+    let rows: &[(&str, &str, &str)] = &[
+        ("vlan", "pop", "push 100"),
+        ("vlan", "push 100", "push 200"),
+        ("vlan", "push 100 priority 3", "push 100 priority 4"),
+        ("vlan", "modify 200 protocol 802.1ad", "modify 200"),
+        ("mpls", "push label 100 ttl 64 tc 3", "push label 101 ttl 64 tc 3"),
+        ("mpls", "pop protocol ipv4", "pop protocol ipv6"),
+        ("skbmod", "set dmac 02:00:00:00:00:01", "set dmac 02:00:00:00:00:02"),
+        ("skbedit", "priority 7", "priority 8"),
+        ("skbedit", "mark 42", "mark 43"),
+        ("skbedit", "mark 1 mask 255", "mark 1 mask 15"),
+        ("connmark", "zone 5", "zone 6"),
+        ("csum", "iph", "iph tcp"),
+        ("nat", "egress 10.0.0.1 192.168.0.1", "egress 10.0.0.1 192.168.0.2"),
+        ("tunnel_key", "set src 10.0.0.1 dst 10.0.0.2 id 100 dst_port 4789", "set src 10.0.0.1 dst 10.0.0.2 id 101 dst_port 4789"),
+        ("tunnel_key", "release", "set src 10.0.0.1 dst 10.0.0.2 id 1"),
+        ("ct", "commit", "commit zone 5"),
+        ("pedit", "ex munge ip ttl set 5", "ex munge ip ttl set 6"),
+        ("simple", "sdata hello", "sdata world"),
+        ("sample", "rate 100 group 5", "rate 200 group 5"),
+        ("ctinfo", "cpmark zone 1", "cpmark zone 2"),
+        ("gate", "base-time 1000 sched-entry open 2000", "base-time 1000 sched-entry close 2000"),
+        (
+            "gate",
+            "priority 1 base-time 1000 sched-entry open 2000 sched-entry close 3000",
+            "priority 1 base-time 1000 sched-entry open 2000 sched-entry close 4000",
+        ),
+        ("ife", "encode allow mark", "encode allow prio"),
+    ];
+
+    with_timeout(async {
+        let ns = TestNamespace::new("action-kinds")?;
+        let conn = conn_in_ns(&ns)?;
+        // On the clsact ingress hook: `ct` attaches nowhere else.
+        let hook = TcHandle::CLSACT_INGRESS;
+        let filter = |actions: ActionList| MatchallFilter::new().actions(actions);
+        let mut failed = Vec::new();
+        for (kind, line, drift) in rows {
+            let actions = list(kind, line)?;
+            let cfg = NetworkConfig::new()
+                .link("d0", |l| l.dummy().up())
+                .qdisc("d0", |q| q.clsact())
+                .tc("d0", move |t| t.filter(hook, FilterPriority::new(1), EthProto::ALL, filter(actions.clone())));
+            match cfg.apply(&conn).await {
+                Ok(applied) if applied.is_success() => {}
+                Ok(applied) => {
+                    failed.push(format!("{kind} {line}: the apply failed: {applied:?}"));
+                    continue;
+                }
+                Err(e) => {
+                    failed.push(format!("{kind} {line}: the apply failed: {e}"));
+                    continue;
+                }
+            }
+            let again = cfg.diff(&conn).await?;
+            if !again.is_empty() {
+                failed.push(format!("{kind} {line}: did not converge:\n{again}"));
+                continue;
+            }
+            ns.exec("tc", &["filter", "del", "dev", "d0", "ingress", "prio", "1"])?;
+            if let Err(e) = conn
+                .add_filter_full("d0", hook, None, EthProto::ALL, FilterPriority::new(1), filter(list(kind, drift)?))
+                .await
+            {
+                failed.push(format!("{kind} {line}: `{drift}` would not install: {e}"));
+                continue;
+            }
+            if cfg.diff(&conn).await?.is_empty() {
+                failed.push(format!("{kind} {line}: `{drift}` compared equal to it"));
+            }
+            let applied = cfg.apply(&conn).await.map(|a| a.is_success()).unwrap_or(false);
+            let back = cfg.diff(&conn).await?;
+            if !applied || !back.is_empty() {
+                failed.push(format!("{kind} {line}: from `{drift}`, did not converge:\n{back}"));
+            }
+        }
+        assert!(failed.is_empty(), "{}", failed.join("\n"));
+        Ok(())
+    })
+    .await
+}
+
+/// #827: every flower key a tc(8) line can now say is written as the
+/// kernel echoes it, so a declaration converges, and is compared, so a
+/// filter whose key drifted, or that matches on one more key, is put back.
+#[tokio::test]
+async fn every_flower_key_is_compared_and_converges() -> Result<()> {
+    use nlink::netlink::filter::FlowerFilter;
+    use nlink::{EthProto, FilterPriority, TcHandle};
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "sch_ingress", "cls_flower");
+
+    // (protocol, line, drift)
+    let rows: &[(&str, &str, &str)] = &[
+        ("ip", "ip_proto icmp type 8 code 0", "ip_proto icmp type 0 code 0"),
+        ("ipv6", "ip_proto icmpv6 type 128", "ip_proto icmpv6 type 129"),
+        ("ip", "ip_flags frag/nofirstfrag", "ip_flags frag/firstfrag"),
+        ("ip", "ct_state +trk+est", "ct_state +trk+new"),
+        ("ip", "ct_zone 3 ct_mark 5/0xff", "ct_zone 3 ct_mark 6/0xff"),
+        ("ip", "ct_zone 3", "ct_zone 3 ct_mark 5"),
+        ("ip", "ct_label 01/ff", "ct_label 02/ff"),
+        ("ip", "enc_key_id 100 enc_dst_ip 10.0.0.1 enc_dst_port 4789", "enc_key_id 101 enc_dst_ip 10.0.0.1 enc_dst_port 4789"),
+        ("ip", "enc_src_ip fd00::/64 enc_tos 16/0xfc enc_ttl 64", "enc_src_ip fd00::/64 enc_tos 16/0xfc enc_ttl 63"),
+        ("mpls_uc", "mpls_label 100 mpls_tc 3", "mpls_label 101 mpls_tc 3"),
+        ("arp", "arp_op request arp_tip 10.0.0.0/24", "arp_op reply arp_tip 10.0.0.0/24"),
+        ("arp", "arp_sha 02:00:00:00:00:01", "arp_sha 02:00:00:00:00:02"),
+        ("802.1q", "vlan_id 10 vlan_ethtype ip src_ip 10.0.0.1", "vlan_id 10 vlan_ethtype ip src_ip 10.0.0.2"),
+        (
+            "802.1ad",
+            "vlan_id 10 vlan_ethtype 802.1q cvlan_id 20 cvlan_ethtype ip",
+            "vlan_id 10 vlan_ethtype 802.1q cvlan_id 21 cvlan_ethtype ip",
+        ),
+        ("ip", "dst_mac 02:00:00:00:00:00/ff:ff:ff:00:00:00", "dst_mac 02:00:00:00:00:00/ff:ff:00:00:00:00"),
+        ("ip", "indev d0", "indev lo"),
+    ];
+
+    with_timeout(async {
+        let ns = TestNamespace::new("flower-keys")?;
+        let conn = conn_in_ns(&ns)?;
+        let hook = TcHandle::CLSACT_INGRESS;
+        let parse = |line: &str| FlowerFilter::parse_params(&line.split_whitespace().collect::<Vec<_>>());
+        let mut failed = Vec::new();
+        for &(proto, line, drift) in rows {
+            let protocol: EthProto = proto.parse()?;
+            let flower = parse(line)?;
+            let cfg = NetworkConfig::new()
+                .link("d0", |l| l.dummy().up())
+                .qdisc("d0", |q| q.clsact())
+                .tc("d0", move |t| t.filter(hook, FilterPriority::new(1), protocol, flower.clone()));
+            match cfg.apply(&conn).await {
+                Ok(applied) if applied.is_success() => {}
+                Ok(applied) => {
+                    failed.push(format!("{proto} {line}: the apply failed: {applied:?}"));
+                    continue;
+                }
+                Err(e) => {
+                    failed.push(format!("{proto} {line}: the apply failed: {e}"));
+                    continue;
+                }
+            }
+            let again = cfg.diff(&conn).await?;
+            if !again.is_empty() {
+                failed.push(format!("{proto} {line}: did not converge:\n{again}"));
+                continue;
+            }
+            ns.exec("tc", &["filter", "del", "dev", "d0", "ingress", "prio", "1"])?;
+            if let Err(e) = conn.add_filter_full("d0", hook, None, protocol, FilterPriority::new(1), parse(drift)?).await {
+                failed.push(format!("{proto} {line}: `{drift}` would not install: {e}"));
+                continue;
+            }
+            if cfg.diff(&conn).await?.is_empty() {
+                failed.push(format!("{proto} {line}: `{drift}` compared equal to it"));
+            }
+            let applied = cfg.apply(&conn).await.map(|a| a.is_success()).unwrap_or(false);
+            let back = cfg.diff(&conn).await?;
+            if !applied || !back.is_empty() {
+                failed.push(format!("{proto} {line}: from `{drift}`, did not converge:\n{back}"));
+            }
+        }
+        assert!(failed.is_empty(), "{}", failed.join("\n"));
+        Ok(())
+    })
+    .await
+}
+
+/// A police action's conform verdict, peakrate and average rate, and a
+/// gact action's random verdict, are compared (#791). The comparison
+/// summarised a police by its rate, burst, mtu and exceed verdict and a
+/// gact by its verdict alone, so a filter whose action drifted in any of
+/// the rest matched its declaration.
+#[tokio::test]
+async fn a_filters_police_and_gact_parameters_are_compared() -> Result<()> {
+    use nlink::netlink::action::{ActionList, Estimator, GactAction, PoliceAction};
+    use nlink::netlink::filter::MatchallFilter;
+    use nlink::netlink::tc::HtbClassConfig;
+    use nlink::{Bytes, EthProto, FilterPriority, Rate, TcHandle};
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "sch_htb", "cls_matchall", "act_police", "act_gact");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("action-fields")?;
+        let conn = conn_in_ns(&ns)?;
+        let h = |m: u16, n: u16| TcHandle::new(m, n);
+        // A peakrate needs an mtu; declared here, so the drift below
+        // changes the peakrate alone.
+        let police = || {
+            PoliceAction::new()
+                .rate(Rate::mbit(1))
+                .burst(Bytes::kib(32))
+                .mtu(Bytes::new(2048))
+                .exceed_drop()
+        };
+        // An average rate needs the actions' rate estimator (#792).
+        let estimator = Estimator::new(std::time::Duration::from_secs(1), std::time::Duration::from_secs(8))?;
+        let filter = move |police: PoliceAction, gact: GactAction| {
+            MatchallFilter::new()
+                .classid(h(1, 0x10))
+                .actions(ActionList::new().with_estimator(estimator).with(police).with(gact))
+        };
+        let cfg = NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .qdisc("d0", |q| q.htb().default_class(0x10))
+            .tc("d0", move |t| {
+                t.class(h(1, 0), h(1, 0x10), HtbClassConfig::new(Rate::mbit(10))).filter(
+                    h(1, 0),
+                    FilterPriority::new(1),
+                    EthProto::IP,
+                    filter(police(), GactAction::pass()),
+                )
+            });
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        assert!(cfg.diff(&conn).await?.is_empty(), "the declared filter converges");
+        let drifts: [(&str, PoliceAction, GactAction); 4] = [
+            ("conform pipe", police().conform_pipe(), GactAction::pass()),
+            ("peakrate", police().peakrate(Rate::mbit(2)), GactAction::pass()),
+            ("avrate", police().avrate(Rate::mbit(1)), GactAction::pass()),
+            ("gact random", police(), GactAction::pass().random(10, 2 /* TC_ACT_SHOT */)),
+        ];
+        for (what, p, g) in drifts {
+            ns.exec("tc", &["filter", "del", "dev", "d0", "parent", "1:", "prio", "1"])?;
+            conn.add_filter_full("d0", h(1, 0), None, EthProto::IP, FilterPriority::new(1), filter(p, g))
+                .await?;
+            let diff = cfg.diff(&conn).await?;
+            assert!(!diff.is_empty(), "{what} compared equal to the declaration");
+            let applied = cfg.apply(&conn).await?;
+            assert!(applied.is_success(), "{what}: {applied:?}");
+            assert!(cfg.diff(&conn).await?.is_empty(), "{what}: did not converge");
+        }
+        Ok(())
+    })
+    .await
 }

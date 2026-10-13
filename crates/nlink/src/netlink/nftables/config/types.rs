@@ -2,10 +2,10 @@
 //! declared structs.
 
 use super::super::{
-    expr::Expr,
+    expr::{ElementStatement, Expr},
     types::{
         ChainType, Family, Hook, Policy, Priority, Rule, Set, SetDataType, SetElement, SetFlags,
-        SetKeyType,
+        SetKeyType, SetPolicy,
     },
     object::{Object, ObjectConfig},
 };
@@ -388,7 +388,8 @@ pub struct DeclaredChain {
     pub(crate) priority: Option<Priority>,
     pub(crate) policy: Option<Policy>,
     pub(crate) chain_type: Option<ChainType>,
-    pub(crate) device: Option<String>,
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
+    pub(crate) devices: Vec<String>,
     pub(crate) exclusive: bool,
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub(crate) comment: Option<String>,
@@ -421,8 +422,17 @@ impl DeclaredChain {
     pub fn chain_type(&self) -> Option<ChainType> {
         self.chain_type
     }
+    /// The device of a chain bound to one; see [`devices`](Self::devices)
+    /// for one bound to several.
     pub fn device(&self) -> Option<&str> {
-        self.device.as_deref()
+        match self.devices.as_slice() {
+            [one] => Some(one),
+            _ => None,
+        }
+    }
+    /// Every device the chain is bound to (#703).
+    pub fn devices(&self) -> &[String] {
+        &self.devices
     }
 
     /// Is this a base chain (one that hooks into the kernel
@@ -438,7 +448,7 @@ pub struct DeclaredChainBuilder {
     priority: Option<Priority>,
     policy: Option<Policy>,
     chain_type: Option<ChainType>,
-    device: Option<String>,
+    devices: Vec<String>,
     exclusive: bool,
     comment: Option<String>,
 }
@@ -451,7 +461,7 @@ impl DeclaredChainBuilder {
             priority: None,
             policy: None,
             chain_type: None,
-            device: None,
+            devices: Vec::new(),
             exclusive: false,
             comment: None,
         }
@@ -511,9 +521,10 @@ impl DeclaredChainBuilder {
     /// [`validate`](super::NftablesConfig::validate) checks; a recent kernel
     /// refuses it on any other hook (`EOPNOTSUPP`). Mirrors the imperative
     /// [`Chain::device`](crate::netlink::nftables::types::Chain::device)
-    /// setter.
+    /// setter: call it again to bind several devices (#703). A changed set
+    /// of devices recreates the chain.
     pub fn device(mut self, dev: impl Into<String>) -> Self {
-        self.device = Some(dev.into());
+        self.devices.push(dev.into());
         self
     }
 
@@ -524,7 +535,7 @@ impl DeclaredChainBuilder {
             priority: self.priority,
             policy: self.policy,
             chain_type: self.chain_type,
-            device: self.device,
+            devices: self.devices,
             exclusive: self.exclusive,
             comment: self.comment,
         }
@@ -564,6 +575,10 @@ pub struct DeclaredSet {
     pub(crate) elements: Vec<SetElement>,
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub(crate) comment: Option<String>,
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub(crate) policy: Option<SetPolicy>,
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
+    pub(crate) statements: Vec<ElementStatement>,
 }
 
 /// How a declared set's elements are reconciled with the kernel's.
@@ -629,13 +644,28 @@ impl DeclaredSet {
     pub fn elements(&self) -> &[SetElement] {
         &self.elements
     }
+    /// Declared backend policy, if any.
+    pub fn policy(&self) -> Option<SetPolicy> {
+        self.policy
+    }
+    /// The statements every element gets.
+    pub fn statements(&self) -> &[ElementStatement] {
+        &self.statements
+    }
 
     /// The elements as they are written: for an interval set, the declared
     /// ranges sorted and merged where they overlap or touch (sending
     /// overlapping ranges is an error from the kernel).
     pub(crate) fn wire_elements(&self) -> Vec<SetElement> {
         use crate::netlink::nftables::interval;
-        if self.merges_ranges() {
+        if self.merges_ranges() && self.key_type.is_host_order() {
+            // Merged as the numbers they are, in network order (#703).
+            let wire: Vec<SetElement> = self.elements.iter().map(SetElement::host_to_wire).collect();
+            interval::canonicalize_elements(&wire)
+                .iter()
+                .map(SetElement::wire_to_host)
+                .collect()
+        } else if self.merges_ranges() {
             interval::canonicalize_elements(&self.elements)
         } else {
             self.elements.clone()
@@ -674,6 +704,8 @@ impl DeclaredSet {
         set.data_type = self.data_type.clone();
         set.comment = self.comment.clone();
         set.owned = true;
+        set.policy = self.policy;
+        set.statements = self.statements.clone();
         set
     }
 }
@@ -691,6 +723,8 @@ pub struct DeclaredSetBuilder {
     data_type: Option<SetDataType>,
     elements: Vec<SetElement>,
     comment: Option<String>,
+    policy: Option<SetPolicy>,
+    statements: Vec<ElementStatement>,
 }
 
 impl DeclaredSetBuilder {
@@ -715,7 +749,32 @@ impl DeclaredSetBuilder {
             data_type: None,
             elements: Vec::new(),
             comment: None,
+            policy: None,
+            statements: Vec::new(),
         }
+    }
+
+    /// Backend policy — see
+    /// [`Set::policy`](crate::netlink::nftables::Set::policy). A changed
+    /// policy recreates the set; leaving it undeclared never counts as
+    /// drift.
+    pub fn policy(mut self, policy: SetPolicy) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+
+    /// A statement every element gets — see
+    /// [`Set::statement`](crate::netlink::nftables::Set::statement).
+    /// Changed statements recreate the set, and its elements start again
+    /// from zero.
+    pub fn statement(mut self, statement: impl Into<ElementStatement>) -> Self {
+        self.statements.push(statement.into());
+        self
+    }
+
+    /// A `counter` on every element: [`statement`](Self::statement).
+    pub fn counter(self) -> Self {
+        self.statement(ElementStatement::Counter)
     }
 
     /// A map — see [`Set::map`](crate::netlink::nftables::Set::map). A
@@ -859,6 +918,8 @@ impl DeclaredSetBuilder {
             data_type: self.data_type,
             elements: self.elements,
             comment: self.comment,
+            policy: self.policy,
+            statements: self.statements,
         }
     }
 }

@@ -1256,3 +1256,626 @@ async fn nflog_reads_what_a_log_group_rule_sends() -> nlink::Result<()> {
     assert_eq!(u16::from_be_bytes([ip[udp + 2], ip[udp + 3]]), 7990);
     Ok(())
 }
+
+/// The rule lines of `nft list chain <family> <table> <chain>`.
+fn listed_rules(ns: &TestNamespace, family: &str, table: &str, chain: &str) -> nlink::Result<Vec<String>> {
+    let out = ns.exec("nft", &["list", "chain", family, table, chain])?;
+    Ok(out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("table") && !l.starts_with("chain") && !l.starts_with("type") && *l != "}")
+        .map(str::to_string)
+        .collect())
+}
+
+/// #703: a `log`'s level, flags, snaplen and queue threshold, as nft
+/// writes them, decode typed, and nlink installs the same rules: `nft`
+/// lists the two chains alike.
+#[tokio::test]
+async fn log_options_read_and_write_as_nft_does() -> nlink::Result<()> {
+    use nlink::netlink::nftables::{LogExpr, LogFlags, LogLevel};
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "nft_log", "nf_log_syslog");
+
+    let ns = TestNamespace::new("nft-log")?;
+    let lines = [
+        "log prefix \"a \" level info flags tcp sequence,options",
+        "log level debug flags all",
+        "log flags skuid",
+        "log group 2 snaplen 64 queue-threshold 10",
+        "log group 3",
+    ];
+    let mut script = String::from("table inet t {\n chain a {\n");
+    for l in lines {
+        script.push_str(&format!("  {l}\n"));
+    }
+    script.push_str(" }\n chain b {\n }\n}\n");
+    let file = std::env::temp_dir().join(format!("nlink-log-{}.nft", std::process::id()));
+    std::fs::write(&file, &script).map_err(nlink::Error::from)?;
+    let installed = ns.exec("nft", &["-f", file.to_str().unwrap()]);
+    let _ = std::fs::remove_file(&file);
+    installed?;
+
+    let nft = ns.connection_for::<Nftables>()?;
+    let logs: Vec<LogExpr> = nft
+        .list_rules("t", Family::Inet)
+        .await?
+        .iter()
+        .flat_map(|r| r.expressions())
+        .filter_map(|e| match e {
+            RuleExpr::Log(l) => Some(l),
+            _ => None,
+        })
+        .collect();
+    let want = [
+        LogExpr::new()
+            .prefix("a ")
+            .level(LogLevel::Info)
+            .flags(LogFlags::TCP_SEQUENCE | LogFlags::TCP_OPTIONS),
+        LogExpr::new().level(LogLevel::Debug).flags(LogFlags::ALL),
+        LogExpr::new().flags(LogFlags::SKUID),
+        LogExpr::new().group(2).snaplen(64).queue_threshold(10),
+        LogExpr::new().group(3),
+    ];
+    assert_eq!(logs, want);
+
+    for log in want {
+        nft.add_rule(Rule::new("t", "b").family(Family::Inet).expr(log)).await?;
+    }
+    assert_eq!(
+        listed_rules(&ns, "inet", "t", "b")?,
+        listed_rules(&ns, "inet", "t", "a")?,
+        "nlink's chain b, nft's chain a"
+    );
+    Ok(())
+}
+
+/// #703: an nflog group's snaplen is what the listener gets: a 33-byte
+/// datagram logged with `snaplen 24` arrives cut to its IP header and
+/// ports.
+#[tokio::test]
+async fn a_log_snaplen_cuts_what_nflog_reads() -> nlink::Result<()> {
+    use nlink::netlink::Nflog;
+    use nlink::netlink::nftables::LogExpr;
+    use std::net::SocketAddr;
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "nft_log", "nfnetlink_log", "veth");
+
+    let pair = crate::common::topo::NsPair::new("nflogsl", 97).await?;
+    let b = NftablesConfig::new().table("f", Family::Inet, |t| {
+        t.chain("in", |c| {
+            c.hook(Hook::Input).priority(Priority::Filter).chain_type(ChainType::Filter)
+        })
+        .rule_keyed("in", "log", |r| {
+            r.match_udp_dport(7991).expr(LogExpr::new().group(6).prefix("cut: ").snaplen(24))
+        })
+    });
+    let nft = pair.b.connection_for::<Nftables>()?;
+    b.diff(&nft).await?.apply(&nft).await?;
+    assert!(b.diff(&nft).await?.is_empty(), "the declared snaplen does not converge");
+
+    let nflog = pair.b.connection_for::<Nflog>()?;
+    nflog.bind_group(6, 0xffff).await?;
+    let mut packets = nflog.events().await;
+    let delivered = crate::common::traffic::deliver_udp(&pair.a, &pair.b, SocketAddr::from((pair.b_addr, 7991)), 1);
+    assert_eq!(delivered, 1);
+    let packet = crate::common::events::expect_event(
+        &mut packets,
+        Duration::from_secs(5),
+        "the logged datagram",
+        |p: &nlink::netlink::nflog::NflogPacket| p.prefix.as_deref() == Some("cut: "),
+    )
+    .await?;
+    assert_eq!(packet.payload.len(), 24, "the snaplen");
+    assert_eq!(u16::from_be_bytes([packet.payload[22], packet.payload[23]]), 7991, "up to the ports");
+    Ok(())
+}
+
+/// #703: header writes as nft writes them. nft installs eight `set`
+/// statements in one chain, nlink the same writes in another; `nft` lists
+/// the two alike, and nlink decodes nft's typed.
+#[tokio::test]
+async fn header_writes_read_and_write_as_nft_does() -> nlink::Result<()> {
+    use nlink::netlink::nftables::HeaderWrite;
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let ns = TestNamespace::new("nft-pset")?;
+    let pairs: [(&str, HeaderWrite); 8] = [
+        ("ip dscp set cs1", HeaderWrite::IpDscp(8)),
+        ("ip ttl set 64", HeaderWrite::IpTtl(64)),
+        ("ip saddr set 10.0.0.9", HeaderWrite::IpSaddr(Ipv4Addr::new(10, 0, 0, 9))),
+        ("ip6 dscp set af21", HeaderWrite::Ip6Dscp(18)),
+        ("ip6 hoplimit set 9", HeaderWrite::Ip6HopLimit(9)),
+        ("ip6 daddr set 2001:db8::1", HeaderWrite::Ip6Daddr("2001:db8::1".parse().unwrap())),
+        ("tcp dport set 8080", HeaderWrite::TcpDport(8080)),
+        ("udp sport set 53", HeaderWrite::UdpSport(53)),
+    ];
+    let mut script = String::from("table inet t {\n chain a { type filter hook output priority 0;\n");
+    for (line, _) in &pairs {
+        script.push_str(&format!("  {line}\n"));
+    }
+    script.push_str(" }\n chain b { type filter hook output priority 0; }\n}\n");
+    let file = std::env::temp_dir().join(format!("nlink-pset-{}.nft", std::process::id()));
+    std::fs::write(&file, &script).map_err(nlink::Error::from)?;
+    let installed = ns.exec("nft", &["-f", file.to_str().unwrap()]);
+    let _ = std::fs::remove_file(&file);
+    installed?;
+
+    let nft = ns.connection_for::<Nftables>()?;
+    let writes = nft
+        .list_rules("t", Family::Inet)
+        .await?
+        .iter()
+        .flat_map(|r| r.expressions())
+        .filter(|e| matches!(e, RuleExpr::PayloadSet { .. }))
+        .count();
+    assert_eq!(writes, pairs.len(), "nft's writes decode typed");
+    for (_, write) in pairs {
+        nft.add_rule(Rule::new("t", "b").family(Family::Inet).set_header(write)).await?;
+    }
+    assert_eq!(
+        listed_rules(&ns, "inet", "t", "b")?,
+        listed_rules(&ns, "inet", "t", "a")?,
+        "nlink's chain b, nft's chain a"
+    );
+    Ok(())
+}
+
+/// #703: a header write acts on the packet, checksums included. `a`
+/// sends with its checksums computed (no tx offload) and `b` checks them
+/// (no rx offload, which would mark them good unread); `b`'s prerouting
+/// moves datagrams for port 7992 to 7993, and they arrive there only if
+/// the write updated the UDP checksum for the new port.
+#[tokio::test]
+async fn a_port_write_moves_the_datagram() -> nlink::Result<()> {
+    use nlink::netlink::Ethtool;
+    use nlink::netlink::nftables::HeaderWrite;
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "veth");
+
+    let pair = crate::common::topo::NsPair::new("nftpset", 96).await?;
+    let ethtool = pair.a.connection_for_async::<Ethtool>().await?;
+    ethtool.set_features(pair.a_if, |f| f.disable("tx-checksum-ip-generic")).await?;
+    let ethtool = pair.b.connection_for_async::<Ethtool>().await?;
+    ethtool.set_features(pair.b_if, |f| f.disable("rx-checksum")).await?;
+
+    let b = NftablesConfig::new().table("w", Family::Inet, |t| {
+        t.chain("pre", |c| {
+            c.hook(Hook::Prerouting).priority(Priority::Filter).chain_type(ChainType::Filter)
+        })
+        .rule_keyed("pre", "move", |r| {
+            r.match_udp_dport(7992).set_header(HeaderWrite::UdpDport(7993))
+        })
+    });
+    let nft = pair.b.connection_for::<Nftables>()?;
+    b.diff(&nft).await?.apply(&nft).await?;
+    assert!(b.diff(&nft).await?.is_empty(), "the declared write does not converge");
+    assert_eq!(arrivals(&pair, 7992, 7993, 3)?.len(), 3, "rewritten to 7993");
+    assert_eq!(arrivals(&pair, 7992, 7992, 3)?.len(), 0, "nothing left for 7992");
+    Ok(())
+}
+
+/// #703: `queue`, `dup` and `fwd` as nft writes them: nft installs each in
+/// one chain, nlink in another, and `nft` lists the two alike.
+#[tokio::test]
+async fn queue_dup_and_fwd_read_and_write_as_nft_does() -> nlink::Result<()> {
+    use nlink::netlink::nftables::{QueueExpr, QueueFlags};
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "nft_queue", "nft_dup_ipv4", "nft_dup_netdev", "nft_fwd_netdev", "dummy");
+
+    let ns = TestNamespace::new("nft-qdf")?;
+    ns.add_dummy("d0")?;
+    let route = ns.connection()?;
+    let d0 = route.get_link_by_name("d0").await?.expect("d0").ifindex();
+    let script = "table ip t {
+        chain a { type filter hook output priority 0;
+            queue num 3 bypass
+            queue num 1-4 fanout
+            queue flags bypass,fanout num 2-5
+            dup to 10.0.0.1 device \"d0\"
+            dup to 10.0.0.2
+        }
+        chain b { type filter hook output priority 0; }
+    }
+    table netdev n {
+        chain a { type filter hook ingress device \"d0\" priority 0;
+            fwd to \"d0\"
+            fwd ip to 10.0.0.1 device \"d0\"
+            dup to \"d0\"
+        }
+        chain b { type filter hook ingress device \"d0\" priority 0; }
+    }";
+    let file = std::env::temp_dir().join(format!("nlink-qdf-{}.nft", std::process::id()));
+    std::fs::write(&file, script).map_err(nlink::Error::from)?;
+    let installed = ns.exec("nft", &["-f", file.to_str().unwrap()]);
+    let _ = std::fs::remove_file(&file);
+    installed?;
+
+    let nft = ns.connection_for::<Nftables>()?;
+    let ip = |r: Rule| r.family(Family::Ip);
+    for rule in [
+        Rule::new("t", "b").expr(QueueExpr::num(3).flags(QueueFlags::BYPASS)),
+        Rule::new("t", "b").expr(QueueExpr::range(1, 4).flags(QueueFlags::FANOUT)),
+        Rule::new("t", "b").expr(QueueExpr::range(2, 5).flags(QueueFlags::BYPASS | QueueFlags::FANOUT)),
+        Rule::new("t", "b").dup_to(Ipv4Addr::new(10, 0, 0, 1).into(), Some(d0)),
+        Rule::new("t", "b").dup_to(Ipv4Addr::new(10, 0, 0, 2).into(), None),
+    ] {
+        nft.add_rule(ip(rule)).await?;
+    }
+    let netdev = |r: Rule| r.family(Family::Netdev);
+    for rule in [
+        Rule::new("n", "b").fwd_to(d0),
+        Rule::new("n", "b").fwd_ip_to(Ipv4Addr::new(10, 0, 0, 1).into(), d0),
+        Rule::new("n", "b").dup_to_device(d0),
+    ] {
+        nft.add_rule(netdev(rule)).await?;
+    }
+    for (family, table) in [("ip", "t"), ("netdev", "n")] {
+        assert_eq!(
+            listed_rules(&ns, family, table, "b")?,
+            listed_rules(&ns, family, table, "a")?,
+            "{family} {table}: nlink's chain b, nft's chain a"
+        );
+    }
+    let decoded = nft
+        .list_rules("t", Family::Ip)
+        .await?
+        .iter()
+        .chain(nft.list_rules("n", Family::Netdev).await?.iter())
+        .flat_map(|r| r.expressions())
+        .filter(|e| matches!(e, RuleExpr::Queue(_) | RuleExpr::Dup { .. } | RuleExpr::Fwd { .. }))
+        .count();
+    assert_eq!(decoded, 2 * 8, "both chains decode typed");
+    Ok(())
+}
+
+/// #703: `queue`, `dup` and `fwd` act on traffic. A datagram queued with
+/// no program listening is dropped, and with `bypass` it is not; one
+/// duplicated to `b` arrives twice; one forwarded at `b`'s ingress to a
+/// dummy never reaches the socket and leaves the dummy instead.
+#[tokio::test]
+async fn queue_dup_and_fwd_act_on_traffic() -> nlink::Result<()> {
+    use nlink::netlink::nftables::{QueueExpr, QueueFlags};
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "nft_queue", "nfnetlink_queue", "nft_dup_ipv4", "nft_fwd_netdev", "veth", "dummy");
+
+    let pair = crate::common::topo::NsPair::new("nftqdf", 95).await?;
+    let b_route = pair.b.connection()?;
+    b_route.add_link(DummyLink::new("x0")).await?;
+    b_route.set_link_up("x0").await?;
+    let x0 = b_route.get_link_by_name("x0").await?.expect("x0").ifindex();
+    let b = NftablesConfig::new()
+        .table("q", Family::Inet, |t| {
+            t.chain("in", |c| c.hook(Hook::Input).priority(Priority::Filter).chain_type(ChainType::Filter))
+                .rule_keyed("in", "drop-queue", |r| r.match_udp_dport(7997).expr(QueueExpr::num(7)))
+                .rule_keyed("in", "bypass-queue", |r| {
+                    r.match_udp_dport(7996).expr(QueueExpr::num(8).flags(QueueFlags::BYPASS))
+                })
+        })
+        .table("f", Family::Netdev, |t| {
+            t.chain("in", |c| {
+                c.hook(Hook::NetdevIngress).device(pair.b_if).priority(Priority::Filter)
+            })
+            .rule_keyed("in", "fwd", |r| r.match_udp_dport(7999).fwd_to(x0))
+        });
+    let nft = pair.b.connection_for::<Nftables>()?;
+    b.diff(&nft).await?.apply(&nft).await?;
+    assert!(b.diff(&nft).await?.is_empty(), "the declared statements do not converge");
+    let a = NftablesConfig::new().table("d", Family::Ip, |t| {
+        t.chain("out", |c| c.hook(Hook::Output).priority(Priority::Filter).chain_type(ChainType::Filter))
+            .rule_keyed("out", "dup", |r| {
+                r.match_udp_dport(7998).dup_to(pair.b_addr.into(), Some(pair.a_ifindex))
+            })
+    });
+    let a_nft = pair.a.connection_for::<Nftables>()?;
+    a.diff(&a_nft).await?.apply(&a_nft).await?;
+
+    assert_eq!(arrivals(&pair, 7997, 7997, 3)?.len(), 0, "queued with no listener: dropped");
+    assert_eq!(arrivals(&pair, 7996, 7996, 3)?.len(), 3, "queued with bypass: accepted");
+    assert_eq!(arrivals(&pair, 7998, 7998, 3)?.len(), 6, "each datagram and its copy");
+    let before = b_route.get_link_by_name("x0").await?.expect("x0").stats().map_or(0, |s| s.tx_packets());
+    assert_eq!(arrivals(&pair, 7999, 7999, 3)?.len(), 0, "forwarded away at ingress");
+    let after = b_route.get_link_by_name("x0").await?.expect("x0").stats().map_or(0, |s| s.tx_packets());
+    assert!(after >= before + 3, "x0 sent {} of the 3", after - before);
+    Ok(())
+}
+
+/// #703: `numgen`, `jhash` and `symhash` as nft writes them: nft installs
+/// six statements in one chain, nlink in another, and `nft` lists them
+/// alike.
+#[tokio::test]
+async fn numgen_and_hash_read_and_write_as_nft_does() -> nlink::Result<()> {
+    use nlink::netlink::nftables::{Generated, NumgenKind, PacketField};
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "nft_numgen", "nft_hash", "nft_ct");
+
+    let ns = TestNamespace::new("nft-ngh")?;
+    let lines = [
+        "meta mark set numgen inc mod 2",
+        "meta mark set numgen random mod 10 offset 5",
+        "meta mark set jhash ip saddr mod 4 seed 0xdead offset 2",
+        "meta mark set jhash ip saddr . tcp dport mod 8",
+        "meta mark set symhash mod 2",
+        "ct mark set numgen inc mod 3 offset 100",
+    ];
+    // An inet table, where nft guards each address with `meta nfproto` as
+    // nlink does in every family; nft 1.0.6 cannot list a guarded hash
+    // input in an ip table, where nft writes none.
+    let mut script = String::from("table inet t {\n chain a { type filter hook output priority 0;\n");
+    for l in lines {
+        script.push_str(&format!("  {l}\n"));
+    }
+    script.push_str(" }\n chain b { type filter hook output priority 0; }\n}\n");
+    let file = std::env::temp_dir().join(format!("nlink-ngh-{}.nft", std::process::id()));
+    std::fs::write(&file, &script).map_err(nlink::Error::from)?;
+    let installed = ns.exec("nft", &["-f", file.to_str().unwrap()]);
+    let _ = std::fs::remove_file(&file);
+    installed?;
+
+    let nft = ns.connection_for::<Nftables>()?;
+    let mark = |g| Rule::new("t", "b").family(Family::Inet).generate(g).set_meta_from(MetaKey::Mark);
+    for rule in [
+        mark(Generated::Numgen { kind: NumgenKind::Incremental, modulus: 2, offset: 0 }),
+        mark(Generated::Numgen { kind: NumgenKind::Random, modulus: 10, offset: 5 }),
+        mark(Generated::Jhash { fields: vec![PacketField::Ip4Saddr], modulus: 4, seed: Some(0xdead), offset: 2 }),
+        mark(Generated::Jhash {
+            fields: vec![PacketField::Ip4Saddr, PacketField::TcpDport],
+            modulus: 8,
+            seed: None,
+            offset: 0,
+        }),
+        mark(Generated::Symhash { modulus: 2, offset: 0 }),
+        Rule::new("t", "b")
+            .family(Family::Inet)
+            .generate(Generated::Numgen { kind: NumgenKind::Incremental, modulus: 3, offset: 100 })
+            .set_ct_from(nlink::netlink::nftables::CtKey::Mark),
+    ] {
+        nft.add_rule(rule).await?;
+    }
+    assert_eq!(
+        listed_rules(&ns, "inet", "t", "b")?,
+        listed_rules(&ns, "inet", "t", "a")?,
+        "nlink's chain b, nft's chain a"
+    );
+    let unknown = nft
+        .list_rules("t", Family::Inet)
+        .await?
+        .iter()
+        .flat_map(|r| r.expressions())
+        .filter(|e| matches!(e, RuleExpr::Unknown { .. }))
+        .count();
+    assert_eq!(unknown, 0, "every numgen and hash decodes typed");
+    Ok(())
+}
+
+/// #703: a `numgen inc mod 2` mark alternates, and a `jhash … mod 1 offset
+/// 7` mark is 7 for every packet: counters on each mark see it.
+#[tokio::test]
+async fn numgen_and_hash_marks_packets() -> nlink::Result<()> {
+    use nlink::netlink::nftables::{Generated, NumgenKind, PacketField};
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "nft_numgen", "nft_hash", "dummy");
+
+    let ns = TestNamespace::new("nft-nghtr")?;
+    lo_up(&ns).await?;
+    let _route = add_dummy(&ns).await?;
+    let cfg = NftablesConfig::new().table("t", Family::Ip, |t| {
+        t.chain("out", |c| c.hook(Hook::Output).priority(Priority::Mangle).chain_type(ChainType::Filter))
+            .rule_keyed("out", "gen", |r| {
+                r.match_udp_dport(7990)
+                    .generate(Generated::Numgen { kind: NumgenKind::Incremental, modulus: 2, offset: 0 })
+                    .set_meta_from(MetaKey::Mark)
+            })
+            .rule_keyed("out", "hash", |r| {
+                r.match_udp_dport(7991)
+                    .generate(Generated::Jhash { fields: vec![PacketField::Ip4Saddr], modulus: 1, seed: None, offset: 7 })
+                    .set_meta_from(MetaKey::Mark)
+            })
+            .rule_keyed("out", "m0", |r| r.match_udp_dport(7990).match_mark(0).counter())
+            .rule_keyed("out", "m1", |r| r.match_udp_dport(7990).match_mark(1).counter())
+            .rule_keyed("out", "m7", |r| r.match_udp_dport(7991).match_mark(7).counter())
+    });
+    let nft = ns.connection_for::<Nftables>()?;
+    cfg.diff(&nft).await?.apply(&nft).await?;
+    assert!(cfg.diff(&nft).await?.is_empty(), "the declared generators do not converge");
+    let to = |port| std::net::SocketAddr::from((Ipv4Addr::new(10, 98, 0, 2), port));
+    send_udp(&ns, &[to(7990)], 4);
+    send_udp(&ns, &[to(7991)], 3);
+    let count = |nth| rule_packets(&nft, "t", Family::Ip, "out", nth);
+    assert_eq!((count(2).await?, count(3).await?), (2, 2), "inc mod 2 alternates");
+    assert_eq!(count(4).await?, 3, "jhash mod 1 offset 7 is 7");
+    Ok(())
+}
+
+/// #703: `tproxy`, `socket` and `synproxy` as nft writes them: nft
+/// installs each in one chain, nlink in another, and `nft` lists them
+/// alike.
+#[tokio::test]
+async fn tproxy_socket_and_synproxy_read_and_write_as_nft_does() -> nlink::Result<()> {
+    use nlink::netlink::nftables::{SocketMatch, SynproxyExpr};
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "nft_tproxy", "nft_socket", "nft_synproxy");
+
+    let ns = TestNamespace::new("nft-tps")?;
+    let script = "table ip t {
+        chain a { type filter hook prerouting priority -150;
+            tcp dport 80 tproxy to 10.0.0.1:8080
+            tcp dport 81 tproxy to :8081
+            socket transparent 1 meta mark set 1
+            socket wildcard 0 accept
+            socket mark 7 accept
+        }
+        chain b { type filter hook prerouting priority -150; }
+        chain sa { type filter hook input priority 0;
+            synproxy mss 1460 wscale 7 timestamp sack-perm
+            synproxy mss 1400
+        }
+        chain sb { type filter hook input priority 0; }
+    }
+    table inet i {
+        chain a { type filter hook prerouting priority -150;
+            tcp dport 82 tproxy ip to 10.0.0.1:8082
+        }
+        chain b { type filter hook prerouting priority -150; }
+    }";
+    let file = std::env::temp_dir().join(format!("nlink-tps-{}.nft", std::process::id()));
+    std::fs::write(&file, script).map_err(nlink::Error::from)?;
+    let installed = ns.exec("nft", &["-f", file.to_str().unwrap()]);
+    let _ = std::fs::remove_file(&file);
+    installed?;
+
+    let nft = ns.connection_for::<Nftables>()?;
+    let ten = Some(Ipv4Addr::new(10, 0, 0, 1).into());
+    let r = |table: &str, chain: &str, family| Rule::new(table, chain).family(family);
+    for rule in [
+        r("t", "b", Family::Ip).match_tcp_dport(80).tproxy(Family::Ip, ten, Some(8080)),
+        r("t", "b", Family::Ip).match_tcp_dport(81).tproxy(Family::Ip, None, Some(8081)),
+        r("t", "b", Family::Ip).match_socket(SocketMatch::Transparent(true)).set_mark(1),
+        r("t", "b", Family::Ip).match_socket(SocketMatch::Wildcard(false)).accept(),
+        r("t", "b", Family::Ip).match_socket(SocketMatch::Mark(7)).accept(),
+        r("t", "sb", Family::Ip).expr(SynproxyExpr::new().mss(1460).wscale(7).timestamp().sack_perm()),
+        r("t", "sb", Family::Ip).expr(SynproxyExpr::new().mss(1400)),
+        r("i", "b", Family::Inet).match_tcp_dport(82).tproxy(Family::Inet, ten, Some(8082)),
+    ] {
+        nft.add_rule(rule).await?;
+    }
+    for (family, table, ours, theirs) in [("ip", "t", "b", "a"), ("ip", "t", "sb", "sa"), ("inet", "i", "b", "a")] {
+        assert_eq!(
+            listed_rules(&ns, family, table, ours)?,
+            listed_rules(&ns, family, table, theirs)?,
+            "{family} {table}: nlink's {ours}, nft's {theirs}"
+        );
+    }
+    Ok(())
+}
+
+/// #703: `tproxy` hands a datagram to a transparent socket on another
+/// port: one sent to `b`'s port 7980 arrives at its `IP_TRANSPARENT`
+/// socket on 7981, which nothing else would deliver it to.
+#[tokio::test]
+async fn tproxy_hands_the_datagram_to_a_transparent_socket() -> nlink::Result<()> {
+    use std::net::{SocketAddr, UdpSocket};
+    use std::os::fd::AsRawFd;
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "nft_tproxy", "veth");
+
+    let pair = crate::common::topo::NsPair::new("nfttp", 94).await?;
+    let b = NftablesConfig::new().table("t", Family::Ip, |t| {
+        t.chain("pre", |c| c.hook(Hook::Prerouting).priority(Priority::Mangle).chain_type(ChainType::Filter))
+            .rule_keyed("pre", "tproxy", |r| r.match_udp_dport(7980).tproxy(Family::Ip, None, Some(7981)))
+    });
+    let nft = pair.b.connection_for::<Nftables>()?;
+    b.diff(&nft).await?.apply(&nft).await?;
+    assert!(b.diff(&nft).await?.is_empty(), "the declared tproxy does not converge");
+
+    let socket = crate::common::traffic::in_ns(&pair.b, || -> std::io::Result<UdpSocket> {
+        let s = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 7981))?;
+        let on: libc::c_int = 1;
+        // SAFETY: a valid fd and a c_int option of its size.
+        let rc = unsafe {
+            libc::setsockopt(
+                s.as_raw_fd(),
+                libc::SOL_IP,
+                libc::IP_TRANSPARENT,
+                (&on as *const libc::c_int).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(s)
+    })
+    .map_err(nlink::Error::from)?;
+    socket.set_read_timeout(Some(Duration::from_millis(500))).map_err(nlink::Error::from)?;
+    send_udp(&pair.a, &[SocketAddr::from((pair.b_addr, 7980))], 3);
+    let mut got = 0;
+    let mut buf = [0u8; 64];
+    while socket.recv_from(&mut buf).is_ok() {
+        got += 1;
+    }
+    assert_eq!(got, 3, "sent to 7980, delivered to the transparent socket on 7981");
+    Ok(())
+}
+
+/// #703: `osf` as nft writes it — a name, `ttl skip`, `ttl loose` with the
+/// version — decodes typed, and nlink installs the same rules: `nft` lists
+/// the two chains alike.
+#[tokio::test]
+async fn osf_reads_and_writes_as_nft_does() -> nlink::Result<()> {
+    use nlink::netlink::nftables::OsfTtl;
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "nft_osf");
+
+    let ns = TestNamespace::new("nft-osf")?;
+    let script = "table inet t {
+        chain a { type filter hook input priority 0;
+            osf name \"unknown\" counter
+            osf ttl skip name \"Linux\" counter
+            osf ttl loose version \"Linux:3.11\" counter
+        }
+        chain b { type filter hook input priority 0; }
+    }";
+    let file = std::env::temp_dir().join(format!("nlink-osf-{}.nft", std::process::id()));
+    std::fs::write(&file, script).map_err(nlink::Error::from)?;
+    let installed = ns.exec("nft", &["-f", file.to_str().unwrap()]);
+    let _ = std::fs::remove_file(&file);
+    installed?;
+
+    let nft = ns.connection_for::<Nftables>()?;
+    let r = || Rule::new("t", "b").family(Family::Inet);
+    for rule in [
+        r().match_osf("unknown", OsfTtl::Exact, false).counter(),
+        r().match_osf("Linux", OsfTtl::Skip, false).counter(),
+        r().match_osf("Linux:3.11", OsfTtl::Loose, true).counter(),
+    ] {
+        nft.add_rule(rule).await?;
+    }
+    assert_eq!(
+        listed_rules(&ns, "inet", "t", "b")?,
+        listed_rules(&ns, "inet", "t", "a")?,
+        "nlink's chain b, nft's chain a"
+    );
+    let unknown = nft
+        .list_rules("t", Family::Inet)
+        .await?
+        .iter()
+        .flat_map(|r| r.expressions())
+        .filter(|e| matches!(e, RuleExpr::Unknown { .. }))
+        .count();
+    assert_eq!(unknown, 0, "every osf decodes typed");
+    Ok(())
+}
+
+/// #703: with no fingerprints loaded, `osf` names every TCP SYN
+/// `unknown`, and looks at nothing else: three SYNs to a closed port count
+/// three on `osf name "unknown"`, none on `osf name "Linux"`, and the RSTs
+/// that answer them count nowhere. Declared, the rules converge.
+#[tokio::test]
+async fn osf_names_each_syn() -> nlink::Result<()> {
+    use nlink::netlink::nftables::OsfTtl;
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables", "nft_osf");
+
+    let ns = TestNamespace::new("nft-osftr")?;
+    lo_up(&ns).await?;
+    let nft = ns.connection_for::<Nftables>()?;
+    let cfg = NftablesConfig::new().table("t", Family::Inet, |t| {
+        t.chain("in", |c| {
+            c.hook(Hook::Input)
+                .priority(Priority::Filter)
+                .chain_type(ChainType::Filter)
+        })
+        .rule_keyed("in", "unknown", |r| r.match_osf("unknown", OsfTtl::Exact, false).counter())
+        .rule_keyed("in", "linux", |r| r.match_osf("Linux", OsfTtl::Skip, false).counter())
+    });
+    cfg.diff(&nft).await?.apply(&nft).await?;
+    let again = cfg.diff(&nft).await?;
+    assert!(again.is_empty(), "second diff must be empty: {again}");
+
+    send_tcp_syns(&ns, &["127.0.0.1:9"], 3, Duration::from_millis(200));
+    assert_eq!(rule_packets(&nft, "t", Family::Inet, "in", 0).await?, 3);
+    assert_eq!(rule_packets(&nft, "t", Family::Inet, "in", 1).await?, 0);
+    Ok(())
+}

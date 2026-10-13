@@ -26,6 +26,22 @@ pub enum Expr {
     },
     /// Load immediate value into a register.
     Immediate { dreg: Register, data: Vec<u8> },
+    /// Write a register into the packet (`ip dscp set`, `tcp dport set`)
+    /// and update the checksums the bytes are in (#703). See
+    /// [`Rule::set_header`].
+    PayloadSet {
+        sreg: Register,
+        base: PayloadBase,
+        offset: u32,
+        len: u32,
+        /// The checksum in the same header that the write updates.
+        csum: PayloadCsum,
+        /// Where that checksum is, from the start of the header.
+        csum_offset: u32,
+        /// The transport checksum covers the bytes through its
+        /// pseudo-header (an address), so it is updated too.
+        l4_pseudo_header: bool,
+    },
     /// Load an extension header / option field into a register
     /// (`tcp option maxseg size`). The rule stops matching when the
     /// header or option is absent.
@@ -95,6 +111,65 @@ pub enum Expr {
     },
     /// Log the packet — see [`LogExpr`].
     Log(LogExpr),
+    /// Send the packet to a userspace queue — see [`QueueExpr`] (#703).
+    Queue(QueueExpr),
+    /// Hand the packet to a local socket at the address and port in the
+    /// registers, keeping its destination (#703). See [`Rule::tproxy`].
+    Tproxy {
+        /// `NFPROTO_IPV4`, `NFPROTO_IPV6`, or 0 (an inet table, either).
+        family: u8,
+        sreg_addr: Option<Register>,
+        sreg_port: Option<Register>,
+    },
+    /// Load something about the packet's local socket (#703). See
+    /// [`Rule::match_socket`].
+    Socket {
+        dreg: Register,
+        key: SocketKey,
+    },
+    /// Answer a SYN for the server with a SYN cookie (#703) — see
+    /// [`SynproxyExpr`].
+    Synproxy(SynproxyExpr),
+    /// The operating system a TCP SYN's fingerprint names, into `dreg`
+    /// (#703) — see [`Rule::match_osf`].
+    Osf {
+        dreg: Register,
+        ttl: OsfTtl,
+        version: bool,
+    },
+    /// A number into `dreg`: counting up, or at random, modulo `modulus`,
+    /// plus `offset` (#703). See [`Rule::generate`].
+    Numgen {
+        dreg: Register,
+        kind: NumgenKind,
+        modulus: u32,
+        offset: u32,
+    },
+    /// A hash into `dreg`, modulo `modulus`, plus `offset` (#703): Jenkins
+    /// over `len` bytes from `sreg` with `seed` (the kernel's own when
+    /// `None`), or the flow's symmetric hash. See [`Rule::generate`].
+    Hash {
+        dreg: Register,
+        kind: HashKind,
+        sreg: Option<Register>,
+        len: u32,
+        modulus: u32,
+        seed: Option<u32>,
+        offset: u32,
+    },
+    /// Send a copy of the packet out: to the gateway in `sreg_addr`, out of
+    /// the device in `sreg_dev` (#703). See [`Rule::dup_to`].
+    Dup {
+        sreg_addr: Option<Register>,
+        sreg_dev: Option<Register>,
+    },
+    /// Send the packet out of the device in `sreg_dev` (netdev family), to
+    /// the next hop in `sreg_addr` of family `nfproto` (#703). See
+    /// [`Rule::fwd_to`].
+    Fwd {
+        sreg_dev: Register,
+        sreg_addr: Option<(Register, u8)>,
+    },
     /// Connection tracking.
     Ct { dreg: Register, key: CtKey },
     /// Write a register into the packet's conntrack entry
@@ -384,6 +459,14 @@ impl DynsetOp {
 /// for an element timeout. The rule continues when the update succeeds,
 /// and stops when it cannot (the set is full) — or the other way round
 /// with [`invert`](Self::invert).
+///
+/// Per-element [`statement`](Self::statement)s give each element its own
+/// state: `add @seen { ip saddr counter }` counts per address, and `update
+/// @flood { ip saddr limit rate over 10/second }` continues only for an
+/// address over its own rate (#703). They must be stateful — counter,
+/// limit, quota, connlimit — and the set dynamic. A set that declares its
+/// own element statements gives them to every element instead; then give
+/// the dynset none, or the same ones, which the kernel does not echo.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DynsetExpr {
@@ -400,6 +483,8 @@ pub struct DynsetExpr {
     /// Match when the update fails rather than when it succeeds
     /// (`NFT_DYNSET_F_INV`).
     pub invert: bool,
+    /// Per-element statements, each element its own (#703).
+    pub statements: Vec<ElementStatement>,
 }
 
 impl DynsetExpr {
@@ -412,7 +497,21 @@ impl DynsetExpr {
             sreg_data: None,
             timeout: None,
             invert: false,
+            statements: Vec::new(),
         }
+    }
+
+    /// Give each element its own `statement`, evaluated on every packet
+    /// that adds or updates it. A limit or quota stops the rule as it would
+    /// on its own.
+    pub fn statement(mut self, statement: impl Into<ElementStatement>) -> Self {
+        self.statements.push(statement.into());
+        self
+    }
+
+    /// A per-element `counter`.
+    pub fn counter(self) -> Self {
+        self.statement(ElementStatement::Counter)
     }
 
     /// Give the element this timeout instead of the set's default. The set
@@ -439,6 +538,128 @@ impl DynsetExpr {
 impl From<DynsetExpr> for Expr {
     fn from(e: DynsetExpr) -> Self {
         Expr::Dynset(e)
+    }
+}
+
+/// A statement a set element carries of its own (#703), from a
+/// [`DynsetExpr`] that adds it: the stateful expressions
+/// `nft_set_elem_expr_alloc` accepts.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ElementStatement {
+    /// `counter`: the element's packets and bytes.
+    Counter,
+    /// `limit rate …`: the element's own rate.
+    Limit(LimitExpr),
+    /// `quota …`: the element's own byte budget.
+    Quota(QuotaExpr),
+    /// `ct count [over] N`: the element's own connection count.
+    Connlimit {
+        /// Connections.
+        count: u32,
+        /// Match over `count` instead of up to it.
+        over: bool,
+    },
+}
+
+impl From<LimitExpr> for ElementStatement {
+    fn from(limit: LimitExpr) -> Self {
+        Self::Limit(limit)
+    }
+}
+
+impl From<QuotaExpr> for ElementStatement {
+    fn from(quota: QuotaExpr) -> Self {
+        Self::Quota(quota)
+    }
+}
+
+impl ElementStatement {
+    /// The statement a decoded expression is, if it is one; its live state
+    /// (a counter's packets, a quota's use) is dropped.
+    pub(crate) fn from_rule_expr(expr: &RuleExpr) -> Option<Self> {
+        match expr {
+            RuleExpr::Counter { .. } => Some(Self::Counter),
+            RuleExpr::Limit(limit) => Some(Self::Limit(limit.clone())),
+            RuleExpr::Quota { bytes, over, .. } => {
+                let quota = QuotaExpr::new(*bytes);
+                Some(Self::Quota(if *over { quota.over() } else { quota }))
+            }
+            RuleExpr::Connlimit { count, over } => Some(Self::Connlimit {
+                count: *count,
+                over: *over,
+            }),
+            _ => None,
+        }
+    }
+
+    /// As a template the kernel dumps it: its state at zero.
+    pub(crate) fn as_dumped(&self) -> RuleExpr {
+        match self.kernel_form() {
+            Self::Counter => RuleExpr::Counter {
+                packets: 0,
+                bytes: 0,
+            },
+            Self::Limit(limit) => RuleExpr::Limit(limit),
+            Self::Quota(quota) => RuleExpr::Quota {
+                bytes: quota.bytes,
+                consumed: 0,
+                over: quota.over,
+                depleted: false,
+            },
+            Self::Connlimit { count, over } => RuleExpr::Connlimit { count, over },
+        }
+    }
+
+    /// As the kernel keeps it: a packet limit's burst of 0 is its 5.
+    pub(crate) fn kernel_form(&self) -> Self {
+        match self {
+            Self::Limit(limit) if limit.kind == LimitKind::Packets && limit.burst == 0 => {
+                Self::Limit(limit.clone().burst(5))
+            }
+            other => other.clone(),
+        }
+    }
+}
+
+/// One statement in `nest` (an `NFTA_*_EXPR`), several in `list` (an
+/// `NFTA_*_EXPRESSIONS` of `NFTA_LIST_ELEM`): how a set and a dynset carry
+/// them.
+pub(crate) fn write_statements(
+    builder: &mut MessageBuilder,
+    statements: &[ElementStatement],
+    nest: u16,
+    list: u16,
+    form: WireForm,
+) {
+    match statements {
+        [] => {}
+        [one] => {
+            let at = builder.nest_start(nest | 0x8000);
+            write_expr_body(builder, &one.clone().into(), form);
+            builder.nest_end(at);
+        }
+        several => {
+            let at = builder.nest_start(list | 0x8000);
+            for statement in several {
+                write_expr(builder, &statement.clone().into(), form);
+            }
+            builder.nest_end(at);
+        }
+    }
+}
+
+impl From<ElementStatement> for Expr {
+    fn from(statement: ElementStatement) -> Self {
+        match statement {
+            ElementStatement::Counter => Expr::Counter,
+            ElementStatement::Limit(limit) => Expr::Limit(limit),
+            ElementStatement::Quota(quota) => Expr::Quota(quota),
+            ElementStatement::Connlimit { count, over } => Expr::Connlimit { count, over },
+        }
     }
 }
 
@@ -516,13 +737,29 @@ impl From<LimitExpr> for Expr {
 /// group has no such limit. And the logger is the `nf_log_syslog` module:
 /// where it cannot be loaded, the rule — and the whole batch with it —
 /// fails with `ENOENT`.
+///
+/// A syslog `log` takes a [`level`](Self::level) and
+/// [`flags`](Self::flags); an `nflog` [`group`](Self::group) takes a
+/// [`snaplen`](Self::snaplen) and a
+/// [`queue_threshold`](Self::queue_threshold). The kernel refuses a `log`
+/// that mixes the two (#703).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct LogExpr {
     /// Prefix prepended to the log line.
     pub prefix: Option<String>,
-    /// `nflog` group; `None` logs to syslog at the kernel's default level.
+    /// `nflog` group; `None` logs to syslog.
     pub group: Option<u16>,
+    /// Syslog level; `None` is the kernel's, `warn`. A decoded `log` at
+    /// `warn` reads as `None`.
+    pub level: Option<LogLevel>,
+    /// What a syslog `log` adds to the line.
+    pub flags: LogFlags,
+    /// Bytes of the packet an `nflog` group copies; `None`, all of it.
+    pub snaplen: Option<u32>,
+    /// Packets an `nflog` group queues before it sends them; `None` (or
+    /// 0) sends each at once.
+    pub queue_threshold: Option<u16>,
 }
 
 impl LogExpr {
@@ -542,11 +779,312 @@ impl LogExpr {
         self.group = Some(group);
         self
     }
+
+    /// The syslog level (`log level info`).
+    pub fn level(mut self, level: LogLevel) -> Self {
+        self.level = Some(level);
+        self
+    }
+
+    /// What a syslog `log` adds to the line (`log flags tcp sequence`).
+    pub fn flags(mut self, flags: LogFlags) -> Self {
+        self.flags = flags;
+        self
+    }
+
+    /// Bytes of the packet an `nflog` group copies (`log group 2 snaplen
+    /// 64`).
+    pub fn snaplen(mut self, bytes: u32) -> Self {
+        self.snaplen = Some(bytes);
+        self
+    }
+
+    /// Packets an `nflog` group queues before it sends them (`log group 2
+    /// queue-threshold 10`).
+    pub fn queue_threshold(mut self, packets: u16) -> Self {
+        self.queue_threshold = Some(packets);
+        self
+    }
+}
+
+/// A syslog `log`'s level (`enum nft_log_level`). `Audit` sends the
+/// packet to the audit subsystem instead of syslog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u32)]
+#[non_exhaustive]
+pub enum LogLevel {
+    /// `emerg`.
+    Emerg = 0,
+    /// `alert`.
+    Alert = 1,
+    /// `crit`.
+    Crit = 2,
+    /// `err`.
+    Err = 3,
+    /// `warn`, the kernel's default.
+    Warning = 4,
+    /// `notice`.
+    Notice = 5,
+    /// `info`.
+    Info = 6,
+    /// `debug`.
+    Debug = 7,
+    /// `audit`.
+    Audit = 8,
+}
+
+impl LogLevel {
+    fn from_u32(v: u32) -> Option<Self> {
+        Some(match v {
+            0 => Self::Emerg,
+            1 => Self::Alert,
+            2 => Self::Crit,
+            3 => Self::Err,
+            4 => Self::Warning,
+            5 => Self::Notice,
+            6 => Self::Info,
+            7 => Self::Debug,
+            8 => Self::Audit,
+            _ => return None,
+        })
+    }
+
+    /// nft's word for it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Emerg => "emerg",
+            Self::Alert => "alert",
+            Self::Crit => "crit",
+            Self::Err => "err",
+            Self::Warning => "warn",
+            Self::Notice => "notice",
+            Self::Info => "info",
+            Self::Debug => "debug",
+            Self::Audit => "audit",
+        }
+    }
+}
+
+bitflags::bitflags! {
+    /// What a syslog `log` adds to the line (`NF_LOG_*`,
+    /// `linux/netfilter/nf_log.h`).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+    pub struct LogFlags: u32 {
+        /// `tcp sequence`.
+        const TCP_SEQUENCE = super::NF_LOG_TCPSEQ;
+        /// `tcp options`.
+        const TCP_OPTIONS = super::NF_LOG_TCPOPT;
+        /// `ip options`.
+        const IP_OPTIONS = super::NF_LOG_IPOPT;
+        /// `skuid`: the uid of the local socket.
+        const SKUID = super::NF_LOG_UID;
+        /// `ether`: the MAC header.
+        const ETHER = super::NF_LOG_MACDECODE;
+        /// `all`.
+        const ALL = super::NF_LOG_MASK;
+    }
 }
 
 impl From<LogExpr> for Expr {
     fn from(e: LogExpr) -> Self {
         Expr::Log(e)
+    }
+}
+
+/// What a `socket` expression loads (`enum nft_socket_keys`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u32)]
+#[non_exhaustive]
+pub enum SocketKey {
+    /// `socket transparent`: the socket has `IP_TRANSPARENT` (1 byte).
+    Transparent = 0,
+    /// `socket mark`: the socket's mark (4 bytes).
+    Mark = 1,
+    /// `socket wildcard`: the socket is bound to the wildcard address
+    /// (1 byte).
+    Wildcard = 2,
+    /// `socket cgroupv2 level N`: the socket's cgroup at a level.
+    Cgroupv2 = 3,
+}
+
+/// How an `osf` compares a SYN's TTL with its fingerprint's
+/// (`NF_OSF_TTL_*`, #703).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(u8)]
+#[non_exhaustive]
+pub enum OsfTtl {
+    /// Exactly — nft's default.
+    #[default]
+    Exact = 0,
+    /// `ttl loose`: at most the fingerprint's.
+    Loose = 1,
+    /// `ttl skip`: not at all.
+    Skip = 2,
+}
+
+/// `synproxy`: answer a SYN for a server with a SYN cookie, and open the
+/// connection to it once the client's ACK proves the address (#703).
+/// Allowed in `input` and `forward` filter chains; the SYN must come
+/// untracked (`notrack` in a raw chain) or `ct state invalid`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SynproxyExpr {
+    /// The MSS the cookie announces.
+    pub mss: Option<u16>,
+    /// The window scale it announces.
+    pub wscale: Option<u8>,
+    /// Announce timestamps.
+    pub timestamp: bool,
+    /// Announce selective acknowledgement.
+    pub sack_perm: bool,
+}
+
+impl SynproxyExpr {
+    /// `synproxy`, with nothing announced.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `mss <mss>`.
+    pub fn mss(mut self, mss: u16) -> Self {
+        self.mss = Some(mss);
+        self
+    }
+
+    /// `wscale <scale>`.
+    pub fn wscale(mut self, scale: u8) -> Self {
+        self.wscale = Some(scale);
+        self
+    }
+
+    /// `timestamp`.
+    pub fn timestamp(mut self) -> Self {
+        self.timestamp = true;
+        self
+    }
+
+    /// `sack-perm`.
+    pub fn sack_perm(mut self) -> Self {
+        self.sack_perm = true;
+        self
+    }
+
+    fn flags(&self) -> u32 {
+        let mut f = 0;
+        if self.mss.is_some() {
+            f |= NF_SYNPROXY_OPT_MSS;
+        }
+        if self.wscale.is_some() {
+            f |= NF_SYNPROXY_OPT_WSCALE;
+        }
+        if self.sack_perm {
+            f |= NF_SYNPROXY_OPT_SACK_PERM;
+        }
+        if self.timestamp {
+            f |= NF_SYNPROXY_OPT_TIMESTAMP;
+        }
+        f
+    }
+}
+
+impl From<SynproxyExpr> for Expr {
+    fn from(e: SynproxyExpr) -> Self {
+        Expr::Synproxy(e)
+    }
+}
+
+/// How a `numgen` counts (`enum nft_ng_types`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u32)]
+#[non_exhaustive]
+pub enum NumgenKind {
+    /// `inc`: 0, 1, 2, … for each packet.
+    Incremental = 0,
+    /// `random`.
+    Random = 1,
+}
+
+/// Which hash a `hash` takes (`enum nft_hash_types`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u32)]
+#[non_exhaustive]
+pub enum HashKind {
+    /// `jhash`: Jenkins, over fields the rule loads.
+    Jenkins = 0,
+    /// `symhash`: the flow's hash, the same both ways.
+    Sym = 1,
+}
+
+/// `queue`: hand the packet to a userspace program on an `nfqueue` (#703).
+///
+/// A range of queues is load-balanced by a hash of the flow, or by CPU
+/// with [`QueueFlags::FANOUT`]; without a listener the packet is dropped,
+/// unless [`QueueFlags::BYPASS`]. [`register`](Self::register) takes the
+/// queue number from a register a `hash` or `numgen` wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct QueueExpr {
+    /// The first queue.
+    pub num: u16,
+    /// How many queues from `num`, at least 1.
+    pub total: u16,
+    /// The register with the queue number, instead of `num`/`total`.
+    pub sreg: Option<Register>,
+    /// `bypass`, `fanout`.
+    pub flags: QueueFlags,
+}
+
+impl QueueExpr {
+    /// `queue num <num>`.
+    pub fn num(num: u16) -> Self {
+        Self {
+            num,
+            total: 1,
+            sreg: None,
+            flags: QueueFlags::empty(),
+        }
+    }
+
+    /// `queue num <first>-<last>`; an inverted range is taken as given.
+    pub fn range(first: u16, last: u16) -> Self {
+        Self {
+            num: first.min(last),
+            total: first.abs_diff(last) + 1,
+            ..Self::num(0)
+        }
+    }
+
+    /// `queue to <register>`: the queue number from a register.
+    pub fn register(sreg: Register) -> Self {
+        Self {
+            num: 0,
+            total: 0,
+            sreg: Some(sreg),
+            flags: QueueFlags::empty(),
+        }
+    }
+
+    /// Set the flags.
+    pub fn flags(mut self, flags: QueueFlags) -> Self {
+        self.flags = flags;
+        self
+    }
+}
+
+impl From<QueueExpr> for Expr {
+    fn from(e: QueueExpr) -> Self {
+        Expr::Queue(e)
+    }
+}
+
+bitflags::bitflags! {
+    /// A `queue`'s flags (`NFT_QUEUE_FLAG_*`).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+    pub struct QueueFlags: u16 {
+        /// `bypass`: accept the packet when no program listens.
+        const BYPASS = super::NFT_QUEUE_FLAG_BYPASS;
+        /// `fanout`: pick the queue by CPU.
+        const FANOUT = super::NFT_QUEUE_FLAG_CPU_FANOUT;
     }
 }
 
@@ -612,7 +1150,85 @@ pub(crate) enum WireForm {
     Echo,
 }
 
-/// `exprs` as they must be sent in a `family` table (#480).
+/// `exprs` as they must be sent in a `family` table: protocol guards as
+/// the family needs them ([`guards_for_family`], #708), and rejects as it
+/// takes them (#480).
+pub(crate) fn exprs_for_family(exprs: &[Expr], family: Family) -> std::borrow::Cow<'_, [Expr]> {
+    match guards_for_family(exprs, family) {
+        std::borrow::Cow::Borrowed(exprs) => rejects_for_family(exprs, family),
+        std::borrow::Cow::Owned(exprs) => {
+            std::borrow::Cow::Owned(rejects_for_family(&exprs, family).into_owned())
+        }
+    }
+}
+
+/// The protocol guard a pair of expressions is: a `meta nfproto` or `meta
+/// l4proto` load and an equality with one byte, the shape the builders
+/// put in front of an address or a port.
+fn guard_at(exprs: &[Expr], i: usize) -> Option<(Register, MetaKey, u8)> {
+    match (exprs.get(i)?, exprs.get(i + 1)?) {
+        (
+            Expr::Meta { dreg, key: key @ (MetaKey::NfProto | MetaKey::L4Proto) },
+            Expr::Cmp { sreg, op: CmpOp::Eq, data },
+        ) if sreg == dreg && data.len() == 1 => Some((*dreg, *key, data[0])),
+        _ => None,
+    }
+}
+
+/// Whether a guard is always true in a `family` table: `meta nfproto
+/// ipv4` in an ip table, `ipv6` in an ip6 one.
+pub(crate) fn guard_implied(family: Family, key: MetaKey, value: u8) -> bool {
+    key == MetaKey::NfProto
+        && matches!((family, value), (Family::Ip, NFPROTO_IPV4) | (Family::Ip6, NFPROTO_IPV6))
+}
+
+/// `exprs` with their protocol guards as nft writes them in a `family`
+/// table (#708). The builders put a guard in front of every field, in every
+/// family; nft writes each once, and only where the family needs it:
+///
+/// - a guard already given earlier in the rule is dropped — `tcp dport 22`
+///   then a `clamp mss` guarded `meta l4proto tcp` three times;
+/// - `meta nfproto ipv4` is dropped in an ip table, `ipv6` in an ip6 one,
+///   where it is always true (and nft 1.0.6 cannot list a hash or dynset
+///   key behind it);
+/// - in a bridge or netdev table `meta nfproto` is the family's own, so a
+///   guard on it never matched: it is `meta protocol`, the ethertype, as
+///   nft writes it.
+pub(crate) fn guards_for_family(exprs: &[Expr], family: Family) -> std::borrow::Cow<'_, [Expr]> {
+    let mut seen: Vec<(MetaKey, u8)> = Vec::new();
+    let mut out: Option<Vec<Expr>> = None;
+    let mut i = 0;
+    while i < exprs.len() {
+        if let Some((reg, key, value)) = guard_at(exprs, i) {
+            let repeated = seen.contains(&(key, value));
+            seen.push((key, value));
+            let ethertype: Option<[u8; 2]> = match (family, key, value) {
+                (Family::Bridge | Family::Netdev, MetaKey::NfProto, NFPROTO_IPV4) => Some([0x08, 0x00]),
+                (Family::Bridge | Family::Netdev, MetaKey::NfProto, NFPROTO_IPV6) => Some([0x86, 0xdd]),
+                _ => None,
+            };
+            if repeated || guard_implied(family, key, value) || ethertype.is_some() {
+                let out = out.get_or_insert_with(|| exprs[..i].to_vec());
+                if let (Some(ethertype), false) = (ethertype, repeated) {
+                    out.push(Expr::Meta { dreg: reg, key: MetaKey::Protocol });
+                    out.push(Expr::Cmp { sreg: reg, op: CmpOp::Eq, data: ethertype.to_vec() });
+                }
+                i += 2;
+                continue;
+            }
+        }
+        if let Some(out) = out.as_mut() {
+            out.push(exprs[i].clone());
+        }
+        i += 1;
+    }
+    match out {
+        Some(out) => std::borrow::Cow::Owned(out),
+        None => std::borrow::Cow::Borrowed(exprs),
+    }
+}
+
+/// `exprs` with their rejects as a `family` table takes them (#480).
 ///
 /// `nft_reject_ipv4_eval` / `nft_reject_ipv6_eval` handle only
 /// `NFT_REJECT_ICMP_UNREACH` and `NFT_REJECT_TCP_RST`; an ICMPX reject falls
@@ -623,7 +1239,7 @@ pub(crate) enum WireForm {
 /// `nft_reject_icmpv6_code` map it to, which is what the kernel echoes and
 /// what `nft` writes. Every other expression, and every other family, is
 /// passed through.
-pub(crate) fn exprs_for_family(exprs: &[Expr], family: Family) -> std::borrow::Cow<'_, [Expr]> {
+fn rejects_for_family(exprs: &[Expr], family: Family) -> std::borrow::Cow<'_, [Expr]> {
     // [no route, port, host, admin prohibited]
     const V4: [u8; 4] = [0, 3, 1, 13];
     const V6: [u8; 4] = [0, 4, 3, 1];
@@ -665,7 +1281,13 @@ pub(crate) fn write_expressions_as(builder: &mut MessageBuilder, exprs: &[Expr],
 /// Write a single expression as a nested NFTA_LIST_ELEM.
 fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
     let elem = builder.nest_start(NFTA_LIST_ELEM | 0x8000);
+    write_expr_body(builder, expr, form);
+    builder.nest_end(elem);
+}
 
+/// An expression's `NFTA_EXPR_NAME` and `NFTA_EXPR_DATA`, in the nest that
+/// holds it: a list element, or a dynset's `NFTA_DYNSET_EXPR`.
+fn write_expr_body(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
     match expr {
         Expr::Meta { dreg, key } => {
             builder.append_attr_str(NFTA_EXPR_NAME, "meta");
@@ -760,6 +1382,32 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             builder.append_attr_u32_be(NFTA_PAYLOAD_BASE, *base as u32);
             builder.append_attr_u32_be(NFTA_PAYLOAD_OFFSET, *offset);
             builder.append_attr_u32_be(NFTA_PAYLOAD_LEN, *len);
+            builder.nest_end(data);
+        }
+        Expr::PayloadSet {
+            sreg,
+            base,
+            offset,
+            len,
+            csum,
+            csum_offset,
+            l4_pseudo_header,
+        } => {
+            // Every attribute `nft_payload_set_dump` echoes.
+            builder.append_attr_str(NFTA_EXPR_NAME, "payload");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_u32_be(NFTA_PAYLOAD_SREG, sreg.wire());
+            builder.append_attr_u32_be(NFTA_PAYLOAD_BASE, *base as u32);
+            builder.append_attr_u32_be(NFTA_PAYLOAD_OFFSET, *offset);
+            builder.append_attr_u32_be(NFTA_PAYLOAD_LEN, *len);
+            builder.append_attr_u32_be(NFTA_PAYLOAD_CSUM_TYPE, *csum as u32);
+            builder.append_attr_u32_be(NFTA_PAYLOAD_CSUM_OFFSET, *csum_offset);
+            let flags = if *l4_pseudo_header {
+                NFT_PAYLOAD_L4CSUM_PSEUDOHDR
+            } else {
+                0
+            };
+            builder.append_attr_u32_be(NFTA_PAYLOAD_CSUM_FLAGS, flags);
             builder.nest_end(data);
         }
         Expr::Immediate { dreg, data } => {
@@ -909,19 +1557,174 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             }
             builder.nest_end(data);
         }
-        Expr::Log(LogExpr { prefix, group }) => {
+        // What `nft_queue_dump`/`nft_queue_sreg_dump` echo: a range always
+        // with its total and flags, a register with its flags.
+        Expr::Queue(QueueExpr {
+            num,
+            total,
+            sreg,
+            flags,
+        }) => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "queue");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            match sreg {
+                Some(sreg) => builder.append_attr_u32_be(NFTA_QUEUE_SREG_QNUM, sreg.wire()),
+                None => {
+                    builder.append_attr_u16_be(NFTA_QUEUE_NUM, *num);
+                    builder.append_attr_u16_be(NFTA_QUEUE_TOTAL, (*total).max(1));
+                }
+            }
+            builder.append_attr_u16_be(NFTA_QUEUE_FLAGS, flags.bits());
+            builder.nest_end(data);
+        }
+        // What `nft_ng_dump` echoes: all four, always.
+        Expr::Numgen {
+            dreg,
+            kind,
+            modulus,
+            offset,
+        } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "numgen");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_u32_be(NFTA_NG_DREG, dreg.wire());
+            builder.append_attr_u32_be(NFTA_NG_MODULUS, *modulus);
+            builder.append_attr_u32_be(NFTA_NG_TYPE, *kind as u32);
+            builder.append_attr_u32_be(NFTA_NG_OFFSET, *offset);
+            builder.nest_end(data);
+        }
+        // What `nft_jhash_dump`/`nft_symhash_dump` echo: a seed only when
+        // the request sent one (without, the kernel picks one and keeps it
+        // to itself), an offset only when it is not 0.
+        Expr::Hash {
+            dreg,
+            kind,
+            sreg,
+            len,
+            modulus,
+            seed,
+            offset,
+        } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "hash");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            if let Some(sreg) = sreg {
+                builder.append_attr_u32_be(NFTA_HASH_SREG, sreg.wire());
+            }
+            builder.append_attr_u32_be(NFTA_HASH_DREG, dreg.wire());
+            if *kind == HashKind::Jenkins {
+                builder.append_attr_u32_be(NFTA_HASH_LEN, *len);
+            }
+            builder.append_attr_u32_be(NFTA_HASH_MODULUS, *modulus);
+            if let Some(seed) = seed {
+                builder.append_attr_u32_be(NFTA_HASH_SEED, *seed);
+            }
+            if *offset != 0 {
+                builder.append_attr_u32_be(NFTA_HASH_OFFSET, *offset);
+            }
+            builder.append_attr_u32_be(NFTA_HASH_TYPE, *kind as u32);
+            builder.nest_end(data);
+        }
+        // What `nft_tproxy_dump` echoes: the family, and each register set.
+        Expr::Tproxy {
+            family,
+            sreg_addr,
+            sreg_port,
+        } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "tproxy");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_u32_be(NFTA_TPROXY_FAMILY, u32::from(*family));
+            if let Some(r) = sreg_addr {
+                builder.append_attr_u32_be(NFTA_TPROXY_REG_ADDR, r.wire());
+            }
+            if let Some(r) = sreg_port {
+                builder.append_attr_u32_be(NFTA_TPROXY_REG_PORT, r.wire());
+            }
+            builder.nest_end(data);
+        }
+        Expr::Socket { dreg, key } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "socket");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_u32_be(NFTA_SOCKET_KEY, *key as u32);
+            builder.append_attr_u32_be(NFTA_SOCKET_DREG, dreg.wire());
+            builder.nest_end(data);
+        }
+        // `nft_osf_dump` echoes all three; `nft_osf_init` refuses a FLAGS
+        // that is not NFT_OSF_F_VERSION, 0 included.
+        Expr::Osf { dreg, ttl, version } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "osf");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_u32_be(NFTA_OSF_DREG, dreg.wire());
+            builder.append_attr(NFTA_OSF_TTL, &[*ttl as u8]);
+            if *version || form == WireForm::Echo {
+                let flags = if *version { NFT_OSF_F_VERSION } else { 0 };
+                builder.append_attr_u32_be(NFTA_OSF_FLAGS, flags);
+            }
+            builder.nest_end(data);
+        }
+        // What `nft_synproxy_dump` echoes: all three, always.
+        Expr::Synproxy(s) => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "synproxy");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_u16_be(NFTA_SYNPROXY_MSS, s.mss.unwrap_or(0));
+            builder.append_attr(NFTA_SYNPROXY_WSCALE, &[s.wscale.unwrap_or(0)]);
+            builder.append_attr_u32_be(NFTA_SYNPROXY_FLAGS, s.flags());
+            builder.nest_end(data);
+        }
+        Expr::Dup { sreg_addr, sreg_dev } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "dup");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            if let Some(r) = sreg_addr {
+                builder.append_attr_u32_be(NFTA_DUP_SREG_ADDR, r.wire());
+            }
+            if let Some(r) = sreg_dev {
+                builder.append_attr_u32_be(NFTA_DUP_SREG_DEV, r.wire());
+            }
+            builder.nest_end(data);
+        }
+        Expr::Fwd { sreg_dev, sreg_addr } => {
+            builder.append_attr_str(NFTA_EXPR_NAME, "fwd");
+            let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
+            builder.append_attr_u32_be(NFTA_FWD_SREG_DEV, sreg_dev.wire());
+            if let Some((r, family)) = sreg_addr {
+                builder.append_attr_u32_be(NFTA_FWD_SREG_ADDR, r.wire());
+                builder.append_attr_u32_be(NFTA_FWD_NFPROTO, u32::from(*family));
+            }
+            builder.nest_end(data);
+        }
+        Expr::Log(LogExpr {
+            prefix,
+            group,
+            level,
+            flags,
+            snaplen,
+            queue_threshold,
+        }) => {
             builder.append_attr_str(NFTA_EXPR_NAME, "log");
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
             if let Some(prefix) = prefix {
                 builder.append_attr_str(NFTA_LOG_PREFIX, prefix);
             }
+            // What the kernel takes for each kind of log, and what
+            // `nft_log_dump` echoes: a group with its snaplen and threshold
+            // when set; a syslog log with its level always (WARNING when the
+            // request named none: send it, or the rule never matches its
+            // echo) and its flags when there are any.
             match group {
-                Some(group) => builder.append_attr_u16_be(NFTA_LOG_GROUP, *group),
-                // Without a group this is a syslog `log`, for which
-                // `nft_log_dump` always emits the level — WARNING when the
-                // request named none. Send it, or the declared rule never
-                // matches its echo.
-                None => builder.append_attr_u32_be(NFTA_LOG_LEVEL, NFT_LOGLEVEL_WARNING),
+                Some(group) => {
+                    builder.append_attr_u16_be(NFTA_LOG_GROUP, *group);
+                    if let Some(snaplen) = snaplen {
+                        builder.append_attr_u32_be(NFTA_LOG_SNAPLEN, *snaplen);
+                    }
+                    if let Some(q) = queue_threshold.filter(|q| *q != 0) {
+                        builder.append_attr_u16_be(NFTA_LOG_QTHRESHOLD, q);
+                    }
+                }
+                None => {
+                    let level = level.map_or(NFT_LOGLEVEL_WARNING, |l| l as u32);
+                    builder.append_attr_u32_be(NFTA_LOG_LEVEL, level);
+                    if !flags.is_empty() {
+                        builder.append_attr_u32_be(NFTA_LOG_FLAGS, flags.bits());
+                    }
+                }
             };
             builder.nest_end(data);
         }
@@ -1007,6 +1810,7 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             sreg_data,
             timeout,
             invert,
+            statements,
         }) => {
             builder.append_attr_str(NFTA_EXPR_NAME, "dynset");
             let data = builder.nest_start(NFTA_EXPR_DATA | 0x8000);
@@ -1023,7 +1827,14 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
                 (None, WireForm::Echo) => builder.append_attr_u64_be(NFTA_DYNSET_TIMEOUT, 0),
                 (None, WireForm::Request) => {}
             }
-            let flags = if *invert { NFT_DYNSET_F_INV } else { 0 };
+            let mut flags = if *invert { NFT_DYNSET_F_INV } else { 0 };
+            // One statement in NFTA_DYNSET_EXPR, several in
+            // NFTA_DYNSET_EXPRESSIONS, which the kernel takes only with
+            // NFT_DYNSET_F_EXPR — and never dumps.
+            write_statements(builder, statements, NFTA_DYNSET_EXPR, NFTA_DYNSET_EXPRESSIONS, form);
+            if statements.len() > 1 && form == WireForm::Request {
+                flags |= NFT_DYNSET_F_EXPR;
+            }
             builder.append_attr_u32_be(NFTA_DYNSET_FLAGS, flags);
             builder.nest_end(data);
         }
@@ -1076,8 +1887,6 @@ fn write_expr(builder: &mut MessageBuilder, expr: &Expr, form: WireForm) {
             builder.nest_end(data);
         }
     }
-
-    builder.nest_end(elem);
 }
 
 /// The attributes of a packet `limit`, as an expression or a limit object.
@@ -1335,6 +2144,25 @@ pub enum RuleExpr {
         /// Number of bytes loaded.
         len: u32,
     },
+    /// `payload` write from a register, with the checksums it updates
+    /// (#703).
+    #[non_exhaustive]
+    PayloadSet {
+        /// Source register.
+        sreg: Register,
+        /// Which packet header the offset is relative to.
+        base: PayloadBase,
+        /// Byte offset within the base header.
+        offset: u32,
+        /// Number of bytes written.
+        len: u32,
+        /// The checksum in the same header that is updated.
+        csum: PayloadCsum,
+        /// Where that checksum is, from the start of the header.
+        csum_offset: u32,
+        /// Whether the transport checksum's pseudo-header changes too.
+        l4_pseudo_header: bool,
+    },
     /// `ct` load into a data register (no direction).
     #[non_exhaustive]
     Ct {
@@ -1418,9 +2246,9 @@ pub enum RuleExpr {
     /// `objref` — a named object, or an object map's pick. One naming an
     /// object type nlink does not model decodes as [`Unknown`](Self::Unknown).
     Objref(ObjrefExpr),
-    /// `dynset` — `add|update|delete @set { <key> [timeout T] }`. A dynset
-    /// carrying per-element expressions (`NFTA_DYNSET_EXPR`) or unknown
-    /// flags decodes as [`Unknown`](Self::Unknown).
+    /// `dynset` — `add|update|delete @set { <key> [timeout T]
+    /// [statements] }`. A dynset with unknown flags, or a statement that
+    /// does not decode, decodes as [`Unknown`](Self::Unknown).
     #[non_exhaustive]
     Dynset {
         /// Set name.
@@ -1435,6 +2263,9 @@ pub enum RuleExpr {
         timeout: Option<std::time::Duration>,
         /// `NFT_DYNSET_F_INV`.
         invert: bool,
+        /// Per-element statements (#703). Dumped only when the set
+        /// declares none of its own.
+        statements: Vec<RuleExpr>,
     },
     /// `ct` load of one direction's tuple.
     #[non_exhaustive]
@@ -1481,10 +2312,87 @@ pub enum RuleExpr {
     },
     /// `limit` — a packet- or byte-rate limit.
     Limit(LimitExpr),
-    /// `log` — to syslog at the default level, or to an `nflog` group. One
-    /// with a level, flags, snaplen or queue threshold decodes as
-    /// [`Unknown`](Self::Unknown).
+    /// `log` — to syslog or to an `nflog` group, with its options.
     Log(LogExpr),
+    /// `queue`.
+    Queue(QueueExpr),
+    /// `tproxy`.
+    #[non_exhaustive]
+    Tproxy {
+        /// `NFPROTO_IPV4`, `NFPROTO_IPV6`, or 0.
+        family: u8,
+        /// The register with the address, if any.
+        sreg_addr: Option<Register>,
+        /// The register with the port, if any.
+        sreg_port: Option<Register>,
+    },
+    /// `socket <key>` load.
+    #[non_exhaustive]
+    Socket {
+        /// Destination register.
+        dreg: Register,
+        /// What is loaded.
+        key: SocketKey,
+    },
+    /// `synproxy`.
+    Synproxy(SynproxyExpr),
+    /// `osf`.
+    #[non_exhaustive]
+    Osf {
+        /// Destination register.
+        dreg: Register,
+        /// How the TTL is compared.
+        ttl: OsfTtl,
+        /// The name carries the version: `genre:version`.
+        version: bool,
+    },
+    /// `numgen`.
+    #[non_exhaustive]
+    Numgen {
+        /// Destination register.
+        dreg: Register,
+        /// Counting up, or at random.
+        kind: NumgenKind,
+        /// Modulo this.
+        modulus: u32,
+        /// Plus this.
+        offset: u32,
+    },
+    /// `jhash` or `symhash`.
+    #[non_exhaustive]
+    Hash {
+        /// Destination register.
+        dreg: Register,
+        /// Jenkins or symmetric.
+        kind: HashKind,
+        /// Jenkins: the register the hashed bytes start at.
+        sreg: Option<Register>,
+        /// Jenkins: how many bytes.
+        len: u32,
+        /// Modulo this.
+        modulus: u32,
+        /// Jenkins: the seed, when one was given.
+        seed: Option<u32>,
+        /// Plus this.
+        offset: u32,
+    },
+    /// `dup`: the registers with its gateway and its output device.
+    #[non_exhaustive]
+    Dup {
+        /// The register with the gateway address.
+        sreg_addr: Option<Register>,
+        /// The register with the output ifindex.
+        sreg_dev: Option<Register>,
+    },
+    /// `fwd`: the register with the output device, and the one with the
+    /// next hop and its family.
+    #[non_exhaustive]
+    Fwd {
+        /// The register with the output ifindex.
+        sreg_dev: Register,
+        /// The register with the next hop, and its `NFPROTO_*` family.
+        sreg_addr: Option<(Register, u8)>,
+    },
     /// `reject`.
     #[non_exhaustive]
     Reject {
@@ -1551,25 +2459,25 @@ pub enum RuleExpr {
 /// malformed elements (no `NFTA_EXPR_NAME`) are skipped. One odd
 /// expression from a future kernel must not fail a rule dump.
 pub fn parse_expressions(bytes: &[u8]) -> Vec<RuleExpr> {
-    let mut exprs = Vec::new();
-    for (kind, elem) in AttrIter::new(bytes) {
-        if kind != NFTA_LIST_ELEM {
-            continue;
+    AttrIter::new(bytes)
+        .filter(|(kind, _)| *kind == NFTA_LIST_ELEM)
+        .filter_map(|(_, elem)| parse_elem(elem))
+        .collect()
+}
+
+/// One expression from its `NFTA_EXPR_NAME` and `NFTA_EXPR_DATA`; `None`
+/// for a nameless one, which the kernel never emits.
+pub(crate) fn parse_elem(elem: &[u8]) -> Option<RuleExpr> {
+    let mut name: Option<&str> = None;
+    let mut data: &[u8] = &[];
+    for (attr, payload) in AttrIter::new(elem) {
+        match attr {
+            NFTA_EXPR_NAME => name = get::string(payload).ok(),
+            NFTA_EXPR_DATA => data = payload,
+            _ => {}
         }
-        let mut name: Option<&str> = None;
-        let mut data: &[u8] = &[];
-        for (attr, payload) in AttrIter::new(elem) {
-            match attr {
-                NFTA_EXPR_NAME => name = get::string(payload).ok(),
-                NFTA_EXPR_DATA => data = payload,
-                _ => {}
-            }
-        }
-        // The kernel never emits a nameless expression; skip defensively.
-        let Some(name) = name else { continue };
-        exprs.push(parse_expr(name, data));
     }
-    exprs
+    Some(parse_expr(name?, data))
 }
 
 /// Decode one expression; anything undecodable demotes to `Unknown`.
@@ -1598,6 +2506,24 @@ fn parse_expr(name: &str, data: &[u8]) -> RuleExpr {
         }),
         "notrack" if data.is_empty() => Some(RuleExpr::Notrack),
         "log" => parse_log(data),
+        "queue" => parse_queue(data),
+        "tproxy" => u32_attr(data, NFTA_TPROXY_FAMILY)
+            .and_then(|f| u8::try_from(f).ok())
+            .map(|family| RuleExpr::Tproxy {
+                family,
+                sreg_addr: reg_attr(data, NFTA_TPROXY_REG_ADDR),
+                sreg_port: reg_attr(data, NFTA_TPROXY_REG_PORT),
+            }),
+        "socket" => parse_socket(data),
+        "synproxy" => parse_synproxy(data),
+        "osf" => parse_osf(data),
+        "numgen" => parse_numgen(data),
+        "hash" => parse_hash(data),
+        "dup" => Some(RuleExpr::Dup {
+            sreg_addr: reg_attr(data, NFTA_DUP_SREG_ADDR),
+            sreg_dev: reg_attr(data, NFTA_DUP_SREG_DEV),
+        }),
+        "fwd" => parse_fwd(data),
         "reject" => parse_reject(data),
         "masq" => parse_masq(data),
         "nat" => parse_nat(data),
@@ -1636,6 +2562,133 @@ bitflags::bitflags! {
 }
 
 /// The value of attribute `id` among `data`'s, as a big-endian u32.
+/// A register attribute.
+fn reg_attr(data: &[u8], id: u16) -> Option<Register> {
+    Register::from_u32(u32_attr(data, id)?)
+}
+
+/// A `socket` load; a `cgroupv2` one stays Unknown (its level and the
+/// cgroup id it compares are not modelled).
+fn parse_socket(data: &[u8]) -> Option<RuleExpr> {
+    let key = match u32_attr(data, NFTA_SOCKET_KEY)? {
+        0 => SocketKey::Transparent,
+        1 => SocketKey::Mark,
+        2 => SocketKey::Wildcard,
+        _ => return None,
+    };
+    Some(RuleExpr::Socket {
+        dreg: reg_attr(data, NFTA_SOCKET_DREG)?,
+        key,
+    })
+}
+
+/// An `osf`.
+fn parse_osf(data: &[u8]) -> Option<RuleExpr> {
+    let attr = |id| AttrIter::new(data).find(|(t, _)| t & 0x7FFF == id).map(|(_, p)| p);
+    let ttl = match attr(NFTA_OSF_TTL).map_or(Some(0), |p| p.first().copied())? {
+        0 => OsfTtl::Exact,
+        1 => OsfTtl::Loose,
+        2 => OsfTtl::Skip,
+        _ => return None,
+    };
+    let version = match u32_attr(data, NFTA_OSF_FLAGS).unwrap_or(0) {
+        0 => false,
+        NFT_OSF_F_VERSION => true,
+        _ => return None,
+    };
+    Some(RuleExpr::Osf {
+        dreg: reg_attr(data, NFTA_OSF_DREG)?,
+        ttl,
+        version,
+    })
+}
+
+/// A `synproxy`: its announced options, by its flags.
+fn parse_synproxy(data: &[u8]) -> Option<RuleExpr> {
+    let flags = u32_attr(data, NFTA_SYNPROXY_FLAGS).unwrap_or(0);
+    let known = NF_SYNPROXY_OPT_MSS
+        | NF_SYNPROXY_OPT_WSCALE
+        | NF_SYNPROXY_OPT_SACK_PERM
+        | NF_SYNPROXY_OPT_TIMESTAMP;
+    if flags & !known != 0 {
+        return None;
+    }
+    let attr = |id| AttrIter::new(data).find(|(t, _)| t & 0x7FFF == id).map(|(_, p)| p);
+    let mss = attr(NFTA_SYNPROXY_MSS).and_then(|p| get::u16_be(p).ok());
+    let wscale = attr(NFTA_SYNPROXY_WSCALE).and_then(|p| p.first().copied());
+    Some(RuleExpr::Synproxy(SynproxyExpr {
+        mss: (flags & NF_SYNPROXY_OPT_MSS != 0).then_some(mss?),
+        wscale: (flags & NF_SYNPROXY_OPT_WSCALE != 0).then_some(wscale?),
+        timestamp: flags & NF_SYNPROXY_OPT_TIMESTAMP != 0,
+        sack_perm: flags & NF_SYNPROXY_OPT_SACK_PERM != 0,
+    }))
+}
+
+/// A `numgen`.
+fn parse_numgen(data: &[u8]) -> Option<RuleExpr> {
+    Some(RuleExpr::Numgen {
+        dreg: reg_attr(data, NFTA_NG_DREG)?,
+        kind: match u32_attr(data, NFTA_NG_TYPE)? {
+            0 => NumgenKind::Incremental,
+            1 => NumgenKind::Random,
+            _ => return None,
+        },
+        modulus: u32_attr(data, NFTA_NG_MODULUS)?,
+        offset: u32_attr(data, NFTA_NG_OFFSET).unwrap_or(0),
+    })
+}
+
+/// A `hash`.
+fn parse_hash(data: &[u8]) -> Option<RuleExpr> {
+    let kind = match u32_attr(data, NFTA_HASH_TYPE).unwrap_or(0) {
+        0 => HashKind::Jenkins,
+        1 => HashKind::Sym,
+        _ => return None,
+    };
+    Some(RuleExpr::Hash {
+        dreg: reg_attr(data, NFTA_HASH_DREG)?,
+        kind,
+        sreg: reg_attr(data, NFTA_HASH_SREG),
+        len: u32_attr(data, NFTA_HASH_LEN).unwrap_or(0),
+        modulus: u32_attr(data, NFTA_HASH_MODULUS)?,
+        seed: u32_attr(data, NFTA_HASH_SEED),
+        offset: u32_attr(data, NFTA_HASH_OFFSET).unwrap_or(0),
+    })
+}
+
+/// A `fwd`: its device register, and its next hop's with the family.
+fn parse_fwd(data: &[u8]) -> Option<RuleExpr> {
+    let sreg_addr = match (reg_attr(data, NFTA_FWD_SREG_ADDR), u32_attr(data, NFTA_FWD_NFPROTO)) {
+        (Some(r), Some(p)) => Some((r, u8::try_from(p).ok()?)),
+        (None, None) => None,
+        _ => return None,
+    };
+    Some(RuleExpr::Fwd {
+        sreg_dev: reg_attr(data, NFTA_FWD_SREG_DEV)?,
+        sreg_addr,
+    })
+}
+
+/// A `queue`: its range, or its register; its flags.
+fn parse_queue(data: &[u8]) -> Option<RuleExpr> {
+    let u16_attr = |id| {
+        AttrIter::new(data)
+            .find(|(attr, _)| attr & 0x7FFF == id)
+            .and_then(|(_, p)| get::u16_be(p).ok())
+    };
+    let flags = QueueFlags::from_bits(u16_attr(NFTA_QUEUE_FLAGS).unwrap_or(0))?;
+    let mut q = match reg_attr(data, NFTA_QUEUE_SREG_QNUM) {
+        Some(sreg) => QueueExpr::register(sreg),
+        None => QueueExpr {
+            num: u16_attr(NFTA_QUEUE_NUM)?,
+            total: u16_attr(NFTA_QUEUE_TOTAL).unwrap_or(1),
+            ..QueueExpr::num(0)
+        },
+    };
+    q.flags = flags;
+    Some(RuleExpr::Queue(q))
+}
+
 fn u32_attr(data: &[u8], id: u16) -> Option<u32> {
     AttrIter::new(data)
         .find(|(attr, _)| attr & 0x7FFF == id)
@@ -1720,8 +2773,13 @@ fn parse_log(data: &[u8]) -> Option<RuleExpr> {
         match attr & 0x7FFF {
             NFTA_LOG_PREFIX => log.prefix = Some(get::string(payload).ok()?.to_string()),
             NFTA_LOG_GROUP => log.group = Some(get::u16_be(payload).ok()?),
+            // The kernel's default, which every syslog log echoes.
             NFTA_LOG_LEVEL if get::u32_be(payload).ok()? == NFT_LOGLEVEL_WARNING => {}
-            // A level, flags, snaplen or threshold LogExpr cannot carry.
+            NFTA_LOG_LEVEL => log.level = Some(LogLevel::from_u32(get::u32_be(payload).ok()?)?),
+            NFTA_LOG_FLAGS => log.flags = LogFlags::from_bits(get::u32_be(payload).ok()?)?,
+            NFTA_LOG_SNAPLEN => log.snaplen = Some(get::u32_be(payload).ok()?),
+            NFTA_LOG_QTHRESHOLD => log.queue_threshold = Some(get::u16_be(payload).ok()?),
+            // An attribute LogExpr cannot carry.
             _ => return None,
         }
     }
@@ -2100,6 +3158,7 @@ fn parse_dynset(data: &[u8]) -> Option<RuleExpr> {
     let mut sreg_data = None;
     let mut timeout = None;
     let mut invert = false;
+    let mut statements = Vec::new();
     for (attr, payload) in AttrIter::new(data) {
         match attr {
             NFTA_DYNSET_SET_NAME => set = get::string(payload).ok().map(str::to_string),
@@ -2112,15 +3171,22 @@ fn parse_dynset(data: &[u8]) -> Option<RuleExpr> {
                 let ms = get::u64_be(payload).ok()?;
                 timeout = (ms != 0).then(|| std::time::Duration::from_millis(ms));
             }
-            NFTA_DYNSET_FLAGS => match get::u32_be(payload).ok()? {
-                0 => {}
-                NFT_DYNSET_F_INV => invert = true,
-                _ => return None,
-            },
-            // Per-element expressions are not modelled: never half-decode.
-            NFTA_DYNSET_EXPR | NFTA_DYNSET_EXPRESSIONS => return None,
+            NFTA_DYNSET_FLAGS => {
+                let flags = get::u32_be(payload).ok()?;
+                if flags & !(NFT_DYNSET_F_INV | NFT_DYNSET_F_EXPR) != 0 {
+                    return None;
+                }
+                invert = flags & NFT_DYNSET_F_INV != 0;
+            }
+            NFTA_DYNSET_EXPR => statements.push(parse_elem(payload)?),
+            NFTA_DYNSET_EXPRESSIONS => statements.extend(parse_expressions(payload)),
             _ => {}
         }
+    }
+    // Never half-decode: a statement nlink cannot read keeps the whole
+    // dynset raw.
+    if statements.iter().any(|s| matches!(s, RuleExpr::Unknown { .. })) {
+        return None;
     }
     Some(RuleExpr::Dynset {
         set: set?,
@@ -2129,6 +3195,7 @@ fn parse_dynset(data: &[u8]) -> Option<RuleExpr> {
         sreg_data,
         timeout,
         invert,
+        statements,
     })
 }
 
@@ -2159,20 +3226,41 @@ fn parse_cmp(data: &[u8]) -> Option<RuleExpr> {
 
 fn parse_payload(data: &[u8]) -> Option<RuleExpr> {
     let mut dreg = None;
+    let mut sreg = None;
     let mut base = None;
     let mut offset = None;
     let mut len = None;
+    let mut csum = PayloadCsum::None;
+    let mut csum_offset = 0;
+    let mut csum_flags = 0;
     for (attr, payload) in AttrIter::new(data) {
         match attr {
             NFTA_PAYLOAD_DREG => dreg = Register::from_u32(get::u32_be(payload).ok()?),
+            NFTA_PAYLOAD_SREG => sreg = Register::from_u32(get::u32_be(payload).ok()?),
             NFTA_PAYLOAD_BASE => base = PayloadBase::from_u32(get::u32_be(payload).ok()?),
             NFTA_PAYLOAD_OFFSET => offset = Some(get::u32_be(payload).ok()?),
             NFTA_PAYLOAD_LEN => len = Some(get::u32_be(payload).ok()?),
+            NFTA_PAYLOAD_CSUM_TYPE => csum = PayloadCsum::from_u32(get::u32_be(payload).ok()?)?,
+            NFTA_PAYLOAD_CSUM_OFFSET => csum_offset = get::u32_be(payload).ok()?,
+            NFTA_PAYLOAD_CSUM_FLAGS => csum_flags = get::u32_be(payload).ok()?,
             _ => {}
         }
     }
-    // SREG-form payload (payload-set / checksum rewrite) has no DREG
-    // and decodes as Unknown.
+    // A write (#703); a flag nlink does not know stays Unknown.
+    if let Some(sreg) = sreg {
+        if csum_flags & !NFT_PAYLOAD_L4CSUM_PSEUDOHDR != 0 {
+            return None;
+        }
+        return Some(RuleExpr::PayloadSet {
+            sreg,
+            base: base?,
+            offset: offset?,
+            len: len?,
+            csum,
+            csum_offset,
+            l4_pseudo_header: csum_flags & NFT_PAYLOAD_L4CSUM_PSEUDOHDR != 0,
+        });
+    }
     Some(RuleExpr::Payload {
         dreg: dreg?,
         base: base?,
@@ -2759,8 +3847,8 @@ mod decode_tests {
     }
 
     /// What these decoders cannot carry demotes to `Unknown`, never to a
-    /// guess: a limit type nlink does not know, a log level, a reject with
-    /// no type.
+    /// guess: a limit type nlink does not know, a log level past `audit`,
+    /// a reject with no type.
     #[test]
     fn statements_beyond_the_types_stay_unknown() {
         let mut limit = MessageBuilder::new(0, 0);
@@ -2768,7 +3856,7 @@ mod decode_tests {
         limit.append_attr_u64_be(NFTA_LIMIT_UNIT, 1);
         limit.append_attr_u32_be(NFTA_LIMIT_TYPE, 7); // a type nlink does not know
         let mut log = MessageBuilder::new(0, 0);
-        log.append_attr_u32_be(NFTA_LOG_LEVEL, 7);
+        log.append_attr_u32_be(NFTA_LOG_LEVEL, 9);
         let reject = MessageBuilder::new(0, 0);
         for (name, b) in [("limit", limit), ("log", log), ("reject", reject)] {
             let data = b.finish()[16..].to_vec();
@@ -3099,6 +4187,71 @@ mod decode_tests {
         ));
     }
 
+    /// One per-element statement goes in NFTA_DYNSET_EXPR, several in
+    /// NFTA_DYNSET_EXPRESSIONS with NFT_DYNSET_F_EXPR, a flag the kernel
+    /// requires and never dumps (#703). Both decode typed; a statement that
+    /// does not keeps the whole dynset raw.
+    #[test]
+    fn dynset_statements_go_as_the_kernel_takes_them_and_decode() {
+        let one = DynsetExpr::new(DynsetOp::Add, "seen", Register::R0).counter();
+        let limit = LimitExpr::packets(10, LimitUnit::Second).over();
+        let several = DynsetExpr::new(DynsetOp::Update, "flood", Register::R0)
+            .counter()
+            .statement(limit.clone());
+
+        let attrs = data_attrs_as(&[one.clone().into()], WireForm::Request);
+        assert!(attrs.contains_key(&NFTA_DYNSET_EXPR));
+        assert!(!attrs.contains_key(&NFTA_DYNSET_EXPRESSIONS));
+        assert_eq!(attrs[&NFTA_DYNSET_FLAGS], 0u32.to_be_bytes());
+        let request = data_attrs_as(&[several.clone().into()], WireForm::Request);
+        assert!(request.contains_key(&NFTA_DYNSET_EXPRESSIONS));
+        assert_eq!(request[&NFTA_DYNSET_FLAGS], NFT_DYNSET_F_EXPR.to_be_bytes());
+        let echo = data_attrs_as(&[several.clone().into()], WireForm::Echo);
+        assert_eq!(echo[&NFTA_DYNSET_FLAGS], 0u32.to_be_bytes());
+
+        let statements = |e: &RuleExpr| match e {
+            RuleExpr::Dynset { statements, .. } => statements.clone(),
+            other => panic!("not a dynset: {other:?}"),
+        };
+        let counter = RuleExpr::Counter { packets: 0, bytes: 0 };
+        let decoded = parse_expressions(&encode(&[one.into(), several.into()]));
+        assert_eq!(statements(&decoded[0]), std::slice::from_ref(&counter));
+        assert_eq!(statements(&decoded[1]), [counter, RuleExpr::Limit(limit)]);
+
+        let mut b = MessageBuilder::new(0, 0);
+        b.append_attr_str(NFTA_DYNSET_SET_NAME, "seen");
+        b.append_attr_u32_be(NFTA_DYNSET_OP, 0);
+        b.append_attr_u32_be(NFTA_DYNSET_SREG_KEY, 1);
+        let odd = b.nest_start(NFTA_DYNSET_EXPR | 0x8000);
+        b.append_attr_str(NFTA_EXPR_NAME, "future");
+        b.nest_end(odd);
+        let decoded = parse_expressions(&build_elem("dynset", &b.as_bytes()[16..]));
+        assert!(matches!(&decoded[0], RuleExpr::Unknown { name, .. } if name == "dynset"));
+    }
+
+    /// `nft_osf_init` refuses a FLAGS that is not NFT_OSF_F_VERSION, 0
+    /// included, and `nft_osf_dump` always writes it (#703).
+    #[test]
+    fn osf_sends_flags_only_for_a_version_and_echoes_them_always() {
+        let plain = [Expr::Osf { dreg: Register::R0, ttl: OsfTtl::Skip, version: false }];
+        assert!(!data_attrs_as(&plain, WireForm::Request).contains_key(&NFTA_OSF_FLAGS));
+        let echo = data_attrs_as(&plain, WireForm::Echo);
+        assert_eq!(echo[&NFTA_OSF_FLAGS], 0u32.to_be_bytes());
+        assert_eq!(echo[&NFTA_OSF_TTL], [2]);
+        let versioned = [Expr::Osf { dreg: Register::R0, ttl: OsfTtl::Loose, version: true }];
+        let request = data_attrs_as(&versioned, WireForm::Request);
+        assert_eq!(request[&NFTA_OSF_FLAGS], NFT_OSF_F_VERSION.to_be_bytes());
+
+        let decoded = parse_expressions(&encode(&[plain[0].clone(), versioned[0].clone()]));
+        assert_eq!(
+            decoded,
+            [
+                RuleExpr::Osf { dreg: Register::R0, ttl: OsfTtl::Skip, version: false },
+                RuleExpr::Osf { dreg: Register::R0, ttl: OsfTtl::Loose, version: true },
+            ]
+        );
+    }
+
     #[test]
     fn roundtrip_meta_set_and_exthdr() {
         let load = Expr::Exthdr {
@@ -3272,6 +4425,208 @@ mod decode_tests {
         let group = data_attrs(&[LogExpr::new().group(5).into()]);
         assert!(!group.contains_key(&NFTA_LOG_LEVEL));
         assert_eq!(group[&NFTA_LOG_GROUP], 5u16.to_be_bytes());
+    }
+
+    /// #703: a log's level and flags (syslog) and its snaplen and queue
+    /// threshold (nflog) are written as the kernel echoes them and read
+    /// back; the default level reads as none.
+    #[test]
+    fn log_options_round_trip() {
+        let syslog = LogExpr::new()
+            .prefix("p")
+            .level(LogLevel::Info)
+            .flags(LogFlags::TCP_SEQUENCE | LogFlags::SKUID);
+        let attrs = data_attrs(&[syslog.clone().into()]);
+        assert_eq!(attrs[&NFTA_LOG_LEVEL], 6u32.to_be_bytes());
+        assert_eq!(attrs[&NFTA_LOG_FLAGS], 0x09u32.to_be_bytes());
+        let nflog = LogExpr::new().group(2).snaplen(64).queue_threshold(10);
+        let attrs = data_attrs(&[nflog.clone().into()]);
+        assert_eq!(attrs[&NFTA_LOG_SNAPLEN], 64u32.to_be_bytes());
+        assert_eq!(attrs[&NFTA_LOG_QTHRESHOLD], 10u16.to_be_bytes());
+        assert!(!attrs.contains_key(&NFTA_LOG_LEVEL));
+
+        let audit = LogExpr::new().level(LogLevel::Audit).flags(LogFlags::ALL);
+        let warn = LogExpr::new().level(LogLevel::Warning);
+        assert_eq!(
+            parse_expressions(&encode(&[
+                syslog.clone().into(),
+                nflog.clone().into(),
+                audit.clone().into(),
+                warn.into(),
+            ])),
+            [
+                RuleExpr::Log(syslog),
+                RuleExpr::Log(nflog),
+                RuleExpr::Log(audit),
+                // The kernel's default level is no level.
+                RuleExpr::Log(LogExpr::new()),
+            ]
+        );
+        // A level the kernel does not have, or a flag it would refuse,
+        // reads as unknown rather than as something else.
+        let mut b = MessageBuilder::new(0, 0);
+        let start = b.len();
+        b.append_attr_u32_be(NFTA_LOG_LEVEL, 9);
+        assert!(parse_log(&b.as_bytes()[start..]).is_none());
+        let mut b = MessageBuilder::new(0, 0);
+        let start = b.len();
+        b.append_attr_u32_be(NFTA_LOG_FLAGS, 0x10);
+        assert!(parse_log(&b.as_bytes()[start..]).is_none());
+    }
+
+    /// #703: `tproxy`, `socket` and `synproxy` as the kernel echoes them,
+    /// and read back.
+    #[test]
+    fn tproxy_socket_and_synproxy_round_trip() {
+        let full = SynproxyExpr::new().mss(1460).wscale(7).timestamp().sack_perm();
+        let attrs = data_attrs(&[full.clone().into()]);
+        assert_eq!(attrs[&NFTA_SYNPROXY_FLAGS], 0x0fu32.to_be_bytes());
+        let mss_only = SynproxyExpr::new().mss(1400);
+        let exprs = [
+            Expr::Tproxy {
+                family: 2,
+                sreg_addr: Some(Register::R0),
+                sreg_port: Some(Register::R1),
+            },
+            Expr::Tproxy {
+                family: 0,
+                sreg_addr: None,
+                sreg_port: Some(Register::R0),
+            },
+            Expr::Socket {
+                dreg: Register::R0,
+                key: SocketKey::Mark,
+            },
+            full.clone().into(),
+            mss_only.clone().into(),
+        ];
+        assert_eq!(
+            parse_expressions(&encode(&exprs)),
+            [
+                RuleExpr::Tproxy {
+                    family: 2,
+                    sreg_addr: Some(Register::R0),
+                    sreg_port: Some(Register::R1),
+                },
+                RuleExpr::Tproxy {
+                    family: 0,
+                    sreg_addr: None,
+                    sreg_port: Some(Register::R0),
+                },
+                RuleExpr::Socket {
+                    dreg: Register::R0,
+                    key: SocketKey::Mark,
+                },
+                RuleExpr::Synproxy(full),
+                RuleExpr::Synproxy(mss_only),
+            ]
+        );
+    }
+
+    /// #703: `numgen` and `hash` as the kernel echoes them — a jhash's seed
+    /// only when given, an offset only when not 0 — and read back.
+    #[test]
+    fn numgen_and_hash_round_trip() {
+        let numgen = Expr::Numgen {
+            dreg: Register::R0,
+            kind: NumgenKind::Random,
+            modulus: 10,
+            offset: 5,
+        };
+        let jhash = |seed, offset| Expr::Hash {
+            dreg: Register::R0,
+            kind: HashKind::Jenkins,
+            sreg: Some(Register::R1),
+            len: 8,
+            modulus: 4,
+            seed,
+            offset,
+        };
+        let sym = Expr::Hash {
+            dreg: Register::R0,
+            kind: HashKind::Sym,
+            sreg: None,
+            len: 0,
+            modulus: 2,
+            seed: None,
+            offset: 0,
+        };
+        let attrs = data_attrs(&[jhash(None, 0)]);
+        assert!(!attrs.contains_key(&NFTA_HASH_SEED) && !attrs.contains_key(&NFTA_HASH_OFFSET));
+        let attrs = data_attrs(std::slice::from_ref(&sym));
+        assert!(!attrs.contains_key(&NFTA_HASH_LEN) && !attrs.contains_key(&NFTA_HASH_SREG));
+        let back = parse_expressions(&encode(&[numgen, jhash(Some(0xdead), 2), sym]));
+        assert_eq!(
+            back,
+            [
+                RuleExpr::Numgen {
+                    dreg: Register::R0,
+                    kind: NumgenKind::Random,
+                    modulus: 10,
+                    offset: 5,
+                },
+                RuleExpr::Hash {
+                    dreg: Register::R0,
+                    kind: HashKind::Jenkins,
+                    sreg: Some(Register::R1),
+                    len: 8,
+                    modulus: 4,
+                    seed: Some(0xdead),
+                    offset: 2,
+                },
+                RuleExpr::Hash {
+                    dreg: Register::R0,
+                    kind: HashKind::Sym,
+                    sreg: None,
+                    len: 0,
+                    modulus: 2,
+                    seed: None,
+                    offset: 0,
+                },
+            ]
+        );
+    }
+
+    /// #703: `queue`, `dup` and `fwd` as the kernel echoes them, and read
+    /// back.
+    #[test]
+    fn queue_dup_and_fwd_round_trip() {
+        let single = QueueExpr::num(3).flags(QueueFlags::BYPASS);
+        let attrs = data_attrs(&[single.clone().into()]);
+        assert_eq!(attrs[&NFTA_QUEUE_TOTAL], 1u16.to_be_bytes(), "a total is always echoed");
+        let range = QueueExpr::range(1, 4).flags(QueueFlags::BYPASS | QueueFlags::FANOUT);
+        assert_eq!((range.num, range.total), (1, 4));
+        let by_reg = QueueExpr::register(Register::R1);
+        let dup = Expr::Dup {
+            sreg_addr: Some(Register::R0),
+            sreg_dev: Some(Register::R1),
+        };
+        let fwd = Expr::Fwd {
+            sreg_dev: Register::R0,
+            sreg_addr: Some((Register::R1, 2)),
+        };
+        assert_eq!(
+            parse_expressions(&encode(&[
+                single.clone().into(),
+                range.clone().into(),
+                by_reg.clone().into(),
+                dup,
+                fwd,
+            ])),
+            [
+                RuleExpr::Queue(single),
+                RuleExpr::Queue(range),
+                RuleExpr::Queue(by_reg),
+                RuleExpr::Dup {
+                    sreg_addr: Some(Register::R0),
+                    sreg_dev: Some(Register::R1),
+                },
+                RuleExpr::Fwd {
+                    sreg_dev: Register::R0,
+                    sreg_addr: Some((Register::R1, 2)),
+                },
+            ]
+        );
     }
 
     #[test]
