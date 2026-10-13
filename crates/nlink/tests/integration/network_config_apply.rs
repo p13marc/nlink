@@ -2651,9 +2651,8 @@ async fn a_police_from_tcs_words_is_tcs_and_converges() -> Result<()> {
 /// skbedit set another mark, matched its declaration and was never put
 /// right. Each row declares a filter with the action, applies twice, then
 /// replaces the filter with a drifted action, which the diff must see and
-/// the apply must put back. `gate` and `bpf` still compare by kind: the
-/// kernel fills a gate's entries and cycle in, and a bpf action is sent a
-/// program's fd and reports its id.
+/// the apply must put back. A gate is read as the schedule the kernel keeps
+/// (#813); bpf, which needs a program, has a test of its own.
 #[tokio::test]
 async fn every_action_kind_is_compared_and_converges() -> Result<()> {
     use nlink::netlink::action::{
@@ -2712,6 +2711,12 @@ async fn every_action_kind_is_compared_and_converges() -> Result<()> {
         ("simple", "sdata hello", "sdata world"),
         ("sample", "rate 100 group 5", "rate 200 group 5"),
         ("ctinfo", "cpmark zone 1", "cpmark zone 2"),
+        ("gate", "base-time 1000 sched-entry open 2000", "base-time 1000 sched-entry close 2000"),
+        (
+            "gate",
+            "priority 1 base-time 1000 sched-entry open 2000 sched-entry close 3000",
+            "priority 1 base-time 1000 sched-entry open 2000 sched-entry close 4000",
+        ),
         ("ife", "encode allow mark", "encode allow prio"),
     ];
 

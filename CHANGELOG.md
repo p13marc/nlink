@@ -1079,6 +1079,16 @@ All notable changes to this project will be documented in this file.
   kernel neither reads nor reports, which it no longer sends, and the
   tunnel_key key id bug (#811). `gate` and `bpf` still compare by kind.
 
+- **A declared gate or bpf action is compared by what it does (#813).**
+  After #791 these two kinds were still compared by kind alone. A gate is
+  now read as the schedule the kernel keeps: its verdict, priority, base
+  time, cycle and extension, flags and clock, and each entry's state,
+  interval, IPV and octet limit. `act_gate`'s defaults stand in for what a
+  request leaves out, and the index the kernel numbers itself is left out.
+  A bpf action is compared by its program and name. A request names the
+  program by fd and a dump by id, so the fd is read as its program's id
+  (`BPF_OBJ_GET_INFO_BY_FD`).
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
