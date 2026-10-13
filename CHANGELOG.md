@@ -991,6 +991,15 @@ All notable changes to this project will be documented in this file.
   a replace is irreversible now, and so is the removal of such a root. An
   undeclared tree holding one refuses the recreate that would lose it.
 
+- **A nexthop with an encap is not a declared one (#783).** A declaration
+  has no encap, and the diff did not read the kernel's. So `ip nexthop add
+  id 7 encap mpls 100 via …` passed for a declared nexthop 7 via the same
+  gateway, and traffic through it went out with a label nothing declared.
+  #745's restore of a recreated link also put such a nexthop back without
+  its encap, silently. `Nexthop::encap_type` reads `NHA_ENCAP_TYPE` now. A
+  declared nexthop with an encap is replaced, and the restore refuses one
+  with the reason.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

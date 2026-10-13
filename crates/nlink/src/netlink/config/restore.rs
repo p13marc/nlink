@@ -863,6 +863,10 @@ fn nexthops_from_live(gone: &HashSet<u32>, live: &Dumps<'_>, why: &mut Vec<Strin
             why.push(format!("nexthop {}, a resilient group, which no declaration has", n.id()));
             continue;
         }
+        if n.encap_type().is_some() {
+            why.push(format!("nexthop {}, with an encap, which no declaration has", n.id()));
+            continue;
+        }
         out.push(RestoredNexthop {
             nexthop: super::diff::nexthop_from_live(n, live.names),
             protocol: n.protocol(),

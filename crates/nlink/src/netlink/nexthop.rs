@@ -178,6 +178,8 @@ pub struct Nexthop {
     pub(crate) group_type: Option<NexthopGroupType>,
     /// Resilient group parameters (only set for resilient groups).
     pub(crate) resilient: Option<ResilientParams>,
+    /// The encapsulation's type (`NHA_ENCAP_TYPE`), when it has one.
+    pub(crate) encap_type: Option<u16>,
 }
 
 impl Nexthop {
@@ -255,6 +257,7 @@ impl Nexthop {
         let mut group: Option<Vec<NexthopGroupMember>> = None;
         let mut group_type: Option<NexthopGroupType> = None;
         let mut resilient: Option<ResilientParams> = None;
+        let mut encap_type: Option<u16> = None;
 
         for (attr_type, payload) in AttrIter::new(attrs_data) {
             match attr_type {
@@ -294,6 +297,9 @@ impl Nexthop {
                     if !members.is_empty() {
                         group = Some(members);
                     }
+                }
+                nha::ENCAP_TYPE if payload.len() >= 2 => {
+                    encap_type = Some(u16::from_ne_bytes([payload[0], payload[1]]));
                 }
                 nha::GROUP_TYPE if payload.len() >= 2 => {
                     let gt = u16::from_ne_bytes([payload[0], payload[1]]);
@@ -345,7 +351,14 @@ impl Nexthop {
             group,
             group_type,
             resilient,
+            encap_type,
         })
+    }
+
+    /// The type of its encapsulation (`NHA_ENCAP_TYPE`, an
+    /// `LWTUNNEL_ENCAP_*`: 1 is MPLS), when it has one (#783).
+    pub fn encap_type(&self) -> Option<u16> {
+        self.encap_type
     }
 
     /// Check if this nexthop is a group.

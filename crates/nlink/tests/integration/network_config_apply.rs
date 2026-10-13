@@ -1735,6 +1735,40 @@ async fn a_route_through_an_encap_nexthop_reads_back_as_one() -> Result<()> {
     .await
 }
 
+/// A nexthop with an encap is not a declared one (#783). A declaration has
+/// no encap, and the diff did not read the kernel's: `ip nexthop add id 7
+/// encap mpls 100 via …` passed for a declared nexthop 7 via the same
+/// gateway, so traffic through it went out with a label nothing declared.
+#[tokio::test]
+async fn a_nexthop_with_an_encap_is_not_a_declared_one() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "mpls_router", "mpls_iptunnel");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("nh-encap")?;
+        let conn = conn_in_ns(&ns)?;
+        let cfg = NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .address("d0", "10.83.1.1/24")?
+            .nexthop(7, |n| n.via("10.83.1.2".parse().unwrap()).dev("d0"));
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        ns.exec(
+            "ip",
+            &["nexthop", "replace", "id", "7", "encap", "mpls", "100", "via", "10.83.1.2", "dev", "d0", "proto", "boot"],
+        )?;
+        let diff = cfg.diff(&conn).await?;
+        assert_eq!(diff.nexthops_to_set.len(), 1, "a nexthop with an encap passed for one without: {diff}");
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let shown = ns.exec("ip", &["nexthop", "show", "id", "7"])?;
+        assert!(!shown.contains("encap"), "{shown}");
+        assert!(cfg.diff(&conn).await?.is_empty(), "did not converge");
+        Ok(())
+    })
+    .await
+}
+
 /// An address the apply removes comes back from its undo with what it had
 /// (#781): its label, metric, `noprefixroute` and broadcast (#783). The diff read a live
 /// address back bare, so the undo put back a plain address: no label, a
