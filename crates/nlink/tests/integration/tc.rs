@@ -3176,8 +3176,11 @@ impl Drop for BpfPin {
 /// references, position).
 fn filter_actions(ns: &TestNamespace, dev: &str) -> Result<Vec<(u64, serde_json::Value)>> {
     let out = ns.exec("tc", &["-j", "filter", "show", "dev", dev, "ingress"])?;
-    let listed: serde_json::Value = serde_json::from_str(&out)
-        .map_err(|e| nlink::Error::invalid_message(format!("{e}: {out}")))?;
+    // iproute2 6.1 prints some kinds' options as text inside the JSON
+    // (skbmod): read those filters' text instead.
+    let Ok(listed) = serde_json::from_str::<serde_json::Value>(&out) else {
+        return filter_actions_text(ns, dev);
+    };
     let mut by_prio = Vec::new();
     for f in listed.as_array().into_iter().flatten() {
         let Some(actions) = f["options"]["actions"].as_array() else {
@@ -3194,6 +3197,42 @@ fn filter_actions(ns: &TestNamespace, dev: &str) -> Result<Vec<(u64, serde_json:
         by_prio.push((f["pref"].as_u64().unwrap_or(0), serde_json::Value::Array(actions)));
     }
     Ok(by_prio)
+}
+
+/// [`filter_actions`] from `tc filter show`'s text: each filter's action
+/// lines, without the index and reference counts.
+fn filter_actions_text(ns: &TestNamespace, dev: &str) -> Result<Vec<(u64, serde_json::Value)>> {
+    let out = ns.exec("tc", &["filter", "show", "dev", dev, "ingress"])?;
+    let mut by_prio: Vec<(u64, String)> = Vec::new();
+    for line in out.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        if words.first() == Some(&"filter") {
+            let pref = words.iter().position(|w| *w == "pref").and_then(|i| words.get(i + 1)?.parse().ok()).unwrap_or(0);
+            if by_prio.last().is_none_or(|(p, _)| *p != pref) {
+                by_prio.push((pref, String::new()));
+            }
+            continue;
+        }
+        let Some((_, text)) = by_prio.last_mut() else { continue };
+        let mut rest = words.iter().copied();
+        while let Some(w) = rest.next() {
+            match w {
+                "index" | "ref" | "bind" => {
+                    rest.next();
+                }
+                "not_in_hw" | "in_hw" | "used_hw_stats" => {}
+                w => {
+                    text.push_str(w);
+                    text.push(' ');
+                }
+            }
+        }
+    }
+    Ok(by_prio
+        .into_iter()
+        .filter(|(_, text)| !text.is_empty())
+        .map(|(pref, text)| (pref, serde_json::Value::String(text)))
+        .collect())
 }
 
 /// One tc(8) action line installed by `tc` and by nlink's `parse_params`,
@@ -3380,6 +3419,31 @@ async fn fq_codel_and_tbf_framing_are_tcs() -> Result<()> {
     ] {
         let words: Vec<&str> = line.split_whitespace().collect();
         qdisc_same_as_tc(&ns, &conn, "tbf", line, TbfConfig::parse_params(&words)?).await?;
+    }
+    Ok(())
+}
+
+/// #816: an skbmod ethertype and an ife type and `use` value are what tc
+/// installs. nlink sent them big-endian where the kernel reads host order,
+/// so `set etype 0x88b5` installed 0xb588 and `use mark 5` mark 5 << 24.
+#[tokio::test]
+async fn skbmod_and_ife_values_install_as_tcs() -> Result<()> {
+    use nlink::netlink::action::{ActionList, IfeAction, SkbmodAction};
+    require_root!();
+    nlink::require_modules!("dummy", "sch_ingress", "cls_matchall", "act_skbmod", "act_ife");
+
+    let (ns, conn, d0) = clsact_d0("tc-byteorder").await?;
+    for line in ["set smac 02:00:00:00:00:02 set etype 0x88b5", "set etype 0x0800"] {
+        same_as_tc(&ns, "skbmod", line, async |a| matchall_at_prio_2(&conn, d0, a).await, |w| {
+            Ok(ActionList::new().with(SkbmodAction::parse_params(w)?))
+        })
+        .await?;
+    }
+    for line in ["encode type 0xed3e use mark 5", "encode use prio 7", "encode allow mark"] {
+        same_as_tc(&ns, "ife", line, async |a| matchall_at_prio_2(&conn, d0, a).await, |w| {
+            Ok(ActionList::new().with(IfeAction::parse_params(w)?))
+        })
+        .await?;
     }
     Ok(())
 }
