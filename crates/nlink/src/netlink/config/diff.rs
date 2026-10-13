@@ -2047,7 +2047,9 @@ fn diff_nexthops(
                     l.protocol()
                 ),
             });
-        } else if have == nexthop_normal(d) {
+        // A declaration has no encap, and one the kernel's nexthop has is
+        // not compared otherwise: it is another nexthop (#783).
+        } else if have == nexthop_normal(d) && l.encap_type().is_none() {
         } else if have.is_group() != d.is_group() {
             diff.nexthops_refused.push(NexthopConflict {
                 nexthop: d.clone(),

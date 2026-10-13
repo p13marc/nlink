@@ -3467,6 +3467,7 @@ mod tests {
             scope: 0,
             blackhole: false,
             fdb: false,
+            encap_type: None,
             group: group.map(|ids| {
                 ids.into_iter()
                     .map(|id| crate::netlink::nexthop::NexthopGroupMember { id, weight: 1 })

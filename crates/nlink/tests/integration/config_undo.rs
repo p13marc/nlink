@@ -345,6 +345,42 @@ async fn the_undo_puts_back_what_a_vrf_port_lost() -> Result<()> {
     .await
 }
 
+/// A nexthop with an encap on a recreated link is not put back without it
+/// (#783): no declaration has an encap, and the restore read the nexthop
+/// back bare, so it said nothing and restored another nexthop.
+#[tokio::test]
+async fn a_nexthop_with_an_encap_is_not_restored_without_it() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy", "8021q", "mpls_router", "mpls_iptunnel");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("undo-nh-encap")?;
+        let conn = Connection::<Route>::new_in(ns.name())?;
+        let cfg = |id: u16| {
+            NetworkConfig::new()
+                .link("u0", |l| l.dummy().up())
+                .link("v0", move |l| l.vlan("u0", id).up())
+                .address("v0", "10.80.1.1/24")
+        };
+        let applied = cfg(5)?.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        run(&ns, "ip", &["nexthop", "add", "id", "7", "encap", "mpls", "100", "via", "10.80.1.2", "dev", "v0"])?;
+
+        let diff = cfg(6)?
+            .diff_with_options(&conn, nlink::netlink::config::PlanOptions::default().recreate_policy(RecreatePolicy::Allow))
+            .await?;
+        let recreate = diff.links_to_recreate.iter().find(|r| r.name == "v0").expect("v0 is recreated");
+        assert!(recreate.restore.is_none());
+        assert!(
+            recreate.unrestorable.iter().any(|w| w.contains("nexthop 7, with an encap")),
+            "{:?}",
+            recreate.unrestorable
+        );
+        Ok(())
+    })
+    .await
+}
+
 /// What no declaration can put back leaves the recreate without an
 /// inverse, and says why (#745): an address with a lifetime, which a
 /// daemon added.
