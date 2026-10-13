@@ -2163,6 +2163,9 @@ pub mod filter {
             pub mask: u32,
             pub val: u32,
             pub off: u32,
+            /// The kernel's `struct tc_u32_key` ends with it; without it
+            /// `tcf_em_validate` refused every u32 ematch (#828).
+            pub offmask: i32,
         }
 
         impl TcfEmU32 {

@@ -4552,7 +4552,10 @@ pub struct EmatchCmp {
 }
 
 /// `u32` ematch — same selector primitive as `cls_u32`'s key, but
-/// embedded in a `cls_basic` ematch tree.
+/// embedded in a `cls_basic` ematch tree: the 32-bit word at `offset` (a
+/// multiple of four, from the network header) under `mask` equals
+/// `value`. `mask` and `value` are that word in host order; the writer
+/// sends it big-endian, as the packet holds it (#828).
 #[derive(Debug, Clone)]
 pub struct EmatchU32 {
     pub mask: u32,
@@ -4735,15 +4738,13 @@ impl BasicFilter {
     ///   `tcp`, `udp`, `icmp`, `icmpv6`, `sctp`, `ah`, `esp`,
     ///   `gre`. Numeric: 0–255.
     ///
-    /// # Not yet typed-modelled
-    ///
-    /// The full ematch DSL (`match cmp(...)`, `match u32(...)`,
-    /// AND/OR composition with paren grouping) is intentionally
-    /// not parsed here. The tc(8) ematch syntax doesn't tokenise
-    /// cleanly through `bins/tc`'s flat `&[String]` interface —
-    /// it relies on shell-quoted expressions. Use the typed
-    /// builder API ([`BasicFilter::ematch`], [`Ematch::cmp`],
-    /// [`Ematch::u32`]) for non-trivial trees.
+    /// - `match EXPR` — a tc-ematch(8) expression (#828): `cmp(...)` and
+    ///   `u32(...)` matches, each optionally `not`, joined by `and` or
+    ///   `or`, read as tc reads them. A match may be one argument
+    ///   (`'cmp(u8 at 9 layer network eq 6)'`, as the shell passes a
+    ///   quoted one) or several. Parenthesised groups, `meta(...)` and
+    ///   the other modules are not modelled; build those with
+    ///   [`BasicFilter::ematch`].
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         let mut f = Self::new();
         let mut i = 0;
@@ -4763,6 +4764,13 @@ impl BasicFilter {
                     f = f.chain(parse_u32_int("basic", "chain", s)?);
                     i += 2;
                 }
+                "match" => {
+                    let (matches, used) = parse_ematch_expr("basic", &params[i + 1..])?;
+                    for m in matches {
+                        f = f.ematch(m);
+                    }
+                    i += 1 + used;
+                }
                 "ip_proto_eq" => {
                     let s = need_value(params, i, "basic", key)?;
                     let proto = parse_ip_proto_name_or_num(s).map_err(|e| {
@@ -4775,7 +4783,7 @@ impl BasicFilter {
                 }
                 other => {
                     return Err(Error::invalid_message(format!(
-                        "basic: unknown token `{other}` (recognised: classid/flowid, chain, ip_proto_eq; complex ematch trees go through the typed builder)"
+                        "basic: unknown token `{other}` (recognised: classid/flowid, chain, match, ip_proto_eq)"
                     )));
                 }
             }
@@ -4829,6 +4837,214 @@ impl FilterConfig for BasicFilter {
     }
 }
 
+/// One lexeme of a tc-ematch(8) expression, and the argument it came from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum EmLex<'a> {
+    Open,
+    Close,
+    And,
+    Or,
+    Not,
+    Word(&'a str),
+}
+
+/// Split the arguments after `match` into lexemes, as tc's lexer does:
+/// `(` and `)` stand alone wherever they are, words split on spaces.
+fn ematch_lex<'a>(params: &[&'a str]) -> Vec<(EmLex<'a>, usize)> {
+    let mut out = Vec::new();
+    for (n, p) in params.iter().enumerate() {
+        let mut word_start = None;
+        let flush = |out: &mut Vec<(EmLex<'a>, usize)>, start: Option<usize>, end: usize| {
+            if let Some(start) = start {
+                let w = &p[start..end];
+                let lex = match w {
+                    "and" | "AND" | "&&" => EmLex::And,
+                    "or" | "OR" | "||" => EmLex::Or,
+                    "not" | "NOT" | "!" => EmLex::Not,
+                    _ => EmLex::Word(w),
+                };
+                out.push((lex, n));
+            }
+        };
+        for (at, c) in p.char_indices() {
+            match c {
+                '(' | ')' => {
+                    flush(&mut out, word_start.take(), at);
+                    out.push((if c == '(' { EmLex::Open } else { EmLex::Close }, n));
+                }
+                c if c.is_whitespace() => flush(&mut out, word_start.take(), at),
+                _ => {
+                    word_start.get_or_insert(at);
+                }
+            }
+        }
+        flush(&mut out, word_start, p.len());
+    }
+    out
+}
+
+/// Parse a tc-ematch(8) expression from the arguments after `match`, as
+/// tc's grammar reads it: matches, each optionally `not`, joined by `and`
+/// or `or`, ending at the first argument that does not continue it.
+/// Returns the matches and how many arguments they took (#828).
+fn parse_ematch_expr(kind: &str, params: &[&str]) -> Result<(Vec<Ematch>, usize)> {
+    let err = |msg: String| Error::invalid_message(format!("{kind}: match: {msg}"));
+    let lex = ematch_lex(params);
+    let mut at = 0;
+    let mut matches = Vec::new();
+    loop {
+        let negate = matches!(lex.get(at), Some((EmLex::Not, _)));
+        if negate {
+            at += 1;
+        }
+        let (module, args_from) = match (lex.get(at), lex.get(at + 1)) {
+            (Some((EmLex::Word(m), _)), Some((EmLex::Open, _))) => (*m, at + 2),
+            (Some((EmLex::Open, _)), _) => {
+                return Err(err("parenthesised groups are not modelled; build them with BasicFilter::ematch".into()));
+            }
+            _ => return Err(err("expected `module(args)`, such as `cmp(u8 at 9 layer network eq 6)`".into())),
+        };
+        let close = lex[args_from..]
+            .iter()
+            .position(|(l, _)| *l == EmLex::Close)
+            .map(|n| args_from + n)
+            .ok_or_else(|| err(format!("`{module}(` has no `)`")))?;
+        let args: Vec<&str> = lex[args_from..close]
+            .iter()
+            .map(|(l, _)| match l {
+                EmLex::Word(w) => Ok(*w),
+                _ => Err(err(format!("unexpected token in `{module}(...)`"))),
+            })
+            .collect::<Result<_>>()?;
+        let mut m = match module {
+            "cmp" => Ematch::cmp(parse_em_cmp(&err, &args)?),
+            "u32" => Ematch::u32(parse_em_u32(&err, &args)?),
+            other => {
+                return Err(err(format!(
+                    "the `{other}` ematch is not modelled (cmp and u32 are); build it with BasicFilter::ematch"
+                )));
+            }
+        };
+        if negate {
+            m = m.negate();
+        }
+        at = close + 1;
+        match lex.get(at) {
+            Some((EmLex::And, _)) => {
+                matches.push(m);
+                at += 1;
+            }
+            Some((EmLex::Or, _)) => {
+                matches.push(m.or());
+                at += 1;
+            }
+            _ => {
+                matches.push(m);
+                break;
+            }
+        }
+    }
+    // The expression ends with the argument its last `)` is in, which
+    // must end there.
+    let (_, last) = lex[at - 1];
+    if lex.get(at).is_some_and(|(_, n)| *n == last) {
+        return Err(err(format!("unexpected `{}` after the expression", params[last])));
+    }
+    Ok((matches, last + 1))
+}
+
+/// A number as tc's ematch modules read one: `strtoul(.., 0)`.
+fn em_number(err: &dyn Fn(String) -> Error, what: &str, s: &str) -> Result<u32> {
+    parse_u32_any("ematch", what, s).map_err(|_| err(format!("invalid {what} `{s}`")))
+}
+
+/// `cmp(ALIGN at OFFSET [layer LAYER] [mask MASK] [trans] eq|gt|lt VALUE)`,
+/// as tc's `em_cmp.c` reads it. An offset and a value are required.
+fn parse_em_cmp(err: &dyn Fn(String) -> Error, args: &[&str]) -> Result<EmatchCmp> {
+    let align = match args.first() {
+        Some(&"u8") => CmpAlign::U8,
+        Some(&"u16") => CmpAlign::U16,
+        Some(&"u32") => CmpAlign::U32,
+        _ => return Err(err("cmp: expected an alignment, u8, u16 or u32, first".into())),
+    };
+    let (mut offset, mut value, mut layer, mut mask, mut trans, mut op) = (None, None, CmpLayer::Network, 0, false, CmpOp::Eq);
+    let mut i = 1;
+    while i < args.len() {
+        let next = || args.get(i + 1).copied().ok_or_else(|| err(format!("cmp: `{}` requires a value", args[i])));
+        match args[i] {
+            "at" => {
+                let off = em_number(err, "cmp offset", next()?)?;
+                offset = Some(u16::try_from(off).map_err(|_| err(format!("cmp: offset {off} is past 65535")))?);
+                i += 2;
+            }
+            "layer" => {
+                layer = match next()? {
+                    "link" | "0" => CmpLayer::Link,
+                    "network" | "1" => CmpLayer::Network,
+                    "transport" | "2" => CmpLayer::Transport,
+                    other => return Err(err(format!("cmp: invalid layer `{other}` (expected link, network or transport)"))),
+                };
+                i += 2;
+            }
+            "mask" => {
+                mask = em_number(err, "cmp mask", next()?)?;
+                i += 2;
+            }
+            "trans" => {
+                trans = true;
+                i += 1;
+            }
+            w @ ("eq" | "gt" | "lt") => {
+                op = match w {
+                    "eq" => CmpOp::Eq,
+                    "gt" => CmpOp::Gt,
+                    _ => CmpOp::Lt,
+                };
+                value = Some(em_number(err, "cmp value", next()?)?);
+                i += 2;
+            }
+            other => return Err(err(format!("cmp: unknown parameter `{other}`"))),
+        }
+    }
+    let (Some(offset), Some(value)) = (offset, value) else {
+        return Err(err("cmp: an offset (`at`) and a value (`eq`, `gt` or `lt`) are required".into()));
+    };
+    Ok(EmatchCmp { layer, align, offset, mask, value, op, trans })
+}
+
+/// `u32(ALIGN KEY MASK at OFFSET)`, packed into the 32-bit word at the
+/// offset rounded down to four, as tc's `em_u32.c` packs it. An offset
+/// from the next header (`nexthdr+`) is not modelled.
+fn parse_em_u32(err: &dyn Fn(String) -> Error, args: &[&str]) -> Result<EmatchU32> {
+    let [align, key, mask, at, off] = args else {
+        return Err(err("u32: expected `u32(ALIGN KEY MASK at OFFSET)`".into()));
+    };
+    if *at != "at" {
+        return Err(err(format!("u32: expected `at`, not `{at}`")));
+    }
+    if off.starts_with("nexthdr+") {
+        return Err(err("u32: an offset from the next header is not modelled".into()));
+    }
+    let (key, mask, off) = (em_number(err, "u32 key", key)?, em_number(err, "u32 mask", mask)?, em_number(err, "u32 offset", off)?);
+    let (key, mask, off) = match *align {
+        "u8" if key <= 0xFF && mask <= 0xFF => {
+            let shift = 24 - (off & 3) * 8;
+            (key << shift, mask << shift, off & !3)
+        }
+        "u16" if key <= 0xFFFF && mask <= 0xFFFF => {
+            let shift = if off & 3 == 0 { 16 } else { 0 };
+            (key << shift, mask << shift, off & !3)
+        }
+        "u32" => (key, mask, off),
+        "u8" | "u16" => return Err(err(format!("u32: key or mask is wider than {align}"))),
+        other => return Err(err(format!("u32: invalid alignment `{other}` (expected u8, u16 or u32)"))),
+    };
+    if off % 4 != 0 {
+        return Err(err(format!("u32: offset {off} is not a multiple of 4")));
+    }
+    Ok(EmatchU32 { mask, value: key & mask, offset: off })
+}
+
 /// Encode an ematch tree under `TCA_BASIC_EMATCHES`.
 fn write_ematch_tree(builder: &mut MessageBuilder, matches: &[Ematch]) {
     let outer = builder.nest_start(basic::TCA_BASIC_EMATCHES);
@@ -4871,11 +5087,15 @@ fn write_ematch_tree(builder: &mut MessageBuilder, matches: &[Ematch]) {
 
         match &m.kind {
             EmatchKind::Cmp(c) => payload.extend_from_slice(encode_cmp(c).as_bytes()),
+            // The kernel's `struct tc_u32_key`, all 16 bytes, its word
+            // big-endian as the packet holds it; nlink sent 12 bytes,
+            // which `tcf_em_validate` refuses (#828).
             EmatchKind::U32(u) => {
                 let body = ematch::TcfEmU32 {
-                    mask: u.mask,
-                    val: u.value,
+                    mask: u.mask.to_be(),
+                    val: (u.value & u.mask).to_be(),
                     off: u.offset,
+                    offmask: 0,
                 };
                 payload.extend_from_slice(body.as_bytes());
             }
@@ -7298,6 +7518,52 @@ mod tests {
         f.write_options(&mut b).unwrap();
         let bytes = b.finish()[16..].to_vec();
         crate::netlink::attr::AttrIter::new(&bytes).map(|(ty, p)| (ty & 0x3fff, p.to_vec())).collect()
+    }
+
+    /// tc-ematch(8) expressions after `match`, as tc reads them (#828).
+    #[test]
+    fn basic_reads_tcs_ematch_expressions() {
+        // One argument per match, as the shell passes a quoted one, or
+        // split across several; the expression ends where it stops.
+        let quoted = BasicFilter::parse_params(&["match", "cmp(u8 at 9 layer network eq 6)", "classid", "1:10"]).unwrap();
+        let split = BasicFilter::parse_params(&["match", "cmp(", "u8", "at", "9", "layer", "network", "eq", "6", ")", "classid", "1:10"]).unwrap();
+        assert_eq!(format!("{:?}", quoted.matches), format!("{:?}", split.matches));
+        assert_eq!(quoted.classid, Some(TcHandle::new(1, 0x10).as_raw()));
+        let f = BasicFilter::parse_params(&["match", "not", "cmp(u8 at 9 layer network eq 17)", "or", "u32(u8 0x06 0xff at 9)"]).unwrap();
+        assert_eq!(f.matches.len(), 2);
+        assert!(f.matches[0].negate && f.matches[0].op == EmatchOp::Or);
+        let EmatchKind::U32(u) = &f.matches[1].kind else { panic!() };
+        // The protocol byte, the second of the word at 8.
+        assert_eq!((u.mask, u.value, u.offset), (0x00ff_0000, 0x0006_0000, 8));
+        let f = BasicFilter::parse_params(&["match", "cmp(u32 at 12 mask 0xffffff00 trans gt 167772160)"]).unwrap();
+        let EmatchKind::Cmp(c) = &f.matches[0].kind else { panic!() };
+        assert_eq!((c.offset, c.mask, c.value, c.op, c.trans), (12, 0xffff_ff00, 167_772_160, CmpOp::Gt, true));
+
+        for (bad, says) in [
+            (&["match", "(cmp(u8 at 9 eq 6))"][..], "groups"),
+            (&["match", "meta(priority eq 5)"], "not modelled"),
+            (&["match", "cmp(u8 at 9 eq 6"], "no `)`"),
+            (&["match", "cmp(u8 eq 6)"], "required"),
+            (&["match", "u32(u8 0x106 0xff at 9)"], "wider"),
+            (&["match", "u32(u8 1 0xff at nexthdr+0)"], "next header"),
+            (&["match", "cmp(u8 at 9 eq 6) classid"], "unexpected"),
+        ] {
+            let err = BasicFilter::parse_params(bad).unwrap_err().to_string();
+            assert!(err.contains(says), "{bad:?}: {err}");
+        }
+    }
+
+    /// A u32 ematch's key is the kernel's whole `struct tc_u32_key`, its
+    /// word big-endian (#828).
+    #[test]
+    fn a_u32_ematchs_key_is_tcs() {
+        let f = BasicFilter::new().ematch(Ematch::u32(EmatchU32 { mask: 0x00ff_0000, value: 0x0006_0000, offset: 8 }));
+        let mut b = MessageBuilder::new(0, 0);
+        f.write_options(&mut b).unwrap();
+        let bytes = b.finish();
+        let needle = [0x00, 0xff, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 8, 0, 0, 0, 0, 0, 0, 0];
+        assert!(bytes.windows(16).any(|w| w == needle), "{bytes:02x?}");
+        assert_eq!(ematch::TcfEmU32::SIZE, 16);
     }
 
     /// tc-flower(8)'s other keys, written as f_flower.c writes them (#827).

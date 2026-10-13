@@ -3734,7 +3734,8 @@ async fn every_class_kinds_lines_install_as_tcs() -> Result<()> {
 async fn every_filter_kinds_lines_install_as_tcs() -> Result<()> {
     require_root!();
     nlink::require_modules!(
-        "dummy", "sch_htb", "cls_u32", "cls_fw", "cls_route", "cls_basic", "cls_matchall", "cls_flow", "cls_flower"
+        "dummy", "sch_htb", "cls_u32", "cls_fw", "cls_route", "cls_basic", "cls_matchall", "cls_flow", "cls_flower",
+        "em_cmp", "em_u32"
     );
 
     // (kind, protocol, handle, line)
@@ -3770,6 +3771,13 @@ async fn every_filter_kinds_lines_install_as_tcs() -> Result<()> {
         ("route", "ip", None, "fromif lo classid 1:10"),
         ("route", "ip", None, "to 10 order 5 classid 1:10"),
         ("basic", "ip", None, "classid 1:10"),
+        // tc-ematch(8) expressions (#828).
+        ("basic", "ip", None, "match cmp(u8 at 9 layer network eq 6) classid 1:10"),
+        ("basic", "ip", None, "match u32(u32 0x0a000001 0xffffffff at 16) classid 1:10"),
+        ("basic", "ip", None, "match u32(u16 0x0050 0xffff at 22) classid 1:10"),
+        ("basic", "ip", None, "match cmp(u16 at 2 layer transport eq 80) and cmp(u8 at 9 layer network eq 6) classid 1:10"),
+        ("basic", "ip", None, "match not cmp(u8 at 9 layer network eq 17) or u32(u8 0x06 0xff at 9) classid 1:10"),
+        ("basic", "ip", None, "match cmp(u32 at 12 layer network mask 0xffffff00 trans gt 167772160) classid 1:10"),
         ("matchall", "all", None, "classid 1:10"),
         // flower's keys beyond flower_lines_install_the_same_through_tc_and_nlink's (#827).
         ("flower", "ip", None, "ip_proto icmp type 8 code 0 classid 1:10"),
@@ -3884,6 +3892,37 @@ async fn filter_lines_same_as_tc(label: &str, rows: &[(&str, &str, Option<&str>,
     Ok(())
 }
 
+
+/// #828: a basic filter with a u32 ematch from the builder installs, and
+/// matches what tc's line for it matches. nlink sent the ematch's key as 12
+/// bytes, which the kernel refuses for want of the `offmask` that ends a
+/// `struct tc_u32_key`, and in host order where the packet's word is
+/// big-endian.
+#[tokio::test]
+async fn a_basic_filters_u32_ematch_installs_as_tcs() -> Result<()> {
+    use nlink::netlink::filter::{BasicFilter, Ematch, EmatchU32};
+    require_root!();
+    nlink::require_modules!("dummy", "sch_htb", "cls_basic", "em_u32");
+
+    let (ns, conn) = setup_tc_ns("tc-em-u32").await?;
+    ns.exec("tc", &["qdisc", "add", "dev", "dummy0", "root", "handle", "1:", "htb"])?;
+    ns.exec("tc", &["class", "add", "dev", "dummy0", "parent", "1:", "classid", "1:10", "htb", "rate", "10mbit"])?;
+    let shown = || ns.exec("tc", &["-d", "filter", "show", "dev", "dummy0", "parent", "1:"]);
+    ns.exec(
+        "tc",
+        &["filter", "add", "dev", "dummy0", "parent", "1:", "protocol", "ip", "prio", "1", "basic", "match", "u32(u8 0x06 0xff at 9)", "classid", "1:10"],
+    )?;
+    let theirs = shown()?;
+    ns.exec("tc", &["filter", "del", "dev", "dummy0", "parent", "1:"])?;
+    // The IP protocol: byte 9, the second of the word at offset 8.
+    let filter = BasicFilter::new()
+        .classid(TcHandle::new(1, 0x10))
+        .ematch(Ematch::u32(EmatchU32 { mask: 0x00ff_0000, value: 0x0006_0000, offset: 8 }));
+    conn.add_filter_full("dummy0", TcHandle::major_only(1), None, nlink::EthProto::IP, nlink::FilterPriority::new(1), filter)
+        .await?;
+    assert_eq!(shown()?, theirs);
+    Ok(())
+}
 
 /// #819, #823: a red, a choke and a taprio from nlink's builders install.
 /// The kernel refused red and choke without their idle-damping table,
