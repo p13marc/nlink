@@ -1462,6 +1462,47 @@ pub struct FlowerFilter {
     ip_ttl: Option<(u8, u8)>,
     /// TCP flags.
     tcp_flags: Option<(u16, u16)>,
+    /// ICMP type and code, each with its mask: ICMPv4 or ICMPv6 by the
+    /// network ethertype and `ip_proto` (#827).
+    icmp_type: Option<(u8, u8)>,
+    icmp_code: Option<(u8, u8)>,
+    /// `TCA_FLOWER_KEY_FLAGS`: the fragment flags and their mask (#827).
+    ip_flags: Option<(u32, u32)>,
+    /// Conntrack state, zone, mark and labels, each with its mask (#827).
+    ct_state: Option<(u16, u16)>,
+    ct_zone: Option<(u16, u16)>,
+    ct_mark: Option<(u32, u32)>,
+    ct_labels: Option<([u8; 16], [u8; 16])>,
+    /// The device packets arrived on (#827).
+    indev: Option<String>,
+    /// The ethertype inside the VLAN tag, the inner tag's id and priority,
+    /// and the ethertype inside that (#827).
+    vlan_ethtype: Option<u16>,
+    cvlan_id: Option<u16>,
+    cvlan_prio: Option<u8>,
+    cvlan_ethtype: Option<u16>,
+    /// The top MPLS label stack entry (#827).
+    mpls_label: Option<u32>,
+    mpls_tc: Option<u8>,
+    mpls_bos: Option<u8>,
+    mpls_ttl: Option<u8>,
+    /// MAC masks; all ones when not given (#827).
+    src_mac_mask: Option<[u8; 6]>,
+    dst_mac_mask: Option<[u8; 6]>,
+    /// ARP opcode, addresses and hardware addresses, with masks (#827).
+    arp_op: Option<(u8, u8)>,
+    arp_sip: Option<(Ipv4Addr, u8)>,
+    arp_tip: Option<(Ipv4Addr, u8)>,
+    arp_sha: Option<([u8; 6], [u8; 6])>,
+    arp_tha: Option<([u8; 6], [u8; 6])>,
+    /// Tunnel metadata: key id, outer addresses, UDP port, TOS and TTL
+    /// (#827).
+    enc_key_id: Option<u32>,
+    enc_src_ip: Option<(IpAddr, u8)>,
+    enc_dst_ip: Option<(IpAddr, u8)>,
+    enc_dst_port: Option<u16>,
+    enc_tos: Option<(u8, u8)>,
+    enc_ttl: Option<(u8, u8)>,
     /// Filter flags (skip_hw, skip_sw, etc.).
     flags: u32,
     /// Priority.
@@ -1724,6 +1765,186 @@ impl FlowerFilter {
         self
     }
 
+    /// Match the ICMP (or ICMPv6) type under a mask. Needs `ip_proto` icmp
+    /// on IPv4 or icmpv6 on IPv6.
+    pub fn icmp_type(mut self, icmp_type: u8, mask: u8) -> Self {
+        self.icmp_type = Some((icmp_type, mask));
+        self
+    }
+
+    /// Match the ICMP (or ICMPv6) code under a mask.
+    pub fn icmp_code(mut self, code: u8, mask: u8) -> Self {
+        self.icmp_code = Some((code, mask));
+        self
+    }
+
+    /// Match `TCA_FLOWER_KEY_FLAGS` under a mask: the fragment bits,
+    /// `TCA_FLOWER_KEY_FLAGS_IS_FRAGMENT` and `…_FRAG_IS_FIRST`.
+    pub fn ip_flags(mut self, flags: u32, mask: u32) -> Self {
+        self.ip_flags = Some((flags, mask));
+        self
+    }
+
+    /// Match the conntrack state (`TCA_FLOWER_KEY_CT_FLAGS_*`) under a mask.
+    pub fn ct_state(mut self, state: u16, mask: u16) -> Self {
+        self.ct_state = Some((state, mask));
+        self
+    }
+
+    /// Match the conntrack zone under a mask.
+    pub fn ct_zone(mut self, zone: u16, mask: u16) -> Self {
+        self.ct_zone = Some((zone, mask));
+        self
+    }
+
+    /// Match the conntrack mark under a mask.
+    pub fn ct_mark(mut self, mark: u32, mask: u32) -> Self {
+        self.ct_mark = Some((mark, mask));
+        self
+    }
+
+    /// Match the 128-bit conntrack labels under a mask.
+    pub fn ct_labels(mut self, labels: [u8; 16], mask: [u8; 16]) -> Self {
+        self.ct_labels = Some((labels, mask));
+        self
+    }
+
+    /// Match only packets that arrived on `dev`; the kernel resolves the
+    /// name in the filter's namespace.
+    pub fn indev(mut self, dev: impl Into<String>) -> Self {
+        self.indev = Some(dev.into());
+        self
+    }
+
+    /// The ethertype inside the VLAN tag: the protocol the L3 keys match
+    /// under a VLAN, or a second tag's for QinQ.
+    pub fn vlan_ethtype(mut self, ethertype: EthProto) -> Self {
+        self.vlan_ethtype = Some(ethertype.as_u16());
+        self
+    }
+
+    /// Match the inner (customer) VLAN id. Needs `vlan_ethtype` a VLAN tag.
+    pub fn cvlan_id(mut self, id: u16) -> Self {
+        self.cvlan_id = Some(id);
+        self
+    }
+
+    /// Match the inner VLAN priority.
+    pub fn cvlan_prio(mut self, prio: u8) -> Self {
+        self.cvlan_prio = Some(prio);
+        self
+    }
+
+    /// The ethertype inside the inner VLAN tag.
+    pub fn cvlan_ethtype(mut self, ethertype: EthProto) -> Self {
+        self.cvlan_ethtype = Some(ethertype.as_u16());
+        self
+    }
+
+    /// Match the top MPLS label. Needs the MPLS ethertype.
+    pub fn mpls_label(mut self, label: u32) -> Self {
+        self.mpls_label = Some(label);
+        self
+    }
+
+    /// Match the top MPLS entry's traffic class.
+    pub fn mpls_tc(mut self, tc: u8) -> Self {
+        self.mpls_tc = Some(tc);
+        self
+    }
+
+    /// Match the top MPLS entry's bottom-of-stack bit.
+    pub fn mpls_bos(mut self, bos: u8) -> Self {
+        self.mpls_bos = Some(bos);
+        self
+    }
+
+    /// Match the top MPLS entry's TTL.
+    pub fn mpls_ttl(mut self, ttl: u8) -> Self {
+        self.mpls_ttl = Some(ttl);
+        self
+    }
+
+    /// Match the source MAC under a mask.
+    pub fn src_mac_masked(mut self, mac: [u8; 6], mask: [u8; 6]) -> Self {
+        self.src_mac = Some(mac);
+        self.src_mac_mask = Some(mask);
+        self
+    }
+
+    /// Match the destination MAC under a mask.
+    pub fn dst_mac_masked(mut self, mac: [u8; 6], mask: [u8; 6]) -> Self {
+        self.dst_mac = Some(mac);
+        self.dst_mac_mask = Some(mask);
+        self
+    }
+
+    /// Match the ARP opcode under a mask. Needs the ARP or RARP ethertype.
+    pub fn arp_op(mut self, op: u8, mask: u8) -> Self {
+        self.arp_op = Some((op, mask));
+        self
+    }
+
+    /// Match the ARP sender address under a prefix.
+    pub fn arp_sip(mut self, addr: Ipv4Addr, prefix_len: u8) -> Self {
+        self.arp_sip = Some((addr, prefix_len));
+        self
+    }
+
+    /// Match the ARP target address under a prefix.
+    pub fn arp_tip(mut self, addr: Ipv4Addr, prefix_len: u8) -> Self {
+        self.arp_tip = Some((addr, prefix_len));
+        self
+    }
+
+    /// Match the ARP sender hardware address under a mask.
+    pub fn arp_sha(mut self, mac: [u8; 6], mask: [u8; 6]) -> Self {
+        self.arp_sha = Some((mac, mask));
+        self
+    }
+
+    /// Match the ARP target hardware address under a mask.
+    pub fn arp_tha(mut self, mac: [u8; 6], mask: [u8; 6]) -> Self {
+        self.arp_tha = Some((mac, mask));
+        self
+    }
+
+    /// Match a tunnel's key id (a VNI, a GRE key).
+    pub fn enc_key_id(mut self, id: u32) -> Self {
+        self.enc_key_id = Some(id);
+        self
+    }
+
+    /// Match a tunnel's outer source address under a prefix.
+    pub fn enc_src_ip(mut self, addr: IpAddr, prefix_len: u8) -> Self {
+        self.enc_src_ip = Some((addr, prefix_len));
+        self
+    }
+
+    /// Match a tunnel's outer destination address under a prefix.
+    pub fn enc_dst_ip(mut self, addr: IpAddr, prefix_len: u8) -> Self {
+        self.enc_dst_ip = Some((addr, prefix_len));
+        self
+    }
+
+    /// Match a tunnel's outer UDP destination port.
+    pub fn enc_dst_port(mut self, port: u16) -> Self {
+        self.enc_dst_port = Some(port);
+        self
+    }
+
+    /// Match a tunnel's outer TOS under a mask.
+    pub fn enc_tos(mut self, tos: u8, mask: u8) -> Self {
+        self.enc_tos = Some((tos, mask));
+        self
+    }
+
+    /// Match a tunnel's outer TTL under a mask.
+    pub fn enc_ttl(mut self, ttl: u8, mask: u8) -> Self {
+        self.enc_ttl = Some((ttl, mask));
+        self
+    }
+
     /// Skip hardware offload.
     pub fn skip_hw(mut self) -> Self {
         self.flags |= flower::TCA_CLS_FLAGS_SKIP_HW;
@@ -1803,8 +2024,17 @@ impl FlowerFilter {
     /// restricted to 0x88a8 frames asked for a 0x8100 TPID and matched
     /// nothing.
     fn effective_eth_type(&self) -> Option<u16> {
+        let protocol = (!matches!(self.protocol, 0 | ETH_P_ALL)).then_some(self.protocol);
+        // Under a VLAN tag, an address's implied ethertype is the inner
+        // protocol's, which `vlan_ethtype` carries: the outer one stays the
+        // tag the filter is installed under (#827).
+        if self.vlan_ethtype.is_some()
+            && let Some(tag) = protocol.filter(|p| matches!(p, 0x8100 | 0x88A8))
+        {
+            return Some(tag);
+        }
         self.eth_type
-            .or((!matches!(self.protocol, 0 | ETH_P_ALL)).then_some(self.protocol))
+            .or(protocol)
             .or((self.vlan_id.is_some() || self.vlan_prio.is_some()).then_some(0x8100))
     }
 
@@ -1920,12 +2150,15 @@ impl FlowerFilter {
                     }
                     i += 2;
                 }
+                // A MAC with an optional `/MASK`, a MAC or a bit count (#827).
                 "src_mac" => {
-                    f = f.src_mac(parse_mac(need_value()?)?);
+                    let (mac, mask) = parse_flower_mac(need_value()?, key)?;
+                    f = f.src_mac_masked(mac, mask);
                     i += 2;
                 }
                 "dst_mac" => {
-                    f = f.dst_mac(parse_mac(need_value()?)?);
+                    let (mac, mask) = parse_flower_mac(need_value()?, key)?;
+                    f = f.dst_mac_masked(mac, mask);
                     i += 2;
                 }
                 "eth_type" => {
@@ -1990,11 +2223,138 @@ impl FlowerFilter {
                     f = if key == "chain" { f.chain(n) } else { f.goto_chain(n) };
                     i += 2;
                 }
-                "ct_state" | "ct_zone" | "ct_mark" | "enc_key_id" | "enc_dst_ip" | "enc_src_ip"
-                | "enc_dst_port" | "indev" => {
-                    return Err(Error::invalid_message(format!(
-                        "flower: `{key}` is not modelled by FlowerFilter yet — file an issue if you need this match"
-                    )));
+                // tc-flower(8)'s other keys (#827), read as f_flower.c reads
+                // them.
+                "type" | "code" => {
+                    let (v, m) = parse_flower_u8_dec(need_value()?, key, None)?;
+                    f = if key == "type" { f.icmp_type(v, m) } else { f.icmp_code(v, m) };
+                    i += 2;
+                }
+                "ip_flags" => {
+                    let (v, m) = parse_flower_ip_flags(need_value()?)?;
+                    f = f.ip_flags(v, m);
+                    i += 2;
+                }
+                "ct_state" => {
+                    let (v, m) = parse_flower_ct_state(need_value()?)?;
+                    f = f.ct_state(v, m);
+                    i += 2;
+                }
+                "ct_zone" => {
+                    let (v, m) = parse_flower_masked_any(need_value()?, key, u16::MAX.into())?;
+                    f = f.ct_zone(v as u16, m as u16);
+                    i += 2;
+                }
+                "ct_mark" => {
+                    let (v, m) = parse_flower_masked_any(need_value()?, key, u32::MAX)?;
+                    f = f.ct_mark(v, m);
+                    i += 2;
+                }
+                "ct_label" => {
+                    let (v, m) = parse_flower_ct_label(need_value()?)?;
+                    f = f.ct_labels(v, m);
+                    i += 2;
+                }
+                "indev" => {
+                    f = f.indev(need_value()?);
+                    i += 2;
+                }
+                "vlan_ethtype" | "cvlan_ethtype" => {
+                    let t = EthProto::new(parse_flower_eth_type(need_value()?)?);
+                    f = if key == "vlan_ethtype" { f.vlan_ethtype(t) } else { f.cvlan_ethtype(t) };
+                    i += 2;
+                }
+                "cvlan_id" => {
+                    let s = need_value()?;
+                    let id = s.parse::<u16>().ok().filter(|id| *id < 4096).ok_or_else(|| {
+                        Error::invalid_message(format!("flower: invalid cvlan_id `{s}` (expected 0-4095)"))
+                    })?;
+                    f = f.cvlan_id(id);
+                    i += 2;
+                }
+                "cvlan_prio" | "mpls_tc" | "mpls_bos" | "mpls_ttl" => {
+                    let s = need_value()?;
+                    let max = match key {
+                        "mpls_bos" => 1,
+                        "mpls_ttl" => 255,
+                        _ => 7,
+                    };
+                    let v = s.parse::<u8>().ok().filter(|v| *v <= max).ok_or_else(|| {
+                        Error::invalid_message(format!("flower: invalid {key} `{s}` (expected 0-{max})"))
+                    })?;
+                    f = match key {
+                        "cvlan_prio" => f.cvlan_prio(v),
+                        "mpls_tc" => f.mpls_tc(v),
+                        "mpls_bos" => f.mpls_bos(v),
+                        _ => f.mpls_ttl(v),
+                    };
+                    i += 2;
+                }
+                "mpls_label" => {
+                    let s = need_value()?;
+                    let label = s.parse::<u32>().ok().filter(|l| *l <= 0xF_FFFF).ok_or_else(|| {
+                        Error::invalid_message(format!("flower: invalid mpls_label `{s}` (expected 0-1048575)"))
+                    })?;
+                    f = f.mpls_label(label);
+                    i += 2;
+                }
+                "arp_op" => {
+                    let names = |s: &str| match s {
+                        "request" => Some(1),
+                        "reply" => Some(2),
+                        _ => None,
+                    };
+                    let (v, m) = parse_flower_u8_dec(need_value()?, key, Some(&names))?;
+                    if v > 2 {
+                        return Err(Error::invalid_message(format!(
+                            "flower: invalid arp_op `{v}` (expected request, reply, 1 or 2)"
+                        )));
+                    }
+                    f = f.arp_op(v, m);
+                    i += 2;
+                }
+                "arp_sip" | "arp_tip" => {
+                    let (addr, plen) = parse_ipv4_with_prefix(need_value()?)?;
+                    f = if key == "arp_sip" { f.arp_sip(addr, plen) } else { f.arp_tip(addr, plen) };
+                    i += 2;
+                }
+                "arp_sha" | "arp_tha" => {
+                    let (mac, mask) = parse_flower_mac(need_value()?, key)?;
+                    f = if key == "arp_sha" { f.arp_sha(mac, mask) } else { f.arp_tha(mac, mask) };
+                    i += 2;
+                }
+                "enc_key_id" => {
+                    let s = need_value()?;
+                    let id = s.parse::<u32>().map_err(|_| {
+                        Error::invalid_message(format!("flower: invalid enc_key_id `{s}`"))
+                    })?;
+                    f = f.enc_key_id(id);
+                    i += 2;
+                }
+                "enc_src_ip" | "enc_dst_ip" => {
+                    let s = need_value()?;
+                    let (addr, plen) = if s.contains(':') {
+                        let (a, p) = parse_ipv6_with_prefix(s)?;
+                        (IpAddr::V6(a), p)
+                    } else {
+                        let (a, p) = parse_ipv4_with_prefix(s)?;
+                        (IpAddr::V4(a), p)
+                    };
+                    f = if key == "enc_src_ip" { f.enc_src_ip(addr, plen) } else { f.enc_dst_ip(addr, plen) };
+                    i += 2;
+                }
+                "enc_dst_port" => {
+                    let s = need_value()?;
+                    let port = s.parse::<u16>().map_err(|_| {
+                        Error::invalid_message(format!("flower: invalid enc_dst_port `{s}`"))
+                    })?;
+                    f = f.enc_dst_port(port);
+                    i += 2;
+                }
+                "enc_tos" | "enc_ttl" => {
+                    let (v, m) = parse_value_mask_u8(need_value()?, key)?;
+                    f = if key == "enc_tos" { f.enc_tos(v, m) } else { f.enc_ttl(v, m) };
+                    i += 2;
                 }
                 "action" | "actions" => {
                     return Err(Error::invalid_message(format!(
@@ -2066,11 +2426,15 @@ impl FlowerFilter {
                 .collect::<Vec<_>>()
                 .join(":")
         };
+        let masked_mac = |m: [u8; 6], mask: Option<[u8; 6]>| match mask {
+            Some(k) if k != [0xFF; 6] => format!("{}/{}", mac(m), mac(k)),
+            _ => mac(m),
+        };
         if let Some(m) = self.src_mac {
-            put("src_mac", mac(m));
+            put("src_mac", masked_mac(m, self.src_mac_mask));
         }
         if let Some(m) = self.dst_mac {
-            put("dst_mac", mac(m));
+            put("dst_mac", masked_mac(m, self.dst_mac_mask));
         }
         if let Some(v) = self.vlan_id {
             put("vlan_id", v.to_string());
@@ -2086,6 +2450,112 @@ impl FlowerFilter {
         }
         if let Some((v, m)) = self.tcp_flags {
             put("tcp_flags", format!("0x{v:x}/0x{m:x}"));
+        }
+        // The keys #827 added, in tc-flower(8)'s words.
+        if let Some((v, m)) = self.icmp_type {
+            put("type", format!("{v}/{m}"));
+        }
+        if let Some((v, m)) = self.icmp_code {
+            put("code", format!("{v}/{m}"));
+        }
+        if let Some((v, m)) = self.ip_flags {
+            let mut words = Vec::new();
+            for (flag, name) in [
+                (flower::TCA_FLOWER_KEY_FLAGS_IS_FRAGMENT, "frag"),
+                (flower::TCA_FLOWER_KEY_FLAGS_FRAG_IS_FIRST, "firstfrag"),
+            ] {
+                if m & flag != 0 {
+                    words.push(if v & flag != 0 { name.to_string() } else { format!("no{name}") });
+                }
+            }
+            if m & !(flower::TCA_FLOWER_KEY_FLAGS_IS_FRAGMENT | flower::TCA_FLOWER_KEY_FLAGS_FRAG_IS_FIRST) != 0 {
+                return Err(Error::not_supported(format!("flower: ip_flags mask {m:#x} has no token")));
+            }
+            put("ip_flags", words.join("/"));
+        }
+        if let Some((v, m)) = self.ct_state {
+            const STATES: [(&str, u16); 6] = [
+                ("trk", flower::TCA_FLOWER_KEY_CT_FLAGS_TRACKED),
+                ("new", flower::TCA_FLOWER_KEY_CT_FLAGS_NEW),
+                ("est", flower::TCA_FLOWER_KEY_CT_FLAGS_ESTABLISHED),
+                ("rel", flower::TCA_FLOWER_KEY_CT_FLAGS_RELATED),
+                ("inv", flower::TCA_FLOWER_KEY_CT_FLAGS_INVALID),
+                ("rpl", flower::TCA_FLOWER_KEY_CT_FLAGS_REPLY),
+            ];
+            let words: String = STATES
+                .iter()
+                .filter(|(_, f)| m & f != 0)
+                .map(|(n, f)| format!("{}{n}", if v & f != 0 { '+' } else { '-' }))
+                .collect();
+            put("ct_state", words);
+        }
+        if let Some((v, m)) = self.ct_zone {
+            put("ct_zone", format!("{v}/0x{m:x}"));
+        }
+        if let Some((v, m)) = self.ct_mark {
+            put("ct_mark", format!("{v}/0x{m:x}"));
+        }
+        if let Some((v, m)) = self.ct_labels {
+            let hex = |b: [u8; 16]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+            put("ct_label", format!("{}/{}", hex(v), hex(m)));
+        }
+        if let Some(dev) = &self.indev {
+            put("indev", dev.clone());
+        }
+        if let Some(t) = self.vlan_ethtype {
+            put("vlan_ethtype", EthProto::from(t).to_string());
+        }
+        if let Some(v) = self.cvlan_id {
+            put("cvlan_id", v.to_string());
+        }
+        if let Some(p) = self.cvlan_prio {
+            put("cvlan_prio", p.to_string());
+        }
+        if let Some(t) = self.cvlan_ethtype {
+            put("cvlan_ethtype", EthProto::from(t).to_string());
+        }
+        for (key, v) in [
+            ("mpls_label", self.mpls_label),
+            ("mpls_tc", self.mpls_tc.map(u32::from)),
+            ("mpls_bos", self.mpls_bos.map(u32::from)),
+            ("mpls_ttl", self.mpls_ttl.map(u32::from)),
+        ] {
+            if let Some(v) = v {
+                put(key, v.to_string());
+            }
+        }
+        if let Some((v, m)) = self.arp_op {
+            put("arp_op", format!("{v}/{m}"));
+        }
+        if let Some((a, l)) = self.arp_sip {
+            put("arp_sip", format!("{a}/{l}"));
+        }
+        if let Some((a, l)) = self.arp_tip {
+            put("arp_tip", format!("{a}/{l}"));
+        }
+        if let Some((m, k)) = self.arp_sha {
+            put("arp_sha", masked_mac(m, Some(k)));
+        }
+        if let Some((m, k)) = self.arp_tha {
+            put("arp_tha", masked_mac(m, Some(k)));
+        }
+        if let Some(id) = self.enc_key_id {
+            put("enc_key_id", id.to_string());
+        }
+        if let Some((a, l)) = self.enc_src_ip {
+            put("enc_src_ip", format!("{a}/{l}"));
+        }
+        if let Some((a, l)) = self.enc_dst_ip {
+            put("enc_dst_ip", format!("{a}/{l}"));
+        }
+        if let Some(p) = self.enc_dst_port {
+            put("enc_dst_port", p.to_string());
+        }
+        if let Some((v, m)) = self.enc_tos {
+            put("enc_tos", format!("{v}/0x{m:x}"));
+        }
+        if let Some((v, m)) = self.enc_ttl {
+            put("enc_ttl", format!("{v}/0x{m:x}"));
         }
         if let Some(c) = self.chain {
             put("chain", c.to_string());
@@ -2239,6 +2709,157 @@ fn parse_value_mask_u8(s: &str, label: &str) -> crate::Result<(u8, u8)> {
     Ok((value, mask))
 }
 
+/// The `TCA_FLOWER_KEY_ETH_TYPE` a dump reports for a flower that wrote a
+/// `TCA_FLOWER_KEY_VLAN_ETH_TYPE`, from the attributes it wrote (`get`):
+/// the kernel keeps the innermost protocol in `n_proto` and dumps that, so
+/// a tag written outermost reads back as `vlan_ethtype`, or under two tags
+/// as `cvlan_ethtype`, absent when none was given (#827). `None` when the
+/// filter wrote no `vlan_ethtype`: the dump is what was written.
+pub(crate) fn flower_dumped_eth_type(get: impl Fn(u16) -> Option<[u8; 2]>) -> Option<Option<[u8; 2]>> {
+    let inner = get(flower::TCA_FLOWER_KEY_VLAN_ETH_TYPE)?;
+    Some(match u16::from_be_bytes(inner) {
+        0x8100 | 0x88A8 => get(flower::TCA_FLOWER_KEY_CVLAN_ETH_TYPE),
+        _ => Some(inner),
+    })
+}
+
+/// Maps a word, such as an ARP opcode's name, to its value.
+type ValueNames<'a> = &'a dyn Fn(&str) -> Option<u8>;
+
+/// A `u8` with an optional `/MASK`, both decimal, as tc-flower's
+/// `flower_parse_u8()` reads them; `names` maps words such as `request`.
+fn parse_flower_u8_dec(s: &str, label: &str, names: Option<ValueNames<'_>>) -> crate::Result<(u8, u8)> {
+    use crate::Error;
+    let invalid = |t: &str| Error::invalid_message(format!("flower: invalid {label} `{t}`"));
+    let (v, m) = s.split_once('/').map_or((s, None), |(v, m)| (v, Some(m)));
+    let value = match names.and_then(|n| n(v)) {
+        Some(v) => v,
+        None => v.parse::<u8>().map_err(|_| invalid(v))?,
+    };
+    let mask = m.map_or(Ok(u8::MAX), |m| m.parse::<u8>().map_err(|_| invalid(m)))?;
+    Ok((value, mask))
+}
+
+/// A value with an optional `/MASK`, both in any base, as tc-flower's
+/// `flower_parse_u16()`/`flower_parse_u32()` read them; `max` is the
+/// field's all-ones.
+fn parse_flower_masked_any(s: &str, label: &str, max: u32) -> crate::Result<(u32, u32)> {
+    use crate::Error;
+    let one = |t: &str| {
+        parse_u32_any("flower", label, t).ok().filter(|v| *v <= max).ok_or_else(|| {
+            Error::invalid_message(format!("flower: invalid {label} `{t}` (expected up to {max:#x})"))
+        })
+    };
+    match s.split_once('/') {
+        Some((v, m)) => Ok((one(v)?, one(m)?)),
+        None => Ok((one(s)?, max)),
+    }
+}
+
+/// `frag`, `firstfrag` and their `no` forms, joined by `/`, as tc-flower's
+/// `ip_flags`: the flags, and the mask of those named.
+fn parse_flower_ip_flags(s: &str) -> crate::Result<(u32, u32)> {
+    use crate::Error;
+    let (mut flags, mut mask) = (0u32, 0u32);
+    for token in s.split('/') {
+        let (no, name) = match token.strip_prefix("no") {
+            Some(rest) => (true, rest),
+            None => (false, token),
+        };
+        let flag = match name {
+            "frag" => flower::TCA_FLOWER_KEY_FLAGS_IS_FRAGMENT,
+            "firstfrag" => flower::TCA_FLOWER_KEY_FLAGS_FRAG_IS_FIRST,
+            _ => {
+                return Err(Error::invalid_message(format!(
+                    "flower: invalid ip_flags `{s}` (expected frag, firstfrag or their no forms, joined by /)"
+                )));
+            }
+        };
+        if no {
+            flags &= !flag;
+        } else {
+            flags |= flag;
+        }
+        mask |= flag;
+    }
+    Ok((flags, mask))
+}
+
+/// `+trk+est-new`: the conntrack states set and the mask of those named.
+fn parse_flower_ct_state(s: &str) -> crate::Result<(u16, u16)> {
+    use crate::Error;
+    const STATES: [(&str, u16); 6] = [
+        ("trk", flower::TCA_FLOWER_KEY_CT_FLAGS_TRACKED),
+        ("new", flower::TCA_FLOWER_KEY_CT_FLAGS_NEW),
+        ("est", flower::TCA_FLOWER_KEY_CT_FLAGS_ESTABLISHED),
+        ("rel", flower::TCA_FLOWER_KEY_CT_FLAGS_RELATED),
+        ("inv", flower::TCA_FLOWER_KEY_CT_FLAGS_INVALID),
+        ("rpl", flower::TCA_FLOWER_KEY_CT_FLAGS_REPLY),
+    ];
+    let invalid = || {
+        Error::invalid_message(format!(
+            "flower: invalid ct_state `{s}` (expected +/- before each of trk, new, est, rel, inv, rpl)"
+        ))
+    };
+    let (mut flags, mut mask) = (0u16, 0u16);
+    let mut rest = s;
+    while !rest.is_empty() {
+        let on = match rest.as_bytes()[0] {
+            b'+' => true,
+            b'-' => false,
+            _ => return Err(invalid()),
+        };
+        let (name, flag) = STATES.iter().find(|(n, _)| rest[1..].starts_with(n)).ok_or_else(invalid)?;
+        if on {
+            flags |= flag;
+        }
+        mask |= flag;
+        rest = &rest[1 + name.len()..];
+    }
+    Ok((flags, mask))
+}
+
+/// A conntrack label, up to 32 hex digits, with an optional `/MASK`. Sent
+/// as all 16 bytes, padded with zeros, which the kernel reads in full.
+fn parse_flower_ct_label(s: &str) -> crate::Result<([u8; 16], [u8; 16])> {
+    use crate::Error;
+    let bytes = |t: &str| -> Option<[u8; 16]> {
+        if t.len() > 32 || !t.len().is_multiple_of(2) {
+            return None;
+        }
+        let mut out = [0u8; 16];
+        for (n, pair) in t.as_bytes().chunks(2).enumerate() {
+            out[n] = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+        }
+        Some(out)
+    };
+    let invalid = || Error::invalid_message(format!("flower: invalid ct_label `{s}` (expected up to 32 hex digits)"));
+    match s.split_once('/') {
+        Some((v, m)) => Ok((bytes(v).ok_or_else(invalid)?, bytes(m).ok_or_else(invalid)?)),
+        None => Ok((bytes(s).ok_or_else(invalid)?, [0xFF; 16])),
+    }
+}
+
+/// A MAC with an optional `/MASK`: a MAC, or a count of leading one bits.
+fn parse_flower_mac(s: &str, label: &str) -> crate::Result<([u8; 6], [u8; 6])> {
+    use crate::Error;
+    let (mac, mask) = s.split_once('/').map_or((s, None), |(m, k)| (m, Some(k)));
+    let mac = parse_mac(mac)?;
+    let mask = match mask {
+        None => [0xFF; 6],
+        Some(k) => match k.parse::<u32>() {
+            Ok(bits) if bits <= 48 => {
+                let m = u64::MAX.checked_shl(64 - bits).unwrap_or(0) >> 16;
+                let b = m.to_be_bytes();
+                [b[2], b[3], b[4], b[5], b[6], b[7]]
+            }
+            Ok(_) => return Err(Error::invalid_message(format!("flower: invalid {label} mask `{k}`"))),
+            Err(_) => parse_mac(k)?,
+        },
+    };
+    Ok((mac, mask))
+}
+
 fn parse_value_mask_u16_hex(s: &str, label: &str) -> crate::Result<(u16, u16)> {
     use crate::Error;
     let parse_one = |t: &str| -> crate::Result<u16> {
@@ -2376,7 +2997,67 @@ impl FilterConfig for FlowerFilter {
         // VLAN tag: nlink writes no TCA_FLOWER_KEY_VLAN_ETH_TYPE, so
         // `n_proto` is never set to the inner protocol) (#424).
         let eth_type = self.effective_eth_type();
-        if !matches!(eth_type, Some(0x0800 | 0x86DD)) {
+        // Under a VLAN tag the kernel takes the network protocol from
+        // TCA_FLOWER_KEY_VLAN_ETH_TYPE, and under a second tag from
+        // TCA_FLOWER_KEY_CVLAN_ETH_TYPE (`fl_set_key`, #827).
+        let is_vlan = |t: Option<u16>| matches!(t, Some(0x8100 | 0x88A8));
+        let l3_type = if !is_vlan(eth_type) {
+            eth_type
+        } else if is_vlan(self.vlan_ethtype) {
+            self.cvlan_ethtype
+        } else {
+            self.vlan_ethtype
+        };
+        if self.vlan_ethtype.is_some() && !is_vlan(eth_type) {
+            return Err(Error::invalid_message(
+                "flower: vlan_ethtype needs an 802.1Q or 802.1AD ethertype — cls_flower reads it only under a VLAN tag".to_string(),
+            ));
+        }
+        if (self.cvlan_id.is_some() || self.cvlan_prio.is_some() || self.cvlan_ethtype.is_some())
+            && !(is_vlan(eth_type) && is_vlan(self.vlan_ethtype))
+        {
+            return Err(Error::invalid_message(
+                "flower: cvlan_id, cvlan_prio and cvlan_ethtype need a VLAN ethertype and a VLAN vlan_ethtype \
+                 (QinQ) — cls_flower reads them only under two tags"
+                    .to_string(),
+            ));
+        }
+        // ARP and MPLS keys are read only under their own ethertypes, and
+        // the ICMP keys only under IPv4 with ip_proto icmp or IPv6 with
+        // icmpv6: anywhere else the kernel drops them into a match-all.
+        let arp = [self.arp_op.is_some(), self.arp_sip.is_some(), self.arp_tip.is_some(), self.arp_sha.is_some(), self.arp_tha.is_some()];
+        if arp.contains(&true) && !matches!(l3_type, Some(0x0806 | 0x8035)) {
+            return Err(Error::invalid_message(
+                "flower: arp_op, arp_sip, arp_tip, arp_sha and arp_tha need the ARP or RARP ethertype".to_string(),
+            ));
+        }
+        let mpls = [self.mpls_label.is_some(), self.mpls_tc.is_some(), self.mpls_bos.is_some(), self.mpls_ttl.is_some()];
+        if mpls.contains(&true) && !matches!(l3_type, Some(0x8847 | 0x8848)) {
+            return Err(Error::invalid_message(
+                "flower: mpls_label, mpls_tc, mpls_bos and mpls_ttl need an MPLS ethertype (mpls_uc or mpls_mc)".to_string(),
+            ));
+        }
+        let icmp_keys = match (l3_type, self.ip_proto) {
+            (Some(0x0800), Some(flower::IPPROTO_ICMP)) => Some((
+                flower::TCA_FLOWER_KEY_ICMPV4_TYPE,
+                flower::TCA_FLOWER_KEY_ICMPV4_TYPE_MASK,
+                flower::TCA_FLOWER_KEY_ICMPV4_CODE,
+                flower::TCA_FLOWER_KEY_ICMPV4_CODE_MASK,
+            )),
+            (Some(0x86DD), Some(flower::IPPROTO_ICMPV6)) => Some((
+                flower::TCA_FLOWER_KEY_ICMPV6_TYPE,
+                flower::TCA_FLOWER_KEY_ICMPV6_TYPE_MASK,
+                flower::TCA_FLOWER_KEY_ICMPV6_CODE,
+                flower::TCA_FLOWER_KEY_ICMPV6_CODE_MASK,
+            )),
+            _ => None,
+        };
+        if (self.icmp_type.is_some() || self.icmp_code.is_some()) && icmp_keys.is_none() {
+            return Err(Error::invalid_message(
+                "flower: an ICMP type or code needs ip_proto icmp under IPv4, or icmpv6 under IPv6".to_string(),
+            ));
+        }
+        if !matches!(l3_type, Some(0x0800 | 0x86DD)) {
             let unusable = [
                 self.ip_proto.map(|_| "ip_proto"),
                 self.src_port.map(|_| "src_port"),
@@ -2391,7 +3072,8 @@ impl FilterConfig for FlowerFilter {
             .flatten()
             .collect::<Vec<_>>();
             if !unusable.is_empty() {
-                let other = match eth_type {
+                let other = match l3_type {
+                    Some(t) if Some(t) != eth_type => format!(" (the one inside the VLAN tag is {t:#06x})"),
                     Some(t) => format!(" (this one is {t:#06x})"),
                     None => String::new(),
                 };
@@ -2436,8 +3118,7 @@ impl FilterConfig for FlowerFilter {
             return Err(Error::invalid_message(format!(
                 "flower: {what} needs an 802.1Q or 802.1AD ethertype, not {ethertype} — \
                  cls_flower reads VLAN keys only under a VLAN tag, and would install this \
-                 as a match-all. Matching an IP header inside a VLAN \
-                 (TCA_FLOWER_KEY_VLAN_ETH_TYPE) is not modelled by FlowerFilter"
+                 as a match-all. Match an IP header inside a VLAN with vlan_ethtype"
             )));
         }
 
@@ -2574,12 +3255,12 @@ impl FilterConfig for FlowerFilter {
         // Add MAC addresses
         if let Some(mac) = self.src_mac {
             builder.append_attr(flower::TCA_FLOWER_KEY_ETH_SRC, &mac);
-            builder.append_attr(flower::TCA_FLOWER_KEY_ETH_SRC_MASK, &[0xFF; 6]);
+            builder.append_attr(flower::TCA_FLOWER_KEY_ETH_SRC_MASK, &self.src_mac_mask.unwrap_or([0xFF; 6]));
         }
 
         if let Some(mac) = self.dst_mac {
             builder.append_attr(flower::TCA_FLOWER_KEY_ETH_DST, &mac);
-            builder.append_attr(flower::TCA_FLOWER_KEY_ETH_DST_MASK, &[0xFF; 6]);
+            builder.append_attr(flower::TCA_FLOWER_KEY_ETH_DST_MASK, &self.dst_mac_mask.unwrap_or([0xFF; 6]));
         }
 
         // Add VLAN
@@ -2607,6 +3288,129 @@ impl FilterConfig for FlowerFilter {
         if let Some((flags, mask)) = self.tcp_flags {
             builder.append_attr(flower::TCA_FLOWER_KEY_TCP_FLAGS, &flags.to_be_bytes());
             builder.append_attr(flower::TCA_FLOWER_KEY_TCP_FLAGS_MASK, &mask.to_be_bytes());
+        }
+
+        // The keys #827 added, as tc-flower writes them.
+        if let Some((t_key, t_mask, c_key, c_mask)) = icmp_keys {
+            if let Some((v, m)) = self.icmp_type {
+                builder.append_attr(t_key, &[v]);
+                builder.append_attr(t_mask, &[m]);
+            }
+            if let Some((v, m)) = self.icmp_code {
+                builder.append_attr(c_key, &[v]);
+                builder.append_attr(c_mask, &[m]);
+            }
+        }
+        if let Some((v, m)) = self.ip_flags {
+            builder.append_attr(flower::TCA_FLOWER_KEY_FLAGS, &v.to_be_bytes());
+            builder.append_attr(flower::TCA_FLOWER_KEY_FLAGS_MASK, &m.to_be_bytes());
+        }
+        if let Some((v, m)) = self.ct_state {
+            builder.append_attr(flower::TCA_FLOWER_KEY_CT_STATE, &v.to_ne_bytes());
+            builder.append_attr(flower::TCA_FLOWER_KEY_CT_STATE_MASK, &m.to_ne_bytes());
+        }
+        if let Some((v, m)) = self.ct_zone {
+            builder.append_attr(flower::TCA_FLOWER_KEY_CT_ZONE, &v.to_ne_bytes());
+            builder.append_attr(flower::TCA_FLOWER_KEY_CT_ZONE_MASK, &m.to_ne_bytes());
+        }
+        if let Some((v, m)) = self.ct_mark {
+            builder.append_attr(flower::TCA_FLOWER_KEY_CT_MARK, &v.to_ne_bytes());
+            builder.append_attr(flower::TCA_FLOWER_KEY_CT_MARK_MASK, &m.to_ne_bytes());
+        }
+        if let Some((v, m)) = self.ct_labels {
+            builder.append_attr(flower::TCA_FLOWER_KEY_CT_LABELS, &v);
+            builder.append_attr(flower::TCA_FLOWER_KEY_CT_LABELS_MASK, &m);
+        }
+        if let Some(dev) = &self.indev {
+            builder.append_attr_str(flower::TCA_FLOWER_INDEV, dev);
+        }
+        if let Some(t) = self.vlan_ethtype {
+            builder.append_attr(flower::TCA_FLOWER_KEY_VLAN_ETH_TYPE, &t.to_be_bytes());
+        }
+        if let Some(id) = self.cvlan_id {
+            builder.append_attr(flower::TCA_FLOWER_KEY_CVLAN_ID, &id.to_ne_bytes());
+        }
+        if let Some(prio) = self.cvlan_prio {
+            builder.append_attr(flower::TCA_FLOWER_KEY_CVLAN_PRIO, &[prio]);
+        }
+        if let Some(t) = self.cvlan_ethtype {
+            builder.append_attr(flower::TCA_FLOWER_KEY_CVLAN_ETH_TYPE, &t.to_be_bytes());
+        }
+        if let Some(label) = self.mpls_label {
+            builder.append_attr(flower::TCA_FLOWER_KEY_MPLS_LABEL, &label.to_ne_bytes());
+        }
+        if let Some(tc) = self.mpls_tc {
+            builder.append_attr(flower::TCA_FLOWER_KEY_MPLS_TC, &[tc]);
+        }
+        if let Some(bos) = self.mpls_bos {
+            builder.append_attr(flower::TCA_FLOWER_KEY_MPLS_BOS, &[bos]);
+        }
+        if let Some(ttl) = self.mpls_ttl {
+            builder.append_attr(flower::TCA_FLOWER_KEY_MPLS_TTL, &[ttl]);
+        }
+        if let Some((op, mask)) = self.arp_op {
+            builder.append_attr(flower::TCA_FLOWER_KEY_ARP_OP, &[op]);
+            builder.append_attr(flower::TCA_FLOWER_KEY_ARP_OP_MASK, &[mask]);
+        }
+        for (addr, key, mask_key) in [
+            (self.arp_sip, flower::TCA_FLOWER_KEY_ARP_SIP, flower::TCA_FLOWER_KEY_ARP_SIP_MASK),
+            (self.arp_tip, flower::TCA_FLOWER_KEY_ARP_TIP, flower::TCA_FLOWER_KEY_ARP_TIP_MASK),
+        ] {
+            if let Some((addr, plen)) = addr {
+                builder.append_attr(key, &addr.octets());
+                builder.append_attr(mask_key, &ipv4_mask(plen).octets());
+            }
+        }
+        for (mac, key, mask_key) in [
+            (self.arp_sha, flower::TCA_FLOWER_KEY_ARP_SHA, flower::TCA_FLOWER_KEY_ARP_SHA_MASK),
+            (self.arp_tha, flower::TCA_FLOWER_KEY_ARP_THA, flower::TCA_FLOWER_KEY_ARP_THA_MASK),
+        ] {
+            if let Some((mac, mask)) = mac {
+                builder.append_attr(key, &mac);
+                builder.append_attr(mask_key, &mask);
+            }
+        }
+        if let Some(id) = self.enc_key_id {
+            builder.append_attr(flower::TCA_FLOWER_KEY_ENC_KEY_ID, &id.to_be_bytes());
+        }
+        for (addr, v4, v4_mask, v6, v6_mask) in [
+            (
+                self.enc_src_ip,
+                flower::TCA_FLOWER_KEY_ENC_IPV4_SRC,
+                flower::TCA_FLOWER_KEY_ENC_IPV4_SRC_MASK,
+                flower::TCA_FLOWER_KEY_ENC_IPV6_SRC,
+                flower::TCA_FLOWER_KEY_ENC_IPV6_SRC_MASK,
+            ),
+            (
+                self.enc_dst_ip,
+                flower::TCA_FLOWER_KEY_ENC_IPV4_DST,
+                flower::TCA_FLOWER_KEY_ENC_IPV4_DST_MASK,
+                flower::TCA_FLOWER_KEY_ENC_IPV6_DST,
+                flower::TCA_FLOWER_KEY_ENC_IPV6_DST_MASK,
+            ),
+        ] {
+            match addr {
+                Some((IpAddr::V4(a), plen)) => {
+                    builder.append_attr(v4, &a.octets());
+                    builder.append_attr(v4_mask, &ipv4_mask(plen).octets());
+                }
+                Some((IpAddr::V6(a), plen)) => {
+                    builder.append_attr(v6, &a.octets());
+                    builder.append_attr(v6_mask, &ipv6_mask(plen).octets());
+                }
+                None => {}
+            }
+        }
+        if let Some(port) = self.enc_dst_port {
+            builder.append_attr(flower::TCA_FLOWER_KEY_ENC_UDP_DST_PORT, &port.to_be_bytes());
+        }
+        if let Some((v, m)) = self.enc_tos {
+            builder.append_attr(flower::TCA_FLOWER_KEY_ENC_IP_TOS, &[v]);
+            builder.append_attr(flower::TCA_FLOWER_KEY_ENC_IP_TOS_MASK, &[m]);
+        }
+        if let Some((v, m)) = self.enc_ttl {
+            builder.append_attr(flower::TCA_FLOWER_KEY_ENC_IP_TTL, &[v]);
+            builder.append_attr(flower::TCA_FLOWER_KEY_ENC_IP_TTL_MASK, &[m]);
         }
 
         // Actions and goto_chain share `TCA_FLOWER_ACT`, so they share one
@@ -6488,24 +7292,82 @@ mod tests {
         assert!(err.to_string().contains("unknown token"));
     }
 
+    /// The options a flower writes, by attribute type.
+    fn flower_attrs(f: &FlowerFilter) -> std::collections::HashMap<u16, Vec<u8>> {
+        let mut b = MessageBuilder::new(0, 0);
+        f.write_options(&mut b).unwrap();
+        let bytes = b.finish()[16..].to_vec();
+        crate::netlink::attr::AttrIter::new(&bytes).map(|(ty, p)| (ty & 0x3fff, p.to_vec())).collect()
+    }
+
+    /// tc-flower(8)'s other keys, written as f_flower.c writes them (#827).
     #[test]
-    fn flower_parse_params_unsupported_features_rejected() {
-        for unsup in [
-            "ct_state",
-            "ct_zone",
-            "ct_mark",
-            "enc_key_id",
-            "enc_dst_ip",
-            "enc_src_ip",
-            "enc_dst_port",
-            "indev",
+    fn flower_reads_and_writes_tcs_other_keys() {
+        let parse = |w: &[&str], proto: u16| {
+            let mut f = FlowerFilter::parse_params(w).unwrap();
+            f.set_protocol(EthProto::new(proto));
+            flower_attrs(&f)
+        };
+        let a = parse(&["ip_proto", "icmp", "type", "8", "code", "0/255"], 0x0800);
+        assert_eq!((&a[&flower::TCA_FLOWER_KEY_ICMPV4_TYPE], &a[&flower::TCA_FLOWER_KEY_ICMPV4_CODE_MASK]), (&vec![8], &vec![255]));
+        let a = parse(&["ip_proto", "icmpv6", "type", "128"], 0x86DD);
+        assert_eq!(a[&flower::TCA_FLOWER_KEY_ICMPV6_TYPE], [128]);
+        let a = parse(&["ip_flags", "frag/nofirstfrag"], 0x0800);
+        assert_eq!((&a[&flower::TCA_FLOWER_KEY_FLAGS], &a[&flower::TCA_FLOWER_KEY_FLAGS_MASK]), (&1u32.to_be_bytes().to_vec(), &3u32.to_be_bytes().to_vec()));
+        let a = parse(&["ct_state", "+trk+est-new", "ct_zone", "3", "ct_mark", "5/0xff"], 0x0800);
+        assert_eq!(a[&flower::TCA_FLOWER_KEY_CT_STATE], 0b1010u16.to_ne_bytes());
+        assert_eq!(a[&flower::TCA_FLOWER_KEY_CT_STATE_MASK], 0b1011u16.to_ne_bytes());
+        assert_eq!(a[&flower::TCA_FLOWER_KEY_CT_ZONE_MASK], u16::MAX.to_ne_bytes());
+        assert_eq!(a[&flower::TCA_FLOWER_KEY_CT_MARK_MASK], 0xffu32.to_ne_bytes());
+        let a = parse(&["enc_key_id", "100", "enc_dst_ip", "10.0.0.0/24", "enc_dst_port", "4789"], 0x0800);
+        assert_eq!(a[&flower::TCA_FLOWER_KEY_ENC_KEY_ID], 100u32.to_be_bytes());
+        assert_eq!(a[&flower::TCA_FLOWER_KEY_ENC_IPV4_DST_MASK], [255, 255, 255, 0]);
+        assert_eq!(a[&flower::TCA_FLOWER_KEY_ENC_UDP_DST_PORT], 4789u16.to_be_bytes());
+        let a = parse(&["src_mac", "02:00:00:00:00:00/24"], 0x0800);
+        assert_eq!(a[&flower::TCA_FLOWER_KEY_ETH_SRC_MASK], [0xff, 0xff, 0xff, 0, 0, 0]);
+        let a = parse(&["vlan_id", "10", "vlan_ethtype", "ip", "src_ip", "10.0.0.1"], 0x8100);
+        assert_eq!(a[&flower::TCA_FLOWER_KEY_ETH_TYPE], 0x8100u16.to_be_bytes());
+        assert_eq!(a[&flower::TCA_FLOWER_KEY_VLAN_ETH_TYPE], 0x0800u16.to_be_bytes());
+        let a = parse(&["arp_op", "request", "arp_tip", "10.0.0.0/8"], 0x0806);
+        assert_eq!((&a[&flower::TCA_FLOWER_KEY_ARP_OP], &a[&flower::TCA_FLOWER_KEY_ARP_TIP_MASK]), (&vec![1], &vec![255, 0, 0, 0]));
+        let a = parse(&["mpls_label", "100", "mpls_bos", "1"], 0x8847);
+        assert_eq!(a[&flower::TCA_FLOWER_KEY_MPLS_LABEL], 100u32.to_ne_bytes());
+
+        // The text round trips.
+        for words in [
+            &["ip_proto", "icmp", "type", "8/255", "ct_state", "+trk-est", "ct_label", "01/ff"][..],
+            &["arp_op", "reply", "arp_sha", "02:00:00:00:00:01/ff:ff:ff:00:00:00", "indev", "lo"],
+            &["enc_src_ip", "fd00::/64", "enc_tos", "16/0xfc", "ip_flags", "nofrag"],
         ] {
-            let err = FlowerFilter::parse_params(&[unsup, "x"]).unwrap_err();
-            assert!(
-                err.to_string().contains("not modelled"),
-                "expected not-modelled for `{unsup}`, got: {err}"
-            );
+            let f = FlowerFilter::parse_params(words).unwrap();
+            let back = f.to_params().unwrap();
+            let refs: Vec<&str> = back.iter().map(String::as_str).collect();
+            assert_eq!(FlowerFilter::parse_params(&refs).unwrap().to_params().unwrap(), back, "{words:?}");
         }
+        assert!(FlowerFilter::parse_params(&["ct_state", "+bogus"]).is_err());
+        assert!(FlowerFilter::parse_params(&["ip_flags", "csum"]).is_err());
+        assert!(FlowerFilter::parse_params(&["mpls_tc", "8"]).is_err());
+    }
+
+    /// The kernel reads ARP, MPLS and ICMP keys only under their own
+    /// ethertypes, and the inner VLAN keys only under two tags: anywhere
+    /// else it drops them and installs a match-all, so they are refused.
+    #[test]
+    fn flower_refuses_keys_the_kernel_would_drop() {
+        let refused = |w: &[&str], proto: u16| {
+            let mut f = FlowerFilter::parse_params(w).unwrap();
+            f.set_protocol(EthProto::new(proto));
+            let mut b = MessageBuilder::new(0, 0);
+            f.write_options(&mut b).unwrap_err().to_string()
+        };
+        assert!(refused(&["arp_op", "request"], 0x0800).contains("ARP"));
+        assert!(refused(&["mpls_label", "5"], 0x0800).contains("MPLS"));
+        assert!(refused(&["ip_proto", "tcp", "type", "8"], 0x0800).contains("ICMP"));
+        assert!(refused(&["ip_proto", "icmp", "type", "8"], 0x86DD).contains("ICMP"));
+        assert!(refused(&["vlan_ethtype", "ip"], 0x0800).contains("vlan_ethtype"));
+        assert!(refused(&["vlan_id", "1", "vlan_ethtype", "ip", "cvlan_id", "2"], 0x8100).contains("cvlan"));
+        // Under a VLAN, the L3 keys follow vlan_ethtype.
+        assert!(refused(&["vlan_id", "1", "vlan_ethtype", "arp", "ip_proto", "tcp"], 0x8100).contains("inside the VLAN"));
     }
 
     #[test]

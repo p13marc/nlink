@@ -3734,7 +3734,7 @@ async fn every_class_kinds_lines_install_as_tcs() -> Result<()> {
 async fn every_filter_kinds_lines_install_as_tcs() -> Result<()> {
     require_root!();
     nlink::require_modules!(
-        "dummy", "sch_htb", "cls_u32", "cls_fw", "cls_route", "cls_basic", "cls_matchall", "cls_flow"
+        "dummy", "sch_htb", "cls_u32", "cls_fw", "cls_route", "cls_basic", "cls_matchall", "cls_flow", "cls_flower"
     );
 
     // (kind, protocol, handle, line)
@@ -3771,6 +3771,24 @@ async fn every_filter_kinds_lines_install_as_tcs() -> Result<()> {
         ("route", "ip", None, "to 10 order 5 classid 1:10"),
         ("basic", "ip", None, "classid 1:10"),
         ("matchall", "all", None, "classid 1:10"),
+        // flower's keys beyond flower_lines_install_the_same_through_tc_and_nlink's (#827).
+        ("flower", "ip", None, "ip_proto icmp type 8 code 0 classid 1:10"),
+        ("flower", "ipv6", None, "ip_proto icmpv6 type 128/255 classid 1:10"),
+        ("flower", "ip", None, "ip_flags frag/nofirstfrag classid 1:10"),
+        ("flower", "ip", None, "ct_state +trk+est-new classid 1:10"),
+        ("flower", "ip", None, "ct_mark 5/0xff ct_zone 3 classid 1:10"),
+        ("flower", "ip", None, "ct_label 0102030405060708090a0b0c0d0e0f10 classid 1:10"),
+        ("flower", "ip", None, "enc_key_id 100 enc_dst_ip 10.0.0.1 enc_src_ip 10.0.0.0/24 enc_dst_port 4789 classid 1:10"),
+        ("flower", "ip", None, "enc_dst_ip fd00::1 enc_tos 0x10/0xfc enc_ttl 64 classid 1:10"),
+        ("flower", "mpls_uc", None, "mpls_label 100 mpls_tc 3 mpls_bos 1 mpls_ttl 64 classid 1:10"),
+        ("flower", "arp", None, "arp_op request arp_sip 10.0.0.1 arp_tip 10.0.0.0/24 classid 1:10"),
+        ("flower", "arp", None, "arp_op reply arp_sha 02:00:00:00:00:01 arp_tha 02:00:00:00:00:00/24 classid 1:10"),
+        ("flower", "802.1q", None, "vlan_id 10 vlan_ethtype ip src_ip 10.0.0.1 classid 1:10"),
+        ("flower", "802.1q", None, "vlan_id 10 vlan_ethtype ipv6 ip_proto tcp dst_port 443 classid 1:10"),
+        ("flower", "802.1ad", None, "vlan_id 10 vlan_ethtype 802.1q cvlan_id 20 cvlan_prio 3 cvlan_ethtype ip classid 1:10"),
+        ("flower", "ip", None, "dst_mac 02:00:00:00:00:00/ff:ff:ff:00:00:00 classid 1:10"),
+        ("flower", "ip", None, "src_mac 02:00:00:00:00:00/24 classid 1:10"),
+        ("flower", "ip", None, "indev lo classid 1:10"),
         ("flow", "ip", Some("1"), "map key mark and 0xff baseclass 1:1 divisor 16"),
         ("flow", "ip", Some("1"), "map key priority or 0x10 xor 0x1 rshift 2 addend 3 baseclass 1:1 divisor 64"),
     ];
@@ -3796,7 +3814,7 @@ async fn flow_hash_lines_install_as_tcs() -> Result<()> {
 /// nlink's `parse_params` on an HTB root, and fails with every line whose
 /// `tc -d filter show` differs.
 async fn filter_lines_same_as_tc(label: &str, rows: &[(&str, &str, Option<&str>, &str)]) -> Result<()> {
-    use nlink::netlink::filter::{BasicFilter, FlowFilter, FwFilter, MatchallFilter, RouteFilter, U32Filter};
+    use nlink::netlink::filter::{BasicFilter, FlowFilter, FlowerFilter, FwFilter, MatchallFilter, RouteFilter, U32Filter};
     let (ns, conn) = setup_tc_ns(label).await?;
     ns.exec("tc", &["qdisc", "add", "dev", "dummy0", "root", "handle", "1:", "htb"])?;
     for class in ["1:1", "1:10"] {
@@ -3849,6 +3867,7 @@ async fn filter_lines_same_as_tc(label: &str, rows: &[(&str, &str, Option<&str>,
             "basic" => install!(BasicFilter),
             "matchall" => install!(MatchallFilter),
             "flow" => install!(FlowFilter),
+            "flower" => install!(FlowerFilter),
             other => panic!("no parser for {other}"),
         };
         if let Err(e) = added {

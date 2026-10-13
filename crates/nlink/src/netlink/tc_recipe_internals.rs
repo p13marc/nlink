@@ -515,7 +515,18 @@ pub(crate) fn flower_matches(
     }
     let end = builder.len();
     let desired_blob = builder.as_bytes()[start..end].to_vec();
-    let desired_attrs = split_attrs(&desired_blob);
+    let mut desired_attrs = split_attrs(&desired_blob);
+    // Under a VLAN tag the kernel dumps the innermost ethertype (#827).
+    let echo = super::filter::flower_dumped_eth_type(|id| desired_attrs.get(&id).and_then(|v| v.get(..2)?.try_into().ok()));
+    let echoed;
+    match echo {
+        Some(Some(t)) => {
+            echoed = t;
+            desired_attrs.insert(super::types::tc::filter::flower::TCA_FLOWER_KEY_ETH_TYPE, &echoed[..]);
+        }
+        Some(None) => _ = desired_attrs.remove(&super::types::tc::filter::flower::TCA_FLOWER_KEY_ETH_TYPE),
+        None => {}
+    }
 
     // Every attribute we would write must be there, byte for byte.
     for (id, want) in &desired_attrs {

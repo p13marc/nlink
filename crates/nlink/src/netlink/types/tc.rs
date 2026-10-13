@@ -1979,6 +1979,10 @@ pub mod filter {
         pub const TCA_CLS_FLAGS_NOT_IN_HW: u32 = 1 << 3;
         pub const TCA_CLS_FLAGS_VERBOSE: u32 = 1 << 4;
 
+        /// `TCA_FLOWER_KEY_FLAGS` bits (#827).
+        pub const TCA_FLOWER_KEY_FLAGS_IS_FRAGMENT: u32 = 1 << 0;
+        pub const TCA_FLOWER_KEY_FLAGS_FRAG_IS_FIRST: u32 = 1 << 1;
+
         /// Connection tracking state flags.
         pub const TCA_FLOWER_KEY_CT_FLAGS_NEW: u16 = 1 << 0;
         pub const TCA_FLOWER_KEY_CT_FLAGS_ESTABLISHED: u16 = 1 << 1;
