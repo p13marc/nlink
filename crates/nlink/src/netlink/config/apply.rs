@@ -1039,8 +1039,18 @@ async fn run_step(
             let protocol = u8::from(plan.routes_protocol.unwrap_or(RouteProtocol::Boot));
             match conn.add_rule(rule_config(r, protocol)).await {
                 Ok(()) => Outcome::Changed(format!("Added {r}"), 1),
-                // There already: the same rule, with this protocol.
-                Err(e) if e.is_already_exists() => Outcome::Unchanged(Some(format!("{r} already present"))),
+                // The kernel's EXCL check is lenient: a rule with a selector
+                // this one leaves out (a TOS, realms) "exists" for it, as
+                // `ip rule add` finds (#793). Present only if this very rule
+                // is; otherwise it goes in beside the other.
+                Err(e) if e.is_already_exists() => {
+                    if super::diff::rule_present(conn, r, protocol).await? {
+                        Outcome::Unchanged(Some(format!("{r} already present")))
+                    } else {
+                        conn.add_rule_alongside(rule_config(r, protocol)).await?;
+                        Outcome::Changed(format!("Added {r}"), 1)
+                    }
+                }
                 Err(e) => return Err(e),
             }
         }

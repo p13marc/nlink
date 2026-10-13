@@ -938,6 +938,19 @@ All notable changes to this project will be documented in this file.
   holds `FilterKey`s (parent, chain, priority, protocol), and
   `del_filter_in_chain_by_index` deletes one.
 
+- **A route or rule with a TOS is not the declared one (#793).** A
+  declaration has no TOS, so it is installed with 0, and the comparison
+  ignored it. A live `tos 0x10` route or rule at the declared key passed
+  for the declared one, which was never added, so the traffic it was for
+  went unrouted. A route now matches a declaration only with TOS 0. A rule
+  with a TOS, realms (`FRA_FLOW`) or a suppressed interface group no longer
+  reads back as a declaration. Adding the declared rule beside such a rule
+  needed one more fix: the kernel's `NLM_F_EXCL` check is lenient and takes
+  the TOS rule for it, as `ip rule add` finds ("File exists"). The apply
+  read that as "already present". Now, on `EEXIST`, it checks for the
+  exact rule, and if it is absent, adds the declared one without
+  `NLM_F_EXCL`.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

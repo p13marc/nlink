@@ -2723,6 +2723,15 @@ impl Connection<Route> {
             .map_err(|e| e.with_context("add_rule"))
     }
 
+    /// [`add_rule`](Self::add_rule) without `NLM_F_EXCL`, beside a rule the
+    /// kernel's lenient check takes for it (#793).
+    pub(crate) async fn add_rule_alongside(&self, rule: super::rule::RuleBuilder) -> Result<()> {
+        let builder = rule.build_alongside()?;
+        self.send_ack(builder)
+            .await
+            .map_err(|e| e.with_context("add_rule"))
+    }
+
     /// Delete a routing rule.
     ///
     /// # Example

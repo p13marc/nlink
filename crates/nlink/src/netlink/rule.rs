@@ -296,19 +296,23 @@ impl RuleBuilder {
 
     /// Build the netlink message for adding this rule.
     pub fn build(&self) -> Result<MessageBuilder> {
-        self.build_internal(NlMsgType::RTM_NEWRULE, true)
+        self.build_internal(NlMsgType::RTM_NEWRULE, NLM_F_CREATE | NLM_F_EXCL)
+    }
+
+    /// [`build`](Self::build) without `NLM_F_EXCL`, which the kernel checks
+    /// leniently: a rule that leaves a selector out (a TOS, realms) "exists"
+    /// when one with it does (#793).
+    pub(crate) fn build_alongside(&self) -> Result<MessageBuilder> {
+        self.build_internal(NlMsgType::RTM_NEWRULE, NLM_F_CREATE)
     }
 
     /// Build the netlink message for deleting this rule.
     pub fn build_delete(&self) -> Result<MessageBuilder> {
-        self.build_internal(NlMsgType::RTM_DELRULE, false)
+        self.build_internal(NlMsgType::RTM_DELRULE, 0)
     }
 
-    fn build_internal(&self, msg_type: u16, create: bool) -> Result<MessageBuilder> {
-        let mut flags = NLM_F_REQUEST | NLM_F_ACK;
-        if create {
-            flags |= NLM_F_CREATE | NLM_F_EXCL;
-        }
+    fn build_internal(&self, msg_type: u16, create_flags: u16) -> Result<MessageBuilder> {
+        let flags = NLM_F_REQUEST | NLM_F_ACK | create_flags;
 
         let mut builder = MessageBuilder::new(msg_type, flags);
 
@@ -320,7 +324,7 @@ impl RuleBuilder {
         // add` does; a drop rule has no table. A delete sends only what was
         // set: the kernel's `rule_find` matches the action and table when
         // they are non-zero, so `lookup main` found nothing else (#667).
-        let (action, table) = if create {
+        let (action, table) = if create_flags & NLM_F_CREATE != 0 {
             let action = self.action.unwrap_or(FibRuleAction::ToTbl);
             let table = match action {
                 FibRuleAction::ToTbl => self.table.unwrap_or(254),
