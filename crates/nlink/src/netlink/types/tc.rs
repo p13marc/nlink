@@ -1445,6 +1445,10 @@ pub mod qdisc {
         pub const TCA_TAPRIO_ATTR_TXTIME_DELAY: u16 = 11;
         pub const TCA_TAPRIO_ATTR_TC_ENTRY: u16 = 12;
 
+        /// The type of each entry nested in `TCA_TAPRIO_ATTR_SCHED_ENTRY_LIST`
+        /// (`TCA_TAPRIO_SCHED_ENTRY`); the kernel skips any other (#823).
+        pub const TCA_TAPRIO_SCHED_ENTRY: u16 = 1;
+
         /// Schedule entry attributes.
         pub const TCA_TAPRIO_SCHED_ENTRY_UNSPEC: u16 = 0;
         pub const TCA_TAPRIO_SCHED_ENTRY_INDEX: u16 = 1;

@@ -3448,6 +3448,237 @@ async fn skbmod_and_ife_values_install_as_tcs() -> Result<()> {
     Ok(())
 }
 
+/// Every qdisc kind's tc(8) lines make, through nlink's `parse_params`, the
+/// qdisc tc makes of them: `tc -j` lists the same options for both. The
+/// qdisc side of the action sweep (#817); kinds were checked one by one as
+/// each bug came (#806).
+#[tokio::test]
+async fn every_qdisc_kinds_lines_install_as_tcs() -> Result<()> {
+    use nlink::netlink::tc::*;
+    require_root!();
+    nlink::require_modules!(
+        "dummy", "sch_prio", "sch_multiq", "sch_sfq", "sch_tbf", "sch_htb", "sch_hfsc", "sch_drr", "sch_qfq",
+        "sch_red", "sch_choke", "sch_gred", "sch_sfb", "sch_codel", "sch_fq_codel", "sch_fq", "sch_pie",
+        "sch_fq_pie", "sch_hhf", "sch_cake", "sch_netem", "sch_etf", "sch_cbs", "sch_skbprio", "sch_plug",
+        "sch_ets", "sch_mqprio", "sch_taprio"
+    );
+
+    // (device, kind, line): `mq0` has four TX queues, for the kinds that
+    // want a multiqueue device.
+    let rows: &[(&str, &str, &str)] = &[
+        ("dummy0", "pfifo", "limit 100"),
+        ("dummy0", "bfifo", "limit 10000"),
+        ("dummy0", "bfifo", "limit 10kb"),
+        ("dummy0", "pfifo_fast", ""),
+        ("dummy0", "prio", "bands 4"),
+        ("dummy0", "prio", "bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1"),
+        ("dummy0", "sfq", ""),
+        ("dummy0", "sfq", "limit 100 perturb 10 quantum 1514"),
+        ("dummy0", "tbf", "rate 1mbit burst 10kb limit 20kb"),
+        ("dummy0", "tbf", "rate 1mbit burst 10kb latency 50ms"),
+        ("dummy0", "tbf", "rate 1mbit burst 10kb peakrate 2mbit mtu 2000 latency 50ms"),
+        ("dummy0", "htb", "default 10"),
+        ("dummy0", "htb", "r2q 5 default 20 direct_qlen 100"),
+        ("dummy0", "hfsc", "default 10"),
+        ("dummy0", "drr", ""),
+        ("dummy0", "qfq", ""),
+        // Not `adaptive`: adaptive RED retunes max_P every 500 ms while the
+        // queue idles, so a slow dump would differ from a quick one.
+        ("dummy0", "red", "limit 400000 min 30000 max 90000 avpkt 1000 burst 55 probability 0.02 bandwidth 10mbit ecn"),
+        ("dummy0", "red", "limit 400000 min 30000 max 90000 avpkt 1000 burst 55 bandwidth 10mbit harddrop"),
+        ("dummy0", "red", "limit 400000 avpkt 1000"),
+        ("dummy0", "red", "limit 1mb avpkt 1500 min 100kb nodrop ecn"),
+        ("dummy0", "choke", "limit 1000 min 100 max 300 avpkt 1000 burst 200 bandwidth 10mbit probability 0.1 ecn"),
+        ("dummy0", "choke", "limit 1000 bandwidth 10mbit"),
+        ("dummy0", "gred", "setup vqs 4 default 1"),
+        ("dummy0", "gred", "setup vqs 4 default 1 grio"),
+        ("dummy0", "gred", "setup vqs 2 default 0 limit 100000 ecn harddrop"),
+        ("dummy0", "sfb", "limit 1000"),
+        ("dummy0", "sfb", "target 40"),
+        ("dummy0", "sfb", "rehash 600 db 60 limit 1000 max 25 target 20 increment 0.0005 decrement 0.00005 penalty_rate 10 penalty_burst 20"),
+        ("dummy0", "codel", "limit 1000 target 5ms interval 100ms ecn"),
+        ("dummy0", "codel", "ce_threshold 1ms noecn"),
+        ("dummy0", "fq_codel", "limit 1000 flows 2048 quantum 1514 target 5ms interval 100ms memory_limit 32Mb ecn"),
+        ("dummy0", "fq", "limit 1000 flow_limit 50 quantum 3028 initial_quantum 15140 maxrate 100mbit buckets 2048 orphan_mask 1023 nopacing"),
+        ("dummy0", "fq", "low_rate_threshold 550kbit horizon 10s horizon_drop ce_threshold 4ms"),
+        ("dummy0", "fq", "buckets 1000 horizon 2s horizon_cap timer_slack 20us"),
+        ("dummy0", "pie", "limit 1000 target 15ms tupdate 15ms alpha 2 beta 20 ecn bytemode"),
+        ("dummy0", "pie", "dq_rate_estimator"),
+        ("dummy0", "pie", "limit 500 no_dq_rate_estimator"),
+        ("dummy0", "fq_pie", "limit 1000 flows 1024 target 15ms tupdate 15ms alpha 2 beta 20 quantum 1514 memory_limit 32Mb ecn_prob 10 ecn bytemode dq_rate_estimator"),
+        ("dummy0", "hhf", "limit 500"),
+        ("dummy0", "hhf", "limit 1000 quantum 1514 hh_limit 2048 reset_timeout 40ms admit_bytes 131072 evict_timeout 1s non_hh_weight 2"),
+        ("dummy0", "cake", "bandwidth 100mbit"),
+        ("dummy0", "cake", "unlimited besteffort"),
+        ("dummy0", "cake", "bandwidth 50mbit diffserv4 nat wash ack-filter"),
+        ("dummy0", "cake", "rtt 50ms overhead 18 mpu 64 noatm"),
+        ("dummy0", "cake", "bandwidth 10mbit ethernet"),
+        ("dummy0", "cake", "bandwidth 10mbit docsis ingress"),
+        ("dummy0", "cake", "triple-isolate split-gso memlimit 4mb fwmark 0xff"),
+        ("dummy0", "cake", "bandwidth 20mbit conservative"),
+        ("dummy0", "cake", "bandwidth 20mbit overhead 10 ether-vlan pppoe-ptm"),
+        ("dummy0", "cake", "bandwidth 20mbit bridged-llcsnap"),
+        ("dummy0", "cake", "bandwidth 20mbit raw"),
+        ("dummy0", "netem", "delay 10ms"),
+        ("dummy0", "netem", "delay 10ms 2ms 25%"),
+        ("dummy0", "netem", "loss 1%"),
+        ("dummy0", "netem", "loss 0.5% 25%"),
+        ("dummy0", "netem", "duplicate 1% corrupt 0.1%"),
+        ("dummy0", "netem", "delay 10ms reorder 25% 50% gap 5"),
+        ("dummy0", "netem", "rate 1mbit 20 100 5"),
+        ("dummy0", "netem", "slot 10ms 20ms packets 10 bytes 1000"),
+        ("dummy0", "netem", "loss state 1% 2% 3% 4% 5%"),
+        ("dummy0", "netem", "loss gemodel 1% 10% 70% 0.1%"),
+        ("dummy0", "netem", "limit 2000 ecn loss 1%"),
+        ("dummy0", "etf", "clockid CLOCK_TAI delta 300000"),
+        ("dummy0", "etf", "clockid CLOCK_TAI delta 300000 deadline_mode"),
+        ("dummy0", "cbs", "idleslope 1000 sendslope -9000 hicredit 30 locredit -1470"),
+        ("dummy0", "skbprio", "limit 100"),
+        ("dummy0", "plug", ""),
+        ("dummy0", "ets", "bands 3"),
+        ("dummy0", "ets", "bands 4 strict 2 quanta 1500 1500 priomap 0 1 2 3"),
+        ("mq0", "mq", ""),
+        ("mq0", "multiq", ""),
+        ("mq0", "mqprio", "num_tc 2 map 0 0 0 0 1 1 1 1 queues 1@0 1@1 hw 0"),
+        ("mq0", "mqprio", "num_tc 2 map 1 0 queues 2@0 2@2 hw 0"),
+        (
+            "mq0",
+            "taprio",
+            "num_tc 2 map 0 1 queues 1@0 1@1 base-time 1000 sched-entry S 01 300000 sched-entry S 02 300000 clockid CLOCK_TAI",
+        ),
+    ];
+
+    let (ns, conn) = setup_tc_ns("tc-qdisc-sweep").await?;
+    ns.exec("ip", &["link", "add", "mq0", "numtxqueues", "4", "numrxqueues", "4", "type", "dummy"])?;
+    ns.exec("ip", &["link", "set", "mq0", "up"])?;
+    // Some kinds' `tc -j` is not JSON (hfsc prints its text inside
+    // `options`): those compare by tc's text after the handle.
+    let options = |dev: &str| -> Result<serde_json::Value> {
+        // Details: red's and choke's derived logs show only with -d.
+        let out = ns.exec("tc", &["-d", "-j", "qdisc", "show", "dev", dev, "root"])?;
+        if let Ok(mut listed) = serde_json::from_str::<serde_json::Value>(&out) {
+            // A netem's seed is random unless given.
+            if let Some(options) = listed[0]["options"].as_object_mut() {
+                options.remove("seed");
+            }
+            return Ok(listed[0]["options"].take());
+        }
+        let out = ns.exec("tc", &["-d", "qdisc", "show", "dev", dev, "root"])?;
+        Ok(serde_json::Value::String(out.split_once("refcnt").map_or(&*out, |(_, rest)| rest).trim().to_string()))
+    };
+    let mut failed = Vec::new();
+    for &(dev, kind, line) in rows {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let mut args = vec!["qdisc", "add", "dev", dev, "root", kind];
+        args.extend(&words);
+        if let Err(e) = ns.exec("tc", &args) {
+            failed.push(format!("{kind} {line}: tc refused it: {e}"));
+            continue;
+        }
+        let theirs = options(dev)?;
+        ns.exec("tc", &["qdisc", "del", "dev", dev, "root"])?;
+        macro_rules! install {
+            ($ty:ty) => {
+                match <$ty>::parse_params(&words) {
+                    Ok(config) => conn.add_qdisc(dev, config).await,
+                    Err(e) => {
+                        failed.push(format!("{kind} {line}: nlink refused it: {e}"));
+                        continue;
+                    }
+                }
+            };
+        }
+        let added = match kind {
+            "pfifo" => install!(PfifoConfig),
+            "bfifo" => install!(BfifoConfig),
+            "pfifo_fast" => install!(PfifoFastConfig),
+            "prio" => install!(PrioConfig),
+            "sfq" => install!(SfqConfig),
+            "tbf" => install!(TbfConfig),
+            "htb" => install!(HtbQdiscConfig),
+            "hfsc" => install!(HfscConfig),
+            "drr" => install!(DrrConfig),
+            "qfq" => install!(QfqConfig),
+            "red" => install!(RedConfig),
+            "choke" => install!(ChokeConfig),
+            "gred" => install!(GredConfig),
+            "sfb" => install!(SfbConfig),
+            "codel" => install!(CodelConfig),
+            "fq_codel" => install!(FqCodelConfig),
+            "fq" => install!(FqConfig),
+            "pie" => install!(PieConfig),
+            "fq_pie" => install!(FqPieConfig),
+            "hhf" => install!(HhfConfig),
+            "cake" => install!(CakeConfig),
+            "netem" => install!(NetemConfig),
+            "etf" => install!(EtfConfig),
+            "cbs" => install!(CbsConfig),
+            "skbprio" => install!(SkbprioConfig),
+            "plug" => install!(PlugConfig),
+            "ets" => install!(EtsConfig),
+            "mq" => install!(MqConfig),
+            "multiq" => install!(MultiqConfig),
+            "mqprio" => install!(MqprioConfig),
+            "taprio" => install!(TaprioConfig),
+            other => panic!("no parser for {other}"),
+        };
+        if let Err(e) = added {
+            failed.push(format!("{kind} {line}: the kernel refused nlink's: {e}"));
+            continue;
+        }
+        let ours = options(dev)?;
+        ns.exec("tc", &["qdisc", "del", "dev", dev, "root"])?;
+        if theirs != ours {
+            failed.push(format!("{kind} {line}:\n  tc:    {theirs}\n  nlink: {ours}"));
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+    Ok(())
+}
+
+/// #819, #823: a red, a choke and a taprio from nlink's builders install.
+/// The kernel refused red and choke without their idle-damping table,
+/// which nlink did not send, and a taprio whose entries it skipped as the
+/// wrong attribute; no test had installed one of the three.
+#[tokio::test]
+async fn red_choke_and_taprio_from_the_builders_install() -> Result<()> {
+    use nlink::netlink::tc::{ChokeConfig, RedConfig, TaprioConfig};
+    use nlink::netlink::types::tc::qdisc::taprio::TaprioSchedEntry;
+    use nlink::{Bytes, Packets};
+    require_root!();
+    nlink::require_modules!("dummy", "sch_red", "sch_choke", "sch_taprio");
+
+    let (ns, conn) = setup_tc_ns("tc-red-builders").await?;
+    let shown = |dev: &str| ns.exec("tc", &["-d", "qdisc", "show", "dev", dev, "root"]);
+
+    conn.add_qdisc("dummy0", RedConfig::new().limit(Bytes::new(400_000)).min(Bytes::new(30_000)).max(Bytes::new(90_000)))
+        .await?;
+    let red = shown("dummy0")?;
+    // tc's arithmetic for these thresholds, avpkt 1000 and 10 Mbit.
+    assert!(red.contains("min 30000b max 90000b") && red.contains("ewma 5"), "{red}");
+    ns.exec("tc", &["qdisc", "del", "dev", "dummy0", "root"])?;
+
+    conn.add_qdisc("dummy0", ChokeConfig::new().limit(Packets::new(1000)).min(Packets::new(100)).max(Packets::new(300)))
+        .await?;
+    let choke = shown("dummy0")?;
+    assert!(choke.contains("limit 1000p min 100p max 300p"), "{choke}");
+    ns.exec("tc", &["qdisc", "del", "dev", "dummy0", "root"])?;
+
+    ns.exec("ip", &["link", "add", "mq0", "numtxqueues", "4", "type", "dummy"])?;
+    let taprio = TaprioConfig::new()
+        .num_tc(2)
+        .map(&[0, 1])
+        .queues(&[(1, 0), (1, 1)])
+        .clockid(libc::CLOCK_TAI)
+        .base_time(1000)
+        .entry(TaprioSchedEntry::set_gates(0x1, 300_000))
+        .entry(TaprioSchedEntry::set_gates(0x2, 300_000));
+    conn.add_qdisc("mq0", taprio).await?;
+    let taprio = shown("mq0")?;
+    assert!(taprio.contains("gatemask 0x1") && taprio.contains("gatemask 0x2"), "{taprio}");
+    Ok(())
+}
+
 /// Every action kind's tc(8) lines make, through nlink's `parse_params`,
 /// the action tc makes of them. A sweep: the kinds were checked one at a
 /// time, as each bug came, and a tunnel_key key id was 0 for every
