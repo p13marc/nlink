@@ -1208,6 +1208,15 @@ All notable changes to this project will be documented in this file.
   and through nlink's query, on the same sockets, found them; everything
   else agreed.
 
+- **ethtool's features and carrier read as the ethtool CLI reads them
+  (#839).** `Features::is_changeable` checked only the kernel's
+  never-change set, so it called changeable every feature outside the
+  device's `hw` set: 98 features across `lo`, a veth and a dummy, which
+  ethtool marks `[fixed]` and `set_features` cannot change.
+  `LinkState::link` read `false` for a device whose driver cannot report
+  its carrier, such as an up dummy; it is `Option<bool>`, `None` there, as
+  ethtool prints no "Link detected".
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

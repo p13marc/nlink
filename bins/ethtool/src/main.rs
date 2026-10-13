@@ -438,7 +438,10 @@ async fn show_device(device: &str, json: bool) -> nlink::Result<()> {
             None => println!("\tSQI: {}", sqi),
         }
     }
-    println!("\tLink detected: {}", if state.link { "yes" } else { "no" });
+    // ethtool prints nothing when the driver cannot tell (#839).
+    if let Some(link) = state.link {
+        println!("\tLink detected: {}", if link { "yes" } else { "no" });
+    }
     // Only meaningful when the link is down: why.
     if let Some(ext) = state.ext_state
         && ext != nlink::netlink::genl::ethtool::LinkExtState::Ok
@@ -1251,7 +1254,11 @@ fn print_event(event: &EthtoolEvent) {
             println!(
                 "[{}] link state: {}",
                 name,
-                if state.link { "up" } else { "down" }
+                match state.link {
+                    Some(true) => "up",
+                    Some(false) => "down",
+                    None => "unknown",
+                }
             );
         }
         EthtoolEvent::LinkModesChanged { ifname, modes } => {
