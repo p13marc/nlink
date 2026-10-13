@@ -970,6 +970,17 @@ All notable changes to this project will be documented in this file.
   peer in place is #804. A peer in another namespace is still left alone,
   since a CNI renames peers there.
 
+- **An IPv4 address keeps its broadcast through an undo or a restore
+  (#783).** `DeclaredAddress` had no broadcast, so the undo of a removed
+  address (#781) and #745's restore of a recreated link put the address
+  back without its `brd`, and without the broadcast route the kernel makes
+  for it in the local table. The read-back keeps it now.
+  `AddressBuilder::broadcast` declares one, and the JSON form has a
+  `broadcast` key. A declared broadcast is compared, and a drift recreates
+  the address, because a replace leaves an IPv4 broadcast as it was. One
+  not declared is not compared: the tools that add addresses set one
+  (`brd +`, DHCP clients).
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

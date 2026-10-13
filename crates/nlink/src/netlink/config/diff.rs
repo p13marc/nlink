@@ -2918,6 +2918,12 @@ pub(super) fn address_from_live(dev: &str, a: &AddressMessage) -> Option<Declare
     let flags = a.flags();
     d.attrs.peer = a.peer().copied();
     d.attrs.label = a.label().filter(|l| *l != dev).map(str::to_string);
+    // Restored without it, an address lost the broadcast route the kernel
+    // makes for it in the local table (#783).
+    d.attrs.broadcast = match a.broadcast() {
+        Some(IpAddr::V4(b)) if !b.is_unspecified() => Some(*b),
+        _ => None,
+    };
     d.attrs.metric = a.metric();
     d.attrs.nodad = flags & f::NODAD != 0;
     d.attrs.optimistic = flags & f::OPTIMISTIC != 0;
@@ -2956,9 +2962,17 @@ fn address_drift(declared: &DeclaredAddress, live: &AddressMessage) -> AddressDr
     let lifetimes = t.lifetimes.is_some() == live.is_permanent();
     let label = declared.address.is_ipv4()
         && t.label.as_deref().unwrap_or(&declared.dev) != live.label().unwrap_or(&declared.dev);
+    // A replace leaves an IPv4 address's broadcast as it was (#783). One
+    // not declared is not compared: the tools that add addresses set one
+    // (`brd +`, DHCP clients), and recreating an address drops it a moment.
+    let live_broadcast = match live.broadcast() {
+        Some(IpAddr::V4(b)) if !b.is_unspecified() => Some(*b),
+        _ => None,
+    };
+    let broadcast = t.broadcast.is_some_and(|b| live_broadcast != Some(b));
     let metric_to_none =
         declared.address.is_ipv6() && t.metric.unwrap_or(0) == 0 && live.metric().unwrap_or(0) != 0;
-    if (declared.address.is_ipv4() && (label || flags)) || metric_to_none {
+    if (declared.address.is_ipv4() && (label || flags || broadcast)) || metric_to_none {
         AddressDrift::Recreate
     } else if flags || metric || lifetimes {
         AddressDrift::InPlace
