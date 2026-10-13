@@ -1772,6 +1772,57 @@ async fn a_route_with_what_a_declaration_cannot_say_is_another() -> Result<()> {
     .await
 }
 
+/// A route through a nexthop object reads back as unicast, and one stuck as
+/// a blackhole is not the declared route (#783). The kernel dumps the
+/// object's type while the object is a blackhole, so the read-back took a
+/// route through a blackhole nexthop for a blackhole route. Put back that
+/// way by an undo, it stayed a blackhole after its object got a gateway,
+/// and nothing compared it.
+#[tokio::test]
+async fn a_route_through_a_blackhole_nexthop_is_unicast() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("nh-blackhole")?;
+        let conn = conn_in_ns(&ns)?;
+        // A blackhole nexthop is on `lo`, which must be up.
+        ns.exec("ip", &["link", "set", "lo", "up"])?;
+        let base = |nh: fn(nlink::netlink::config::NexthopSpecBuilder) -> nlink::netlink::config::NexthopSpecBuilder| {
+            NetworkConfig::new()
+                .link("d0", |l| l.dummy().up())
+                .address("d0", "10.91.0.1/24")
+                .map(|c| c.nexthop(5, nh))
+        };
+        let via = |n: nlink::netlink::config::NexthopSpecBuilder| n.via("10.91.0.2".parse().unwrap()).dev("d0");
+        let a = base(|n| n.blackhole())?.route("10.90.0.0/16", |r| r.nhid(5))?;
+        let applied = a.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let b = base(|n| n.blackhole())?.route("10.90.0.0/16", |r| r.via("10.91.0.3").dev("d0"))?;
+        let applied = b.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let undone = applied.undo().apply(&conn, nlink::ExecOptions::new()).await?;
+        assert!(undone.is_success(), "{undone:?}");
+        // Give the object a gateway: the route put back follows it.
+        ns.exec("ip", &["nexthop", "replace", "id", "5", "via", "10.91.0.2", "dev", "d0", "proto", "boot"])?;
+        let shown = ns.exec("ip", &["-d", "route", "show", "10.90.0.0/16"])?;
+        assert!(shown.starts_with("unicast"), "the undo put it back as a blackhole: {shown}");
+
+        // A route added as a blackhole stays one: not the declared route.
+        ns.exec("ip", &["route", "replace", "blackhole", "10.90.0.0/16", "nhid", "5", "proto", "boot"])?;
+        let c = base(via)?.route("10.90.0.0/16", |r| r.nhid(5))?;
+        let diff = c.diff(&conn).await?;
+        assert_eq!(diff.routes_to_add.len(), 1, "a route stuck as a blackhole passed for the declared one: {diff}");
+        let applied = c.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let shown = ns.exec("ip", &["-d", "route", "show", "10.90.0.0/16"])?;
+        assert!(shown.starts_with("unicast"), "{shown}");
+        assert!(c.diff(&conn).await?.is_empty(), "did not converge");
+        Ok(())
+    })
+    .await
+}
+
 /// A nexthop with an encap is not a declared one (#783). A declaration has
 /// no encap, and the diff did not read the kernel's: `ip nexthop add id 7
 /// encap mpls 100 via …` passed for a declared nexthop 7 via the same

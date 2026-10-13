@@ -1743,7 +1743,9 @@ pub(crate) fn diff_snapshot(
     );
 
     // Diff routes
-    diff_routes(config, &current_routes, &ifindex_to_name, opts, &mut diff);
+    let blackhole_nexthops: HashSet<u32> =
+        snapshot.nexthops.iter().filter(|n| n.is_blackhole()).map(|n| n.id()).collect();
+    diff_routes(config, &current_routes, &ifindex_to_name, &blackhole_nexthops, opts, &mut diff);
 
     // What is there now and goes with a flushed link is a re-add (#649).
     let cause_of = |dev: &str| {
@@ -3067,6 +3069,7 @@ fn diff_routes(
     config: &NetworkConfig,
     current: &[RouteMessage],
     ifindex_to_name: &HashMap<u32, &str>,
+    blackhole_nexthops: &HashSet<u32>,
     opts: &PlanOptions,
     diff: &mut ConfigDiff,
 ) {
@@ -3091,6 +3094,14 @@ fn diff_routes(
         .map(|(idx, name)| (*name, *idx))
         .collect();
     let resolve = |name: &str| name_to_ifindex.get(name).copied();
+    // A route through a nexthop object dumps the object's type while the
+    // object is a blackhole, and its own otherwise. One added as a
+    // blackhole stays one whatever its object becomes (#783): that is not
+    // the declared route, which is unicast.
+    let stuck = |r: &RouteMessage| {
+        r.nh_id()
+            .is_some_and(|id| r.route_type() != RouteType::Unicast && !blackhole_nexthops.contains(&id))
+    };
 
     // Index current routes by (dst, prefix, table) for fast lookup
     // of every matching kernel route. ECMP / multi-metric setups
@@ -3160,7 +3171,7 @@ fn diff_routes(
             && current_by_key.get(&key).is_some_and(|kernel_routes| {
                 kernel_routes
                     .iter()
-                    .any(|r| route_matches(declared, declared_oif, &resolve, r))
+                    .any(|r| route_matches(declared, declared_oif, &resolve, r) && !stuck(r))
             });
 
         if matches_existing {
@@ -3382,6 +3393,10 @@ pub(super) fn declared_from_live(
     // default). Read back with them, its delete matched no route and its
     // re-add was refused: a request may not name both (#769).
     let through_object = r.nh_id().is_some();
+    // Through an object, the type dumped is the object's while it is a
+    // blackhole; put back as one, the route stays a blackhole whatever the
+    // object becomes (#783). The route is unicast.
+    let route_type = if through_object { DeclaredRouteType::Unicast } else { route_type };
     Some(DeclaredRoute {
         destination,
         prefix_len: r.dst_len(),
@@ -4110,7 +4125,7 @@ mod tests {
 
     fn purge_routes(config: &NetworkConfig, current: &[RouteMessage], opts: PlanOptions) -> Vec<(String, u32)> {
         let mut diff = ConfigDiff::default();
-        diff_routes(config, current, &HashMap::new(), &opts, &mut diff);
+        diff_routes(config, current, &HashMap::new(), &HashSet::new(), &opts, &mut diff);
         diff.routes_to_remove
             .iter()
             .map(|r| (format!("{}/{}", r.destination, r.prefix_len), r.table.unwrap()))
@@ -4389,7 +4404,7 @@ mod tests {
         let run = |route: fn(RouteBuilder) -> RouteBuilder, current: &[RouteMessage]| {
             let config = NetworkConfig::new().route("10.0.0.0/24", route).unwrap();
             let mut diff = ConfigDiff::default();
-            diff_routes(&config, current, &names, &PlanOptions::default(), &mut diff);
+            diff_routes(&config, current, &names, &HashSet::new(), &PlanOptions::default(), &mut diff);
             (diff.routes_to_add.len(), diff.routes_refused)
         };
 
