@@ -1698,3 +1698,45 @@ async fn an_undo_puts_back_an_address_with_its_attributes() -> Result<()> {
     })
     .await
 }
+
+/// A tunnel's output key is compared too (#782). A declared key is the
+/// key both ways, and the comparison read the input key alone: a gre,
+/// vti or ip6gre tunnel with another output key compared equal to its
+/// declaration and was never put right. The apply sends both now, and
+/// `ip` reads one key back.
+#[tokio::test]
+async fn a_tunnels_output_key_is_compared() -> Result<()> {
+    use std::net::Ipv6Addr;
+    nlink::require_root!();
+    nlink::require_modules!("ip_gre", "ip_vti", "ip6_gre", "ip6_vti");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("okey")?;
+        let conn = conn_in_ns(&ns)?;
+        for (kind, local, remote) in [("gre", "10.88.0.1", "10.88.0.2"), ("vti", "10.88.1.1", "10.88.1.2"), ("ip6gre", "fd88::1", "fd88::2"), ("vti6", "fd88:1::1", "fd88:1::2")] {
+            ns.exec("ip", &["link", "add", "t1", "type", kind, "local", local, "remote", remote, "ikey", "7", "okey", "8"])?;
+            let cfg = NetworkConfig::new().link("t1", |l| match kind {
+                "ip6gre" | "vti6" => (if kind == "ip6gre" { l.ip6gre() } else { l.vti6() })
+                    .ip6tnl_local(local.parse::<Ipv6Addr>().unwrap())
+                    .ip6tnl_remote(remote.parse::<Ipv6Addr>().unwrap())
+                    .tunnel_key(7),
+                _ => {
+                    let l = if kind == "gre" { l.gre() } else { l.vti() };
+                    l.tunnel_local(local.parse().unwrap()).tunnel_remote(remote.parse().unwrap()).tunnel_key(7)
+                }
+            });
+            let diff = cfg.diff(&conn).await?;
+            assert!(!diff.is_empty(), "{kind}: okey 8 compared equal to key 7");
+            let applied = cfg.apply(&conn).await?;
+            assert!(applied.is_success(), "{kind}: {applied:?}");
+            let link = crate::common::converge::ip_json(&ns, &["-d", "link", "show", "t1"])
+                .map_err(nlink::Error::invalid_message)?;
+            let data = &link[0]["linkinfo"]["info_data"];
+            assert_eq!((&data["ikey"], &data["okey"]), (&data["ikey"], &data["ikey"]), "{kind}: {data}");
+            assert!(cfg.diff(&conn).await?.is_empty(), "{kind} did not converge");
+            ns.exec("ip", &["link", "del", "t1"])?;
+        }
+        Ok(())
+    })
+    .await
+}

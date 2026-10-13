@@ -847,6 +847,12 @@ All notable changes to this project will be documented in this file.
   lost; without `noprefixroute`, the kernel added a prefix route that had
   not been there. The read-back is whole now.
 
+- **A tunnel's output key is compared (#782).** A declared key is the key
+  both ways, but the comparison read only the input key. So a gre, gretap,
+  vti, ip6gre, ip6gretap or vti6 tunnel with a different output key
+  matched its declaration and was never put right. Both are compared now,
+  and an apply makes them the declared key.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
