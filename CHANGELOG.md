@@ -1033,6 +1033,16 @@ All notable changes to this project will be documented in this file.
   records it: the plan shows `~ fdb … (was on p0)` or `(was dst …)`, and
   the undo puts the entry back.
 
+- **A multipath hop's weight of 256, its encap and its realms are read
+  (#783).** The weight was a `u8`, so the kernel's largest, 256, read back
+  as 255. It passed for a declared 255, and an undo put back 255. A hop's
+  encap and realms (`RTA_FLOW`) were not read at all, so a route whose hop
+  had them passed for its declaration, and its undo or restore lost them.
+  The weight is a `u16` now, 1 to 256 (`ParsedNextHop`, `RouteNexthop`,
+  `NextHop`, `RouteNexthopBuilder`), and the validation refuses more. A
+  hop with an encap or realms is something a declaration cannot say: the
+  route differs from its declaration and is not put back.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

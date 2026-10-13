@@ -3482,6 +3482,8 @@ mod tests {
             weight: 1,
             flags: 0,
             gateway: None,
+            encap_type: None,
+            flow: None,
         };
 
         let single = RouteMessageBuilder::new().oif(2).build();

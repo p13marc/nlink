@@ -132,6 +132,13 @@ impl NetworkConfig {
             if let Some(why) = r.gateway_family_mismatch() {
                 errors.push(ValidationErrorInfo::new(at(), why));
             }
+            // `rtnh_hops` is a u8, the weight less one (#783).
+            if let Some(h) = r.attrs.multipath.iter().find(|h| h.weight > 256) {
+                errors.push(ValidationErrorInfo::new(
+                    at(),
+                    format!("a next hop's weight is 1 to 256, not {}", h.weight),
+                ));
+            }
             // IPv6 masks host bits away; IPv4 refuses them (EINVAL,
             // "Invalid prefix for given prefix length") (#518).
             if let IpAddr::V4(v4) = r.destination {
@@ -4473,21 +4480,21 @@ pub struct RouteNexthop {
     /// The device; the kernel's, from the gateway, when unset.
     #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     pub dev: Option<String>,
-    /// Its share of the flows, 1 and up.
+    /// Its share of the flows, 1 to 256 (a `u16` since 0.32, #783).
     #[cfg_attr(feature = "serde", serde(default = "one", skip_serializing_if = "is_one"))]
-    pub weight: u8,
+    pub weight: u16,
     /// The gateway is on the link whatever the subnets say.
     #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "std::ops::Not::not"))]
     pub onlink: bool,
 }
 
 #[cfg(feature = "serde")]
-fn one() -> u8 {
+fn one() -> u16 {
     1
 }
 
 #[cfg(feature = "serde")]
-fn is_one(w: &u8) -> bool {
+fn is_one(w: &u16) -> bool {
     *w == 1
 }
 
@@ -4538,7 +4545,7 @@ impl RouteNexthopBuilder {
     }
 
     /// Its share of the flows, 1 and up (0 is 1).
-    pub fn weight(mut self, weight: u8) -> Self {
+    pub fn weight(mut self, weight: u16) -> Self {
         self.hop.weight = weight.max(1);
         self
     }

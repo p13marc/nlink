@@ -3410,6 +3410,13 @@ pub(crate) fn route_lost(r: &RouteMessage) -> Option<String> {
     if r.expires().is_some_and(|e| e != 0) {
         what.push("an expiry");
     }
+    let hops = r.multipath().unwrap_or_default();
+    if r.nh_id().is_none() && hops.iter().any(|h| h.encap_type.is_some()) {
+        what.push("a next hop with an encap");
+    }
+    if hops.iter().any(|h| h.flow.is_some_and(|f| f != 0)) {
+        what.push("a next hop with realms");
+    }
     (!what.is_empty()).then(|| format!("it has {}, which no declaration has", what.join(", ")))
 }
 
