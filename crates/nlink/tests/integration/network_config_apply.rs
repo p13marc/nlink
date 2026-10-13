@@ -1735,6 +1735,43 @@ async fn a_route_through_an_encap_nexthop_reads_back_as_one() -> Result<()> {
     .await
 }
 
+/// A route with what a declaration cannot say is not the declared one, and
+/// its replace is not undone as if it were (#783). The comparison and the
+/// read-back held six metrics, so a live route with an `rto_min` and a
+/// realm passed for its declaration, and the undo of a replace put back a
+/// route without them.
+#[tokio::test]
+async fn a_route_with_what_a_declaration_cannot_say_is_another() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("dummy");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("route-lost")?;
+        let conn = conn_in_ns(&ns)?;
+        let cfg = NetworkConfig::new()
+            .link("d0", |l| l.dummy().up())
+            .address("d0", "10.85.0.1/24")?
+            .route("10.86.0.0/16", |r| r.via("10.85.0.2").dev("d0"))?;
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        ns.exec(
+            "ip",
+            &["route", "replace", "10.86.0.0/16", "via", "10.85.0.2", "dev", "d0", "rto_min", "50ms", "realm", "7", "proto", "boot"],
+        )?;
+        let diff = cfg.diff(&conn).await?;
+        assert_eq!(diff.routes_to_add.len(), 1, "a route with rto_min and a realm passed for one without: {diff}");
+        let applied = cfg.apply(&conn).await?;
+        assert!(applied.is_success(), "{applied:?}");
+        let stuck: Vec<String> = applied.irreversible().map(|s| s.to_string()).collect();
+        assert_eq!(stuck.len(), 1, "the replace of what cannot be put back: {stuck:?}");
+        let shown = ns.exec("ip", &["route", "show", "10.86.0.0/16"])?;
+        assert!(!shown.contains("rto_min") && !shown.contains("realm"), "{shown}");
+        assert!(cfg.diff(&conn).await?.is_empty(), "did not converge");
+        Ok(())
+    })
+    .await
+}
+
 /// A nexthop with an encap is not a declared one (#783). A declaration has
 /// no encap, and the diff did not read the kernel's: `ip nexthop add id 7
 /// encap mpls 100 via …` passed for a declared nexthop 7 via the same

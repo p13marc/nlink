@@ -23,6 +23,8 @@ mod attr_ids {
     pub const RTA_METRICS: u16 = 8;
     /// Plan 202 — multipath nexthop chain (`RTA_MULTIPATH`).
     pub const RTA_MULTIPATH: u16 = 9;
+    /// Realms (`RTA_FLOW`): the source and destination realm, 16 bits each.
+    pub const RTA_FLOW: u16 = 11;
     pub const RTA_TABLE: u16 = 15;
     /// A gateway of another family (`RTA_VIA`, RFC 5549): `struct rtvia`.
     pub const RTA_VIA: u16 = 18;
@@ -91,6 +93,13 @@ pub struct RouteMessage {
     pub(crate) encap_type: Option<u16>,
     /// The labels an MPLS encapsulation pushes, outermost first (#516).
     pub(crate) mpls_labels: Option<Vec<u32>>,
+    /// Realms (`RTA_FLOW`).
+    pub(crate) flow: Option<u32>,
+    /// The metrics locked against path discovery (`RTAX_LOCK`, a bit per
+    /// `RTAX_*`).
+    pub(crate) metrics_lock: Option<u32>,
+    /// The congestion control (`RTAX_CC_ALGO`).
+    pub(crate) congctl: Option<String>,
 }
 
 /// One nexthop parsed from an `RTA_MULTIPATH` chain. Plan 202.
@@ -219,6 +228,24 @@ impl RouteMessage {
     /// Get the expiration time.
     pub fn expires(&self) -> Option<u32> {
         self.expires
+    }
+
+    /// Realms (`RTA_FLOW`, `ip route … realm`): the destination realm in
+    /// the low 16 bits, the source realm in the high (#783).
+    pub fn flow(&self) -> Option<u32> {
+        self.flow
+    }
+
+    /// The metrics locked against path discovery (`RTAX_LOCK`, `ip route …
+    /// mtu lock 1400`): one bit per `RTAX_*` (#783).
+    pub fn metrics_lock(&self) -> Option<u32> {
+        self.metrics_lock
+    }
+
+    /// The route's congestion control (`RTAX_CC_ALGO`, `ip route …
+    /// congctl bbr`), #783.
+    pub fn congctl(&self) -> Option<&str> {
+        self.congctl.as_deref()
     }
 
     /// Get the multipath nexthop list parsed from
@@ -526,6 +553,24 @@ impl FromNetlink for RouteMessage {
                 }
                 attr_ids::RTA_METRICS => {
                     msg.metrics = Some(crate::netlink::route::RouteMetrics::parse(attr_data));
+                    // What `RouteMetrics` does not hold (#783).
+                    use crate::netlink::{attr::AttrIter, route::rtax};
+                    for (ty, payload) in AttrIter::new(attr_data) {
+                        match ty & 0x3FFF {
+                            rtax::LOCK if payload.len() >= 4 => {
+                                msg.metrics_lock = Some(u32::from_ne_bytes(payload[..4].try_into().unwrap()));
+                            }
+                            rtax::CC_ALGO => {
+                                msg.congctl = Some(
+                                    String::from_utf8_lossy(payload).trim_end_matches('\0').to_string(),
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                attr_ids::RTA_FLOW if attr_data.len() >= 4 => {
+                    msg.flow = Some(u32::from_ne_bytes(attr_data[..4].try_into().unwrap()));
                 }
                 attr_ids::RTA_MULTIPATH => {
                     // Plan 202 — parse the nexthop chain.

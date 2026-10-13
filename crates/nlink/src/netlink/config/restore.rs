@@ -281,6 +281,10 @@ pub(super) fn capture(
             why.push(format!("route {text}, which the kernel learned from a router advertisement"));
             continue;
         }
+        if let Some(lost) = super::diff::route_lost(r) {
+            why.push(format!("route {text}: {lost}"));
+            continue;
+        }
         match super::diff::declared_from_live(r, names) {
             Some(route) => restore.routes.push(RestoredRoute {
                 route,
