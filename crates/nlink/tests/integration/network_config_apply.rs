@@ -1200,6 +1200,49 @@ async fn the_previous_config_removes_its_neighbours() -> Result<()> {
     .await
 }
 
+/// A veth or netkit pair whose peer here has another name is not the
+/// declared pair (#793). The comparison looked at the peer's namespace and
+/// never its name, so a pair made with another peer name passed for the
+/// declared one, and the declared peer never appeared. It is a recreate
+/// now, which the apply refuses while the other peer is undeclared, since
+/// the kernel deletes it with the pair; once that pair is gone, the apply
+/// makes the declared one.
+#[tokio::test]
+async fn a_pairs_peer_name_is_compared() -> Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("veth", "netkit");
+
+    with_timeout(async {
+        let ns = TestNamespace::new("peer-name")?;
+        let conn = conn_in_ns(&ns)?;
+        for (kind, cfg) in [
+            ("veth", NetworkConfig::new().link("v0", |l| l.veth("v0-p").up())),
+            ("netkit", NetworkConfig::new().link("v0", |l| l.netkit("v0-p").up())),
+        ] {
+            // iproute2 before 6.7 cannot make a netkit pair.
+            if kind == "veth" {
+                ns.exec("ip", &["link", "add", "v0", "type", kind, "peer", "name", "v0-x"])?;
+            } else {
+                conn.add_link(nlink::netlink::link::NetkitLink::new("v0", "v0-x")).await?;
+            }
+            let diff = cfg.diff(&conn).await?;
+            assert_eq!(diff.links_to_recreate.len(), 1, "{kind}: a peer v0-x passed for v0-p: {diff}");
+            let err = cfg.apply(&conn).await.expect_err("the other peer is undeclared");
+            assert!(err.to_string().contains("peer v0-x -> v0-p"), "{kind}: {err}");
+
+            ns.exec("ip", &["link", "del", "v0"])?;
+            let applied = cfg.apply(&conn).await?;
+            assert!(applied.is_success(), "{kind}: {applied:?}");
+            let links = ns.exec("ip", &["-br", "link", "show"])?;
+            assert!(links.contains("v0-p@v0"), "{kind}: {links}");
+            assert!(cfg.diff(&conn).await?.is_empty(), "{kind}: did not converge");
+            ns.exec("ip", &["link", "del", "v0"])?;
+        }
+        Ok(())
+    })
+    .await
+}
+
 /// A bridge FDB entry declared without a VLAN is also one per VLAN of its
 /// port, and the diff sees one of those go (#793). `br_fdb_add` makes the
 /// untagged entry and one for each VLAN on the port, VLAN 1 by default,

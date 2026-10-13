@@ -2324,6 +2324,19 @@ pub(crate) fn plan(config: &NetworkConfig, opts: &PlanOptions, live: Live<'_>) -
                 d.recreate.push(format!("veth peer {} -> in {want}", here(have)));
             }
         }
+        // The peer's name, when the peer is here (#793). Nothing renames
+        // it, so a pair whose peer has another name never converged: the
+        // check above looks at the namespace alone. A peer elsewhere may
+        // have been renamed there, by a CNI for one, and is left alone.
+        if let DeclaredLinkType::Veth { peer, .. } | DeclaredLinkType::Netkit { peer, .. } =
+            &link.link_type
+            && link.peer_netns().is_none_or(|n| n.is_default())
+            && live.link_netnsid.is_none()
+            && let Some(have) = live.link().and_then(|i| names.get(&i))
+            && *have != peer.as_str()
+        {
+            d.recreate.push(format!("peer {have} -> {peer}"));
+        }
         if !d.recreate.is_empty() || !d.refuse.is_empty() {
             let mut reasons = d.refuse.clone();
             reasons.extend(d.recreate.iter().cloned());

@@ -960,6 +960,16 @@ All notable changes to this project will be documented in this file.
   declaration when one is missing or learned. It reads the ports' VLANs
   whenever a config declares FDB entries.
 
+- **A veth or netkit pair whose peer has another name is not the declared
+  one (#793).** The comparison looked at the peer's namespace and never at
+  its name. So `ip link add v0 type veth peer name v0-x` passed for a
+  declaration with peer `v0-p`, and the declared peer never appeared. When
+  the peer is in this namespace, its name is compared now, and a mismatch
+  is a recreate. The apply refuses that recreate while the other peer is
+  undeclared, because the kernel deletes it with the pair. Renaming the
+  peer in place is #804. A peer in another namespace is still left alone,
+  since a CNI renames peers there.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
