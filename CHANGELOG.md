@@ -1065,6 +1065,20 @@ All notable changes to this project will be documented in this file.
   either family. It took only `src`/`dst`, which tc accepts as
   abbreviations, and nlink's `src6`/`dst6`.
 
+- **Every action kind is compared by what it does (#791).** A declared
+  filter's actions were compared by their kind alone, except mirred, gact
+  and police. So a vlan action pushing another id, an skbedit setting
+  another mark, a nat or tunnel_key with other addresses, or a pedit with
+  another value all matched their declaration and were never put right.
+  vlan, mpls, skbmod, skbedit, connmark, csum, nat, tunnel_key, ct, pedit,
+  simple, sample, ctinfo and ife are now compared by their attributes.
+  Timestamps, padding, counters and the `tc_gen` bookkeeping are left
+  out, and so are the defaults the kernel reports for what a request
+  leaves out. A sweep of every kind, applied twice and then drifted with
+  `tc`, checks each one. It found that a vlan pop sent a protocol the
+  kernel neither reads nor reports, which it no longer sends, and the
+  tunnel_key key id bug (#811). `gate` and `bpf` still compare by kind.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
