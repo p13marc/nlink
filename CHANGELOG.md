@@ -825,6 +825,14 @@ All notable changes to this project will be documented in this file.
   So the filter returned every unix socket. The replies are now checked
   against it, as the type and path already were (#223).
 
+- **TC classes and filters stream per interface (#778).**
+  `stream_classes()` and `stream_filters()` sent their dumps with no
+  interface, and a class or filter dump answers for one, so both always
+  ended empty, although the docs said they returned every interface's
+  entries. `stream_classes_by_index(ifindex)` and
+  `stream_filters_by_index(ifindex, parent)` stream one interface's; the
+  old two are deprecated.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
