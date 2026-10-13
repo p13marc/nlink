@@ -214,6 +214,7 @@ EthtoolPauseAttr = ETHTOOL_A_PAUSE
     StatsRxSrc -> STATS_SRC
 EthtoolRingsAttr = ETHTOOL_A_RINGS
 EthtoolTsinfoAttr = ETHTOOL_A_TSINFO
+EthtoolPhyAttr = ETHTOOL_A_PHY
 EthtoolRssAttr = ETHTOOL_A_RSS
 EthtoolStatsAttr = ETHTOOL_A_STATS
 EthtoolStatsGrpAttr = ETHTOOL_A_STATS_GRP

@@ -530,6 +530,49 @@ pub struct Tsinfo {
 }
 
 // =============================================================================
+// PHYs
+// =============================================================================
+
+/// One PHY on a link (`ethtool --show-phys`, kernel 6.12, #166). A link
+/// can have several: a media converter in front of the PHY on the board,
+/// a PHY on an SFP module.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PhyInfo {
+    /// Interface name.
+    pub ifname: Option<String>,
+    /// Interface index.
+    pub ifindex: Option<u32>,
+    /// Its index on the link, which PHY-specific requests name it by.
+    pub index: u32,
+    /// Its driver's name.
+    pub driver: Option<String>,
+    /// Its device name.
+    pub name: Option<String>,
+    /// What it is attached to.
+    pub upstream: Option<PhyUpstream>,
+    /// The SFP bus it sits behind, when it is on an SFP module.
+    pub upstream_sfp: Option<String>,
+    /// The SFP cage it drives, if any.
+    pub downstream_sfp: Option<String>,
+}
+
+/// What a PHY is attached to (`enum phy_upstream`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PhyUpstream {
+    /// The MAC: a switch port or an Ethernet controller.
+    Mac,
+    /// Another PHY, by its index on the link: a media converter's.
+    Phy {
+        /// The upstream PHY's index.
+        index: u32,
+    },
+    /// A kind of upstream newer than nlink, by the kernel's number.
+    Other(u32),
+}
+
+// =============================================================================
 // Channels
 // =============================================================================
 
