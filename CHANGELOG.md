@@ -1014,6 +1014,16 @@ All notable changes to this project will be documented in this file.
   `RTAX_LOCK` and `RTAX_CC_ALGO` (`flow()`, `metrics_lock()`,
   `congctl()`).
 
+- **A route through a blackhole nexthop is put back as unicast (#783).**
+  The kernel dumps a route through a nexthop object with the object's type
+  while the object is a blackhole, so the read-back took such a route for a
+  blackhole route. An undo or #745's restore re-added it as `blackhole …
+  nhid N`, and a route added that way stays a blackhole whatever its
+  object becomes: once the object had a gateway, the route still dropped
+  everything. A route through an object reads back as unicast now. One
+  already stuck as a blackhole through an object that is not one is not
+  the declared route, and the apply replaces it.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**
