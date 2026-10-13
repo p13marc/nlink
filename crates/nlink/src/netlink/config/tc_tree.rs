@@ -395,6 +395,7 @@ impl ClassSpec {
                         c.quantum_declared().is_none_or(|q| p.quantum == q)
                             && (p.rate.mpu, p.rate.overhead) == (mpu, overhead)
                             && (p.ceil.mpu, p.ceil.overhead) == (mpu, overhead)
+                            && p.rate.linklayer == c.linklayer_wire()
                     })
             }
             // The kernel keeps a curve in its own units, rounding up, and

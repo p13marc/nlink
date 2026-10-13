@@ -8356,6 +8356,9 @@ pub struct HtbClassConfig {
     mpu: u16,
     /// Per-packet overhead.
     overhead: u16,
+    /// The link layer the rate tables account for (tc(8)'s `linklayer`,
+    /// #826).
+    linklayer: psched::LinkLayer,
 }
 
 impl HtbClassConfig {
@@ -8384,6 +8387,7 @@ impl HtbClassConfig {
             mtu: 1600,
             mpu: 0,
             overhead: 0,
+            linklayer: psched::LinkLayer::Ethernet,
         }
     }
 
@@ -8454,6 +8458,12 @@ impl HtbClassConfig {
         self
     }
 
+    /// Set the link layer: ATM rounds each packet up to whole 53-byte cells.
+    pub fn linklayer(mut self, linklayer: psched::LinkLayer) -> Self {
+        self.linklayer = linklayer;
+        self
+    }
+
     /// Build the configuration. No-op marker for "I'm done"; the
     /// builder is already usable as a `ClassConfig` without it.
     pub fn build(self) -> Self {
@@ -8482,6 +8492,7 @@ impl HtbClassConfig {
         let mut mtu: Option<u32> = None;
         let mut mpu: Option<u16> = None;
         let mut overhead: Option<u16> = None;
+        let mut linklayer: Option<psched::LinkLayer> = None;
 
         let mut i = 0;
         while i < params.len() {
@@ -8561,9 +8572,22 @@ impl HtbClassConfig {
                     })?);
                     i += 2;
                 }
+                "linklayer" => {
+                    let v = val()?;
+                    linklayer = Some(match v {
+                        "ethernet" => psched::LinkLayer::Ethernet,
+                        "atm" | "adsl" => psched::LinkLayer::Atm,
+                        _ => {
+                            return Err(Error::invalid_message(format!(
+                                "htb: invalid linklayer `{v}` (expected ethernet, atm or adsl)"
+                            )));
+                        }
+                    });
+                    i += 2;
+                }
                 other => {
                     return Err(Error::invalid_message(format!(
-                        "htb: unknown token `{other}` (recognised: rate, ceil, burst, cburst, prio, quantum, mtu, mpu, overhead)"
+                        "htb: unknown token `{other}` (recognised: rate, ceil, burst, cburst, prio, quantum, mtu, mpu, overhead, linklayer)"
                     )));
                 }
             }
@@ -8594,6 +8618,9 @@ impl HtbClassConfig {
         }
         if let Some(o) = overhead {
             cfg = cfg.overhead(o);
+        }
+        if let Some(l) = linklayer {
+            cfg = cfg.linklayer(l);
         }
         Ok(cfg)
     }
@@ -8632,6 +8659,11 @@ impl HtbClassConfig {
         if self.overhead != default.overhead {
             put("overhead", self.overhead.to_string());
         }
+        match self.linklayer {
+            psched::LinkLayer::Ethernet => {}
+            psched::LinkLayer::Atm => put("linklayer", "atm".to_string()),
+            other => return Err(Error::not_supported(format!("htb: linklayer {other:?} has no token"))),
+        }
         Ok(out)
     }
 }
@@ -8662,6 +8694,11 @@ impl HtbClassConfig {
     /// The mpu and overhead both rate specs carry (#789).
     pub(crate) fn mpu_and_overhead(&self) -> (u16, u16) {
         (self.mpu, self.overhead)
+    }
+
+    /// The link layer, as the rate specs carry it.
+    pub(crate) fn linklayer_wire(&self) -> u8 {
+        self.linklayer as u8
     }
 
     /// The declared ceil burst as a dump reads it back (through the tick
@@ -8725,7 +8762,7 @@ impl ClassConfig for HtbClassConfig {
             overhead: cfg.overhead,
             ..Default::default()
         };
-        let linklayer = psched::LinkLayer::default();
+        let linklayer = cfg.linklayer;
         let rtab = psched::tc_calc_rtable(&mut rate_spec, rate, cfg.mtu, linklayer);
         let ctab = psched::tc_calc_rtable(&mut ceil_spec, ceil, cfg.mtu, linklayer);
 
@@ -8895,6 +8932,8 @@ impl HfscClassConfig {
     /// Each curve is `rt`, `ls`, `ul`, or `sc` (real-time and link-sharing
     /// both), followed by `[m1 <rate> d <time>] m2 <rate>`, or by
     /// `rate <rate>`, which is `m2` alone. `d` is a time (`5ms`, `100us`).
+    /// tc(8)'s other form, `[umax <size>] [dmax <time>] rate <rate>`, is
+    /// turned into `m1`, `d` and `m2` as tc turns it (#826).
     /// Strict rejection on unknown tokens.
     pub fn parse_params(params: &[&str]) -> Result<Self> {
         use crate::util::Rate;
@@ -8905,7 +8944,7 @@ impl HfscClassConfig {
             if !matches!(kind, "rt" | "ls" | "ul" | "sc") {
                 return Err(Error::invalid_message(format!(
                     "hfsc: unknown token `{kind}` (recognised: rt, ls, ul, sc; each followed by \
-                     `[m1 <rate> d <time>] m2 <rate>` or `rate <rate>`)"
+                     `[m1 <rate> d <time>] m2 <rate>`, `[umax <size>] [dmax <time>] rate <rate>` or `rate <rate>`)"
                 )));
             }
             let rate = |key: &str, v: &str| -> Result<u32> {
@@ -8914,9 +8953,10 @@ impl HfscClassConfig {
                     .map_err(|e| Error::invalid_message(format!("hfsc: invalid {key} `{v}`: {e}")))
             };
             let (mut m1, mut d, mut m2) = (None, None, None);
+            let (mut umax, mut dmax) = (None, None);
             i += 1;
             while let Some(&key) = params.get(i) {
-                if !matches!(key, "m1" | "d" | "m2" | "rate") {
+                if !matches!(key, "m1" | "d" | "m2" | "rate" | "umax" | "dmax") {
                     break;
                 }
                 let v = params.get(i + 1).copied().ok_or_else(|| {
@@ -8924,18 +8964,55 @@ impl HfscClassConfig {
                 })?;
                 match key {
                     "m1" => m1 = Some(rate(key, v)?),
-                    "d" => {
+                    "d" | "dmax" => {
                         let t = crate::util::parse::get_time(v).map_err(|e| {
-                            Error::invalid_message(format!("hfsc: invalid d `{v}`: {e}"))
+                            Error::invalid_message(format!("hfsc: invalid {key} `{v}`: {e}"))
                         })?;
                         let us = (t.as_nanos() + 500) / 1000;
-                        d = Some(u32::try_from(us).map_err(|_| {
-                            Error::invalid_message(format!("hfsc: d `{v}` is past u32 microseconds"))
-                        })?);
+                        let us = u32::try_from(us).map_err(|_| {
+                            Error::invalid_message(format!("hfsc: {key} `{v}` is past u32 microseconds"))
+                        })?;
+                        if key == "d" {
+                            d = Some(us);
+                        } else {
+                            dmax = Some(us);
+                        }
+                    }
+                    "umax" => {
+                        let bytes = crate::util::parse::get_size(v).ok().and_then(|b| u32::try_from(b).ok()).ok_or_else(|| {
+                            Error::invalid_message(format!("hfsc: invalid umax `{v}` (expected a size)"))
+                        })?;
+                        umax = Some(bytes);
                     }
                     _ => m2 = Some(rate(key, v)?),
                 }
                 i += 2;
+            }
+            if umax.is_some() || dmax.is_some() {
+                if m1.is_some() || d.is_some() {
+                    return Err(Error::invalid_message(format!(
+                        "hfsc: `{kind}` takes `m1`/`d` or `umax`/`dmax`, not both"
+                    )));
+                }
+                let rate = m2.ok_or_else(|| {
+                    Error::invalid_message(format!("hfsc: `{kind} umax`/`dmax` requires `rate <rate>`"))
+                })?;
+                let (umax, dmax) = (umax.unwrap_or(0), dmax.unwrap_or(0));
+                if umax != 0 && dmax == 0 {
+                    return Err(Error::invalid_message(format!("hfsc: `{kind} umax` requires `dmax`")));
+                }
+                // tc's hfsc_get_sc2(): concave when umax/dmax beats the
+                // rate, with that slope up to dmax; convex otherwise, flat
+                // until dmax - umax/rate.
+                let slope = (f64::from(umax) * 1e6 / f64::from(dmax)).ceil();
+                if dmax != 0 && slope > f64::from(rate) {
+                    m1 = Some(slope as u32);
+                    d = Some(dmax);
+                } else {
+                    m1 = Some(0);
+                    let flat = (f64::from(dmax) - f64::from(umax) * 1e6 / f64::from(rate.max(1))).ceil();
+                    d = Some(flat.max(0.0) as u32);
+                }
             }
             let m2 = m2.ok_or_else(|| {
                 Error::invalid_message(format!(
@@ -9261,19 +9338,20 @@ impl QfqClassConfig {
                     cfg = cfg.weight(w);
                     i += 2;
                 }
-                "lmax" => {
+                // tc(8) says `maxpkt` (#826); `lmax` is the kernel's name.
+                "maxpkt" | "lmax" => {
                     let v = params.get(i + 1).copied().ok_or_else(|| {
-                        Error::invalid_message("qfq: `lmax` requires a value")
+                        Error::invalid_message(format!("qfq: `{}` requires a value", params[i]))
                     })?;
                     let b = v.parse::<crate::util::Bytes>().map_err(|e| {
-                        Error::invalid_message(format!("qfq: invalid lmax `{v}`: {e}"))
+                        Error::invalid_message(format!("qfq: invalid {} `{v}`: {e}", params[i]))
                     })?;
                     cfg = cfg.lmax(b);
                     i += 2;
                 }
                 other => {
                     return Err(Error::invalid_message(format!(
-                        "qfq: unknown token `{other}` (recognised: weight, lmax)"
+                        "qfq: unknown token `{other}` (recognised: weight, maxpkt, lmax)"
                     )));
                 }
             }
@@ -9288,8 +9366,9 @@ impl QfqClassConfig {
         if let Some(w) = self.weight {
             out.extend(["weight".to_string(), w.to_string()]);
         }
+        // tc's word, and the plain byte count tc reads.
         if let Some(l) = self.lmax {
-            out.extend(["lmax".to_string(), l.to_string()]);
+            out.extend(["maxpkt".to_string(), l.as_u64().to_string()]);
         }
         Ok(out)
     }
@@ -13031,7 +13110,7 @@ mod class_params_tests {
         assert!(round_trips!(DrrClassConfig, DrrClassConfig::new()).is_empty());
         assert_eq!(
             round_trips!(QfqClassConfig, QfqClassConfig::new().weight(10).lmax(Bytes::kib(2))),
-            ["weight", "10", "lmax", "2kib"]
+            ["weight", "10", "maxpkt", "2048"]
         );
     }
 }
