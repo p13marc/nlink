@@ -813,6 +813,12 @@ All notable changes to this project will be documented in this file.
   gateway, which the kernel refuses. The read-back now keeps the id alone,
   and a delete names the nexthop object.
 
+- **`get_eth_stats` reads the device it names (#773).** It sent its
+  request as a dump, which ethtool answers for every device in the
+  namespace, ignoring the one a dump names, and kept the first answer:
+  `lo`'s stats, empty, whatever the device. It is a single-device request
+  now, as #754 made the other getters.
+
 ### Added
 
 - **`Netns`, an owned network namespace handle (#520).**

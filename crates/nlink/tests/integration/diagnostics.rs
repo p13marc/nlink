@@ -480,6 +480,25 @@ async fn ethtool_reads_and_sets_the_named_devices_features() -> nlink::Result<()
     Ok(())
 }
 
+/// `get_eth_stats` sent its request as a dump, which ethtool answers for
+/// every device in the namespace, ignoring the one it names, and kept the
+/// first answer: `lo`'s, whatever the device (#773). The reply's header
+/// names the device it is about.
+#[tokio::test]
+async fn ethtool_reads_the_named_devices_stats() -> nlink::Result<()> {
+    use nlink::netlink::{Connection, Ethtool, link::VethLink};
+    require_root!();
+    nlink::require_module!("veth");
+
+    let ns = TestNamespace::new("ns-ethstats")?;
+    let conn = ns.connection()?;
+    conn.add_link(VethLink::new("ve0", "ve1")).await?;
+    let ethtool: Connection<Ethtool> = nlink::Connection::new_in_async(ns.name()).await?;
+    let stats = ethtool.get_eth_stats("ve0").await?;
+    assert_eq!(stats.ifname.as_deref(), Some("ve0"), "{stats:?}");
+    Ok(())
+}
+
 /// #166: a veth's timestamping is the kernel's software-only default
 /// (`ethtool_op_get_ts_info`): transmit, receive and the system clock in
 /// software, no hardware modes or filters, no PTP clock. Where the ethtool
