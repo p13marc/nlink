@@ -56,7 +56,7 @@ pub fn run(args: ExampleArgs) -> Result<()> {
         }
         OutputFormat::Json => {
             // Convert YAML to JSON
-            let value: serde_yaml::Value = serde_yaml::from_str(example).map_err(|e| {
+            let value: serde_norway::Value = serde_norway::from_str(example).map_err(|e| {
                 nlink::netlink::Error::invalid_message(format!("YAML parse failed: {}", e))
             })?;
             println!(
@@ -446,7 +446,7 @@ mod tests {
             ("full", super::FULL_EXAMPLE),
         ];
         for (name, text) in examples {
-            let parsed: std::result::Result<ConfigFile, _> = serde_yaml::from_str(text);
+            let parsed: std::result::Result<ConfigFile, _> = serde_norway::from_str(text);
             assert!(
                 parsed.is_ok(),
                 "example `{name}` failed to parse: {parsed:?}"

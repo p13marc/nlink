@@ -335,7 +335,7 @@ pub async fn run(args: CaptureArgs) -> Result<()> {
         OutputFormat::Yaml => {
             println!(
                 "{}",
-                serde_yaml::to_string(&config).map_err(|e| {
+                serde_norway::to_string(&config).map_err(|e| {
                     nlink::netlink::Error::invalid_message(format!(
                         "YAML serialization failed: {}",
                         e
@@ -366,16 +366,16 @@ pub async fn run(args: CaptureArgs) -> Result<()> {
 /// behind typed accessors, not a generic map).
 fn qdisc_options_map(
     qdisc: &nlink::netlink::messages::TcMessage,
-) -> BTreeMap<String, serde_yaml::Value> {
+) -> BTreeMap<String, serde_norway::Value> {
     use nlink::netlink::tc_options::QdiscOptions;
 
-    let mut map: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
+    let mut map: BTreeMap<String, serde_norway::Value> = BTreeMap::new();
     let Some(opts) = qdisc.options() else {
         return map;
     };
 
     let mut put = |k: &str, v: String| {
-        map.insert(k.to_string(), serde_yaml::Value::String(v));
+        map.insert(k.to_string(), serde_norway::Value::String(v));
     };
 
     match opts {

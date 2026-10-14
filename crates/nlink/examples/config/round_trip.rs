@@ -26,9 +26,10 @@ async fn main() -> nlink::Result<()> {
     // -- Step 1: load a typed config from a JSON document ---------
     //
     // The same shape works from a file (`std::fs::read_to_string`)
-    // or, with `serde_yaml` in your own crate, from YAML. Links use
-    // the externally-tagged `link-type`; unit kinds (bridge) are
-    // bare strings, kinds with fields (veth) are `{ "veth": { … } }`.
+    // or, with a serde YAML crate such as `serde_norway`, from
+    // YAML. Links use the externally-tagged `link-type`; unit kinds
+    // (bridge) are bare strings, kinds with fields (veth) are
+    // `{ "veth": { … } }`.
     let json = r#"{
         "links": [
             { "name": "br0",   "link-type": "bridge", "state": "up" },

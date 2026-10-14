@@ -648,8 +648,9 @@ let desired = NetworkConfig::from_json_str(r#"{
     "routes":    [ { "destination": "10.1.0.0/16", "gateway": "10.0.0.254", "dev": "br0" } ]
 }"#)?;
 
-// YAML works too via serde_yaml (the Deserialize impl is format-agnostic):
-// let desired: NetworkConfig = serde_yaml::from_str(yaml)?;
+// YAML works too, through any serde YAML crate (the Deserialize impl is
+// format-agnostic), e.g. serde_norway:
+// let desired: NetworkConfig = serde_norway::from_str(yaml)?;
 
 let json = desired.to_json_string_pretty()?;
 # Ok(())
