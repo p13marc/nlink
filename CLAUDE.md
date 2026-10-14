@@ -939,9 +939,10 @@ sets are checked: `cargo test -p nlink --doc` in the `test` job and
 
 ## Active work
 
-**The 0.32 cycle is open on `master`** (workspace 0.32.0, unreleased). It
-carries #534's redesigns, and `docs/migration_guide/0.31.0-to-0.32.0.md`
-lists every break.
+**0.32.0 shipped 2026-10-14** (`0.32.0` tagged — bare, no `v`; both crates
+on crates.io). Narrative in `CHANGELOG.md ## [0.32.0]` +
+`docs/migration_guide/0.31.0-to-0.32.0.md`. The redesign release: #534's
+redesigns, in 190 PRs.
 - **Namespaces:** `Netns`, `NetnsTarget`, `Connection::new_in`,
   `NetnsCommand`.
 - **The error model:** `Error` is a one-pointer struct with `kind()`,
@@ -972,9 +973,9 @@ The 2026-10-12 run worked through every open issue after #534:
 - **Tooling:** `replay` (#168), the YNL spec gate (#167) and
   `ip vrf exec` (#257).
 
-#708's typed redesigns (`ChainKind`, `RuleSpec`/`lift`, `Change<T>`) stay
-open. #747 moved `nlink-config` from the deprecated `serde_yaml` to
-`serde_norway`, its maintained fork.
+#708's typed redesigns (`ChainKind`, `RuleSpec`/`lift`, `Change<T>`) move
+to a later cycle. #747 moved `nlink-config` from the deprecated
+`serde_yaml` to `serde_norway`, its maintained fork, just before the cut.
 
 The 2026-10-13 run swept tc(8) parity across every kind. Each action,
 qdisc, class and filter kind's tc lines were installed through `tc` and

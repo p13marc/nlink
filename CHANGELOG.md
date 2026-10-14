@@ -4,6 +4,49 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-10-14
+
+> **The redesign release: namespaces, errors, declarative TC, and a plan
+> apart from its apply.**
+>
+> 0.31.0 fixed the bugs nlink-lab filed in #534 and left its redesigns for
+> their own cycle. This is that cycle:
+> - **Namespaces:** an owned `Netns` handle, one `NetnsTarget` that every
+>   `*_in` takes (`Connection::new_in`), and `NetnsCommand` to run a
+>   process inside one (#520, #521, #532).
+> - **Errors:** `Error` is a one-pointer struct with `kind()`, `detail()`,
+>   `context()` and `object()`. Every error keeps its context, and one from
+>   a namespace connection names the namespace (#526, #718).
+> - **`NetworkConfig`:** ownership, recreate and purge, with typed
+>   `Blocker`s (#512, #513). The undo puts back everything an apply
+>   changes, a deleted link included (#649, #745).
+> - **Declarative TC:** `QdiscSpec` and `NetworkConfig::tc` trees, with
+>   HFSC, DRR and QFQ, in JSON too (#515, #645).
+> - **Plan, then apply:** `PlanOptions`/`ExecOptions`, `Plan` and
+>   `StackPlan` (#519).
+> - **nftables:** typed statement decoders, NAT, comments,
+>   `RulesetSnapshot`, `TableMode`, and protocol guards as each family
+>   needs them (#527, #528, #703, #708).
+> - **And:** `AsFd` throughout, an NFLOG reader, simulated Wi-Fi radios and
+>   mesh (#530), telemetry families (#166), `blocking::Connection` (#533),
+>   record and replay (#168), the YNL spec gate (#167), `ip vrf exec`
+>   (#257), and an MSRV of 1.88.
+>
+> A closing sweep installed every TC action, qdisc, class and filter kind's
+> tc(8) lines both through `tc` and through nlink, and compared what the
+> kernel dumped. It found five things that never installed, values that
+> went out wrong with no error, and about sixty of tc's own words nlink
+> refused (#811–#831). The last fixes made nftables commits work before
+> Linux 6.10 and name a failed commit as the commit's (#868).
+>
+> The typed nftables redesigns (`ChainKind`, `RuleSpec`, `Change<T>`, #708)
+> move to a later cycle.
+>
+> The compile breaks are many, and most are mechanical. Many behaviours
+> changed as well: read the behaviour section of the
+> [migration guide](docs/migration_guide/0.31.0-to-0.32.0.md) before
+> upgrading.
+
 ### Breaking Changes
 
 - **The early half of the API cleanup (#532).** The workspace is 0.32.0;
