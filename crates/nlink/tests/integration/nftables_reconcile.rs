@@ -1831,12 +1831,10 @@ async fn a_refused_batch_names_each_refused_operation() -> nlink::Result<()> {
 /// A batch refused in the middle, its last operation accepted. The kernel
 /// answers the last operation after every error, and that ACK is what ends
 /// the read: a commit no longer waits for BATCH_END's, which kernels before
-/// 6.10 never send. Every refused operation is named. (The replay tests in
-/// `nftables/connection.rs` cover a dispatcher connection, where a drain
-/// that stopped at the first empty read could stop early; run live, one in
-/// five full suites in the rootless lane lost the dispatcher's driver to an
-/// `EINVAL` from `recvmsg`, #870.)
-#[tokio::test]
+/// 6.10 never send. Then every refused operation is named, on a dispatcher
+/// connection too, where a drain that stopped at the first empty read could
+/// stop before the driver routed the rest.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_batch_refused_mid_way_ends_on_its_last_ack() -> nlink::Result<()> {
     use nlink::netlink::nftables::types::Rule;
     require_root!();
@@ -1844,40 +1842,49 @@ async fn a_batch_refused_mid_way_ends_on_its_last_ack() -> nlink::Result<()> {
 
     const REFUSED: usize = 16;
     let ns = TestNamespace::new("nft-batch-mid")?;
-    let conn = ns.connection_for::<Nftables>()?;
-    with_timeout(async {
-        let mut tx = conn.transaction();
-        for i in 0..REFUSED {
-            let chain = format!("c{i}");
-            tx = tx.add_rule(Rule::new("absent", &chain).family(Family::Ip).accept());
-        }
-        let err = tx
-            .add_table("last", Family::Ip)
-            .commit(&conn)
-            .await
-            .expect_err("every rule names a table that does not exist");
-        let nlink::ErrorDetail::NftBatch { failures, .. } = err.detail() else {
-            panic!("expected Error::NftBatch, got {err:?}");
-        };
-        let indexes: Vec<_> = failures.iter().map(|f| f.index).collect();
-        let expected: Vec<_> = (0..REFUSED).map(Some).collect();
-        assert_eq!(indexes, expected, "{err}");
-        assert!(
-            !conn.list_tables().await?.iter().any(|t| t.name == "last"),
-            "a refused batch commits nothing"
-        );
+    for dispatched in [false, true] {
+        let conn = ns.connection_for::<Nftables>()?;
+        let conn = if dispatched { conn.with_dispatcher() } else { conn };
+        with_timeout(async {
+            let mut tx = conn.transaction();
+            for i in 0..REFUSED {
+                let chain = format!("c{i}");
+                tx = tx.add_rule(Rule::new("absent", &chain).family(Family::Ip).accept());
+            }
+            let err = tx
+                .add_table("last", Family::Ip)
+                .commit(&conn)
+                .await
+                .expect_err("every rule names a table that does not exist");
+            let nlink::ErrorDetail::NftBatch { failures, .. } = err.detail() else {
+                panic!("expected Error::NftBatch, got {err:?}");
+            };
+            let indexes: Vec<_> = failures.iter().map(|f| f.index).collect();
+            let expected: Vec<_> = (0..REFUSED).map(Some).collect();
+            assert_eq!(indexes, expected, "dispatched: {dispatched}: {err}");
+            assert!(
+                !conn.list_tables().await?.iter().any(|t| t.name == "last"),
+                "a refused batch commits nothing"
+            );
 
-        // Accepted, the same batch ends on the last ACK alone.
-        conn.transaction()
-            .add_table("first", Family::Ip)
-            .add_table("last", Family::Ip)
-            .commit(&conn)
-            .await?;
-        let tables = conn.list_tables().await?;
-        assert!(tables.iter().any(|t| t.name == "last"), "{tables:?}");
-        Ok(())
-    })
-    .await
+            // Accepted, the same batch ends on the last ACK alone.
+            conn.transaction()
+                .add_table("first", Family::Ip)
+                .add_table("last", Family::Ip)
+                .commit(&conn)
+                .await?;
+            let tables = conn.list_tables().await?;
+            assert!(tables.iter().any(|t| t.name == "last"), "dispatched: {dispatched}: {tables:?}");
+            conn.transaction()
+                .del_table("first", Family::Ip)
+                .del_table("last", Family::Ip)
+                .commit(&conn)
+                .await?;
+            Ok(())
+        })
+        .await?;
+    }
+    Ok(())
 }
 
 // ============================================================================

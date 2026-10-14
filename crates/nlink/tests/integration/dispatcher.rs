@@ -484,3 +484,26 @@ async fn nftables_requests_work_beside_the_dispatcher_driver() -> nlink::Result<
     }
     Ok(())
 }
+
+/// Back-to-back empty dumps on a dispatcher connection (#870). An empty
+/// dump ends inside the request's `sendmsg`: the kernel queues its
+/// `NLMSG_DONE`, wakes the driver and only then clears `cb_running`. A
+/// driver that takes the DONE in between continues a dump that is no
+/// longer there, and the kernel leaves an `EINVAL` in `sk_err` for its
+/// next receive — which killed the driver, one run of 200 000 dumps in two
+/// on two CPUs. The receive now tries again; the DONE is still queued.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn back_to_back_empty_dumps_keep_the_driver() -> nlink::Result<()> {
+    use nlink::netlink::Nftables;
+    require_root!();
+    nlink::require_module!("nf_tables");
+
+    let ns = crate::common::TestNamespace::new("disp-b2b")?;
+    let conn = ns.connection_for::<Nftables>()?.with_dispatcher();
+    for i in 0..50_000 {
+        if let Err(e) = conn.list_tables().await {
+            panic!("dump {i}: {e}");
+        }
+    }
+    Ok(())
+}

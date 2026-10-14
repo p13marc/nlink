@@ -332,6 +332,19 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **A dispatcher connection's driver survives a dump that ends as it
+  reads (#870).** An empty dump ends inside the request's `sendmsg`: the
+  kernel queues its `NLMSG_DONE`, wakes the reader and only then clears
+  `cb_running`. A `with_dispatcher()` driver that took the DONE in between
+  continued a dump that was no longer there, and the kernel left an
+  `EINVAL` in `sk_err` for the next receive. The driver took that as
+  fatal, and every request on the connection after it failed with
+  `netlink dispatcher driver stopped: … Invalid argument (os error 22)`.
+  Back-to-back empty dumps on two CPUs did it in one run of 200 000 dumps
+  in two; one full suite in five lost a test to it. A receive now tries
+  again past such an `EINVAL`, up to three times: the error is returned
+  before anything is dequeued, so the DONE is still there.
+
 - **nftables commits no longer time out before Linux 6.10.** A batch
   waited for the ACK of its `BATCH_END`, which the kernel only sends from
   6.10 ("netfilter: nfnetlink: Handle ACK flags for batch messages").

@@ -1184,23 +1184,57 @@ fn recv_whole_capped(
     max: usize,
 ) -> std::io::Result<RecvWhole> {
     let mut buf = BytesMut::with_capacity(RECV_INITIAL_CAPACITY);
-    let (len, addr) = socket.recv_from(&mut buf, flags | libc::MSG_PEEK | libc::MSG_TRUNC)?;
+    let (len, addr) =
+        past_dump_race(|| socket.recv_from(&mut buf, flags | libc::MSG_PEEK | libc::MSG_TRUNC))?;
     let multicast = addr.multicast_groups() != 0;
     if len > max {
         // Drop it, and say so.
         let mut none = BytesMut::new();
-        socket.recv_from(&mut none, flags)?;
+        past_dump_race(|| socket.recv_from(&mut none, flags))?;
         return Ok(RecvWhole::TooLarge(len));
     }
     if len <= RECV_INITIAL_CAPACITY {
         // The peek has it all; consume it without copying it again.
         let mut none = BytesMut::new();
-        socket.recv_from(&mut none, flags)?;
+        past_dump_race(|| socket.recv_from(&mut none, flags))?;
         return Ok(RecvWhole::Frame(buf.to_vec(), multicast));
     }
     let mut big = BytesMut::with_capacity(len);
-    socket.recv_from(&mut big, flags)?;
+    past_dump_race(|| socket.recv_from(&mut big, flags))?;
     Ok(RecvWhole::Frame(big.to_vec(), multicast))
+}
+
+/// How many times [`past_dump_race`] retries before it believes an `EINVAL`.
+const DUMP_RACE_RETRIES: usize = 3;
+
+/// One receive, retried past the `EINVAL` a dump's end can leave in
+/// `sk_err` (#870).
+///
+/// After it hands over a datagram, `netlink_recvmsg` continues the dump it
+/// sees running. The thread that started the dump can be finishing it at
+/// that moment: in its `sendmsg`, `netlink_dump` queues the last skb, wakes
+/// the reader and only then clears `cb_running`. A reader on another CPU —
+/// a dispatcher's driver, whose request task started the dump — can take
+/// that skb in between. Its own `netlink_dump` then waits for the dumper's
+/// mutex, finds no dump, and its `-EINVAL` lands in `sk_err`. The next
+/// receive returns it, and clears it, before it dequeues anything. Nothing
+/// is lost, so the receive is tried again. It reproduced as back-to-back
+/// empty dumps on a dispatcher connection: the driver died one run in two,
+/// on the consume after the peek of the dump's `NLMSG_DONE`.
+///
+/// Bounded: each spurious `EINVAL` needs the race again, so a few in a row
+/// mean the error is real.
+fn past_dump_race<T>(mut recv: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut retries = 0;
+    loop {
+        match recv() {
+            Err(e) if e.raw_os_error() == Some(libc::EINVAL) && retries < DUMP_RACE_RETRIES => {
+                retries += 1;
+                tracing::debug!(retries, "netlink recv: EINVAL left by a finished dump; retrying");
+            }
+            other => return other,
+        }
+    }
 }
 
 /// `NETLINK_PKTINFO` from `linux/netlink.h`.
@@ -1228,10 +1262,10 @@ fn recv_whole_meta(
     let fd = socket.as_raw_fd();
     let mut buf = vec![0u8; RECV_INITIAL_CAPACITY];
     let (len, meta, multicast) =
-        recvmsg_meta(fd, &mut buf, flags | libc::MSG_PEEK | libc::MSG_TRUNC)?;
+        past_dump_race(|| recvmsg_meta(fd, &mut buf, flags | libc::MSG_PEEK | libc::MSG_TRUNC))?;
     if len > max || len <= buf.len() {
         let mut none = BytesMut::new();
-        socket.recv_from(&mut none, flags)?;
+        past_dump_race(|| socket.recv_from(&mut none, flags))?;
         if len > max {
             return Ok((RecvWhole::TooLarge(len), meta));
         }
@@ -1239,7 +1273,7 @@ fn recv_whole_meta(
         return Ok((RecvWhole::Frame(buf, multicast), meta));
     }
     let mut big = vec![0u8; len];
-    let (got, _, _) = recvmsg_meta(fd, &mut big, flags)?;
+    let (got, _, _) = past_dump_race(|| recvmsg_meta(fd, &mut big, flags))?;
     big.truncate(got);
     Ok((RecvWhole::Frame(big, multicast), meta))
 }
@@ -1566,18 +1600,21 @@ impl NetlinkSocket {
             // the kernel `timeout` arg has been buggy since 2010
             // (see `man recvmmsg(2)` BUGS) — tokio::time::timeout
             // is the right tool.
-            let n = unsafe {
-                libc::recvmmsg(
-                    fd,
-                    bufs.msgs.as_mut_ptr(),
-                    max as libc::c_uint,
-                    libc::MSG_DONTWAIT,
-                    std::ptr::null_mut(),
-                )
-            };
-            if n < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
+            let n = past_dump_race(|| {
+                let n = unsafe {
+                    libc::recvmmsg(
+                        fd,
+                        bufs.msgs.as_mut_ptr(),
+                        max as libc::c_uint,
+                        libc::MSG_DONTWAIT,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if n < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(n)
+            })?;
 
             let mut frames = Vec::with_capacity(n as usize);
             for i in 0..n as usize {
@@ -1775,6 +1812,50 @@ mod seq_tests {
         assert_eq!(next_nonzero_seq(&counter), 1);
         assert_eq!(next_nonzero_seq(&counter), 2);
         assert_eq!(next_nonzero_seq(&counter), 3);
+    }
+}
+
+#[cfg(test)]
+mod dump_race_tests {
+    use super::*;
+
+    fn einval() -> std::io::Error {
+        std::io::Error::from_raw_os_error(libc::EINVAL)
+    }
+
+    /// The `EINVAL` a finished dump leaves in `sk_err` is returned once and
+    /// cleared; the datagram is still queued, so the next try gets it (#870).
+    #[test]
+    fn a_spurious_einval_is_retried() {
+        let mut calls = 0;
+        let got = past_dump_race(|| {
+            calls += 1;
+            if calls < 3 { Err(einval()) } else { Ok(calls) }
+        });
+        assert_eq!(got.unwrap(), 3);
+    }
+
+    /// An `EINVAL` that keeps coming is not the race: it surfaces.
+    #[test]
+    fn a_persistent_einval_surfaces() {
+        let mut calls = 0;
+        let got: std::io::Result<()> = past_dump_race(|| {
+            calls += 1;
+            Err(einval())
+        });
+        assert_eq!(got.unwrap_err().raw_os_error(), Some(libc::EINVAL));
+        assert_eq!(calls, DUMP_RACE_RETRIES + 1);
+    }
+
+    #[test]
+    fn other_errors_are_not_retried() {
+        let mut calls = 0;
+        let got: std::io::Result<()> = past_dump_race(|| {
+            calls += 1;
+            Err(std::io::Error::from_raw_os_error(libc::ENOBUFS))
+        });
+        assert_eq!(got.unwrap_err().raw_os_error(), Some(libc::ENOBUFS));
+        assert_eq!(calls, 1);
     }
 }
 
