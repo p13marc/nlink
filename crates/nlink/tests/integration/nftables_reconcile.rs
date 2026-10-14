@@ -1887,6 +1887,65 @@ async fn a_batch_refused_mid_way_ends_on_its_last_ack() -> nlink::Result<()> {
     Ok(())
 }
 
+/// A failed commit says it is the commit's (#868). Every operation is
+/// accepted, then the kernel refuses to commit an anonymous set no rule
+/// uses, and reports it at the first operation's seq: it used to read as
+/// that operation's refusal. Alone in its batch and behind another
+/// operation, which take different paths to the answer, on a plain and a
+/// dispatcher connection: alone, the error's seq is the operation's ACK's
+/// too, and only reading what is queued after it tells them apart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_commit_names_the_commit() -> nlink::Result<()> {
+    use nlink::netlink::nftables::types::{Set, SetFlags};
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let ns = TestNamespace::new("nft-commit-fail")?;
+    ns.connection_for::<Nftables>()?.add_table("t", Family::Ip).await?;
+    let unbound = || {
+        Set::new("t", "__set0")
+            .family(Family::Ip)
+            .key_type(SetKeyType::Ipv4Addr)
+            .flags(SetFlags::ANONYMOUS | SetFlags::CONSTANT)
+    };
+    for dispatched in [false, true] {
+        let conn = ns.connection_for::<Nftables>()?;
+        let conn = if dispatched { conn.with_dispatcher() } else { conn };
+        for behind_another in [false, true] {
+            with_timeout(async {
+                let mut tx = conn.transaction();
+                if behind_another {
+                    tx = tx.add_table("other", Family::Ip);
+                }
+                let err = tx
+                    .add_set(unbound())
+                    .commit(&conn)
+                    .await
+                    .expect_err("the kernel does not commit an unbound anonymous set");
+                let nlink::ErrorDetail::NftBatch { failures, .. } = err.detail() else {
+                    panic!("expected Error::NftBatch, got {err:?}");
+                };
+                let shown = format!("dispatched {dispatched}, behind another {behind_another}: {err}");
+                assert_eq!(failures.len(), 1, "{shown}");
+                assert_eq!(failures[0].index, None, "{shown}");
+                assert_eq!(failures[0].operation, "commit", "{shown}");
+                assert_eq!(failures[0].errno, libc::EINVAL, "{shown}");
+                assert!(shown.contains("commit: Invalid argument (errno 22)"), "{shown}");
+                assert!(err.is_invalid_argument(), "{shown}");
+                assert_eq!(err.object(), None, "{shown}");
+                let tables = conn.list_tables().await?;
+                assert!(
+                    !tables.iter().any(|t| t.name == "other"),
+                    "a failed commit commits nothing: {shown}: {tables:?}"
+                );
+                Ok(())
+            })
+            .await?;
+        }
+    }
+    Ok(())
+}
+
 // ============================================================================
 // #503 — the nftables snapshot holds named objects and set elements
 // ============================================================================

@@ -939,7 +939,9 @@ impl Connection<Nftables> {
     /// response (with that op's `nlmsg_seq`), sent after the commit.
     /// The last inner message here sets it: its ACK is the "commit
     /// succeeded" signal. `BATCH_END`'s ACK cannot be — the kernel
-    /// only answers `BATCH_END` from Linux 6.10.
+    /// only answers `BATCH_END` from Linux 6.10. The first sets it
+    /// too, which tells a failed commit, reported at its seq, from its
+    /// own refusal (#868).
     ///
     /// Response-loop rules (Plan 170, after the 0.16 cycle's CI
     /// hang surfaced the bugs):
@@ -1019,8 +1021,10 @@ impl Connection<Nftables> {
             // The last operation's ACK is the commit signal: the kernel sends
             // it after the commit, once every error is out (see
             // `BatchReplies`). BATCH_END's ACK cannot be: before Linux 6.10
-            // the kernel never answers BATCH_END.
-            if index == last {
+            // the kernel never answers BATCH_END. The first operation's ACK
+            // tells a failed commit, which the kernel reports at the first
+            // operation's seq, from a refusal of that operation (#868).
+            if index == 0 || index == last {
                 request_ack(msg_data);
             }
             inner_seqs.push(seq);
@@ -1061,17 +1065,18 @@ impl Connection<Nftables> {
             loop {
                 // Wait for the last operation's answer, even after a failure:
                 // the kernel sends it after every error, so the batch's
-                // errors are all read by then. A drain that stopped at the
-                // first empty read could stop early in dispatcher mode, where
-                // an empty channel can mean only that the driver has not
-                // routed the rest yet. After an ENOMEM the kernel drops what
-                // it had queued and sends nothing more, so the last answer
-                // may never come: then drain what is already here. nfnetlink
-                // queues everything inside our sendmsg, before it returns.
+                // errors are all read by then. Drain instead, reading only
+                // what is queued, where that answer may not come: after an
+                // ENOMEM the kernel drops what it had queued and sends
+                // nothing more, and a lone operation's error is followed by
+                // its ACK only if the commit failed. nfnetlink queues
+                // everything inside our sendmsg, before it returns, and in
+                // dispatcher mode `recv_queued` lets the driver read the
+                // socket dry before it calls the channel empty.
                 let data: Vec<u8> = if !replies.drain() {
                     session.recv_with_timeout(self).await?
                 } else {
-                    match session.try_recv(self)? {
+                    match session.recv_queued(self).await? {
                         Some(data) => data,
                         None => return Err(replies.take_error()),
                     }
@@ -1343,11 +1348,18 @@ pub(crate) enum BatchStep {
 ///
 /// The kernel always answers the last operation, which `send_batch` asks to
 /// ACK, so its answer comes last and decides the batch.
+///
+/// `send_batch` asks the first operation's ACK too. A refused operation gets
+/// its error instead of its ACK, so an error at the first operation's seq
+/// followed by an ACK at it was the commit's (#868).
 pub(crate) struct BatchReplies<'a> {
     begin_seq: u32,
     inner_seqs: &'a [u32],
     messages: &'a [Vec<u8>],
     failures: Vec<super::NftBatchFailure>,
+    /// The only operation's error is in: the last word, unless it was the
+    /// commit's, when the operation's ACK follows it.
+    lone_error: bool,
 }
 
 impl<'a> BatchReplies<'a> {
@@ -1357,6 +1369,7 @@ impl<'a> BatchReplies<'a> {
             inner_seqs,
             messages,
             failures: Vec::new(),
+            lone_error: false,
         }
     }
 
@@ -1367,9 +1380,10 @@ impl<'a> BatchReplies<'a> {
 
     /// Whether to drain what is queued instead of waiting for the last
     /// operation's answer. After an ENOMEM, nfnetlink resets the replies it
-    /// had queued and sends nothing more.
+    /// had queued and sends nothing more. After a lone operation's error,
+    /// what follows, if anything, is its ACK.
     pub(crate) fn drain(&self) -> bool {
-        self.failures.iter().any(|f| f.errno == libc::ENOMEM)
+        self.lone_error || self.failures.iter().any(|f| f.errno == libc::ENOMEM)
     }
 
     /// The refused operations, as the error `commit()` returns.
@@ -1404,7 +1418,16 @@ impl<'a> BatchReplies<'a> {
             let err = NlMsgError::from_bytes(payload)?;
             err.warn_if_ack_warns(header.nlmsg_flags, payload);
             if err.is_ack() {
-                // (2) The ACK of the last operation decides the batch:
+                // (2) An ACK at a seq that already has an error: the
+                //     operation was accepted, so the error was the failed
+                //     commit's, which the kernel reports at the first
+                //     operation's seq (#868).
+                if let Some(index) = self.inner_seqs.iter().position(|s| *s == seq)
+                    && let Some(failure) = self.failures.iter_mut().find(|f| f.index == Some(index))
+                {
+                    failure.read_as_commit();
+                }
+                // (3) The ACK of the last operation decides the batch:
                 //     every error came before it. The ACKs of earlier
                 //     operations can fire mid-batch and must not be
                 //     mistaken for it. BATCH_END's cannot be: before
@@ -1412,11 +1435,11 @@ impl<'a> BatchReplies<'a> {
                 //     it timed out on every commit.
                 return Ok(if last { self.outcome() } else { BatchStep::Pending });
             }
-            // (3) The kernel refused a message. Record which one
+            // (4) The kernel refused a message. Record which one
             //     and keep reading: it reports every refused
             //     operation, then rolls the batch back (#481). A
             //     failed commit lands here too, at the first
-            //     operation's seq, and reads as that operation's.
+            //     operation's seq, until (2) reads it again.
             let ext = err.ext_ack(header.nlmsg_flags, payload);
             let failure = if seq == self.begin_seq {
                 super::NftBatchFailure::of_batch("batch begin", err.error, ext)
@@ -1426,14 +1449,18 @@ impl<'a> BatchReplies<'a> {
                 super::NftBatchFailure::of_message(index, message, err.error, ext)
             };
             self.failures.push(failure);
-            // (4) A refusal of the batch itself is all the kernel says,
+            // (5) A refusal of the batch itself is all the kernel says,
             //     and the last operation's error is the last thing it
-            //     says.
-            return Ok(if seq == self.begin_seq || last {
-                BatchStep::Refused
-            } else {
-                BatchStep::Pending
-            });
+            //     says — unless it is the only operation, whose error a
+            //     failed commit's would share a seq with: then drain.
+            if seq == self.begin_seq {
+                return Ok(BatchStep::Refused);
+            }
+            if last && self.inner_seqs.len() == 1 {
+                self.lone_error = true;
+                return Ok(BatchStep::Pending);
+            }
+            return Ok(if last { BatchStep::Refused } else { BatchStep::Pending });
         }
 
         // NLMSG_DONE is a *dump* terminator; nfnetlink never emits
@@ -1528,29 +1555,57 @@ mod batch_replies_tests {
     }
 
     #[test]
-    fn a_failed_commit_is_refused() {
+    fn a_failed_commit_is_the_commits() {
         // The commit error comes first, at the first operation's seq, then
-        // the ACK of the last operation, which the kernel still delivers.
-        let r = replay(&[reply(FIRST_SEQ, libc::EINVAL), reply(LAST_SEQ, 0)]);
+        // the ACKs the operations asked, which the kernel still delivers:
+        // the first one's says the error was not that operation's (#868).
+        let r = replay(&[reply(FIRST_SEQ, libc::EINVAL), reply(FIRST_SEQ, 0), reply(LAST_SEQ, 0)]);
         assert_eq!(r.step, BatchStep::Refused);
         assert_eq!(r.failures.len(), 1);
         assert_eq!(r.failures[0].errno, libc::EINVAL);
+        assert_eq!(r.failures[0].index, None);
+        assert_eq!(r.failures[0].operation, "commit");
+        assert_eq!(r.failures[0].object, None);
     }
 
     #[test]
-    fn a_failed_commit_of_one_operation_is_refused_at_its_error() {
+    fn a_failed_commit_of_one_operation_is_the_commits() {
         // One operation: the commit error and its ACK share its seq. The
-        // error decides; the ACK after it must not read as a commit.
-        let r = replay_in(&[FIRST_SEQ], &[reply(FIRST_SEQ, libc::EINVAL), reply(FIRST_SEQ, 0)]);
+        // error alone cannot decide, so the loop drains; the ACK after it
+        // must not read as a commit.
+        let only = [FIRST_SEQ];
+        let r = replay_in(&only, &[reply(FIRST_SEQ, libc::EINVAL)]);
+        assert_eq!(r.step, BatchStep::Pending);
+        assert!(r.drain);
+        let r = replay_in(&only, &[reply(FIRST_SEQ, libc::EINVAL), reply(FIRST_SEQ, 0)]);
         assert_eq!(r.step, BatchStep::Refused);
         assert_eq!(r.failures.len(), 1);
+        assert_eq!(r.failures[0].operation, "commit");
+    }
+
+    #[test]
+    fn a_lone_refused_operation_stays_its_own() {
+        // Nothing follows its error; the drain comes back empty and the
+        // failure is the operation's.
+        let r = replay_in(&[FIRST_SEQ], &[reply(FIRST_SEQ, libc::ENOENT)]);
+        assert_eq!(r.step, BatchStep::Pending);
+        assert!(r.drain);
+        assert_eq!(r.failures[0].index, Some(0));
+    }
+
+    #[test]
+    fn an_accepted_batch_reads_both_acks() {
+        assert_eq!(replay(&[reply(FIRST_SEQ, 0), reply(LAST_SEQ, 0)]).step, BatchStep::Committed);
     }
 
     #[test]
     fn a_refused_operation_is_not_committed_by_the_last_ack() {
+        // Its error replaces its ACK, so no ACK follows at its seq: the
+        // failure stays the first operation's.
         let r = replay(&[reply(FIRST_SEQ, libc::EEXIST), reply(LAST_SEQ, 0)]);
         assert_eq!(r.step, BatchStep::Refused);
         assert_eq!(r.failures[0].index, Some(0));
+        assert_ne!(r.failures[0].operation, "commit");
     }
 
     #[test]

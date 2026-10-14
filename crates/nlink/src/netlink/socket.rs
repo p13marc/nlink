@@ -1054,7 +1054,7 @@ impl NetlinkSocket {
 
     /// [`try_recv_msg`](Self::try_recv_msg) with the multicast tag, as in
     /// [`recv_msg_from`](Self::recv_msg_from).
-    fn try_recv_inner(&self) -> Result<Option<(Vec<u8>, bool)>> {
+    pub(crate) fn try_recv_inner(&self) -> Result<Option<(Vec<u8>, bool)>> {
         self.try_recv_inner_unstamped().map_err(|e| self.stamp(e))
     }
 

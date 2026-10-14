@@ -55,7 +55,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock, RwLock},
 };
 
-use tokio::sync::{Notify, broadcast, mpsc};
+use tokio::sync::{Notify, broadcast, mpsc, oneshot};
 
 use super::{message::MessageIter, resync::ResyncMarker, socket::NetlinkSocket};
 use crate::Error;
@@ -128,6 +128,13 @@ struct DispatcherInner {
 
     /// Monotonic id source for `event_listeners` registrations.
     next_listener_id: std::sync::atomic::AtomicU64,
+
+    /// Callers of [`Dispatcher::settle`], each waiting for the driver to
+    /// have routed what the socket held when it asked.
+    settle_waiters: Mutex<Vec<oneshot::Sender<()>>>,
+
+    /// Wakes the driver for a [`Dispatcher::settle`].
+    settle: Notify,
 }
 
 /// Item delivered to multicast subscribers by the dispatcher.
@@ -164,6 +171,8 @@ impl Dispatcher {
                 fatal: Mutex::new(None),
                 event_listeners: Mutex::new(HashMap::new()),
                 next_listener_id: std::sync::atomic::AtomicU64::new(0),
+                settle_waiters: Mutex::new(Vec::new()),
+                settle: Notify::new(),
             }),
         }
     }
@@ -493,6 +502,103 @@ impl Dispatcher {
             .write()
             .unwrap_or_else(|p| p.into_inner())
             .clear();
+        // …and whoever waits in `settle`: the driver that would answer is
+        // gone.
+        self.inner
+            .settle_waiters
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+    }
+
+    /// Wait until the driver has routed every datagram the socket held
+    /// when this was called.
+    ///
+    /// For a reply the kernel queues inside the request's `sendmsg`, as
+    /// nfnetlink does for a batch: after the send and a `settle`, an empty
+    /// per-seq channel means the kernel has nothing more to say, where on
+    /// its own it could mean only that the driver has not got to it yet.
+    /// Returns at once when the driver has died, whose channels are then
+    /// closed.
+    pub(crate) async fn settle(&self) {
+        if !self.driver_started() {
+            // Nothing reads the socket, so nothing is routed either way.
+            return;
+        }
+        let (tx, rx) = oneshot::channel();
+        self.inner
+            .settle_waiters
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(tx);
+        // `fail_all` records the error before it drops the waiters, so a
+        // waiter it missed sees the error here.
+        if self
+            .inner
+            .fatal
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some()
+        {
+            return;
+        }
+        self.inner.settle.notify_one();
+        let _ = rx.await;
+    }
+
+    /// The driver's half of [`settle`](Self::settle): read the socket
+    /// without waiting until it is empty, routing each datagram, then
+    /// release the waiters. They are taken before the read: one that
+    /// registers during it may have datagrams this read does not reach,
+    /// and is released by the next.
+    fn settle_now(&self, socket: &NetlinkSocket) -> std::ops::ControlFlow<()> {
+        let waiters = std::mem::take(
+            &mut *self
+                .inner
+                .settle_waiters
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()),
+        );
+        loop {
+            match socket.try_recv_inner() {
+                Ok(Some((buf, multicast))) => self.route_buffer(Arc::new(buf), multicast),
+                Ok(None) => break,
+                Err(e) => self.on_recv_error(e)?,
+            }
+        }
+        for waiter in waiters {
+            let _ = waiter.send(());
+        }
+        std::ops::ControlFlow::Continue(())
+    }
+
+    /// What the driver does with a failed receive: carry on, or record
+    /// the error and stop.
+    fn on_recv_error(&self, e: Error) -> std::ops::ControlFlow<()> {
+        use std::ops::ControlFlow;
+        // A notification past the receive cap was dropped: lost events, as
+        // with an overflow (#505).
+        if e.is_truncated() {
+            if let crate::ErrorDetail::FrameTruncated { received, .. } = e.detail() {
+                tracing::warn!(received, "dispatcher driver: dropped an oversized frame");
+            }
+            self.emit_enobufs();
+            return ControlFlow::Continue(());
+        }
+        if e.is_no_buffer_space() {
+            // ENOBUFS: `recv_msg` already fanned out
+            // ResyncMarker::ResyncStart to subscribers via the
+            // socket's dispatcher hook. A multicast overflow
+            // must not kill unrelated in-flight requests, so
+            // keep going (an improvement over the pre-dispatcher
+            // path where ENOBUFS surfaced into whichever caller
+            // happened to be in recv_msg).
+            tracing::debug!("dispatcher driver: ENOBUFS, continuing");
+            return ControlFlow::Continue(());
+        }
+        tracing::warn!(error = %e, "dispatcher driver: fatal recv error");
+        self.fail_all(e.to_string());
+        ControlFlow::Break(())
     }
 
     /// Take the stored fatal error (if any) as an [`Error`], or a
@@ -694,32 +800,17 @@ async fn run_driver(socket: Arc<NetlinkSocket>, dispatcher: Dispatcher) {
                 tracing::trace!("dispatcher driver: shutdown");
                 break;
             }
+            _ = dispatcher.inner.settle.notified() => {
+                if dispatcher.settle_now(&socket).is_break() {
+                    break;
+                }
+            }
             res = socket.recv_msg_from() => match res {
                 Ok((buf, multicast)) => dispatcher.route_buffer(Arc::new(buf), multicast),
-                // A notification past the receive cap was dropped: lost
-                // events, as with an overflow (#505).
-                Err(e) if e.is_truncated() => {
-                    if let crate::ErrorDetail::FrameTruncated { received, .. } = e.detail() {
-                        tracing::warn!(received, "dispatcher driver: dropped an oversized frame");
-                    }
-                    dispatcher.emit_enobufs();
-                    continue;
-                }
-                Err(e) if e.is_no_buffer_space() => {
-                    // ENOBUFS: `recv_msg` already fanned out
-                    // ResyncMarker::ResyncStart to subscribers via the
-                    // socket's dispatcher hook. A multicast overflow
-                    // must not kill unrelated in-flight requests, so
-                    // keep going (an improvement over the pre-dispatcher
-                    // path where ENOBUFS surfaced into whichever caller
-                    // happened to be in recv_msg).
-                    tracing::debug!("dispatcher driver: ENOBUFS, continuing");
-                    continue;
-                }
                 Err(e) => {
-                    tracing::warn!(error = %e, "dispatcher driver: fatal recv error");
-                    dispatcher.fail_all(e.to_string());
-                    break;
+                    if dispatcher.on_recv_error(e).is_break() {
+                        break;
+                    }
                 }
             }
         }
@@ -892,6 +983,55 @@ mod tests {
         hdr.nlmsg_len = NLMSG_HDRLEN as u32;
         hdr.nlmsg_seq = seq;
         Arc::new(hdr.as_bytes().to_vec())
+    }
+
+    /// After a send and a `settle`, the reply the kernel queued inside the
+    /// `sendmsg` is in the channel: an empty channel then means there is
+    /// nothing more, where right after the send it can mean only that the
+    /// driver has not routed it yet (#868).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn settle_routes_what_the_socket_holds() {
+        use crate::netlink::{
+            NetlinkSocket, Protocol,
+            message::{NLM_F_ACK, NLM_F_REQUEST, NLMSG_HDRLEN, NlMsgHdr, NlMsgType},
+        };
+        let socket = Arc::new(NetlinkSocket::new(Protocol::Route).expect("socket"));
+        let d = Dispatcher::new();
+        d.ensure_driver(socket.clone());
+        for seq in 1..=200 {
+            let mut guard = d.register(seq);
+            // NLMSG_NOOP asking an ACK: answered inside the sendmsg, by
+            // any user.
+            let mut hdr = NlMsgHdr::new(NlMsgType::NOOP, NLM_F_REQUEST | NLM_F_ACK);
+            hdr.nlmsg_len = NLMSG_HDRLEN as u32;
+            hdr.nlmsg_seq = seq;
+            socket.send(hdr.as_bytes()).await.expect("send");
+            d.settle().await;
+            let ack = guard.rx.try_recv().unwrap_or_else(|e| panic!("seq {seq}: {e}"));
+            let (header, _) = MessageIter::new(&ack).flatten().next().expect("a message");
+            assert_eq!(header.nlmsg_seq, seq);
+            assert!(guard.rx.try_recv().is_err(), "one answer per request");
+        }
+        d.shutdown();
+    }
+
+    /// A `settle` with no driver to answer it, or after the driver died,
+    /// returns rather than waiting forever.
+    #[tokio::test]
+    async fn settle_returns_without_a_driver() {
+        use crate::netlink::{NetlinkSocket, Protocol};
+        let bound = std::time::Duration::from_secs(5);
+        let d = Dispatcher::new();
+        tokio::time::timeout(bound, d.settle())
+            .await
+            .expect("no driver: settle returns");
+        let socket = Arc::new(NetlinkSocket::new(Protocol::Route).expect("socket"));
+        d.ensure_driver(socket);
+        d.fail_all("simulated fatal recv error".to_string());
+        tokio::time::timeout(bound, d.settle())
+            .await
+            .expect("a dead driver: settle returns");
+        d.shutdown();
     }
 
     #[tokio::test]
