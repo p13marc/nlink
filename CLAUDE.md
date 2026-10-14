@@ -973,7 +973,8 @@ The 2026-10-12 run worked through every open issue after #534:
   `ip vrf exec` (#257).
 
 #708's typed redesigns (`ChainKind`, `RuleSpec`/`lift`, `Change<T>`) stay
-open. So does #747: replacing `serde_yaml` is a dependency choice.
+open. #747 moved `nlink-config` from the deprecated `serde_yaml` to
+`serde_norway`, its maintained fork.
 
 The 2026-10-13 run swept tc(8) parity across every kind. Each action,
 qdisc, class and filter kind's tc lines were installed through `tc` and

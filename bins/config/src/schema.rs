@@ -37,7 +37,7 @@ pub enum OutputFormat {
 /// open-ended attribute model. Values are kept as YAML scalars so a
 /// captured file round-trips byte-for-byte; the translator
 /// interprets them per kind.
-type Options = BTreeMap<String, serde_yaml::Value>;
+type Options = BTreeMap<String, serde_norway::Value>;
 
 /// The complete `nlink-config` file format.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -135,7 +135,7 @@ impl ConfigFile {
                 Error::invalid_message(format!("config: parse JSON {}: {e}", path.display()))
             })
         } else {
-            serde_yaml::from_str(&text).map_err(|e| {
+            serde_norway::from_str(&text).map_err(|e| {
                 Error::invalid_message(format!("config: parse YAML {}: {e}", path.display()))
             })
         }
@@ -542,11 +542,11 @@ fn err(link: &str, msg: String) -> Error {
 
 fn opt_str(o: &Options, key: &str) -> Option<String> {
     o.get(key).and_then(|v| match v {
-        serde_yaml::Value::String(s) => Some(s.clone()),
+        serde_norway::Value::String(s) => Some(s.clone()),
         // Accept bare scalars (numbers/bools) as their textual form,
         // matching how YAML users write `mode: 802.3ad` unquoted.
-        serde_yaml::Value::Number(n) => Some(n.to_string()),
-        serde_yaml::Value::Bool(b) => Some(b.to_string()),
+        serde_norway::Value::Number(n) => Some(n.to_string()),
+        serde_norway::Value::Bool(b) => Some(b.to_string()),
         _ => None,
     })
 }
@@ -699,14 +699,14 @@ routes:
     gateway: 10.0.0.254
     dev: br0
 "#;
-        let cfg: ConfigFile = serde_yaml::from_str(yaml).unwrap();
+        let cfg: ConfigFile = serde_norway::from_str(yaml).unwrap();
         assert_eq!(cfg.links.len(), 2);
         assert_eq!(cfg.addresses.len(), 1);
         assert_eq!(cfg.routes.len(), 1);
 
         // Re-serialize and re-parse: the round trip is stable.
-        let out = serde_yaml::to_string(&cfg).unwrap();
-        let cfg2: ConfigFile = serde_yaml::from_str(&out).unwrap();
+        let out = serde_norway::to_string(&cfg).unwrap();
+        let cfg2: ConfigFile = serde_norway::from_str(&out).unwrap();
         assert_eq!(cfg2.links.len(), 2);
         assert_eq!(
             cfg2.links[1].options.get("peer").unwrap().as_str(),
@@ -734,7 +734,7 @@ routes:
   - destination: default
     gateway: 10.0.0.254
 "#;
-        let cfg: ConfigFile = serde_yaml::from_str(yaml).unwrap();
+        let cfg: ConfigFile = serde_norway::from_str(yaml).unwrap();
         let (nc, warnings) = cfg.to_network_config().unwrap();
         assert_eq!(nc.links().len(), 2);
         assert_eq!(nc.addresses().len(), 1);
@@ -749,7 +749,7 @@ links:
   - name: x0
     kind: wormhole
 "#;
-        let cfg: ConfigFile = serde_yaml::from_str(yaml).unwrap();
+        let cfg: ConfigFile = serde_norway::from_str(yaml).unwrap();
         let e = cfg.to_network_config().unwrap_err();
         assert!(e.to_string().contains("unknown link kind"), "got: {e}");
     }
@@ -761,7 +761,7 @@ links:
   - name: v0
     kind: veth
 "#;
-        let cfg: ConfigFile = serde_yaml::from_str(yaml).unwrap();
+        let cfg: ConfigFile = serde_norway::from_str(yaml).unwrap();
         let e = cfg.to_network_config().unwrap_err();
         assert!(
             e.to_string().contains("missing required option `peer`"),
@@ -787,7 +787,7 @@ qdiscs:
     parent: root
     kind: htb
 "#;
-        let cfg: ConfigFile = serde_yaml::from_str(yaml).unwrap();
+        let cfg: ConfigFile = serde_norway::from_str(yaml).unwrap();
         let (_nc, warnings) = cfg.to_network_config().unwrap();
         // bridge vlan_filtering option + rules + qdiscs => 3 warnings.
         assert_eq!(warnings.len(), 3, "warnings: {warnings:?}");
@@ -806,7 +806,7 @@ links:
       min_links: 1
       xmit_hash_policy: layer3+4
 "#;
-        let cfg: ConfigFile = serde_yaml::from_str(yaml).unwrap();
+        let cfg: ConfigFile = serde_norway::from_str(yaml).unwrap();
         let (nc, warnings) = cfg.to_network_config().unwrap();
         assert_eq!(nc.links().len(), 1);
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");

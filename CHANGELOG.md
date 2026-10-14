@@ -3503,6 +3503,16 @@ All notable changes to this project will be documented in this file.
   key, including a live filter that matches on one more, and reads a VLAN
   filter's ethertype as the kernel dumps it: the innermost protocol.
 
+### Changed
+
+- **`nlink-config` reads YAML through `serde_norway` (#747).** `serde_yaml`
+  is deprecated, and the `unsafe-libyaml` it pulls is unmaintained
+  (RUSTSEC-2024-0449), which `cargo deny check` had to ignore.
+  `serde_norway` is its maintained fork, with the same API and the same
+  libyaml parser, so anchors, tags and how numbers and booleans are typed
+  read as before. The demo binary was the only dependent; the library
+  never used either crate. The advisory ignore is gone from `deny.toml`.
+
 ## [0.31.0] - 2026-10-11
 
 > **The nlink-lab release: 53 bugs fixed, and tests in the shapes that
