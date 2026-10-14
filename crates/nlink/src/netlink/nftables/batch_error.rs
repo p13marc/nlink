@@ -30,7 +30,9 @@ const ATTRS_START: usize = 20;
 #[non_exhaustive]
 pub struct NftBatchFailure {
     /// The operation's position in the transaction, from 0. `None` for a
-    /// failure of the batch as a whole (the commit).
+    /// failure of the batch as a whole: a failed commit (`operation` is
+    /// `commit`), or the kernel refusing the batch before reading an
+    /// operation (`batch begin`).
     pub index: Option<usize>,
     /// What the operation was: `add rule ip t/input [ssh]`,
     /// `delete set inet fw/blocked`.
@@ -93,6 +95,16 @@ impl NftBatchFailure {
         }
     }
 
+    /// This failure, read again as a failed commit's. The kernel reports
+    /// one at the first operation's seq, so it first reads as that
+    /// operation's refusal (#868).
+    pub(crate) fn read_as_commit(&mut self) {
+        self.index = None;
+        self.operation = "commit".to_string();
+        self.attribute = None;
+        self.object = None;
+    }
+
     /// A failure of the batch as a whole: the begin or end marker, or the
     /// commit.
     pub(crate) fn of_batch(what: &str, errno: i32, ext: ParsedExtAck) -> Self {
@@ -121,6 +133,10 @@ impl NftBatchFailure {
             libc::EBUSY if self.operation.starts_with("delete") => {
                 Some("something still uses it (a rule, a map element, a jump)")
             }
+            libc::EINVAL if self.operation == "commit" => Some(
+                "every operation was accepted, the ruleset as a whole was not: an \
+                 anonymous set or chain no rule uses, for one",
+            ),
             _ => None,
         }
     }

@@ -227,21 +227,38 @@ impl RecvSession {
         }
     }
 
-    /// The next datagram for this cycle if one is already here, without
-    /// waiting — for draining what the kernel queued after a failure.
-    pub(crate) fn try_recv<P: ProtocolState>(
+    /// The next datagram for this cycle if the kernel has already queued
+    /// one, without waiting for the kernel — for draining what it queued
+    /// inside the request's `sendmsg`, as nfnetlink does for a batch.
+    ///
+    /// `None` means the socket held nothing more for this cycle. In
+    /// dispatcher mode an empty channel means only that the driver has not
+    /// routed it yet, so an empty channel waits for the driver to read the
+    /// socket dry ([`Dispatcher::settle`](super::dispatcher::Dispatcher))
+    /// and looks again.
+    pub(crate) async fn recv_queued<P: ProtocolState>(
         &mut self,
         conn: &Connection<P>,
     ) -> Result<Option<Vec<u8>>> {
+        use tokio::sync::mpsc::error::TryRecvError;
         match self {
             RecvSession::Direct(_) => conn.socket().try_recv_unicast(),
-            RecvSession::Dispatched { guard, .. } => match guard.rx.try_recv() {
-                Ok(buf) => Ok(Some((*buf).clone())),
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => Ok(None),
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                    Err(conn.socket().stamp(conn.dispatcher().take_fatal_error()))
+            RecvSession::Dispatched { guard, .. } => {
+                let mut settled = false;
+                loop {
+                    match guard.rx.try_recv() {
+                        Ok(buf) => return Ok(Some((*buf).clone())),
+                        Err(TryRecvError::Empty) if !settled => {
+                            conn.dispatcher().settle().await;
+                            settled = true;
+                        }
+                        Err(TryRecvError::Empty) => return Ok(None),
+                        Err(TryRecvError::Disconnected) => {
+                            return Err(conn.socket().stamp(conn.dispatcher().take_fatal_error()));
+                        }
+                    }
                 }
-            },
+            }
         }
     }
 

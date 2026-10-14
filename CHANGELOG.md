@@ -332,6 +332,23 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **A failed nftables commit says it is the commit's (#868).** The kernel
+  reports a commit it refuses at the first operation's seq, so the error
+  read as that operation's: `op #0 add table ip t: Invalid argument`, for
+  a batch whose every operation was accepted. Commits do fail on their
+  own: an anonymous set or chain no rule uses (`EINVAL`), a hardware
+  offload refusal, memory. Now `NftBatchFailure::index` is `None` and the
+  operation is `commit`, as its documentation always said; the error
+  reads `commit: Invalid argument (errno 22)`, with a hint, and names no
+  object. The batch asks the first operation's ACK as well as the last's:
+  a refused operation gets its error instead, so an error followed by an
+  ACK at its seq was the commit's.
+  - On a `with_dispatcher()` connection, the read of what the kernel
+    queued after a failure could stop before the driver had routed all
+    of it. It now waits for the driver to read the socket dry, so a
+    dispatcher connection tells a failed commit from a refused operation
+    as a plain one does.
+
 - **A dispatcher connection's driver survives a dump that ends as it
   reads (#870).** An empty dump ends inside the request's `sendmsg`: the
   kernel queues its `NLMSG_DONE`, wakes the reader and only then clears

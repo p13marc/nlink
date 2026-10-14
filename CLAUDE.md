@@ -653,7 +653,13 @@ answer, not on the first per-op ACK, and `NLMSG_DONE` there is an error
 commit at the *first operation's* seq (BATCH_BEGIN is pulled off the skb
 first), then the operations' replies in batch order. An error at
 BATCH_BEGIN's seq is the kernel refusing the whole batch, and nothing
-follows it. `BatchReplies` in `nftables/connection.rs` has the order.
+follows it. The batch also asks the first operation's ACK: a refused
+operation gets its error *instead of* its ACK, so an error followed by an
+ACK at the same seq was the commit's (#868). `BatchReplies` in
+`nftables/connection.rs` has the order. A loop that drains what the kernel
+queued uses `RecvSession::recv_queued`, which in dispatcher mode lets the
+driver read the socket dry (`Dispatcher::settle`) before it calls the
+channel empty.
 
 *(The template used to name a `recv_with_timeout` that did not exist —
 zero occurrences crate-wide — so code written by following it did not
