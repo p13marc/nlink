@@ -228,7 +228,7 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
     );
     println!("    UDP entry deleted by tuple");
 
-    // 6. Inject two more, then flush the whole table. Note the
+    // 6. Inject two more, then flush the IPv4 table. Note the
     //    explicit timeout — the kernel rejects a TCP add with
     //    `tcp_state` set but no timeout (EINVAL). It needs the
     //    timeout for the state-machine bookkeeping.

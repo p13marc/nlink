@@ -142,7 +142,8 @@ nf.del_conntrack(
         ),
 ).await?;
 
-// 6. Or wipe the whole v4 table.
+// 6. Or wipe the whole IPv4 table. `flush_conntrack_v6` wipes IPv6's,
+//    and `flush_conntrack_all` both.
 nf.flush_conntrack().await?;
 # Ok(())
 # }

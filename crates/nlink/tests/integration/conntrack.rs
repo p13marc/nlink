@@ -310,6 +310,59 @@ async fn ct_delete_without_a_tuple_is_refused() -> nlink::Result<()> {
     Ok(())
 }
 
+/// Each family's flush leaves the other family's entries (#880). With
+/// nfgenmsg version 0 the kernel ignored the family and flushed both, and
+/// `ct_flush_empties_table` seeds IPv4 only, so it could not tell.
+#[tokio::test]
+async fn ct_flush_is_per_family() -> nlink::Result<()> {
+    nlink::require_root!();
+    nlink::require_module!("nf_conntrack");
+    nlink::require_module!("nf_conntrack_netlink");
+
+    let ns = TestNamespace::new("ct-flush-family")?;
+    let nf = nf_in_ns(&ns)?;
+    let seed = async |v4: bool, v6: bool| -> nlink::Result<()> {
+        for port in [86, 87] {
+            if v4 {
+                nf.add_conntrack(udp_entry(false, 40005, port)).await?;
+            }
+            if v6 {
+                nf.add_conntrack(udp_entry(true, 40005, port)).await?;
+            }
+        }
+        Ok(())
+    };
+    let families = async || -> nlink::Result<Vec<AddressFamily>> {
+        Ok(ct_inventory(&nf)
+            .await?
+            .into_iter()
+            .map(|(f, ..)| f)
+            .collect())
+    };
+    let (v4, v6) = (AddressFamily::Inet, AddressFamily::Inet6);
+
+    seed(true, true).await?;
+    nf.flush_conntrack().await?;
+    assert_eq!(families().await?, [v6, v6], "flush_conntrack leaves IPv6");
+
+    seed(true, false).await?;
+    nf.flush_conntrack_v6().await?;
+    assert_eq!(
+        families().await?,
+        [v4, v4],
+        "flush_conntrack_v6 leaves IPv4"
+    );
+
+    seed(false, true).await?;
+    nf.flush_conntrack_all().await?;
+    assert!(
+        families().await?.is_empty(),
+        "flush_conntrack_all leaves nothing"
+    );
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn ct_flush_empties_table() -> nlink::Result<()> {
     nlink::require_root!();
