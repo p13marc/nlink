@@ -527,8 +527,8 @@ impl PerPeerImpairer {
         let ifindex = conn.resolve_interface(&self.target).await?;
         // Each attempt dumps the tree again (#532).
         let (mut report, attempts) = opts
-            .retry(super::reconcile::transient, async || {
-                self.reconcile_inner(conn, ifindex, opts).await
+            .retry(super::reconcile::transient, || {
+                self.reconcile_inner(conn, ifindex, opts)
             })
             .await?;
         report.attempts = attempts;

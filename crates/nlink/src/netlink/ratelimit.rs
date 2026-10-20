@@ -352,8 +352,8 @@ impl RateLimiter {
         let ifindex = self.ifindex(conn).await?;
         // Each attempt reads the trees again (#532).
         let (mut report, attempts) = opts
-            .retry(super::reconcile::transient, async || {
-                self.reconcile_once(conn, ifindex, opts).await
+            .retry(super::reconcile::transient, || {
+                self.reconcile_once(conn, ifindex, opts)
             })
             .await?;
         report.attempts = attempts;
@@ -1497,8 +1497,8 @@ impl PerHostLimiter {
         let ifindex = link.ifindex();
         // Each attempt dumps the tree again (#532).
         let (mut report, attempts) = opts
-            .retry(super::reconcile::transient, async || {
-                self.reconcile_inner(conn, ifindex, opts).await
+            .retry(super::reconcile::transient, || {
+                self.reconcile_inner(conn, ifindex, opts)
             })
             .await?;
         report.attempts = attempts;

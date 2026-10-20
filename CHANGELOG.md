@@ -6,6 +6,26 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **No reconcile could be spawned** (#879). `tokio::spawn(async move {
+  cfg.apply_reconcile(&conn, opts).await })` did not compile ("implementation
+  of `Send` is not general enough") for any reconcile entry point:
+  - `NftablesConfig::apply_reconcile` and `NftablesDiff::apply_reconcile`;
+  - `NetworkConfig::apply_reconcile{,_with_options}` and
+    `WireguardConfig::apply_reconcile`;
+  - `RateLimiter`, `PerHostLimiter` and `PerPeerImpairer`'s
+    `reconcile{,_with_options}`;
+  - `Stack::apply_reconcile_in`.
+
+  A daemon runs its reconcile in a spawned task or behind a
+  `dyn Future + Send`, which is where stream-marker found it.
+
+  All of them retry through one helper, and it took an `AsyncFnMut`. With an
+  async closure that borrows, rustc cannot prove the future `Send` for every
+  lifetime. The helper takes an `FnMut` that returns a future now, and no
+  public signature changed. A compile-only test spawns every entry point; it
+  did not build before the fix. #884 is the same check for every public
+  future.
+
 - **A flower test counted IPv6's own packets as UDP** (#891).
   `flower_actions_run_on_its_match` asserted that HTB's default class
   passed exactly the 5 UDP packets nothing classified. On the up link, IPv6

@@ -14,7 +14,7 @@
 //! `backoff`) that the network and WireGuard layers borrowed. These are
 //! both, under every path either was reachable by.
 
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 use super::{
     error::{Error, Result},
@@ -156,11 +156,18 @@ impl ReconcileOptions {
 
     /// Run `f` until it succeeds, fails with an error `transient` does not
     /// accept, or the retries run out; the result and the attempts made.
-    pub(crate) async fn retry<T>(
+    ///
+    /// `f` is an `FnMut` returning a future, not an `AsyncFnMut`: with an
+    /// async closure that borrows, rustc cannot prove the future `Send`
+    /// for every lifetime, and no reconcile could be spawned (#879).
+    pub(crate) async fn retry<T, Fut>(
         &self,
         transient: impl Fn(&Error) -> bool,
-        mut f: impl AsyncFnMut() -> Result<T>,
-    ) -> Result<(T, usize)> {
+        mut f: impl FnMut() -> Fut,
+    ) -> Result<(T, usize)>
+    where
+        Fut: Future<Output = Result<T>>,
+    {
         let mut attempt = 0;
         loop {
             match f().await {
@@ -257,6 +264,8 @@ pub struct UnmanagedObject {
 
 #[cfg(test)]
 mod tests {
+    use std::future::ready;
+
     use super::*;
 
     #[test]
@@ -289,9 +298,9 @@ mod tests {
         // Busy twice, then through: three attempts.
         let mut calls = 0;
         let (v, attempts) = o
-            .retry(transient, async || {
+            .retry(transient, || {
                 calls += 1;
-                if calls < 3 { Err(busy()) } else { Ok(7) }
+                ready(if calls < 3 { Err(busy()) } else { Ok(7) })
             })
             .await
             .unwrap();
@@ -300,9 +309,9 @@ mod tests {
         // Busy forever: the third failure is returned.
         let mut calls = 0;
         let e = o
-            .retry(transient, async || -> Result<()> {
+            .retry(transient, || {
                 calls += 1;
-                Err(busy())
+                ready(Err::<(), _>(busy()))
             })
             .await
             .unwrap_err();
@@ -312,13 +321,85 @@ mod tests {
         // Not transient: no retry.
         let mut calls = 0;
         let e = o
-            .retry(transient, async || -> Result<()> {
+            .retry(transient, || {
                 calls += 1;
-                Err(Error::from_errno_ext_ack(libc::EINVAL, None, None))
+                ready(Err::<(), _>(Error::from_errno_ext_ack(
+                    libc::EINVAL,
+                    None,
+                    None,
+                )))
             })
             .await
             .unwrap_err();
         assert!(e.is_invalid_argument());
         assert_eq!(calls, 1);
+    }
+}
+
+/// Every reconcile entry point must be spawnable (#879). They all go
+/// through [`ReconcileOptions::retry`], and when it took an
+/// `AsyncFnMut`, rustc could not prove the returned future `Send` for
+/// every lifetime of the borrows the closure captured: none of them could
+/// run in `tokio::spawn` or behind a `dyn Future + Send`. Compile-only.
+#[cfg(test)]
+#[allow(dead_code)]
+mod spawnable {
+    use std::future::Future;
+
+    use super::ReconcileOptions;
+    use crate::facade::Stack;
+    use crate::netlink::config::{ApplyOptions, NetworkConfig};
+    use crate::netlink::genl::wireguard::WireguardConfig;
+    use crate::netlink::impair::PerPeerImpairer;
+    use crate::netlink::nftables::config::{NftablesConfig, NftablesDiff};
+    use crate::netlink::ratelimit::{PerHostLimiter, RateLimiter};
+    use crate::netlink::{Connection, Nftables, Route, Wireguard};
+
+    /// The bounds `tokio::spawn` puts on its future.
+    fn spawnable<F: Future + Send + 'static>(_: F) {}
+
+    fn nftables_config(cfg: NftablesConfig, conn: Connection<Nftables>) {
+        spawnable(async move { cfg.apply_reconcile(&conn, ReconcileOptions::new()).await });
+    }
+
+    fn nftables_diff(diff: NftablesDiff, conn: Connection<Nftables>) {
+        spawnable(async move { diff.apply_reconcile(&conn, ReconcileOptions::new()).await });
+    }
+
+    fn network_config(cfg: NetworkConfig, conn: Connection<Route>) {
+        spawnable(async move { cfg.apply_reconcile(&conn, ReconcileOptions::new()).await });
+        spawnable(async move {
+            NetworkConfig::new()
+                .apply_reconcile_with_options(
+                    &Connection::<Route>::new()?,
+                    ReconcileOptions::new(),
+                    ApplyOptions::default(),
+                )
+                .await
+        });
+    }
+
+    fn wireguard_config(cfg: WireguardConfig, conn: Connection<Wireguard>) {
+        spawnable(async move { cfg.apply_reconcile(&conn, ReconcileOptions::new()).await });
+    }
+
+    fn rate_limiter(limiter: RateLimiter, conn: Connection<Route>) {
+        spawnable(async move { limiter.reconcile(&conn).await });
+    }
+
+    fn per_host_limiter(limiter: PerHostLimiter, conn: Connection<Route>) {
+        spawnable(async move { limiter.reconcile(&conn).await });
+    }
+
+    fn per_peer_impairer(impairer: PerPeerImpairer, conn: Connection<Route>) {
+        spawnable(async move { impairer.reconcile(&conn).await });
+    }
+
+    fn stack(stack: Stack) {
+        spawnable(async move {
+            stack
+                .apply_reconcile_in("ns", ReconcileOptions::new(), Default::default())
+                .await
+        });
     }
 }

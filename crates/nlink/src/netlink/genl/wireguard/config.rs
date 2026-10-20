@@ -515,7 +515,7 @@ impl WireguardConfig {
             });
         }
         let (result, attempts) = opts
-            .retry(crate::netlink::reconcile::transient, async || self.apply(conn).await)
+            .retry(crate::netlink::reconcile::transient, || self.apply(conn))
             .await?;
         Ok(ReconcileReport {
             attempts,
