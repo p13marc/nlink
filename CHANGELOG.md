@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A flower test counted IPv6's own packets as UDP** (#891).
+  `flower_actions_run_on_its_match` asserted that HTB's default class
+  passed exactly the 5 UDP packets nothing classified. On the up link, IPv6
+  sends MLD reports and router solicitations at random delays, and those
+  land in the default class too. Under load one arrived in the window and
+  failed the lane on a PR that did not touch TC. UDP 5002 has a class of its
+  own now. The old test fails with IPv6 multicast pinged on the link during
+  the window; the new one passes.
+
 ## [0.32.0] - 2026-10-14
 
 > **The redesign release: namespaces, errors, declarative TC, and a plan

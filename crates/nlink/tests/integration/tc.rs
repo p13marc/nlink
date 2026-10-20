@@ -2371,24 +2371,42 @@ async fn flower_actions_run_on_its_match() -> Result<()> {
     let htb = HtbQdiscConfig::new().default_class(0x30).build();
     conn.add_qdisc_full("dummy0", TcHandle::ROOT, Some(TcHandle::major_only(1)), htb)
         .await?;
-    let class = HtbClassConfig::new(nlink::Rate::mbit(100)).build();
-    conn.add_class("dummy0", TcHandle::major_only(1), TcHandle::new(1, 0x30), class)
+    // UDP 5002 gets a class of its own: the default class also counts
+    // IPv6's own packets on the up link (MLD, router solicitations), so
+    // its count is not the test's to assert (#891).
+    for minor in [0x20, 0x30] {
+        let class = HtbClassConfig::new(nlink::Rate::mbit(100)).build();
+        conn.add_class(
+            "dummy0",
+            TcHandle::major_only(1),
+            TcHandle::new(1, minor),
+            class,
+        )
         .await?;
-    let filter = FlowerFilter::new()
+    }
+    let drop_5001 = FlowerFilter::new()
         .ipv4()
         .ip_proto_udp()
         .dst_port(5001)
         .actions(ActionList::new().with(GactAction::drop()))
         .build();
-    conn.add_filter_full(
-        "dummy0",
-        TcHandle::major_only(1),
-        None,
-        nlink::EthProto::new(0x0800),
-        nlink::FilterPriority::new(1),
-        filter,
-    )
-    .await?;
+    let pass_5002 = FlowerFilter::new()
+        .ipv4()
+        .ip_proto_udp()
+        .dst_port(5002)
+        .classid(TcHandle::new(1, 0x20))
+        .build();
+    for (prio, filter) in [(1, drop_5001), (2, pass_5002)] {
+        conn.add_filter_full(
+            "dummy0",
+            TcHandle::major_only(1),
+            None,
+            nlink::EthProto::new(0x0800),
+            nlink::FilterPriority::new(prio),
+            filter,
+        )
+        .await?;
+    }
 
     const PER_PORT: usize = 5;
     {
@@ -2416,13 +2434,13 @@ async fn flower_actions_run_on_its_match() -> Result<()> {
     let classes = conn.get_classes_by_name("dummy0").await?;
     let passed = classes
         .iter()
-        .find(|c| c.handle() == TcHandle::new(1, 0x30))
+        .find(|c| c.handle() == TcHandle::new(1, 0x20))
         .map(|c| c.packets());
     let want = Some(PER_PORT as u64);
     assert!(
         drops.map(u64::from) == want && passed == want,
         "the HTB root dropped {drops:?} packets (want {want:?}: UDP 5001, by the flower drop) and \
-         its default class passed {passed:?} (want {want:?}: UDP 5002)"
+         class 1:20 passed {passed:?} (want {want:?}: UDP 5002)"
     );
     Ok(())
 }
