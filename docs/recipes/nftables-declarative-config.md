@@ -278,37 +278,71 @@ add element inet filter allowed_v4 10.0.0.1 10.0.0.2
 
 ## `apply_reconcile` — retry on conflict
 
-When multiple processes mutate nftables concurrently (think:
-systemd-resolved adding stub-resolver rules while your operator
-applies its ruleset), the kernel returns EBUSY for the loser.
-`apply_reconcile` retries with exponential backoff:
+When other processes write nftables too (think: systemd-resolved adding
+stub-resolver rules while your operator applies its ruleset), the
+ruleset can change between your diff and its commit. Every batch nlink
+sends carries the generation its diff read (#482), so the kernel refuses
+such a commit with `ERESTART` instead of applying a diff of a ruleset
+that is gone. `NftablesConfig::apply_reconcile` diffs again and retries,
+with exponential backoff:
 
 ```rust,no_run
 use nlink::reconcile::ReconcileOptions;
 use std::time::Duration;
-# use nlink::netlink::nftables::config::{NftablesConfig, NftablesDiff};
+# use nlink::netlink::nftables::config::NftablesConfig;
 # use nlink::{Connection, Nftables};
-# async fn run(diff: NftablesDiff, conn: &Connection<Nftables>) -> nlink::Result<()> {
+# async fn run(cfg: &NftablesConfig, conn: &Connection<Nftables>) -> nlink::Result<()> {
 // `ReconcileOptions` is `#[non_exhaustive]`, so it is built with the
 // `with`-style setters rather than a struct literal.
 let opts = ReconcileOptions::default()
     .with_max_retries(5)
     .with_backoff(Duration::from_millis(50));
-let report = diff.apply_reconcile(conn, opts).await?;
+let report = cfg.apply_reconcile(conn, opts).await?;
 if report.attempts > 1 {
     tracing::warn!(
         retries = report.attempts - 1,
-        "concurrent nftables mutator detected; retried successfully",
+        "the ruleset moved under the diff; diffed again",
     );
 }
 # Ok(())
 # }
 ```
 
-`ReconcileOptions::default()` is `max_retries: 3, backoff: 100ms`.
-Non-transient errors (permission denied, invalid argument, etc.)
-surface immediately without retry — the predicate is
-`Error::is_busy() || Error::is_try_again()`.
+`ReconcileOptions::default()` is `max_retries: 3, backoff: 100ms`. It
+retries `ERESTART` and an interrupted dump (`Error::is_restart()`,
+`Error::is_dump_interrupted()`); anything else surfaces at once. `EBUSY`
+is not retried: in nf_tables it means an object is in use, and a retry
+only repeats it.
+
+`NftablesDiff::apply_reconcile` applies a diff you already hold, and
+retries only an interrupted dump. After `ERESTART` that diff is stale for
+good, so it returns the error.
+
+### Logging what drifted
+
+A daemon that re-asserts its ruleset on a timer wants to log *what*
+someone else changed, not only that something did (#887).
+`ReconcileReport` counts the changes; the diff says what they are. Diff
+once, log the diff, and apply that same diff:
+
+```rust,no_run
+use nlink::reconcile::ReconcileOptions;
+# use nlink::netlink::nftables::config::NftablesConfig;
+# use nlink::{Connection, Nftables};
+# async fn tick(cfg: &NftablesConfig, conn: &Connection<Nftables>) -> nlink::Result<()> {
+let diff = cfg.diff(conn).await?;
+if !diff.is_empty() {
+    tracing::warn!(changes = diff.change_count(), "ruleset drifted, restoring:\n{diff}");
+    match diff.apply_reconcile(conn, ReconcileOptions::default()).await {
+        Ok(_) => {}
+        // The ruleset moved again since this diff: the next tick diffs anew.
+        Err(e) if e.is_restart() => {}
+        Err(e) => return Err(e),
+    }
+}
+# Ok(())
+# }
+```
 
 ## Loading from a config file
 

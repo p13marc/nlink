@@ -77,6 +77,23 @@ All notable changes to this project will be documented in this file.
   own now. The old test fails with IPv6 multicast pinged on the link during
   the window; the new one passes.
 
+### Documentation
+
+- **Three recipe statements that no longer held, and a pattern for
+  logging drift** (#888, #887).
+  - `conntrack-programmatic` said there was no event subscription.
+    `subscribe` and `events()` exist, and the recipe's own events section
+    uses them.
+  - `nftables-stateful-fw` said conntrack zones were not exposed on rules.
+    `Rule::set_ct_zone` and `Rule::match_ct_zone` are.
+  - `nftables-declarative-config` said a concurrent writer gets `EBUSY` and
+    that `apply_reconcile` retries `EBUSY` / `EAGAIN`. Since #482 a batch
+    carries its generation, so a concurrent change is `ERESTART`, and
+    `NftablesConfig::apply_reconcile` diffs again. The recipe's example
+    called the diff's `apply_reconcile`, which cannot ride that out.
+  - The same recipe shows how a daemon logs what drifted: diff once, log the
+    diff, apply that diff (#887).
+
 ## [0.32.0] - 2026-10-14
 
 > **The redesign release: namespaces, errors, declarative TC, and a plan

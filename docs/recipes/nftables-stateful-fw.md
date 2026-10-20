@@ -394,9 +394,11 @@ conntrack (above), not in `NFT_MSG_GETFLOWTABLE`. See the
   `match_in_set(PacketField::Ip4Saddr, ..)` /
   `match_in_set(PacketField::Ip6Saddr, ..)`; each lookup is guarded by
   `meta nfproto`, so the other family's packets never reach it.
-- **Conntrack zones.** Multiple firewalls on a single host (e.g.,
-  per-tenant CT zones) need `zone()` set on rules. Not yet exposed by
-  the typed `Rule` builder — file an issue if you need it.
+- **Conntrack zones.** Several firewalls on one host (per-tenant CT
+  zones) put each connection in its zone with `Rule::set_ct_zone(zone)`
+  (`ct zone set 5`), in a chain at the `raw` priority so it runs before
+  conntrack sees the packet. Later rules match it with
+  `Rule::match_ct_zone(zone)` (`ct zone 5`).
 
 ## Hand-rolled equivalent
 
