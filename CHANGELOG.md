@@ -37,6 +37,15 @@ All notable changes to this project will be documented in this file.
   `flush_conntrack()` did. The test that existed seeded IPv4 entries only,
   so it could not tell the difference.
 
+- **Route destinations are addresses, not strings** (#881).
+  `Ipv4Route::new` and `Ipv6Route::new` took a string and parsed it with
+  `unwrap_or(UNSPECIFIED)`, so a typo, a CIDR (`"10.0.0.0/24"`) or a stray
+  space became `0.0.0.0/<prefix>` or `::/<prefix>` with no error. With
+  prefix 0 that is a default route. They take `Ipv4Addr` / `Ipv6Addr` now,
+  like the builders' `gateway` and `prefsrc`. So do `del_route_v4`,
+  `del_route_v6` and their `_if_exists` forms, which went through the same
+  parse and could delete the default route on a typo.
+
 ### Fixed
 
 - **No reconcile could be spawned** (#879). `tokio::spawn(async move {

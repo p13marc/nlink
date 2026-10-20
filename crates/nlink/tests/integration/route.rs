@@ -44,7 +44,7 @@ async fn test_add_route_via_interface() -> Result<()> {
     let (_ns, conn) = setup_routed_ns("rtdev").await?;
 
     // Add route via interface
-    conn.add_route(Ipv4Route::new("10.0.0.0", 8).dev("dummy0"))
+    conn.add_route(Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8).dev("dummy0"))
         .await?;
 
     // Verify route exists
@@ -67,7 +67,7 @@ async fn test_add_route_via_gateway() -> Result<()> {
 
     // Add route via gateway
     conn.add_route(
-        Ipv4Route::new("10.0.0.0", 8)
+        Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8)
             .gateway(Ipv4Addr::new(192, 168, 1, 254))
             .dev("dummy0"),
     )
@@ -94,7 +94,7 @@ async fn test_delete_route() -> Result<()> {
     let (_ns, conn) = setup_routed_ns("rtdel").await?;
 
     // Add route
-    conn.add_route(Ipv4Route::new("10.0.0.0", 8).dev("dummy0"))
+    conn.add_route(Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8).dev("dummy0"))
         .await?;
 
     // Verify it exists
@@ -107,7 +107,7 @@ async fn test_delete_route() -> Result<()> {
     // doesn't carry the device binding, and newer kernels return
     // ESRCH ("no matching route") rather than fuzzy-matching the
     // dst+prefix alone.
-    conn.del_route(Ipv4Route::new("10.0.0.0", 8).dev("dummy0"))
+    conn.del_route(Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8).dev("dummy0"))
         .await?;
 
     // Verify it's gone
@@ -126,8 +126,10 @@ async fn test_blackhole_route() -> Result<()> {
     let conn = ns.connection()?;
 
     // Add blackhole route
-    conn.add_route(Ipv4Route::new("10.255.0.0", 16).route_type(RouteType::Blackhole))
-        .await?;
+    conn.add_route(
+        Ipv4Route::new(Ipv4Addr::new(10, 255, 0, 0), 16).route_type(RouteType::Blackhole),
+    )
+    .await?;
 
     // Verify route exists and is blackhole
     let routes = conn.get_routes().await?;
@@ -150,8 +152,10 @@ async fn test_unreachable_route() -> Result<()> {
     let conn = ns.connection()?;
 
     // Add unreachable route
-    conn.add_route(Ipv4Route::new("10.254.0.0", 16).route_type(RouteType::Unreachable))
-        .await?;
+    conn.add_route(
+        Ipv4Route::new(Ipv4Addr::new(10, 254, 0, 0), 16).route_type(RouteType::Unreachable),
+    )
+    .await?;
 
     // Verify
     let routes = conn.get_routes().await?;
@@ -174,8 +178,10 @@ async fn test_prohibit_route() -> Result<()> {
     let conn = ns.connection()?;
 
     // Add prohibit route
-    conn.add_route(Ipv4Route::new("10.253.0.0", 16).route_type(RouteType::Prohibit))
-        .await?;
+    conn.add_route(
+        Ipv4Route::new(Ipv4Addr::new(10, 253, 0, 0), 16).route_type(RouteType::Prohibit),
+    )
+    .await?;
 
     // Verify
     let routes = conn.get_routes().await?;
@@ -198,7 +204,7 @@ async fn test_default_route() -> Result<()> {
 
     // Add default route
     conn.add_route(
-        Ipv4Route::new("0.0.0.0", 0)
+        Ipv4Route::new(Ipv4Addr::UNSPECIFIED, 0)
             .gateway(Ipv4Addr::new(192, 168, 1, 254))
             .dev("dummy0"),
     )
@@ -227,8 +233,10 @@ async fn test_ipv6_route() -> Result<()> {
     conn.set_link_up("dummy0").await?;
 
     // Add IPv6 route
-    conn.add_route(Ipv6Route::new("2001:db8:2::", 48).dev("dummy0"))
-        .await?;
+    conn.add_route(
+        Ipv6Route::new(Ipv6Addr::new(0x2001, 0xdb8, 2, 0, 0, 0, 0, 0), 48).dev("dummy0"),
+    )
+    .await?;
 
     // Verify
     let routes = conn.get_routes().await?;
@@ -250,7 +258,7 @@ async fn test_route_with_source() -> Result<()> {
 
     // Add route with preferred source
     conn.add_route(
-        Ipv4Route::new("10.0.0.0", 8)
+        Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8)
             .dev("dummy0")
             .prefsrc(Ipv4Addr::new(192, 168, 1, 1)),
     )
@@ -277,16 +285,24 @@ async fn test_route_with_table() -> Result<()> {
     let (_ns, conn) = setup_routed_ns("rttable").await?;
 
     // Add route to custom table
-    conn.add_route(Ipv4Route::new("10.0.0.0", 8).dev("dummy0").table(100))
-        .await?;
+    conn.add_route(
+        Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8)
+            .dev("dummy0")
+            .table(100),
+    )
+    .await?;
 
     // Verify by deleting from the specific table.
     // get_routes() only returns main table by default, so a successful
     // del is the verification. The del must mirror the add's full key
     // (dest + prefix + dev + table) — newer kernels return ESRCH on
     // partial-key del.
-    conn.del_route(Ipv4Route::new("10.0.0.0", 8).dev("dummy0").table(100))
-        .await?;
+    conn.del_route(
+        Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8)
+            .dev("dummy0")
+            .table(100),
+    )
+    .await?;
 
     // If we got here without error, the route existed in table 100
     Ok(())
@@ -301,7 +317,7 @@ async fn test_route_with_metrics() -> Result<()> {
 
     // Add route with MTU metric
     conn.add_route(
-        Ipv4Route::new("10.0.0.0", 8)
+        Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8)
             .dev("dummy0")
             .metrics(RouteMetrics::new().mtu(1400)),
     )
@@ -347,7 +363,8 @@ async fn test_multipath_route() -> Result<()> {
     .await?;
 
     // Add multipath route
-    conn.add_route(Ipv4Route::new("10.0.0.0", 8).multipath(vec![
+    conn.add_route(
+        Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8).multipath(vec![
             NextHop::new()
                 .gateway_v4(Ipv4Addr::new(192, 168, 1, 254))
                 .dev("dummy0")
@@ -379,7 +396,7 @@ async fn test_replace_route() -> Result<()> {
 
     // Add initial route
     conn.add_route(
-        Ipv4Route::new("10.0.0.0", 8)
+        Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8)
             .gateway(Ipv4Addr::new(192, 168, 1, 100))
             .dev("dummy0"),
     )
@@ -387,7 +404,7 @@ async fn test_replace_route() -> Result<()> {
 
     // Replace with different gateway
     conn.replace_route(
-        Ipv4Route::new("10.0.0.0", 8)
+        Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8)
             .gateway(Ipv4Addr::new(192, 168, 1, 200))
             .dev("dummy0"),
     )
@@ -448,7 +465,7 @@ async fn test_host_route() -> Result<()> {
 
     // Add /32 host route
     conn.add_route(
-        Ipv4Route::new("10.0.0.100", 32)
+        Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 100), 32)
             .gateway(Ipv4Addr::new(192, 168, 1, 254))
             .dev("dummy0"),
     )
@@ -533,7 +550,7 @@ async fn an_mpls_encap_route_is_added() -> Result<()> {
 
     let (ns, conn) = setup_routed_ns("mplsencap").await?;
     conn.add_route(
-        Ipv4Route::new("10.88.0.0", 16)
+        Ipv4Route::new(Ipv4Addr::new(10, 88, 0, 0), 16)
             .gateway(Ipv4Addr::new(192, 168, 1, 2))
             .dev("dummy0")
             .mpls_encap(MplsEncap::new().labels(&[100, 200]).ttl(32)),

@@ -19,6 +19,7 @@
 //!
 //! ```no_run
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use std::net::Ipv4Addr;
 //! use nlink::netlink::{Connection, Route};
 //! use nlink::netlink::srv6::{Srv6Encap, Srv6LocalBuilder, Srv6Mode};
 //! use nlink::netlink::route::Ipv4Route;
@@ -28,7 +29,7 @@
 //!
 //! // IPv4 route with SRv6 encapsulation (IPv4oIPv6)
 //! conn.add_route(
-//!     Ipv4Route::new("10.0.0.0", 8)
+//!     Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8)
 //!         .dev("eth0")
 //!         .srv6_encap(
 //!             Srv6Encap::encap()

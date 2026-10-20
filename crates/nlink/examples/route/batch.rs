@@ -27,9 +27,15 @@ async fn main() -> nlink::netlink::Result<()> {
 
     let results = conn
         .batch()
-        .add_route(Ipv4Route::new("10.99.1.0", 24).gateway(Ipv4Addr::new(10, 99, 0, 2)))
-        .add_route(Ipv4Route::new("10.99.2.0", 24).gateway(Ipv4Addr::new(10, 99, 0, 3)))
-        .add_route(Ipv4Route::new("10.99.3.0", 24).gateway(Ipv4Addr::new(10, 99, 0, 4)))
+        .add_route(
+            Ipv4Route::new(Ipv4Addr::new(10, 99, 1, 0), 24).gateway(Ipv4Addr::new(10, 99, 0, 2)),
+        )
+        .add_route(
+            Ipv4Route::new(Ipv4Addr::new(10, 99, 2, 0), 24).gateway(Ipv4Addr::new(10, 99, 0, 3)),
+        )
+        .add_route(
+            Ipv4Route::new(Ipv4Addr::new(10, 99, 3, 0), 24).gateway(Ipv4Addr::new(10, 99, 0, 4)),
+        )
         .execute()
         .await?;
 

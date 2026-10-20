@@ -1278,7 +1278,7 @@ conn.add_nexthop_group(
 
 // Use nexthop group in route
 conn.add_route(
-    Ipv4Route::new("10.0.0.0", 8)
+    Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8)
         .nexthop_group(100)
 ).await?;
 
@@ -1307,7 +1307,7 @@ let conn = Connection::<Route>::new()?;
 
 // IP route with MPLS encapsulation (push label)
 conn.add_route(
-    Ipv4Route::new("10.0.0.0", 8)
+    Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8)
         .gateway(Ipv4Addr::new(192, 168, 1, 1))
         .dev("eth0")
         .mpls_encap(MplsEncap::new().label(100))
@@ -1315,7 +1315,7 @@ conn.add_route(
 
 // Push label stack (outer to inner)
 conn.add_route(
-    Ipv4Route::new("10.1.0.0", 16)
+    Ipv4Route::new(Ipv4Addr::new(10, 1, 0, 0), 16)
         .gateway(Ipv4Addr::new(192, 168, 1, 1))
         .mpls_encap(MplsEncap::new().labels(&[100, 200, 300]).ttl(64))
 ).await?;
@@ -1348,13 +1348,13 @@ for route in conn.get_mpls_routes().await? {
 use nlink::netlink::{Connection, Route};
 use nlink::netlink::srv6::{Srv6Encap, Srv6LocalBuilder};
 use nlink::netlink::route::{Ipv4Route, Ipv6Route};
-use std::net::Ipv6Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 let conn = Connection::<Route>::new()?;
 
 // IPv4 route with SRv6 encapsulation
 conn.add_route(
-    Ipv4Route::new("10.0.0.0", 8)
+    Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8)
         .dev("eth0")
         .srv6_encap(
             Srv6Encap::encap()
@@ -1364,7 +1364,7 @@ conn.add_route(
 
 // SRv6 with segment list
 conn.add_route(
-    Ipv4Route::new("10.1.0.0", 16)
+    Ipv4Route::new(Ipv4Addr::new(10, 1, 0, 0), 16)
         .dev("eth0")
         .srv6_encap(
             Srv6Encap::encap()

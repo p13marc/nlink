@@ -78,7 +78,7 @@ async fn main() -> nlink::Result<()> {
 
     // Push single MPLS label onto IP packets
     conn.add_route(
-        Ipv4Route::new("10.0.0.0", 8)
+        Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8)
             .gateway(Ipv4Addr::new(192, 168, 1, 1))
             .dev("eth0")
             .mpls_encap(MplsEncap::new().label(100))
@@ -91,7 +91,7 @@ async fn main() -> nlink::Result<()> {
         r#"
     // Push multiple labels (outer to inner)
     conn.add_route(
-        Ipv4Route::new("10.1.0.0", 16)
+        Ipv4Route::new(Ipv4Addr::new(10, 1, 0, 0), 16)
             .gateway(Ipv4Addr::new(192, 168, 1, 1))
             .mpls_encap(
                 MplsEncap::new()
@@ -165,7 +165,7 @@ async fn main() -> nlink::Result<()> {
 
     // Penultimate hop popping (PHP)
     conn.add_route(
-        Ipv4Route::new("10.2.0.0", 16)
+        Ipv4Route::new(Ipv4Addr::new(10, 2, 0, 0), 16)
             .gateway(Ipv4Addr::new(192, 168, 1, 1))
             .mpls_encap(MplsEncap::new().label(implicit_null.0))
     ).await?;

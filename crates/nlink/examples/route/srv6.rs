@@ -64,7 +64,7 @@ async fn main() -> nlink::Result<()> {
 
     // Encapsulate IPv4 traffic in SRv6 (IPv4oIPv6)
     conn.add_route(
-        Ipv4Route::new("10.0.0.0", 8)
+        Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8)
             .dev("eth0")
             .srv6_encap(
                 Srv6Encap::encap()
@@ -74,7 +74,7 @@ async fn main() -> nlink::Result<()> {
 
     // With multiple segments (segment list)
     conn.add_route(
-        Ipv4Route::new("10.1.0.0", 16)
+        Ipv4Route::new(Ipv4Addr::new(10, 1, 0, 0), 16)
             .dev("eth0")
             .srv6_encap(
                 Srv6Encap::encap()
@@ -94,7 +94,7 @@ async fn main() -> nlink::Result<()> {
 
     // Insert SRH into existing IPv6 packet (no outer header)
     conn.add_route(
-        Ipv6Route::new("2001:db8::", 32)
+        Ipv6Route::new(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32)
             .dev("eth0")
             .srv6_encap(
                 Srv6Encap::inline()

@@ -134,7 +134,7 @@ async fn main() -> nlink::Result<()> {
 
     // Add route using nexthop group
     conn.add_route(
-        Ipv4Route::new("10.0.0.0", 8)
+        Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8)
             .nexthop_group(100)  // Reference group ID
     ).await?;
 "#

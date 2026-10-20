@@ -189,7 +189,10 @@ async fn errors_name_the_namespace_they_came_from() -> nlink::Result<()> {
     };
 
     // The namespace has no route anywhere: the kernel refuses this.
-    let route = || Ipv4Route::new("10.1.0.0", 16).gateway(std::net::Ipv4Addr::new(192, 0, 2, 1));
+    let route = || {
+        Ipv4Route::new(std::net::Ipv4Addr::new(10, 1, 0, 0), 16)
+            .gateway(std::net::Ipv4Addr::new(192, 0, 2, 1))
+    };
     let conn = Connection::<Route>::new_in(&netns)?;
     let refused = conn.add_route(route()).await.unwrap_err();
     assert!(refused.errno().is_some(), "{refused}");

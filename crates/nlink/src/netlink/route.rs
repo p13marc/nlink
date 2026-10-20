@@ -14,25 +14,25 @@
 //!
 //! // Add a simple route via gateway
 //! conn.add_route(
-//!     Ipv4Route::new("192.168.2.0", 24)
+//!     Ipv4Route::new(Ipv4Addr::new(192, 168, 2, 0), 24)
 //!         .gateway(Ipv4Addr::new(192, 168, 1, 1))
 //! ).await?;
 //!
 //! // Add a route via interface
 //! conn.add_route(
-//!     Ipv4Route::new("10.0.0.0", 8)
+//!     Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8)
 //!         .dev("eth0")
 //! ).await?;
 //!
 //! // Add a route via interface index (namespace-safe)
 //! conn.add_route(
-//!     Ipv4Route::new("10.0.0.0", 8)
+//!     Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8)
 //!         .dev_index(5)
 //! ).await?;
 //!
 //! // Add a multipath route (ECMP)
 //! conn.add_route(
-//!     Ipv4Route::new("0.0.0.0", 0)
+//!     Ipv4Route::new(Ipv4Addr::UNSPECIFIED, 0)
 //!         .multipath(vec![
 //!             NextHop::new().gateway_v4(Ipv4Addr::new(192, 168, 1, 1)).dev("eth0").weight(1),
 //!             NextHop::new().gateway_v4(Ipv4Addr::new(192, 168, 2, 1)).dev("eth1").weight(1),
@@ -41,12 +41,12 @@
 //!
 //! // Add a blackhole route
 //! conn.add_route(
-//!     Ipv4Route::new("10.255.0.0", 16)
+//!     Ipv4Route::new(Ipv4Addr::new(10, 255, 0, 0), 16)
 //!         .route_type(RouteType::Blackhole)
 //! ).await?;
 //!
 //! // Delete a route
-//! conn.del_route_v4("192.168.2.0", 24).await?;
+//! conn.del_route_v4(Ipv4Addr::new(192, 168, 2, 0), 24).await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -450,21 +450,21 @@ impl Default for NextHop {
 /// use std::net::Ipv4Addr;
 ///
 /// // Simple gateway route
-/// let route = Ipv4Route::new("192.168.2.0", 24)
+/// let route = Ipv4Route::new(Ipv4Addr::new(192, 168, 2, 0), 24)
 ///     .gateway(Ipv4Addr::new(192, 168, 1, 1));
 ///
 /// // Route with metrics
-/// let route = Ipv4Route::new("10.0.0.0", 8)
+/// let route = Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8)
 ///     .dev("eth0")
 ///     .metrics(RouteMetrics::new().mtu(1400));
 ///
 /// // Route with interface by index (namespace-safe)
-/// let route = Ipv4Route::new("10.0.0.0", 8)
+/// let route = Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8)
 ///     .dev_index(5)
 ///     .metrics(RouteMetrics::new().mtu(1400));
 ///
 /// // Route using a nexthop group (Linux 5.3+)
-/// let route = Ipv4Route::new("10.0.0.0", 8)
+/// let route = Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8)
 ///     .nexthop_group(100);  // Reference nexthop group ID 100
 ///
 /// conn.add_route(route).await?;
@@ -511,24 +511,32 @@ pub struct Ipv4Route {
 
 impl Ipv4Route {
     /// Build the default IPv4 route (`0.0.0.0/0`). Equivalent
-    /// to [`Ipv4Route::new`]`("0.0.0.0", 0)` but self-documenting.
-    /// Plan 184.
+    /// to [`Ipv4Route::new`]`(Ipv4Addr::UNSPECIFIED, 0)` but
+    /// self-documenting. Plan 184.
     pub fn default_route() -> Self {
-        Self::new("0.0.0.0", 0)
+        Self::new(Ipv4Addr::UNSPECIFIED, 0)
     }
 
     /// Create a new IPv4 route configuration.
     ///
     /// # Arguments
     ///
-    /// * `destination` - Destination network (e.g., "192.168.1.0" or "0.0.0.0" for default)
+    /// * `destination` - Destination network (e.g. `Ipv4Addr::new(192, 168, 1, 0)`,
+    ///   or [`Ipv4Addr::UNSPECIFIED`] for the default route)
     /// * `prefix_len` - Prefix length (0-32)
-    pub fn new(destination: impl Into<String>, prefix_len: u8) -> Self {
-        let dest_str = destination.into();
-        let dest = dest_str.parse().unwrap_or(Ipv4Addr::UNSPECIFIED);
-
+    ///
+    /// The destination is an address, not a string (#881). A string that
+    /// failed to parse used to become `0.0.0.0` with no error, and with
+    /// prefix 0 that is the default route. A caller holding a string parses
+    /// it and handles the error:
+    ///
+    /// ```compile_fail
+    /// # use nlink::netlink::route::Ipv4Route;
+    /// let route = Ipv4Route::new("10.0.0.0", 8);
+    /// ```
+    pub fn new(destination: Ipv4Addr, prefix_len: u8) -> Self {
         Self {
-            destination: dest,
+            destination,
             prefix_len,
             gateway: None,
             via6: None,
@@ -687,6 +695,7 @@ impl Ipv4Route {
     /// # use nlink::Ipv4Route;
     /// # use nlink::netlink::nexthop::NexthopGroupBuilder;
     /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// # use std::net::Ipv4Addr;
     /// // First, create a nexthop group
     /// conn.add_nexthop_group(
     ///     NexthopGroupBuilder::new(100)
@@ -696,7 +705,7 @@ impl Ipv4Route {
     ///
     /// // Then use it in a route
     /// conn.add_route(
-    ///     Ipv4Route::new("10.0.0.0", 8)
+    ///     Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8)
     ///         .nexthop_group(100)
     /// ).await?;
     /// # Ok(())
@@ -717,16 +726,17 @@ impl Ipv4Route {
     ///
     /// ```no_run
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use std::net::Ipv4Addr;
     /// use nlink::netlink::route::Ipv4Route;
     /// use nlink::netlink::mpls::MplsEncap;
     ///
     /// // Push a single label
-    /// let route = Ipv4Route::new("10.0.0.0", 8)
+    /// let route = Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8)
     ///     .gateway("192.168.1.1".parse()?)
     ///     .mpls_encap(MplsEncap::new().label(100));
     ///
     /// // Push a label stack
-    /// let route = Ipv4Route::new("10.0.0.0", 8)
+    /// let route = Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8)
     ///     .gateway("192.168.1.1".parse()?)
     ///     .mpls_encap(MplsEncap::new().labels(&[100, 200]));
     /// # Ok(())
@@ -745,11 +755,12 @@ impl Ipv4Route {
     ///
     /// ```no_run
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use std::net::Ipv4Addr;
     /// use nlink::netlink::route::Ipv4Route;
     /// use nlink::netlink::srv6::Srv6Encap;
     ///
     /// // Encapsulate IPv4 traffic in SRv6
-    /// let route = Ipv4Route::new("10.0.0.0", 8)
+    /// let route = Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8)
     ///     .dev("eth0")
     ///     .srv6_encap(
     ///         Srv6Encap::encap()
@@ -1049,19 +1060,24 @@ pub struct Ipv6Route {
 
 impl Ipv6Route {
     /// Build the default IPv6 route (`::/0`). Equivalent to
-    /// [`Ipv6Route::new`]`("::", 0)` but self-documenting.
-    /// Plan 184.
+    /// [`Ipv6Route::new`]`(Ipv6Addr::UNSPECIFIED, 0)` but
+    /// self-documenting. Plan 184.
     pub fn default_route() -> Self {
-        Self::new("::", 0)
+        Self::new(Ipv6Addr::UNSPECIFIED, 0)
     }
 
     /// Create a new IPv6 route configuration.
-    pub fn new(destination: impl Into<String>, prefix_len: u8) -> Self {
-        let dest_str = destination.into();
-        let dest = dest_str.parse().unwrap_or(Ipv6Addr::UNSPECIFIED);
-
+    ///
+    /// The destination is an address, not a string (#881): a string that
+    /// failed to parse used to become `::` with no error.
+    ///
+    /// ```compile_fail
+    /// # use nlink::netlink::route::Ipv6Route;
+    /// let route = Ipv6Route::new("2001:db8::", 32);
+    /// ```
+    pub fn new(destination: Ipv6Addr, prefix_len: u8) -> Self {
         Self {
-            destination: dest,
+            destination,
             prefix_len,
             gateway: None,
             prefsrc: None,
@@ -1231,11 +1247,12 @@ impl Ipv6Route {
     ///
     /// ```no_run
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use std::net::Ipv6Addr;
     /// use nlink::netlink::route::Ipv6Route;
     /// use nlink::netlink::srv6::Srv6Encap;
     ///
     /// // Inline mode (insert SRH into IPv6 packet)
-    /// let route = Ipv6Route::new("2001:db8::", 32)
+    /// let route = Ipv6Route::new(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32)
     ///     .dev("eth0")
     ///     .srv6_encap(
     ///         Srv6Encap::inline()
@@ -1243,7 +1260,7 @@ impl Ipv6Route {
     ///     );
     ///
     /// // Encap mode (add outer IPv6 header with SRH)
-    /// let route = Ipv6Route::new("2001:db8::", 32)
+    /// let route = Ipv6Route::new(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32)
     ///     .dev("eth0")
     ///     .srv6_encap(
     ///         Srv6Encap::encap()
@@ -1591,19 +1608,19 @@ impl Connection<Route> {
     ///
     /// // Add IPv4 route
     /// conn.add_route(
-    ///     Ipv4Route::new("192.168.2.0", 24)
+    ///     Ipv4Route::new(Ipv4Addr::new(192, 168, 2, 0), 24)
     ///         .gateway(Ipv4Addr::new(192, 168, 1, 1))
     /// ).await?;
     ///
     /// // Add IPv6 route
     /// conn.add_route(
-    ///     Ipv6Route::new("2001:db8:2::", 48)
+    ///     Ipv6Route::new(Ipv6Addr::new(0x2001, 0xdb8, 2, 0, 0, 0, 0, 0), 48)
     ///         .gateway("2001:db8::1".parse()?)
     /// ).await?;
     ///
     /// // Add route with interface by index (namespace-safe)
     /// conn.add_route(
-    ///     Ipv4Route::new("10.0.0.0", 8)
+    ///     Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8)
     ///         .dev_index(5)
     /// ).await?;
     /// # Ok(())
@@ -1652,9 +1669,10 @@ impl Connection<Route> {
     /// ```no_run
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let conn = nlink::Connection::<nlink::Route>::new()?;
+    /// use std::net::Ipv4Addr;
     /// use nlink::netlink::route::Ipv4Route;
     /// let gone = conn
-    ///     .del_route_if_exists(Ipv4Route::new("10.2.0.0", 24).dev("eth1").table(100))
+    ///     .del_route_if_exists(Ipv4Route::new(Ipv4Addr::new(10, 2, 0, 0), 24).dev("eth1").table(100))
     ///     .await?;
     /// # let _ = gone;
     /// # Ok(())
@@ -1678,19 +1696,20 @@ impl Connection<Route> {
     /// ```no_run
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let conn = nlink::Connection::<nlink::Route>::new()?;
-    /// conn.del_route_v4("192.168.2.0", 24).await?;
+    /// # use std::net::Ipv4Addr;
+    /// conn.del_route_v4(Ipv4Addr::new(192, 168, 2, 0), 24).await?;
     /// # Ok(())
     /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_route_v4"))]
-    pub async fn del_route_v4(&self, destination: &str, prefix_len: u8) -> Result<()> {
+    pub async fn del_route_v4(&self, destination: Ipv4Addr, prefix_len: u8) -> Result<()> {
         let route = Ipv4Route::new(destination, prefix_len);
         self.del_route(route).await
     }
 
     /// Delete an IPv6 route by destination.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_route_v6"))]
-    pub async fn del_route_v6(&self, destination: &str, prefix_len: u8) -> Result<()> {
+    pub async fn del_route_v6(&self, destination: Ipv6Addr, prefix_len: u8) -> Result<()> {
         let route = Ipv6Route::new(destination, prefix_len);
         self.del_route(route).await
     }
@@ -1700,7 +1719,11 @@ impl Connection<Route> {
     /// [`Self::del_route_v4`], does NOT error on `ESRCH`/`ENOENT`
     /// (#169; mirrors the nftables `del_*_if_exists` family).
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_route_v4_if_exists"))]
-    pub async fn del_route_v4_if_exists(&self, destination: &str, prefix_len: u8) -> Result<bool> {
+    pub async fn del_route_v4_if_exists(
+        &self,
+        destination: Ipv4Addr,
+        prefix_len: u8,
+    ) -> Result<bool> {
         match self.del_route_v4(destination, prefix_len).await {
             Ok(()) => Ok(true),
             // A delete that matches nothing is ESRCH, which `is_not_found()`
@@ -1713,7 +1736,11 @@ impl Connection<Route> {
     /// Delete an IPv6 route if it exists. See
     /// [`Self::del_route_v4_if_exists`].
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_route_v6_if_exists"))]
-    pub async fn del_route_v6_if_exists(&self, destination: &str, prefix_len: u8) -> Result<bool> {
+    pub async fn del_route_v6_if_exists(
+        &self,
+        destination: Ipv6Addr,
+        prefix_len: u8,
+    ) -> Result<bool> {
         match self.del_route_v6(destination, prefix_len).await {
             Ok(()) => Ok(true),
             // A delete that matches nothing is ESRCH, which `is_not_found()`
@@ -1761,17 +1788,15 @@ mod tests {
 
     #[test]
     fn default_route_equals_explicit_new() {
-        // Same destination/prefix as the iproute2-muscle-memory
-        // form. Documents the equivalence + guards against silent
-        // drift if the underlying `new()` ever stops treating
-        // "0.0.0.0"/"::" as the unspecified address.
+        // Same destination/prefix as the explicit form. Documents the
+        // equivalence.
         assert_eq!(
             Ipv4Route::default_route().destination,
-            Ipv4Route::new("0.0.0.0", 0).destination
+            Ipv4Route::new(Ipv4Addr::UNSPECIFIED, 0).destination
         );
         assert_eq!(
             Ipv6Route::default_route().destination,
-            Ipv6Route::new("::", 0).destination
+            Ipv6Route::new(Ipv6Addr::UNSPECIFIED, 0).destination
         );
     }
 }
