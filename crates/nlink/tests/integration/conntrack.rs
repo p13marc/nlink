@@ -13,11 +13,15 @@
 
 use std::{net::Ipv4Addr, time::Duration};
 
-use nlink::netlink::{
-    Connection, Netfilter,
-    netfilter::{
-        ConntrackBuilder, ConntrackEvent, ConntrackGroup, ConntrackStatus, ConntrackTuple,
-        IpProtocol, TcpConntrackState,
+use nlink::{
+    ErrorKind,
+    netlink::{
+        Connection, Netfilter,
+        netfilter::{
+            ConntrackBuilder, ConntrackEvent, ConntrackGroup, ConntrackStatus, ConntrackTuple,
+            IpProtocol, TcpConntrackState,
+        },
+        types::AddressFamily,
     },
 };
 use tokio_stream::StreamExt;
@@ -150,43 +154,141 @@ async fn ct_update_changes_mark_in_place() -> nlink::Result<()> {
     Ok(())
 }
 
+/// A UDP entry `10.0.0.1:sport -> 10.0.0.2:dport`, or the same between
+/// `fd00::1` and `fd00::2`, ready for `add_conntrack`.
+fn udp_entry(v6: bool, sport: u16, dport: u16) -> ConntrackBuilder {
+    let builder = if v6 {
+        ConntrackBuilder::new_v6(IpProtocol::Udp).orig(
+            ConntrackTuple::v6("fd00::1".parse().unwrap(), "fd00::2".parse().unwrap())
+                .ports(sport, dport),
+        )
+    } else {
+        ConntrackBuilder::new_v4(IpProtocol::Udp).orig(
+            ConntrackTuple::v4(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2))
+                .ports(sport, dport),
+        )
+    };
+    builder
+        .status(ConntrackStatus::CONFIRMED)
+        .timeout(Duration::from_secs(120))
+}
+
+/// Every entry in the namespace, both families, as `(family, dport, zone)`,
+/// sorted.
+async fn ct_inventory(
+    nf: &Connection<Netfilter>,
+) -> nlink::Result<Vec<(AddressFamily, u16, Option<u16>)>> {
+    let mut all = nf.get_conntrack().await?;
+    all.extend(nf.get_conntrack_v6().await?);
+    let mut v: Vec<_> = all
+        .iter()
+        .map(|e| (e.family, e.orig.dst_port.unwrap_or(0), e.zone))
+        .collect();
+    v.sort_by_key(|&(f, port, zone)| (u8::from(f), port, zone));
+    Ok(v)
+}
+
+/// Deleting one entry leaves every other one: another entry of its
+/// family, an entry of the other family, and the same tuple in another
+/// zone (#878). `del_conntrack_by_id` sent the id alone, which the kernel
+/// takes for a flush, and the test it had held only the entry it deleted.
 #[tokio::test]
-async fn ct_del_by_id_removes_entry() -> nlink::Result<()> {
+async fn ct_delete_entry_removes_only_that_entry() -> nlink::Result<()> {
     nlink::require_root!();
     nlink::require_module!("nf_conntrack");
     nlink::require_module!("nf_conntrack_netlink");
 
-    let ns = TestNamespace::new("ct-del")?;
+    let ns = TestNamespace::new("ct-del-entry")?;
     let nf = nf_in_ns(&ns)?;
 
-    let orig =
-        ConntrackTuple::v4(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)).ports(40002, 82);
+    nf.add_conntrack(udp_entry(false, 40002, 82)).await?;
+    nf.add_conntrack(udp_entry(false, 40002, 83)).await?;
+    nf.add_conntrack(udp_entry(false, 40002, 82).zone(7))
+        .await?;
+    nf.add_conntrack(udp_entry(true, 40002, 82)).await?;
 
-    nf.add_conntrack(
-        ConntrackBuilder::new_v4(IpProtocol::Tcp)
-            .orig(orig)
-            .status(ConntrackStatus::CONFIRMED | ConntrackStatus::SEEN_REPLY)
-            .timeout(Duration::from_secs(120))
-            .tcp_state(TcpConntrackState::Established),
-    )
-    .await?;
-
-    let entries = nf.get_conntrack().await?;
-    let id = entries
-        .iter()
-        .find(|e| e.orig.src_port == Some(40002) && e.orig.dst_port == Some(82))
-        .and_then(|e| e.id)
-        .expect("just-added entry has an id");
-
-    nf.del_conntrack_by_id(id).await?;
-
-    let after = nf.get_conntrack().await?;
-    assert!(
-        !after
-            .iter()
-            .any(|e| e.orig.src_port == Some(40002) && e.orig.dst_port == Some(82)),
-        "entry should be gone after del_conntrack_by_id"
+    let (v4, v6) = (AddressFamily::Inet, AddressFamily::Inet6);
+    assert_eq!(
+        ct_inventory(&nf).await?,
+        [
+            (v4, 82, None),
+            (v4, 82, Some(7)),
+            (v4, 83, None),
+            (v6, 82, None)
+        ],
+        "a dump reads each entry's family and zone"
     );
+
+    // The zone-7 twin, then the IPv6 entry, each from the dump.
+    let zoned = nf
+        .get_conntrack()
+        .await?
+        .into_iter()
+        .find(|e| e.zone == Some(7))
+        .expect("the zone-7 entry is in the dump");
+    nf.del_conntrack_entry(&zoned).await?;
+    assert_eq!(
+        ct_inventory(&nf).await?,
+        [(v4, 82, None), (v4, 83, None), (v6, 82, None)],
+        "only the zone-7 entry is gone"
+    );
+
+    let v6_entry = nf.get_conntrack_v6().await?.pop().expect("the IPv6 entry");
+    nf.del_conntrack_entry(&v6_entry).await?;
+    assert_eq!(
+        ct_inventory(&nf).await?,
+        [(v4, 82, None), (v4, 83, None)],
+        "only the IPv6 entry is gone"
+    );
+
+    Ok(())
+}
+
+/// The delete carries the entry's id, and the kernel checks it: an entry
+/// replaced by another flow with the same tuple is not deleted in its
+/// place.
+#[tokio::test]
+async fn ct_delete_entry_checks_the_id() -> nlink::Result<()> {
+    nlink::require_root!();
+    nlink::require_module!("nf_conntrack");
+    nlink::require_module!("nf_conntrack_netlink");
+
+    let ns = TestNamespace::new("ct-del-id")?;
+    let nf = nf_in_ns(&ns)?;
+    nf.add_conntrack(udp_entry(false, 40003, 84)).await?;
+
+    let entry = nf.get_conntrack().await?.pop().expect("the entry");
+    let mut stale = entry.clone();
+    stale.id = Some(entry.id.expect("the kernel reports an id").wrapping_add(1));
+    let err = nf.del_conntrack_entry(&stale).await.unwrap_err();
+    assert!(err.is_not_found(), "a mismatched id is ENOENT: {err}");
+    assert_eq!(nf.get_conntrack().await?.len(), 1, "the entry survives");
+
+    nf.del_conntrack_entry(&entry).await?;
+    assert!(nf.get_conntrack().await?.is_empty());
+
+    Ok(())
+}
+
+/// A delete with no tuple is refused before it is sent: ctnetlink takes
+/// one for a flush of the whole table (#878).
+#[tokio::test]
+async fn ct_delete_without_a_tuple_is_refused() -> nlink::Result<()> {
+    nlink::require_root!();
+    nlink::require_module!("nf_conntrack");
+    nlink::require_module!("nf_conntrack_netlink");
+
+    let ns = TestNamespace::new("ct-del-empty")?;
+    let nf = nf_in_ns(&ns)?;
+    nf.add_conntrack(udp_entry(false, 40004, 85)).await?;
+    nf.add_conntrack(udp_entry(true, 40004, 85)).await?;
+
+    let err = nf
+        .del_conntrack(ConntrackBuilder::new_v4(IpProtocol::Udp))
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Invalid, "{err}");
+    assert_eq!(ct_inventory(&nf).await?.len(), 2, "nothing was flushed");
 
     Ok(())
 }

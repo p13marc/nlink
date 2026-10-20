@@ -183,21 +183,20 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
         e
     })?;
 
-    // Look up the kernel-assigned ID so we can delete by ID.
+    // Find the entry in a dump, to delete exactly that one.
     let entries = act.get_conntrack().await?;
-    let id = entries
+    let entry = entries
         .iter()
         .find(|e| {
             e.proto == IpProtocol::Tcp
                 && e.orig.src_port == Some(40000)
                 && e.orig.dst_port == Some(80)
         })
-        .and_then(|e| e.id)
         .ok_or_else(|| nlink::Error::invalid_message("injected entry not in dump"))?;
 
-    // Step 2: delete by ID → should emit a DESTROY notification.
-    println!("  Step 2: delete by id ({id}) — expect a DESTROY event");
-    act.del_conntrack_by_id(id).await?;
+    // Step 2: delete it → should emit a DESTROY notification.
+    println!("  Step 2: delete the dumped entry — expect a DESTROY event");
+    act.del_conntrack_entry(entry).await?;
 
     // Drain the collector. It will time out 3s after we spawned it.
     let collected = collector

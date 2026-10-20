@@ -2,8 +2,8 @@
 //!
 //! Demonstrates the ctnetlink mutation API on top of the existing dump
 //! path: inject a synthetic TCP entry, query it back, update mark +
-//! timeout in place, delete by ID, inject a UDP entry, delete it by
-//! tuple, then flush.
+//! timeout in place, delete the dumped entry, inject a UDP entry,
+//! delete it by tuple, then flush.
 //!
 //! Run modes:
 //!
@@ -91,8 +91,8 @@ fn print_overview() {
     let entries = nf.get_conntrack().await?;
     let injected = entries.iter().find(|e| e.orig.dst_port == Some(80)).unwrap();
 
-    // Evict by ID — cheapest path when you've just dumped.
-    nf.del_conntrack_by_id(injected.id.unwrap()).await?;
+    // Delete exactly that entry: its tuple, zone and id.
+    nf.del_conntrack_entry(injected).await?;
 "#
     );
 
@@ -199,10 +199,10 @@ async fn run_demo(ns_name: &str) -> nlink::Result<()> {
     );
     assert_eq!(updated.mark, Some(0x99), "updated mark should round-trip");
 
-    // 4. Delete by ID.
+    // 4. Delete the dumped entry: its tuple, zone and id.
     println!();
-    println!("  Step 4: delete by id ({id})");
-    nf.del_conntrack_by_id(id).await?;
+    println!("  Step 4: delete the dumped entry (id {id})");
+    nf.del_conntrack_entry(&updated).await?;
     let still_there = find_entry(&nf, IpProtocol::Tcp, 40000, 80).await.ok();
     assert!(still_there.is_none(), "entry should be gone after delete");
     println!("    confirmed: TCP entry no longer in dump");
