@@ -530,6 +530,10 @@ impl ConntrackBuilder {
     /// [`Connection::del_conntrack`] needs, and what
     /// [`Connection::del_conntrack_entry`] sends.
     ///
+    /// It names the entry; it does not copy it. The reply tuple, status,
+    /// mark, timeout and TCP state stay unset, so set what an
+    /// `update_conntrack` should change.
+    ///
     /// An entry with no family (one not from the kernel) takes it from
     /// its original tuple's addresses.
     pub fn from_entry(entry: &ConntrackEntry) -> Self {

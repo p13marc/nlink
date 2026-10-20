@@ -290,6 +290,23 @@ async fn ct_delete_without_a_tuple_is_refused() -> nlink::Result<()> {
     assert_eq!(err.kind(), ErrorKind::Invalid, "{err}");
     assert_eq!(ct_inventory(&nf).await?.len(), 2, "nothing was flushed");
 
+    // A partial tuple is sent, and the kernel takes it for a lookup, not
+    // a flush: `CTA_TUPLE_ORIG` is there, so it parses the tuple and
+    // refuses it.
+    let partial = ConntrackTuple {
+        dst_port: Some(85),
+        ..ConntrackTuple::default()
+    };
+    let err = nf
+        .del_conntrack(ConntrackBuilder::new_v4(IpProtocol::Udp).orig(partial))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        ct_inventory(&nf).await?.len(),
+        2,
+        "a partial tuple flushed nothing ({err})"
+    );
+
     Ok(())
 }
 
