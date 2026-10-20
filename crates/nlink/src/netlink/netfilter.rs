@@ -715,7 +715,14 @@ impl ConntrackTuple {
 
 /// Append the 4-byte nfgenmsg header onto a request builder.
 fn append_nfgenmsg(b: &mut MessageBuilder, family: u8) {
-    b.append_bytes(&[family, 0, 0, 0]); // family, version=NFNETLINK_V0, res_id=0
+    append_nfgenmsg_version(b, family, 0); // NFNETLINK_V0
+}
+
+/// [`append_nfgenmsg`] with an explicit version. ctnetlink reads it on a
+/// flush, where only a version that is not 0 makes it honour the family
+/// (#880). The headers name no version but `NFNETLINK_V0`.
+fn append_nfgenmsg_version(b: &mut MessageBuilder, family: u8, version: u8) {
+    b.append_bytes(&[family, version, 0, 0]); // family, version, res_id=0
 }
 
 /// Append a `CTA_TUPLE_*` nested attribute (one of `CTA_TUPLE_ORIG` /
@@ -955,8 +962,8 @@ impl Connection<Netfilter> {
         // Version 1, not NFNETLINK_V0: a flush honours `nfgen_family` only
         // when the version is not 0, and with 0 flushes every family
         // (`ctnetlink_del_conntrack`, kept that way for old userspace,
-        // #880). There is no header constant for 1.
-        b.append_bytes(&[family, 1, 0, 0]);
+        // #880).
+        append_nfgenmsg_version(&mut b, family, 1);
         self.send_ack(b).await
     }
 
