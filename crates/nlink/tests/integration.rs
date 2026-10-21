@@ -186,6 +186,11 @@ mod nftables_safety;
 #[path = "integration/nftables_statements.rs"]
 mod nftables_statements;
 
+// #708: a rule read back as `nft list` prints it, with nft as the oracle,
+// for what nft installs and for what nlink builds.
+#[path = "integration/nftables_lift.rs"]
+mod nftables_lift;
+
 // Every rule shape nlink writes must reconcile to an empty diff: the kernel
 // echoes some attributes whether or not they were sent, and drops others.
 #[path = "integration/nftables_echo.rs"]

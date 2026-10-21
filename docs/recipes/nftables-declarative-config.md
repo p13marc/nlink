@@ -344,6 +344,24 @@ if !diff.is_empty() {
 # }
 ```
 
+Each rule line of the diff ends with the rule as `nft list` prints it,
+`+ rule Inet filter/input [ssh]: tcp dport 22 accept` (#708). The rules in
+the kernel print the same way, through `RuleInfo::nft_syntax`, which is
+`None` for the rare rule nlink cannot print exactly as nft would (an
+anonymous set, an expression it does not decode):
+
+```rust,no_run
+# use nlink::{Connection, Nftables};
+# use nlink::netlink::nftables::types::Family;
+# async fn show(conn: &Connection<Nftables>) -> nlink::Result<()> {
+for rule in conn.list_rules("filter", Family::Inet).await? {
+    let text = rule.nft_syntax().unwrap_or_else(|| "<not printable>".into());
+    println!("{}: {text} # handle {}", rule.chain, rule.handle);
+}
+# Ok(())
+# }
+```
+
 ## Loading from a config file
 
 ### From the CLI — `nft reconcile` / `nft diff`

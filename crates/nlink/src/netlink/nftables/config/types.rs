@@ -946,13 +946,18 @@ pub struct DeclaredRule {
     pub(crate) chain: String,
     pub(crate) family: Family,
     pub(crate) handle_key: Option<String>,
-    // Plan 189: skip the expression body in JSON output —
-    // the Expr tree is wire-format detail. Consumers can
-    // call `body()` programmatically for the Rust value (it has
-    // `Debug`, not `Display`). See §"Plan 189" of the migration
-    // guide.
-    #[cfg_attr(feature = "serde", serde(skip))]
+    /// In JSON, the rule as `nft list` prints it, or `null` where nlink
+    /// cannot print it (#708). The `Expr` tree itself is wire-format detail
+    /// (Plan 189); `body()` returns it.
+    #[cfg_attr(feature = "serde", serde(rename = "nft", serialize_with = "nft_text"))]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
     pub(crate) body: Rule,
+}
+
+/// A rule body as its `nft` text.
+#[cfg(feature = "serde")]
+fn nft_text<S: serde::Serializer>(body: &Rule, s: S) -> std::result::Result<S::Ok, S::Error> {
+    serde::Serialize::serialize(&body.nft_syntax(), s)
 }
 
 impl DeclaredRule {

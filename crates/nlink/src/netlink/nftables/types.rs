@@ -2241,6 +2241,27 @@ impl Rule {
         self.comment.as_deref()
     }
 
+    /// The rule as `nft list ruleset` will print it once installed, in its
+    /// family's table: `Rule::new("t", "c").match_tcp_dport(22).accept()`
+    /// is `tcp dport 22 accept` (#708). `None` where
+    /// [`RuleInfo::nft_syntax`] would be.
+    ///
+    /// ```
+    /// use nlink::netlink::nftables::Rule;
+    ///
+    /// let rule = Rule::new("t", "c").match_tcp_dport(22).counter().accept();
+    /// assert_eq!(
+    ///     rule.nft_syntax().as_deref(),
+    ///     Some("tcp dport 22 counter packets 0 bytes 0 accept")
+    /// );
+    /// ```
+    pub fn nft_syntax(&self) -> Option<String> {
+        let bytes = super::config::lower_to_expression_bytes(self);
+        let exprs = super::expr::parse_expressions(&bytes);
+        let body = super::lift::lift(&exprs, self.family)?;
+        Some(super::expr::with_comment(body, self.comment.as_deref()))
+    }
+
     /// Match TCP destination port.
     ///
     /// Generates: meta(L4PROTO) + cmp(==TCP) + payload(dport) + cmp(==port)

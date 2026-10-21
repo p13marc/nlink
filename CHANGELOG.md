@@ -203,6 +203,35 @@ All notable changes to this project will be documented in this file.
   compile failures. clippy's `future_not_send` lint cannot catch #879's
   shape: it checks modulo lifetimes, and on 0.32.0 it never fired in
   `reconcile.rs`.
+- **A rule prints as `nft list` prints it** (#708, the read half of its
+  rule model). The kernel keeps a rule as register-level expressions; until
+  now nlink could decode them, but not say what the rule matched.
+  - `RuleInfo::nft_syntax()` follows the registers as nft's
+    `netlink_delinearize.c` does. It names each header field from the
+    protocol the rule has matched so far, and drops the protocol matches
+    nft drops. It joins prefixes, flag tests and bounds the way nft does.
+  - `Rule::nft_syntax()` prints a rule before it is installed.
+  - `NftablesDiff`'s `Display` ends each rule line with the rule:
+    `+ rule Inet filter/input [ssh]: tcp dport 22 accept`. In its JSON, a
+    declared rule carries the same text as `nft` (`null` where nlink
+    cannot print it), so a `--check --json` says what changes.
+  - `nlink-nft list rules` prints them as `nft -a list chain` does. Its
+    JSON gains an `nft` field.
+
+  The result is `None`, never a guess, when a rule holds something nlink
+  cannot print exactly. That means an anonymous set (its elements are not
+  in the rule), an object map (the rule does not say the object type), or
+  an expression nlink does not decode. Two things nft looks up on the host
+  print as numbers instead: an interface index (`iif 1` where nft prints
+  `iif "lo"`), and a `dup` or `fwd` device.
+
+  nft is the oracle in `nftables_lift`. It installs a corpus of about 200
+  rules across the inet, ip, ip6, bridge and netdev families, and nlink
+  installs one rule per builder method. Every line has to print as `nft
+  list chain` prints it, under nft 1.1.3 and under nft 1.0.6 (the CI
+  lane's). The two versions print three things differently: a packet
+  limit's default burst, a masked flag match, and an ICMP code. nlink
+  prints 1.1's form, and the test turns a 1.0 line into it.
 
 ### Documentation
 
