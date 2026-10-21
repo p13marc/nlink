@@ -321,11 +321,74 @@ pub struct RuleMove {
     pub placement: RulePlacement,
     /// The rule to re-insert.
     pub rule: DeclaredRule,
+    /// The rule the kernel has at [`from`](Self::from), as `nft -s list`
+    /// prints it ([`RuleInfo::nft_syntax_stateless`]). `None` where nlink
+    /// cannot print it.
+    pub current: Option<String>,
     /// Why it moves.
     pub reason: MoveReason,
     /// See [`RuleAdd`].
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) seq: usize,
+}
+
+/// A rule in the kernel that the diff deletes.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct RuleDelete {
+    /// Owning table.
+    pub table: String,
+    /// Owning family.
+    pub family: Family,
+    /// Chain. The kernel refuses a `NFT_MSG_DELRULE` without one (`ENOENT`),
+    /// even when the handle names the rule (Plan 178).
+    pub chain: String,
+    /// Kernel handle of the rule.
+    pub handle: RuleHandle,
+    /// The rule's key, when nlink wrote it.
+    pub key: Option<String>,
+    /// The rule as `nft -s list` prints it
+    /// ([`RuleInfo::nft_syntax_stateless`]), so a log of the diff says what
+    /// it removes. `None` where nlink cannot print it.
+    pub current: Option<String>,
+}
+
+impl RuleDelete {
+    fn of(rule: &RuleInfo) -> Self {
+        Self {
+            table: rule.table.clone(),
+            family: rule.family,
+            chain: rule.chain.clone(),
+            handle: RuleHandle(rule.handle),
+            key: rule.key.clone(),
+            current: rule.nft_syntax_stateless(),
+        }
+    }
+}
+
+/// A rule replaced in place: `NFT_MSG_NEWRULE | NLM_F_REPLACE` at its
+/// handle, which keeps its place in the chain.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct RuleReplace {
+    /// Owning table.
+    pub table: String,
+    /// Owning family.
+    pub family: Family,
+    /// Chain.
+    pub chain: String,
+    /// Kernel handle of the rule replaced.
+    pub handle: RuleHandle,
+    /// The rule the kernel has now, as `nft -s list` prints it
+    /// ([`RuleInfo::nft_syntax_stateless`]). `None` where nlink cannot
+    /// print it.
+    pub current: Option<String>,
+    /// The declared rule that takes its place.
+    pub rule: DeclaredRule,
 }
 
 /// A flowtable changed in place: devices added and removed, flags set
@@ -585,23 +648,18 @@ pub struct NftablesDiff {
     pub chains_to_recreate: Vec<ChainRecreate>,
     /// Rules to add, each with its placement in the chain.
     pub rules_to_add: Vec<RuleAdd>,
-    /// Rules to delete — `(table, family, chain, kernel_handle)`.
-    /// Chain is carried explicitly because the kernel rejects a
-    /// `NFT_MSG_DELRULE` with an empty `NFTA_RULE_CHAIN` even when
-    /// `NFTA_RULE_HANDLE` is supplied (returns `ENOENT`); the
-    /// earlier (table, family, handle) shape relied on a kernel
-    /// behavior that doesn't actually hold. Plan 178 closeout.
-    pub rules_to_delete: Vec<(String, Family, String, RuleHandle)>,
-    /// Rules to replace in-place. Each entry is
-    /// `(table, family, chain, kernel_handle, replacement)` —
-    /// emits `NFT_MSG_NEWRULE | NLM_F_REPLACE | NFTA_RULE_HANDLE`
-    /// so the kernel atomically swaps the rule body at that
-    /// handle (preserves position, no flush).
+    /// Rules to delete, each with what the kernel has: its key, and the
+    /// rule as `nft -s list` prints it.
+    pub rules_to_delete: Vec<RuleDelete>,
+    /// Rules to replace in place, each with what the kernel has now and the
+    /// declared rule that takes its place. Applied as `NFT_MSG_NEWRULE |
+    /// NLM_F_REPLACE | NFTA_RULE_HANDLE`: the kernel swaps the rule body at
+    /// that handle atomically, keeping its position.
     ///
     /// Populated by [`NftablesConfig::diff`] when a declared
     /// keyed rule matches a kernel rule by `NFTA_RULE_USERDATA`
     /// comment but the expression bytes differ. Plan 157b v2.
-    pub rules_to_replace: Vec<(String, Family, String, RuleHandle, DeclaredRule)>,
+    pub rules_to_replace: Vec<RuleReplace>,
     /// Declared rules to delete and put back in place.
     ///
     /// Rules installed out of declared order move to their place. And a set
@@ -797,15 +855,31 @@ impl NftablesDiff {
                 body_suffix(r),
             ));
         }
-        for (tbl, fam, chain, h) in &self.rules_to_delete {
-            lines.push(format!("- rule {fam:?} {tbl}/{chain} (handle={})", h.0));
-        }
-        for (tbl, fam, chain, h, r) in &self.rules_to_replace {
-            let key = r.handle_key().unwrap_or("<anonymous>");
+        for d in &self.rules_to_delete {
+            let key = d
+                .key
+                .as_deref()
+                .map(|k| format!(" [{k}]"))
+                .unwrap_or_default();
+            let body = d
+                .current
+                .as_deref()
+                .map(|b| format!(": {b}"))
+                .unwrap_or_default();
             lines.push(format!(
-                "~ rule {fam:?} {tbl}/{chain} (handle={} key={key}){}",
-                h.0,
-                body_suffix(r),
+                "- rule {:?} {}/{}{key} (handle={}){body}",
+                d.family, d.table, d.chain, d.handle.0,
+            ));
+        }
+        for r in &self.rules_to_replace {
+            let key = r.rule.handle_key().unwrap_or("<anonymous>");
+            lines.push(format!(
+                "~ rule {:?} {}/{} (handle={} key={key}){}",
+                r.family,
+                r.table,
+                r.chain,
+                r.handle.0,
+                change_suffix(r.current.as_deref(), &r.rule),
             ));
         }
         for m in &self.rules_to_move {
@@ -824,7 +898,7 @@ impl NftablesDiff {
                 m.chain,
                 m.from.0,
                 placement_suffix(m.placement),
-                body_suffix(&m.rule),
+                change_suffix(m.current.as_deref(), &m.rule),
             ));
         }
         for f in &self.flowtables_to_add {
@@ -925,12 +999,23 @@ impl std::fmt::Display for NftablesDiff {
     }
 }
 
-/// `: <the rule as nft prints it>`, when nlink can print it (#708).
+/// `: <the rule as nft -s prints it>`, when nlink can print it (#708).
 fn body_suffix(rule: &DeclaredRule) -> String {
     rule.body()
-        .nft_syntax()
+        .nft_syntax_stateless()
         .map(|body| format!(": {body}"))
         .unwrap_or_default()
+}
+
+/// `: <what the kernel has> -> <what is declared>` for a rule the diff
+/// writes over, or just the declared rule when the two print the same.
+fn change_suffix(current: Option<&str>, rule: &DeclaredRule) -> String {
+    match (current, rule.body().nft_syntax_stateless()) {
+        (Some(now), Some(to)) if now != to => format!(": {now} -> {to}"),
+        (_, Some(to)) => format!(": {to}"),
+        (Some(now), None) => format!(" (now: {now})"),
+        (None, None) => String::new(),
+    }
 }
 
 /// ` (before handle=N)` / ` (after handle=N)` for a positioned rule.
@@ -1109,14 +1194,14 @@ fn keep_what_staying_rules_use(
     let (table, family) = (declared.name(), declared.family());
     let here = |t: &str, f: Family| t == table && f == family;
     let mut gone: HashSet<u64> = HashSet::new();
-    for (t, f, _, h) in &diff.rules_to_delete {
-        if here(t, *f) {
-            gone.insert(h.0);
+    for d in &diff.rules_to_delete {
+        if here(&d.table, d.family) {
+            gone.insert(d.handle.0);
         }
     }
-    for (t, f, _, h, _) in &diff.rules_to_replace {
-        if here(t, *f) {
-            gone.insert(h.0);
+    for r in &diff.rules_to_replace {
+        if here(&r.table, r.family) {
+            gone.insert(r.handle.0);
         }
     }
     for m in &diff.rules_to_move {
@@ -2166,12 +2251,7 @@ impl NftablesConfig {
                         .collect();
                     for kr in &kernel_rules {
                         if kr.key.as_deref().is_none_or(|k| !keys.contains(k)) {
-                            diff.rules_to_delete.push((
-                                declared.name().to_string(),
-                                declared.family(),
-                                chain_name.to_string(),
-                                RuleHandle(kr.handle),
-                            ));
+                            diff.rules_to_delete.push(RuleDelete::of(kr));
                         }
                     }
                     for rule in &declared_rules {
@@ -2186,6 +2266,7 @@ impl NftablesConfig {
                                 from: RuleHandle(kr.handle),
                                 placement: RulePlacement::Append,
                                 rule: (*rule).clone(),
+                                current: kr.nft_syntax_stateless(),
                                 reason: MoveReason::ChainRecreated,
                                 seq,
                             }),
@@ -2249,13 +2330,16 @@ impl NftablesConfig {
                     options.enforce_rule_order,
                 );
 
+                // What the kernel has at a handle the plan names: the planner
+                // only names the handles it was given.
+                let at = |handle: u64| {
+                    *kernel_rules
+                        .iter()
+                        .find(|kr| kr.handle == handle)
+                        .expect("a planned handle is a kernel rule's")
+                };
                 for handle in plan.deletes {
-                    diff.rules_to_delete.push((
-                        declared.name().to_string(),
-                        declared.family(),
-                        chain_name.to_string(),
-                        RuleHandle(handle),
-                    ));
+                    diff.rules_to_delete.push(RuleDelete::of(at(handle)));
                 }
                 for insert in plan.inserts {
                     let rule = declared_rules[insert.declared].clone();
@@ -2272,6 +2356,7 @@ impl NftablesConfig {
                             from: RuleHandle(from),
                             placement: insert.placement,
                             rule,
+                            current: at(from).nft_syntax_stateless(),
                             reason: insert.reason,
                             seq,
                         }),
@@ -2279,13 +2364,14 @@ impl NftablesConfig {
                     seq += 1;
                 }
                 for (handle, i) in plan.replaces {
-                    diff.rules_to_replace.push((
-                        declared.name().to_string(),
-                        declared.family(),
-                        chain_name.to_string(),
-                        RuleHandle(handle),
-                        declared_rules[i].clone(),
-                    ));
+                    diff.rules_to_replace.push(RuleReplace {
+                        table: declared.name().to_string(),
+                        family: declared.family(),
+                        chain: chain_name.to_string(),
+                        handle: RuleHandle(handle),
+                        current: at(handle).nft_syntax_stateless(),
+                        rule: declared_rules[i].clone(),
+                    });
                 }
             }
 
@@ -2306,12 +2392,7 @@ impl NftablesConfig {
                     continue;
                 }
                 for rule in current_rules.iter().filter(|r| &r.chain == chain) {
-                    diff.rules_to_delete.push((
-                        table.clone(),
-                        *family,
-                        chain.clone(),
-                        RuleHandle(rule.handle),
-                    ));
+                    diff.rules_to_delete.push(RuleDelete::of(rule));
                 }
             }
         }
@@ -2648,18 +2729,35 @@ mod tests {
             handle_key: Some("ssh".to_string()),
             body: rule,
         };
-        d.rules_to_replace.push((
-            "filter".to_string(),
-            Family::Inet,
-            "input".to_string(),
-            RuleHandle(42),
-            declared,
-        ));
+        d.rules_to_replace.push(RuleReplace {
+            table: "filter".to_string(),
+            family: Family::Inet,
+            chain: "input".to_string(),
+            handle: RuleHandle(42),
+            current: Some("tcp dport 23 counter accept".to_string()),
+            rule: declared,
+        });
+        d.rules_to_delete.push(RuleDelete {
+            table: "filter".to_string(),
+            family: Family::Inet,
+            chain: "input".to_string(),
+            handle: RuleHandle(7),
+            key: None,
+            current: Some("udp dport 53 accept".to_string()),
+        });
         let s = d.summary();
-        assert!(s.contains("~ rule"), "summary missing replace marker: {s}");
-        assert!(s.contains("handle=42"), "summary missing handle: {s}");
-        assert!(s.contains("key=ssh"), "summary missing key: {s}");
-        assert_eq!(d.change_count(), 1);
+        assert!(
+            s.contains(
+                "~ rule Inet filter/input (handle=42 key=ssh): \
+                 tcp dport 23 counter accept -> tcp dport 22 accept"
+            ),
+            "a replace says what the kernel has and what replaces it: {s}"
+        );
+        assert!(
+            s.contains("- rule Inet filter/input (handle=7): udp dport 53 accept"),
+            "a delete says what it removes: {s}"
+        );
+        assert_eq!(d.change_count(), 2);
         assert!(!d.is_empty());
     }
 

@@ -375,7 +375,16 @@ mod tests {
         let options = NftDiffOptions::default();
         let diff = lab(2222, false).diff_against(&lab(22, true), &options).unwrap();
         assert_eq!(diff.rules_to_replace.len(), 1, "{diff}");
-        assert_eq!(diff.rules_to_replace[0].4.handle_key(), Some("ssh"));
+        let replace = &diff.rules_to_replace[0];
+        assert_eq!(replace.rule.handle_key(), Some("ssh"));
+        assert_eq!(replace.current.as_deref(), Some("tcp dport 22 accept"));
+        assert!(
+            diff.to_string().contains(&format!(
+                "~ rule Inet f/input (handle={} key=ssh): tcp dport 22 accept -> tcp dport 2222 accept",
+                replace.handle.0
+            )),
+            "{diff}"
+        );
         assert_eq!(diff.sets_to_delete, [("f".to_string(), Family::Inet, "hosts".to_string())]);
         assert_eq!(diff.change_count(), 2, "{diff}");
         assert_eq!(diff.generation, None, "an offline diff has no generation to hold");
@@ -462,6 +471,31 @@ mod tests {
             rules.contains(&("masq".into(), "masquerade".into())),
             "{rules:?}"
         );
+        assert!(
+            rules
+                .iter()
+                .any(|(_, nft)| nft == "ip saddr @nets counter accept"),
+            "a counter is printed as nft -s prints it: {rules:?}"
+        );
+
+        // A delete and a replace carry what the kernel has.
+        let was = NftablesConfig::new().table("f", Family::Inet, |t| {
+            t.chain("input", |c| c)
+                .rule_keyed("input", "dns", |r| r.match_udp_dport(53).counter().accept())
+                .rule_keyed("input", "ssh", |r| r.match_tcp_dport(22).accept())
+        });
+        let now = NftablesConfig::new().table("f", Family::Inet, |t| {
+            t.chain("input", |c| c)
+                .rule_keyed("input", "ssh", |r| r.match_tcp_dport(2222).accept())
+        });
+        let diff = now.diff_against(&was, &NftDiffOptions::default()).unwrap();
+        let json = serde_json::to_value(&diff).unwrap();
+        let delete = &json["rules-to-delete"][0];
+        assert_eq!(delete["key"], "dns", "{json:#}");
+        assert_eq!(delete["current"], "udp dport 53 counter accept", "{json:#}");
+        let replace = &json["rules-to-replace"][0];
+        assert_eq!(replace["current"], "tcp dport 22 accept", "{json:#}");
+        assert_eq!(replace["rule"]["nft"], "tcp dport 2222 accept", "{json:#}");
     }
 
     /// #876 — an `NftablesDiff` with every field filled in validates
@@ -473,8 +507,8 @@ mod tests {
         use crate::netlink::config::schema_check;
         use crate::netlink::nftables::ObjectType;
         use crate::netlink::nftables::config::{
-            ChainRecreate, FlowtableUpdate, KeptInUse, MoveReason, NftablesDiff, RuleHandle,
-            RuleMove, RulePlacement,
+            ChainRecreate, FlowtableUpdate, KeptInUse, MoveReason, NftablesDiff, RuleDelete,
+            RuleHandle, RuleMove, RulePlacement, RuleReplace,
         };
 
         let cfg = lab(22, true).table("ft", Family::Inet, |t| {
@@ -504,15 +538,22 @@ mod tests {
             reason: "hook changed".into(),
             blocked_by: vec!["handle 9".into()],
         });
-        diff.rules_to_delete
-            .push((table.clone(), family, "input".into(), RuleHandle(4)));
-        diff.rules_to_replace.push((
-            table.clone(),
+        diff.rules_to_delete.push(RuleDelete {
+            table: table.clone(),
             family,
-            "input".into(),
-            RuleHandle(5),
-            rule.clone(),
-        ));
+            chain: "input".into(),
+            handle: RuleHandle(4),
+            key: Some("old".into()),
+            current: Some("udp dport 53 accept".into()),
+        });
+        diff.rules_to_replace.push(RuleReplace {
+            table: table.clone(),
+            family,
+            chain: "input".into(),
+            handle: RuleHandle(5),
+            current: Some("tcp dport 23 accept".into()),
+            rule: rule.clone(),
+        });
         diff.rules_to_move.push(RuleMove {
             table: table.clone(),
             family,
@@ -520,6 +561,7 @@ mod tests {
             from: RuleHandle(6),
             placement: RulePlacement::After(RuleHandle(5)),
             rule,
+            current: Some("tcp dport 22 accept".into()),
             reason: MoveReason::Reorder,
             seq: 0,
         });

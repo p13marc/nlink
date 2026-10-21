@@ -2262,6 +2262,29 @@ impl Rule {
         Some(super::expr::with_comment(body, self.comment.as_deref()))
     }
 
+    /// [`nft_syntax`](Self::nft_syntax) as `nft -s list ruleset`
+    /// (`--stateless`) prints it, which is how [`NftablesDiff`] shows a
+    /// rule: a counter without its packets and bytes, a quota without what
+    /// it has used.
+    ///
+    /// [`NftablesDiff`]: super::config::NftablesDiff
+    ///
+    /// ```
+    /// use nlink::netlink::nftables::Rule;
+    ///
+    /// let rule = Rule::new("t", "c").match_tcp_dport(22).counter().accept();
+    /// assert_eq!(
+    ///     rule.nft_syntax_stateless().as_deref(),
+    ///     Some("tcp dport 22 counter accept")
+    /// );
+    /// ```
+    pub fn nft_syntax_stateless(&self) -> Option<String> {
+        let bytes = super::config::lower_to_expression_bytes(self);
+        let exprs = super::expr::parse_expressions(&bytes);
+        let body = super::lift::lift_stateless(&exprs, self.family)?;
+        Some(super::expr::with_comment(body, self.comment.as_deref()))
+    }
+
     /// Match TCP destination port.
     ///
     /// Generates: meta(L4PROTO) + cmp(==TCP) + payload(dport) + cmp(==port)

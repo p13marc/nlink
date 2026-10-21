@@ -198,8 +198,8 @@ impl NftablesDiff {
         // (returns ENOENT) even when NFTA_RULE_HANDLE pins the
         // rule — contrary to an earlier assumption in this code.
         // Plan 178 closeout.
-        for (table, family, chain, handle) in &self.rules_to_delete {
-            tx = tx.del_rule(table, chain, *family, handle.0);
+        for d in &self.rules_to_delete {
+            tx = tx.del_rule(&d.table, &d.chain, d.family, d.handle.0);
         }
         // ...and the rules being moved: out of declared order, or bound to
         // a set being recreated, which must be gone before its DELSET
@@ -403,8 +403,8 @@ impl NftablesDiff {
         //     (preserves position, no flush), releasing what the old body
         //     used. After the inserts, so no insert anchors on a handle a
         //     replace has already retired.
-        for (_table, _family, _chain, handle, declared) in &self.rules_to_replace {
-            tx = tx.replace_rule(keyed_body(declared), handle.0);
+        for r in &self.rules_to_replace {
+            tx = tx.replace_rule(keyed_body(&r.rule), r.handle.0);
         }
 
         // Phase 4 — delete what nothing uses any more: sets (an object map

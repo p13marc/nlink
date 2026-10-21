@@ -2192,8 +2192,8 @@ fn diff_shape(d: &nlink::netlink::nftables::config::NftablesDiff) -> Vec<String>
     shape.extend(d.chains_to_modify.iter().map(|(t, _, c)| format!("~chain {t} {}", c.name())));
     shape.extend(d.chains_to_delete.iter().map(|(t, _, c)| format!("-chain {t} {c}")));
     shape.extend(d.rules_to_add.iter().map(|a| format!("+rule {:?}", a.rule.handle_key())));
-    shape.extend(d.rules_to_delete.iter().map(|(t, _, c, _)| format!("-rule {t} {c}")));
-    shape.extend(d.rules_to_replace.iter().map(|r| format!("~rule {:?}", r.4.handle_key())));
+    shape.extend(d.rules_to_delete.iter().map(|r| format!("-rule {} {}", r.table, r.chain)));
+    shape.extend(d.rules_to_replace.iter().map(|r| format!("~rule {:?}", r.rule.handle_key())));
     shape.extend(d.rules_to_move.iter().map(|m| format!(">rule {:?}", m.rule.handle_key())));
     shape.extend(d.sets_to_add.iter().map(|(t, _, s)| format!("+set {t} {}", s.name())));
     shape.extend(d.sets_to_delete.iter().map(|(t, _, s)| format!("-set {t} {s}")));

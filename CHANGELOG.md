@@ -46,6 +46,30 @@ All notable changes to this project will be documented in this file.
   `del_route_v6` and their `_if_exists` forms, which went through the same
   parse and could delete the default route on a typo.
 
+- **A rule the diff deletes, replaces or moves says what the kernel has**
+  (#708). `NftablesDiff::rules_to_delete` is a `Vec<RuleDelete>` and
+  `rules_to_replace` a `Vec<RuleReplace>`; both were tuples. Each names the
+  table, family, chain and handle as before, and adds `current`, the
+  kernel's rule as `nft -s list` prints it. A delete also has the rule's
+  `key`, and `RuleMove` gains the same `current`. A delete used to print its
+  handle and nothing else, so a log of the diff could not say what a
+  reconcile removed. A rule someone added by hand went, and the log said
+  `handle=6`. Now it reads:
+
+  ```text
+  - rule Inet f/input (handle=6): udp dport 5353 counter accept comment "by hand"
+  ~ rule Inet f/input (handle=5 key=ntp): udp dport 123 accept -> udp dport 1123 accept
+  ```
+
+  The diff prints rules stateless, as `nft -s` does: `counter`, not
+  `counter packets 5 bytes 300`, and a quota without what it has used. So a
+  rule reads the same however much traffic it has counted.
+  `RuleInfo::nft_syntax_stateless()` and `Rule::nft_syntax_stateless()`
+  print that form. In `nftables_lift`, nft installs a rule with counted
+  packets and a used quota, nlink installs keyed ones, and each rule the
+  diff deletes, replaces or moves has to read as `nft -s -a list chain`
+  prints it at that handle.
+
 ### Fixed
 
 - **No reconcile could be spawned** (#879). `tokio::spawn(async move {
@@ -211,10 +235,11 @@ All notable changes to this project will be documented in this file.
     protocol the rule has matched so far, and drops the protocol matches
     nft drops. It joins prefixes, flag tests and bounds the way nft does.
   - `Rule::nft_syntax()` prints a rule before it is installed.
-  - `NftablesDiff`'s `Display` ends each rule line with the rule:
-    `+ rule Inet filter/input [ssh]: tcp dport 22 accept`. In its JSON, a
-    declared rule carries the same text as `nft` (`null` where nlink
-    cannot print it), so a `--check --json` says what changes.
+  - `NftablesDiff`'s `Display` ends each rule line with the rule, as
+    `nft -s list` prints it: `+ rule Inet filter/input [ssh]: tcp dport 22
+    accept`. In its JSON, a declared rule carries the same text as `nft`
+    (`null` where nlink cannot print it), so a `--check --json` says what
+    changes.
   - `nlink-nft list rules` prints them as `nft -a list chain` does. Its
     JSON gains an `nft` field.
 
