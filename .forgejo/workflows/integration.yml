@@ -19,6 +19,14 @@ env:
   # on vm-runner-01; S3 endpoint+credentials come from the runner's env_file
   RUSTC_WRAPPER: /srv/cache/bin/sccache
   CARGO_INCREMENTAL: "0"
+  # Cap build parallelism, same as ci.yml: cargo otherwise defaults to nproc
+  # (6 on vm-runner-01). This lane's job runs beside the standard lane's
+  # three, in the same 10 GB VM.
+  CARGO_BUILD_JOBS: "2"
+  # Panics keep file:line, the build drops full DWARF. Full debug info made
+  # each test job's target/ big enough that two concurrent zenkey runs
+  # filled /srv/cache (2026-10-19). vm-dev builds with the same setting.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   integration:
