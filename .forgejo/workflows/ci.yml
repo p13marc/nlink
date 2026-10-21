@@ -21,6 +21,10 @@ env:
   # Cap build parallelism: cargo otherwise defaults to nproc (6 on
   # vm-runner-01) per job, against a lane capacity of 2.
   CARGO_BUILD_JOBS: "2"
+  # Panics keep file:line, the build drops full DWARF. Full debug info made
+  # each test job's target/ big enough that two concurrent zenkey runs
+  # filled /srv/cache (2026-10-19). vm-dev builds with the same setting.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   # No fmt job on purpose: the tree is not rustfmt-clean and the previous CI
