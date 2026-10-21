@@ -26,28 +26,19 @@ pub async fn with_timeout<T>(body: impl Future<Output = nlink::Result<T>>) -> nl
     }
 }
 
-/// Check if running as root.
-pub fn is_root() -> bool {
-    nlink::lab::is_root()
-}
-
 /// Skip the test if not running as root.
 ///
 /// Use this at the beginning of integration tests that require root privileges.
 ///
 /// Per Plan 174 — also initializes a `tracing-subscriber` (via
 /// [`nlink::lab::init_test_tracing`]) so the lib's
-/// `#[tracing::instrument]` spans surface in CI logs. Equivalent to
-/// `nlink::require_root!()`; both paths feed through the same
-/// subscriber-init helper.
+/// `#[tracing::instrument]` spans surface in CI logs. It is
+/// `nlink::require_root!()`, so `NLINK_TEST_STRICT_ROOT=1` makes the skip a
+/// failure here too (#885).
 #[macro_export]
 macro_rules! require_root {
     () => {
-        ::nlink::lab::init_test_tracing();
-        if !$crate::common::is_root() {
-            eprintln!("Skipping test: requires root");
-            return Ok(());
-        }
+        ::nlink::require_root!();
     };
 }
 
@@ -55,10 +46,6 @@ macro_rules! require_root {
 #[macro_export]
 macro_rules! require_root_void {
     () => {
-        ::nlink::lab::init_test_tracing();
-        if !$crate::common::is_root() {
-            eprintln!("Skipping test: requires root");
-            return;
-        }
+        ::nlink::require_root_void!();
     };
 }

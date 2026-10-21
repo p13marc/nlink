@@ -52,6 +52,23 @@
 //! open: one whose name is deleted elsewhere lives on, unnamed, until the
 //! `LabNamespace` drops.
 //!
+//! # Skips that fail
+//!
+//! [`require_root!`](crate::require_root), [`require_host_root!`](crate::require_host_root)
+//! and [`require_module!`](crate::require_module) return `Ok(())` when the
+//! test cannot run, and a skipped test reports `ok`. Each has a variable
+//! that makes its skip a failure, for an environment that knows what it
+//! provides:
+//!
+//! | Variable | Gate | Fails when |
+//! |---|---|---|
+//! | `NLINK_TEST_STRICT_ROOT=1` | `require_root!` | the process is not root ([`strict_root`]) |
+//! | `NLINK_TEST_STRICT_HOST_ROOT=1` | `require_host_root!` | it is not root in the initial user namespace ([`strict_host_root`]) |
+//! | `NLINK_TEST_STRICT_MODULES=a,b` | `require_module!` | a listed module is missing ([`strict_modules`]) |
+//!
+//! A CI job that runs its suite as root sets the first, so a job that
+//! loses root fails instead of skipping everything.
+//!
 //! # Naming
 //!
 //! `LabNamespace::new(prefix)` generates a name of the form
@@ -413,6 +430,22 @@ fn uid_map_is_identity(map: &str) -> bool {
     })
 }
 
+/// Whether a test that needs [`is_root`] should fail rather than skip when
+/// the process is not root.
+///
+/// Set `NLINK_TEST_STRICT_ROOT=1` where the suite is meant to run as root:
+/// a CI job, or a run under `sudo`. A test gated by
+/// [`require_root!`](crate::require_root) then fails instead of reporting
+/// `ok` without running, which is what every such test did on a job that
+/// lost root (#885). A flag, like [`strict_host_root`]: there is one thing
+/// being promised.
+pub fn strict_root() -> bool {
+    matches!(
+        std::env::var("NLINK_TEST_STRICT_ROOT").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
 /// Whether a test that needs [`is_host_root`] should fail rather than
 /// skip when it does not have it.
 ///
@@ -567,6 +600,9 @@ pub fn init_test_tracing() {
 /// not running as root, useful for integration tests that need
 /// `CAP_SYS_ADMIN`.
 ///
+/// Set `NLINK_TEST_STRICT_ROOT=1` to make the skip a failure — see
+/// [`strict_root`](crate::lab::strict_root).
+///
 /// Also initializes a `tracing-subscriber` (via
 /// [`crate::lab::init_test_tracing`]) so CI logs surface the spans on every
 /// `Connection` method.
@@ -584,6 +620,10 @@ macro_rules! require_root {
     () => {
         $crate::lab::init_test_tracing();
         if !$crate::lab::is_root() {
+            assert!(
+                !$crate::lab::strict_root(),
+                "requires root, and NLINK_TEST_STRICT_ROOT makes the skip a failure"
+            );
             eprintln!("Skipping test: requires root");
             return Ok(());
         }
@@ -634,6 +674,7 @@ macro_rules! require_host_root {
 
 /// Like [`crate::require_host_root!`] but for test functions whose
 /// return type is `()` rather than `Result<()>`.
+/// `NLINK_TEST_STRICT_HOST_ROOT` makes its skip a failure too.
 #[macro_export]
 macro_rules! require_host_root_void {
     () => {
@@ -652,12 +693,17 @@ macro_rules! require_host_root_void {
 }
 
 /// Like [`crate::require_root!`] but for test functions whose
-/// return type is `()` rather than `Result<()>`.
+/// return type is `()` rather than `Result<()>`. `NLINK_TEST_STRICT_ROOT`
+/// makes its skip a failure too.
 #[macro_export]
 macro_rules! require_root_void {
     () => {
         $crate::lab::init_test_tracing();
         if !$crate::lab::is_root() {
+            assert!(
+                !$crate::lab::strict_root(),
+                "requires root, and NLINK_TEST_STRICT_ROOT makes the skip a failure"
+            );
             eprintln!("Skipping test: requires root");
             return;
         }
@@ -674,6 +720,10 @@ macro_rules! require_root_void {
 /// Wraps [`has_module`]. Pair with [`crate::require_root!`] — the
 /// module can only be checked once the test is actually trying to
 /// run.
+///
+/// Set `NLINK_TEST_STRICT_MODULES` to a comma-separated list of modules
+/// the environment provides, and a skip for one of them fails instead —
+/// see [`strict_modules`].
 ///
 /// ```no_run
 /// #[tokio::test]
@@ -702,7 +752,8 @@ macro_rules! require_module {
 }
 
 /// Like [`require_module`] but for test functions whose return type
-/// is `()` rather than `Result<()>`.
+/// is `()` rather than `Result<()>`. `NLINK_TEST_STRICT_MODULES` applies
+/// to it too.
 #[macro_export]
 macro_rules! require_module_void {
     ($name:expr) => {
@@ -721,8 +772,9 @@ macro_rules! require_module_void {
 
 /// Require multiple kernel modules in one call. Skips the test
 /// (returning `Ok(())`) if any of the named modules is not
-/// loaded or built-in. Convenience for tests that touch several
-/// independent kernel features.
+/// loaded or built-in, or fails for one `NLINK_TEST_STRICT_MODULES`
+/// lists. Convenience for tests that touch several independent
+/// kernel features.
 ///
 /// ```no_run
 /// #[tokio::test]

@@ -49,6 +49,74 @@ async fn traffic_helpers_count_deliveries_and_see_a_dead_wire() -> nlink::Result
     .await
 }
 
+/// `require_root!` skips a test when the process is not root, and with
+/// `NLINK_TEST_STRICT_ROOT=1` fails it instead (#885).
+///
+/// The run is a child: this test binary, running only
+/// [`root_gate_probe`], with no root. Root runs it in a user namespace of
+/// its own (`unshare --user`), where its uid is the overflow uid. Without
+/// root it is a plain child.
+#[test]
+fn require_root_fails_instead_of_skipping_under_strict_root() {
+    let run = |strict: bool| {
+        let exe = std::env::current_exe().expect("the test binary's path");
+        let mut cmd = if nlink::lab::is_root() {
+            let mut cmd = std::process::Command::new("unshare");
+            cmd.arg("--user").arg(exe);
+            cmd
+        } else {
+            std::process::Command::new(exe)
+        };
+        cmd.args([
+            "--exact",
+            "harness::root_gate_probe",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("NLINK_HARNESS_ROOT_PROBE", "1")
+        .env_remove("NLINK_TEST_STRICT_ROOT");
+        if strict {
+            cmd.env("NLINK_TEST_STRICT_ROOT", "1");
+        }
+        let out = cmd.output().expect("run the probe");
+        let text = String::from_utf8_lossy(&out.stdout).into_owned()
+            + &String::from_utf8_lossy(&out.stderr);
+        (out.status.success(), text)
+    };
+
+    let (passed, text) = run(false);
+    assert!(
+        passed,
+        "without the variable the probe skips and passes:\n{text}"
+    );
+    assert!(
+        text.contains("Skipping test: requires root"),
+        "the probe ran without root:\n{text}"
+    );
+    assert!(text.contains("1 passed"), "the probe did not run:\n{text}");
+
+    let (passed, text) = run(true);
+    assert!(
+        !passed,
+        "with NLINK_TEST_STRICT_ROOT=1 the skip fails:\n{text}"
+    );
+    assert!(
+        text.contains("NLINK_TEST_STRICT_ROOT makes the skip a failure"),
+        "{text}"
+    );
+}
+
+/// The test [`require_root_fails_instead_of_skipping_under_strict_root`]
+/// runs as a child. Anywhere else it does nothing.
+#[tokio::test]
+async fn root_gate_probe() -> nlink::Result<()> {
+    if std::env::var_os("NLINK_HARNESS_ROOT_PROBE").is_none() {
+        return Ok(());
+    }
+    require_root!();
+    panic!("the probe got past require_root! as root, where it was meant to run without");
+}
+
 /// `expect_event` returns the event it waits for, fails on a stream that
 /// stays quiet, and `expect_event_without` fails when the forbidden event
 /// comes first.

@@ -103,6 +103,24 @@ All notable changes to this project will be documented in this file.
   the fix. The validator is test code, and a schema keyword it does not
   know fails the test instead of passing it.
 
+### Added
+
+- **`NLINK_TEST_STRICT_ROOT=1` makes `require_root!` fail instead of
+  skipping** (#885). A test that needs root returned `Ok(())` without it,
+  and a skipped test reports `ok`, so a suite that lost root passed every
+  root test without running one. stream-marker marked its namespace tests
+  `#[ignore]` and asserted root itself to avoid that. The variable is named
+  like the two that already existed, `NLINK_TEST_STRICT_HOST_ROOT` and
+  `NLINK_TEST_STRICT_MODULES`, which the report had not found. Each gate's
+  documentation now names its variable, and the `lab` module documents all
+  three.
+  - `nlink::lab::strict_root()` reads it.
+  - The privileged CI lane sets it. The integration tests' own
+    `require_root!` is nlink's now, so it applies there.
+  - A harness test runs a probe as a child, without root: in a user
+    namespace of its own when the parent is root. The probe skips, and it
+    fails when the variable is set. Without the change it passed both ways.
+
 ### Documentation
 
 - **Three recipe statements that no longer held, and a pattern for
