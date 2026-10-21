@@ -670,13 +670,13 @@ impl NftablesDiff {
     /// to its schema (#531).
     #[cfg(feature = "schemars")]
     pub fn json_schema() -> String {
-        crate::netlink::config::draft07_schema_text::<Self>()
+        crate::netlink::config::draft07_output_schema_text::<Self>()
     }
 
     /// [`json_schema`](Self::json_schema) as a [`schemars::Schema`].
     #[cfg(feature = "schemars")]
     pub fn json_schema_value() -> schemars::Schema {
-        crate::netlink::config::draft07_schema::<Self>()
+        crate::netlink::config::draft07_output_schema::<Self>()
     }
 
     /// `true` if declared state already matches kernel state.

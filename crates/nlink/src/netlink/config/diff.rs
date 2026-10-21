@@ -529,13 +529,13 @@ impl ConfigDiff {
     /// to its schema (#531).
     #[cfg(feature = "schemars")]
     pub fn json_schema() -> String {
-        crate::netlink::config::draft07_schema_text::<Self>()
+        crate::netlink::config::draft07_output_schema_text::<Self>()
     }
 
     /// [`json_schema`](Self::json_schema) as a [`schemars::Schema`].
     #[cfg(feature = "schemars")]
     pub fn json_schema_value() -> schemars::Schema {
-        crate::netlink::config::draft07_schema::<Self>()
+        crate::netlink::config::draft07_output_schema::<Self>()
     }
 
     /// Apply this pre-computed diff in-place without re-running
@@ -4413,6 +4413,192 @@ mod tests {
                 "tables-to-recreate",
             ]
         );
+    }
+
+    /// #876 — a `ConfigDiff` with every field filled in validates against
+    /// the schema it publishes. The adds are a real diff against an empty
+    /// kernel.
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn config_diff_json_matches_its_schema() {
+        use crate::netlink::config::schema_check;
+
+        let cfg = super::super::types::schemars_tests::every_section();
+        let empty = Snapshot {
+            links: Vec::new(),
+            addresses: Vec::new(),
+            routes: Vec::new(),
+            qdiscs: Vec::new(),
+            extras: None,
+            tc: HashMap::new(),
+            bridge_vlans: Vec::new(),
+            neighbours: Vec::new(),
+            proxies: Vec::new(),
+            fdb: Vec::new(),
+            rules: Vec::new(),
+            nexthops: Vec::new(),
+            // The namespace the veth's peer is declared in exists, with
+            // nothing of ours in it.
+            netns_ids: HashMap::from([(
+                crate::netlink::namespace::NetnsRef::Named("peer".into()),
+                None,
+            )]),
+            peer_links: HashMap::new(),
+            vrf_strict_mode: Some(false),
+        };
+        let mut diff = cfg.diff_snapshot(&empty, PlanOptions::default()).unwrap();
+        fill_the_rest(&mut diff, &cfg);
+
+        schema_check::assert_every_root_property_populated(&diff, ConfigDiff::json_schema_value());
+        schema_check::assert_matches_schema(&diff, ConfigDiff::json_schema_value());
+    }
+
+    /// What a diff against an empty kernel cannot produce — changes,
+    /// removals, recreates and refusals — built from what `cfg` declares.
+    #[cfg(feature = "schemars")]
+    fn fill_the_rest(diff: &mut ConfigDiff, cfg: &NetworkConfig) {
+        use crate::TcHandle;
+        use crate::netlink::config::{
+            Blocker, LinkRecreate, LinkRemoval, LinkRename, LinkRestore, PreservedTc,
+            RestoredNexthop, RestoredRoute, TcObject,
+        };
+        use crate::netlink::devconf::{AddrGenMode, Ipv4Devconf, Ipv6Devconf};
+        use crate::netlink::namespace::NetnsRef;
+        use crate::netlink::types::route::RouteProtocol;
+
+        let changes = LinkChanges {
+            set_up: true,
+            set_mtu: Some(9000),
+            set_master: Some("br0".into()),
+            set_address: Some([2, 0, 0, 0, 0, 1]),
+            set_kind_params: vec!["vlan id".into()],
+            add_altnames: vec!["uplink".into()],
+            set_ipv4_conf: vec![(Ipv4Devconf::Forwarding, 1)],
+            set_ipv6_conf: vec![(Ipv6Devconf::AcceptRa, -1)],
+            set_addr_gen_mode: Some(AddrGenMode::StablePrivacy),
+            set_ipv6_token: Some("::1".parse().unwrap()),
+            set_port_options: vec!["cost".into()],
+            ..LinkChanges::default()
+        };
+        let route = cfg.routes()[0].clone();
+        let blockers = vec![
+            Blocker::Address {
+                dev: "d0".into(),
+                address: "10.0.0.1".parse().unwrap(),
+                prefix_len: 24,
+            },
+            Blocker::Route {
+                dev: "d0".into(),
+                destination: "10.1.0.0".parse().unwrap(),
+                prefix_len: 16,
+                table: 254,
+                nhid: Some(1),
+                through: None,
+                protocol: RouteProtocol::Static,
+            },
+            Blocker::Qdisc {
+                dev: "d0".into(),
+                qdisc: "htb".into(),
+                under: Some((TcHandle::major_only(1), TcHandle::new(1, 1))),
+            },
+            Blocker::Neighbour {
+                dev: "d0".into(),
+                destination: "10.0.0.9".parse().unwrap(),
+                permanent: true,
+            },
+        ];
+        let mut qdisc = TcObject {
+            kind: "htb".into(),
+            handle: TcHandle::major_only(1),
+            parent: TcHandle::ROOT,
+            info: 0,
+            chain: Some(0),
+            options: vec![0xde, 0xad],
+            spec: None,
+        };
+        qdisc.spec = Some(cfg.qdiscs()[1].qdisc_type.clone());
+        let mut tc = PreservedTc {
+            dev: "d0".into(),
+            ..PreservedTc::default()
+        };
+        tc.qdiscs.push(qdisc.clone());
+        tc.classes.push(TcObject {
+            kind: "htb".into(),
+            spec: None,
+            ..qdisc.clone()
+        });
+        tc.filters.push(TcObject {
+            kind: "flower".into(),
+            spec: None,
+            ..qdisc
+        });
+        tc.targets.insert(7, "ifb0".into());
+        let restore = LinkRestore {
+            links: cfg.links().to_vec(),
+            ports: cfg.links()[1..2].to_vec(),
+            nexthops: vec![RestoredNexthop {
+                nexthop: cfg.nexthops()[0].clone(),
+                protocol: 4,
+            }],
+            addresses: cfg.addresses().to_vec(),
+            routes: vec![RestoredRoute {
+                route: route.clone(),
+                protocol: RouteProtocol::Boot,
+            }],
+            neighbours: cfg.neighbours().to_vec(),
+            fdb: cfg.fdb_entries().to_vec(),
+            tc: vec![tc.clone()],
+        };
+
+        diff.links_to_recreate.push(LinkRecreate {
+            name: "d0.42".into(),
+            reason: "vlan id 42 -> 43".into(),
+            blocked_by: blockers.clone(),
+            resets: vec!["mtu".into()],
+            destroys: blockers.clone(),
+            preserved_tc: Some(tc),
+            restore: Some(Box::new(restore.clone())),
+            unrestorable: vec!["an xfrm state".into()],
+        });
+        diff.links_to_rename.push(LinkRename {
+            from: "ve1".into(),
+            to: "ve2".into(),
+            peer_of: "ve0".into(),
+        });
+        diff.links_to_modify.push(("d0".into(), changes.clone()));
+        diff.veth_peers_to_modify.push(VethPeerChange {
+            link: "ve0".into(),
+            peer: "ve1".into(),
+            netns: NetnsRef::Named("peer".into()),
+            changes,
+        });
+        diff.links_missing.push("eth9".into());
+        diff.links_to_remove.push(LinkRemoval {
+            name: "old0".into(),
+            link_kind: "vlan".into(),
+            stacked_on: Some("d0".into()),
+            blocked_by: blockers.clone(),
+            destroys: blockers,
+            restore: Some(Box::new(restore)),
+            unrestorable: vec!["a bpf program".into()],
+        });
+        diff.addresses_to_change.push(cfg.addresses()[0].clone());
+        diff.addresses_to_remove.push(cfg.addresses()[1].clone());
+        diff.routes_refused.push(RouteConflict {
+            route: route.clone(),
+            held_by: "proto bgp".into(),
+        });
+        diff.routes_to_remove.push(route);
+        diff.qdiscs_to_replace.push(cfg.qdiscs()[0].clone());
+        diff.qdiscs_to_remove.push(cfg.qdiscs()[1].clone());
+        diff.neighbours_to_remove.push(cfg.neighbours()[0].clone());
+        diff.fdb_to_remove.push(cfg.fdb_entries()[0].clone());
+        diff.nexthops_to_remove.push(cfg.nexthops()[0].clone());
+        diff.nexthops_refused.push(NexthopConflict {
+            nexthop: cfg.nexthops()[1].clone(),
+            reason: "in use".into(),
+        });
+        diff.rules_to_remove.push(cfg.rules()[0].clone());
     }
 
     // ---- #473 — the order of link modifications ----

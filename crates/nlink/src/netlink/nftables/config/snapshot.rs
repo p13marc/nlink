@@ -433,6 +433,95 @@ mod tests {
         );
     }
 
+    /// #876 — an `NftablesDiff` with every field filled in validates
+    /// against the schema it publishes. The adds come from a real offline
+    /// diff; the rest reuse what it declared.
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn diff_json_matches_its_schema() {
+        use crate::netlink::config::schema_check;
+        use crate::netlink::nftables::ObjectType;
+        use crate::netlink::nftables::config::{
+            ChainRecreate, FlowtableUpdate, KeptInUse, MoveReason, NftablesDiff, RuleHandle,
+            RuleMove, RulePlacement,
+        };
+
+        let cfg = lab(22, true).table("ft", Family::Inet, |t| {
+            t.flowtable("ft", |f| f.device("eth0").hw_offload(true))
+        });
+        let mut diff = cfg
+            .diff_against(&NftablesConfig::new(), &NftDiffOptions::default())
+            .unwrap();
+        let (table, family) = ("f".to_string(), Family::Inet);
+        let chain = diff.chains_to_add[0].2.clone();
+        let rule = diff.rules_to_add[0].rule.clone();
+        let flowtable = diff.flowtables_to_add[0].clone();
+
+        diff.tables_to_modify.push((family, table.clone(), 1));
+        diff.tables_to_delete.push((Family::Ip, "gone".into()));
+        diff.tables_refused
+            .push((Family::Ip, "theirs".into(), "not nlink's".into()));
+        diff.tables_to_recreate
+            .push((Family::Ip, "n".into(), "PERSIST toggled".into()));
+        diff.chains_to_modify.push(diff.chains_to_add[0].clone());
+        diff.chains_to_delete
+            .push((table.clone(), family, "gone".into()));
+        diff.chains_to_recreate.push(ChainRecreate {
+            table: table.clone(),
+            family,
+            chain,
+            reason: "hook changed".into(),
+            blocked_by: vec!["handle 9".into()],
+        });
+        diff.rules_to_delete
+            .push((table.clone(), family, "input".into(), RuleHandle(4)));
+        diff.rules_to_replace.push((
+            table.clone(),
+            family,
+            "input".into(),
+            RuleHandle(5),
+            rule.clone(),
+        ));
+        diff.rules_to_move.push(RuleMove {
+            table: table.clone(),
+            family,
+            chain: "input".into(),
+            from: RuleHandle(6),
+            placement: RulePlacement::After(RuleHandle(5)),
+            rule,
+            reason: MoveReason::Reorder,
+            seq: 0,
+        });
+        diff.rules_to_add[0].placement = RulePlacement::Before(RuleHandle(4));
+        diff.flowtables_to_delete
+            .push((family, table.clone(), "gone".into()));
+        diff.flowtables_to_update.push(FlowtableUpdate {
+            flowtable,
+            add_devs: vec!["eth1".into()],
+            remove_devs: vec!["eth2".into()],
+        });
+        diff.sets_to_delete
+            .push((table.clone(), family, "gone".into()));
+        diff.sets_to_update.push(diff.sets_to_add[0].clone());
+        diff.set_elements_to_remove
+            .push(diff.set_elements_to_add[0].clone());
+        diff.objects_to_update.push(diff.objects_to_add[0].clone());
+        diff.objects_to_delete
+            .push((table.clone(), family, "gone".into(), ObjectType::Counter));
+        diff.kept_in_use.push(KeptInUse::Set {
+            table,
+            family,
+            name: "nets".into(),
+        });
+        diff.generation = Some(7);
+
+        schema_check::assert_every_root_property_populated(
+            &diff,
+            NftablesDiff::json_schema_value(),
+        );
+        schema_check::assert_matches_schema(&diff, NftablesDiff::json_schema_value());
+    }
+
     /// A snapshot that did not read a set's elements makes the diff fail,
     /// rather than take the set for empty and re-add everything.
     #[test]

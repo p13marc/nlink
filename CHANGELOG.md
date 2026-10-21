@@ -77,6 +77,32 @@ All notable changes to this project will be documented in this file.
   own now. The old test fails with IPv6 multicast pinged on the link during
   the window; the new one passes.
 
+- **The diffs' JSON Schemas did not describe their JSON** (#876).
+  nlink-lab validated real `apply --check --json` output against
+  `WireguardConfigDiff::json_schema_value()`, and it failed. Five fields
+  write their JSON through a custom serializer, and their schema described
+  the Rust type instead:
+  - a public key, written as base64, was 32 integers;
+  - the preshared key, written as `true`/`false`, was a key;
+  - the keepalive, written in seconds, was a `Duration` object;
+  - the modified and removed peers were tuples and byte arrays.
+
+  Each now has the schema of what it writes. A `peers-to-modify` entry
+  serializes and derives its schema through one type.
+
+  The test that fixes it found two more. Every diff's schema described what
+  would *deserialize*, so a list a diff leaves out when it is empty was
+  required: a chain's `devices` and a set's `statements` in an
+  `NftablesDiff`, and four lists of a TC tree's diff in a `ConfigDiff`.
+  `ConfigDiff`, `NftablesDiff` and `WireguardConfigDiff` publish the schema
+  of what they serialize to now. `NetworkConfig`, which is read as well as
+  written, keeps the deserialize schema.
+
+  A unit test validates the JSON of each of the four against its own
+  schema, with every root field filled in. Three of the four failed before
+  the fix. The validator is test code, and a schema keyword it does not
+  know fails the test instead of passing it.
+
 ### Documentation
 
 - **Three recipe statements that no longer held, and a pattern for

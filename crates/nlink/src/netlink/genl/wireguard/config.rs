@@ -1095,6 +1095,7 @@ impl DeclaredWgDeviceBuilder {
 #[non_exhaustive]
 pub struct DeclaredWgPeer {
     #[cfg_attr(feature = "serde", serde(serialize_with = "diff_serde::pubkey"))]
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub public_key: [u8; WG_KEY_LEN],
     /// Serialized as a presence boolean (`preshared-key-set`) —
     /// secret material never leaves the process via serde.
@@ -1105,6 +1106,7 @@ pub struct DeclaredWgPeer {
             serialize_with = "diff_serde::secret_presence"
         )
     )]
+    #[cfg_attr(feature = "schemars", schemars(with = "bool"))]
     pub preshared_key: Option<[u8; WG_KEY_LEN]>,
     pub endpoint: Option<SocketAddr>,
     /// Serialized as whole seconds (`persistent-keepalive-secs`).
@@ -1115,6 +1117,7 @@ pub struct DeclaredWgPeer {
             serialize_with = "diff_serde::keepalive_secs"
         )
     )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<u16>"))]
     pub persistent_keepalive: Option<Duration>,
     pub allowed_ips: Vec<AllowedIp>,
     /// Whether the endpoint is kept to, or set once (#529).
@@ -1398,13 +1401,13 @@ impl WireguardConfigDiff {
     /// to its schema (#531).
     #[cfg(feature = "schemars")]
     pub fn json_schema() -> String {
-        crate::netlink::config::draft07_schema_text::<Self>()
+        crate::netlink::config::draft07_output_schema_text::<Self>()
     }
 
     /// [`json_schema`](Self::json_schema) as a [`schemars::Schema`].
     #[cfg(feature = "schemars")]
     pub fn json_schema_value() -> schemars::Schema {
-        crate::netlink::config::draft07_schema::<Self>()
+        crate::netlink::config::draft07_output_schema::<Self>()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1642,9 +1645,14 @@ pub struct DeviceChanges {
     pub peers_to_add: Vec<DeclaredWgPeer>,
     /// Per-peer mutations.
     #[cfg_attr(feature = "serde", serde(serialize_with = "diff_serde::keyed_changes"))]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(with = "Vec<diff_serde::KeyedPeerChanges<'static>>")
+    )]
     pub peers_to_modify: Vec<([u8; WG_KEY_LEN], PeerChanges)>,
     /// Peers in the kernel but not in the config.
     #[cfg_attr(feature = "serde", serde(serialize_with = "diff_serde::pubkey_vec"))]
+    #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
     pub peers_to_remove: Vec<[u8; WG_KEY_LEN]>,
 }
 
@@ -1677,19 +1685,23 @@ mod diff_serde {
         seq.end()
     }
 
+    /// One `peers-to-modify` entry as it serializes. The schema is derived
+    /// from this type too, so the two cannot disagree (#876).
+    #[derive(serde::Serialize)]
+    #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+    #[serde(rename_all = "kebab-case")]
+    pub(super) struct KeyedPeerChanges<'a> {
+        public_key: String,
+        changes: &'a PeerChanges,
+    }
+
     pub(super) fn keyed_changes<S: Serializer>(
         entries: &[([u8; WG_KEY_LEN], PeerChanges)],
         s: S,
     ) -> std::result::Result<S::Ok, S::Error> {
-        #[derive(serde::Serialize)]
-        #[serde(rename_all = "kebab-case")]
-        struct Entry<'a> {
-            public_key: String,
-            changes: &'a PeerChanges,
-        }
         let mut seq = s.serialize_seq(Some(entries.len()))?;
         for (pk, changes) in entries {
-            seq.serialize_element(&Entry {
+            seq.serialize_element(&KeyedPeerChanges {
                 public_key: b64_encode_32(pk),
                 changes,
             })?;
@@ -2504,9 +2516,9 @@ mod tests {
     /// #169 — serde shape: public keys as base64, secrets redacted to
     /// presence booleans, keepalive in whole seconds. Pins the JSON
     /// ABI for typed drift reporting.
+    /// A diff with every field filled in, keys `0xAA`..`0xDD`.
     #[cfg(feature = "serde")]
-    #[test]
-    fn diff_serde_shape_redacts_secrets() {
+    fn populated_diff() -> WireguardConfigDiff {
         let peer = DeclaredWgPeer {
             public_key: key(0xAA),
             preshared_key: Some(key(0xBB)),
@@ -2532,7 +2544,13 @@ mod tests {
         let mut diff = WireguardConfigDiff::default();
         diff.devices_to_modify.push(("wg0".to_string(), changes));
         diff.devices_to_add.push("wg1".to_string());
+        diff
+    }
 
+    #[cfg(feature = "serde")]
+    #[test]
+    fn diff_serde_shape_redacts_secrets() {
+        let diff = populated_diff();
         let json = serde_json::to_value(&diff).expect("serialize");
         let rendered = json.to_string();
 
@@ -2555,6 +2573,31 @@ mod tests {
         assert_eq!(dev[1]["peers-to-modify"][0]["changes"]["endpoint-set"], true);
         assert_eq!(dev[1]["peers-to-remove"][0], b64_encode_32(&key(0xDD)));
         assert_eq!(json["devices-to-add"][0], "wg1");
+    }
+
+    /// #876 — the schema describes the JSON above: keys as base64 strings,
+    /// the preshared key as a presence flag, the keepalive in seconds and
+    /// each modified peer as `{public-key, changes}`. It described the Rust
+    /// fields instead (32 integers, a `Duration` object, a tuple).
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn diff_json_matches_its_schema() {
+        use crate::netlink::config::schema_check;
+
+        let diff = populated_diff();
+        schema_check::assert_every_root_property_populated(
+            &diff,
+            WireguardConfigDiff::json_schema_value(),
+        );
+        schema_check::assert_matches_schema(&diff, WireguardConfigDiff::json_schema_value());
+
+        // An absent preshared key and keepalive are `false` and `null`.
+        let mut bare = populated_diff();
+        let peer = &mut bare.devices_to_modify[0].1.peers_to_add[0];
+        peer.preshared_key = None;
+        peer.persistent_keepalive = None;
+        peer.endpoint = None;
+        schema_check::assert_matches_schema(&bare, WireguardConfigDiff::json_schema_value());
     }
 
     /// No trailing newline, like the other diffs' `Display` (#532).

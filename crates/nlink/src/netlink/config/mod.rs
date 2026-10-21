@@ -56,6 +56,9 @@ mod kind;
 mod plan;
 mod preserve;
 mod restore;
+// #876 — a diff's JSON, checked against the schema it publishes.
+#[cfg(all(test, feature = "schemars"))]
+pub(crate) mod schema_check;
 mod tc_tree;
 #[cfg(feature = "serde")]
 mod tc_tree_serde;
