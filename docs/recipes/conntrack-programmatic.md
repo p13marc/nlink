@@ -365,13 +365,18 @@ process events on a dedicated task that does nothing else.
 - **`del_conntrack` is forgiving.** Deleting a tuple that doesn't
   exist returns `Error::NotFound` — wrap with `.is_not_found()`
   if you want idempotent eviction.
+- **A delete names an entry.** `del_conntrack` refuses a builder with
+  no tuple (`ErrorKind::Invalid`): the kernel takes a delete without
+  one for a flush of the whole table. Flush on purpose with
+  `flush_conntrack`, `flush_conntrack_v6` or `flush_conntrack_all`.
 - **Counter / timeout drift.** `update_conntrack` updates the fields
   you supplied but doesn't reset the kernel's packet/byte counters.
   Use `del` + `add` if you want a fresh entry.
-- **No event subscription.** The Plan 137 PR B work hasn't shipped, so
-  there's no way today to subscribe to NEW/UPDATE/DESTROY events on
-  injected entries. Poll `get_conntrack` if you need
-  near-real-time visibility.
+- **Events want a connection of their own.** `subscribe` +
+  `events()` stream NEW, UPDATE and DESTROY (see
+  [Subscribing to events](#subscribing-to-events)). Subscribe on one
+  connection and mutate on another, so multicast deliveries never
+  interleave with a request's ACK.
 - **TCP state byte values.** `tcp_state(TcpConntrackState::Established)`
   emits the correct wire byte (3) automatically; the
   `Unknown(u8)` variant is the escape hatch if you need to set a
