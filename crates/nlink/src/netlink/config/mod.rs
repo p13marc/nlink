@@ -295,7 +295,7 @@ impl NetworkConfig {
         exec.dry_run |= opts.dry_run;
         let plan = &apply.plan;
         let (changes_made, attempts) = opts
-            .retry(crate::netlink::reconcile::transient, async || {
+            .retry(crate::netlink::reconcile::transient, || async move {
                 let diff = self.diff_with_options(conn, plan.clone()).await?;
                 if diff.is_empty() {
                     return Ok(0);

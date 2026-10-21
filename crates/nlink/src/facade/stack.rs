@@ -170,7 +170,7 @@ impl Stack {
         let (mut report, attempts) = opts
             .retry(
                 |e| crate::netlink::reconcile::transient(e) || e.is_restart(),
-                async || {
+                || async move {
                     let plan = self.plan_in(ns.clone(), plan_options.clone()).await?;
                     plan.apply_or_keep(ns.clone(), exec).await
                 },

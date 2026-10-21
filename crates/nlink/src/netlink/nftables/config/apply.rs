@@ -553,7 +553,7 @@ impl NftablesDiff {
             });
         }
         let (_, attempts) = opts
-            .retry(Error::is_dump_interrupted, async || self.apply(conn).await)
+            .retry(Error::is_dump_interrupted, || self.apply(conn))
             .await?;
         Ok(ReconcileReport {
             attempts,
@@ -610,7 +610,7 @@ impl super::NftablesConfig {
         let (changes_made, attempts) = opts
             .retry(
                 |e| e.is_restart() || e.is_dump_interrupted(),
-                async || {
+                || async move {
                     let diff = self.diff(conn).await?;
                     diff.apply(conn).await?;
                     Ok(diff.change_count())
