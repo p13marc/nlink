@@ -74,11 +74,24 @@ pub(crate) fn draft07_schema<T: schemars::JsonSchema>() -> schemars::Schema {
         .into_root_schema_for::<T>()
 }
 
-/// [`draft07_schema`], pretty-printed.
+/// The draft-7 JSON Schema of the JSON `T` serializes to, for a type that is
+/// only ever written: the diffs. [`draft07_schema`] describes what
+/// deserializes, where a field with no default is required, so a list a
+/// diff leaves out when it is empty was required by its schema and missing
+/// from its JSON (#876).
 #[cfg(feature = "schemars")]
-pub(crate) fn draft07_schema_text<T: schemars::JsonSchema>() -> String {
+pub(crate) fn draft07_output_schema<T: schemars::JsonSchema>() -> schemars::Schema {
+    schemars::generate::SchemaSettings::draft07()
+        .for_serialize()
+        .into_generator()
+        .into_root_schema_for::<T>()
+}
+
+/// [`draft07_output_schema`], pretty-printed.
+#[cfg(feature = "schemars")]
+pub(crate) fn draft07_output_schema_text<T: schemars::JsonSchema>() -> String {
     // Library-generated: no user data, no serializer that can fail.
-    serde_json::to_string_pretty(&draft07_schema::<T>())
+    serde_json::to_string_pretty(&draft07_output_schema::<T>())
         .expect("schema serialization is infallible")
 }
 
@@ -7873,7 +7886,7 @@ mod mac_serde {
 }
 
 #[cfg(all(test, feature = "schemars"))]
-mod schemars_tests {
+pub(super) mod schemars_tests {
     use super::*;
 
     fn schema_value() -> serde_json::Value {
@@ -7979,6 +7992,118 @@ mod schemars_tests {
             !rendered.contains("integer") && !rendered.contains("\"array\""),
             "MAC must NOT be modelled as a byte array: {rendered}"
         );
+    }
+
+    /// A config that declares something in every section, with the kinds
+    /// whose JSON a custom serializer writes: MACs, CIDRs, durations, rates,
+    /// handles and route protocols.
+    pub(crate) fn every_section() -> NetworkConfig {
+        use crate::netlink::filter::FlowerFilter;
+        use crate::netlink::link::VlanProtocol;
+        use crate::netlink::tc::{FqCodelConfig, HtbClassConfig};
+        use crate::netlink::types::route::RouteProtocol;
+        use crate::util::{Percent, Rate};
+        use crate::{EthProto, FilterPriority, TcHandle};
+
+        NetworkConfig::new()
+            .owner("schema-test")
+            .vrf_strict_mode(true)
+            .route_protocol(RouteProtocol::Static)
+            .link("br0", |l| {
+                l.bridge()
+                    .bridge_options(|b| b.vlan_filtering(true).hello_time(Duration::from_secs(2)))
+                    .up()
+                    .mtu(1500)
+            })
+            .link("d0", |l| {
+                l.dummy()
+                    .address([0xaa, 0xbb, 0xcc, 0x11, 0x22, 0x33])
+                    .master("br0")
+                    .port_options(|p| p.vlan(10).pvid(20).untagged(30))
+            })
+            .link("d0.42", |l| {
+                l.vlan("d0", 42).vlan_protocol(VlanProtocol::Dot1ad)
+            })
+            .link("ve0", |l| {
+                l.veth("ve1")
+                    .veth_peer_netns(crate::netlink::namespace::NetnsRef::Named("peer".into()))
+                    .veth_peer_mtu(1400)
+            })
+            .link("vx0", |l| {
+                l.vxlan(100)
+                    .vxlan_remote("10.0.0.2".parse().unwrap())
+                    .vxlan_port(4789)
+            })
+            .address("br0", "10.0.0.1/24")
+            .unwrap()
+            .address("br0", "2001:db8::1/64")
+            .unwrap()
+            .route("0.0.0.0/0", |r| r.via("10.0.0.254"))
+            .unwrap()
+            .route("10.10.0.0/16", |r| r.blackhole().metric(100))
+            .unwrap()
+            .neighbour(
+                "br0",
+                "10.0.0.9".parse::<IpAddr>().unwrap(),
+                [0x02, 0, 0, 0, 0, 9],
+            )
+            .proxy_neighbour("br0", "10.0.0.10".parse::<IpAddr>().unwrap())
+            .fdb("d0", [0x02, 0, 0, 0, 0, 1], |e| e.vlan(10))
+            .fdb("vx0", [0; 6], |e| e.dst("192.0.2.1".parse().unwrap()))
+            .nexthop(1, |n| n.via("10.0.0.2".parse().unwrap()).dev("br0"))
+            .nexthop(2, |n| n.via("10.0.0.3".parse().unwrap()).dev("br0"))
+            .nexthop(10, |n| n.group(&[(1, 1), (2, 3)]))
+            .rule(100, |r| {
+                r.from("10.0.0.0".parse::<IpAddr>().unwrap(), 8).table(100)
+            })
+            .qdisc("ve0", |q| {
+                q.netem()
+                    .delay(Duration::from_micros(1_500))
+                    .rate(Rate::mbit(100))
+                    .loss_pct(Percent::new(1.0))
+            })
+            .qdisc("d0", |q| q.htb().default_class(0x20))
+            .tc("d0", |t| {
+                t.class(
+                    TcHandle::major_only(1),
+                    TcHandle::new(1, 1),
+                    HtbClassConfig::new(Rate::mbit(100)),
+                )
+                .class(
+                    TcHandle::new(1, 1),
+                    TcHandle::new(1, 0x20),
+                    HtbClassConfig::new(Rate::mbit(40)),
+                )
+                .leaf(
+                    TcHandle::new(1, 0x20),
+                    TcHandle::major_only(0x20),
+                    FqCodelConfig::new(),
+                )
+                .filter(
+                    TcHandle::major_only(1),
+                    FilterPriority::new(1),
+                    EthProto::IP,
+                    FlowerFilter::new()
+                        .ip_proto_tcp()
+                        .dst_port(22)
+                        .classid(TcHandle::new(1, 0x20)),
+                )
+            })
+    }
+
+    /// #876 — a config's JSON validates against the schema it publishes,
+    /// with every section in it. The schema was only ever checked by
+    /// reading pieces of it.
+    #[test]
+    fn config_json_matches_its_schema() {
+        use crate::netlink::config::schema_check;
+        let cfg = every_section();
+        cfg.validate().expect("the test config is valid");
+        schema_check::assert_every_root_property_populated(
+            &cfg,
+            NetworkConfig::json_schema_value(),
+        );
+        schema_check::assert_matches_schema(&cfg, NetworkConfig::json_schema_value());
     }
 
     #[test]
