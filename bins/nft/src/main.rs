@@ -709,30 +709,28 @@ async fn main() -> Result<()> {
                                     "position": r.position,
                                     "key": r.key,
                                     "comment": r.comment_text,
-                                    // The library keeps rule expressions as
-                                    // raw bytes (no disassembler); expose the
-                                    // payload length so callers can tell
-                                    // empty rules from non-trivial ones.
+                                    // The rule as `nft list` prints it, or
+                                    // null where nlink cannot (#708).
+                                    "nft": r.nft_syntax(),
                                     "expr_bytes": r.expression_bytes.len(),
                                 })
                             })
                             .collect(),
                     );
                 } else {
+                    // As `nft -a list chain` prints them (#708).
                     for r in &rules {
                         if r.chain == chain {
-                            let mut line = format!("  handle {}", r.handle);
+                            let mut line = match r.nft_syntax() {
+                                Some(body) => format!("  {body} # handle {}", r.handle),
+                                None => format!(
+                                    "  # handle {}: {} expression bytes nlink cannot print",
+                                    r.handle,
+                                    r.expression_bytes.len()
+                                ),
+                            };
                             if let Some(pos) = r.position {
                                 line.push_str(&format!(" position {pos}"));
-                            }
-                            if let Some(ref c) = r.comment_text {
-                                line.push_str(&format!(" comment \"{c}\""));
-                            }
-                            if !r.expression_bytes.is_empty() {
-                                line.push_str(&format!(
-                                    " ({} expr bytes)",
-                                    r.expression_bytes.len()
-                                ));
                             }
                             println!("{line}");
                         }

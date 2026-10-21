@@ -59,6 +59,7 @@ mod rules;
 mod snapshot;
 mod types;
 
+pub(crate) use diff::lower_to_expression_bytes;
 pub use snapshot::RulesetSnapshot;
 
 // The one reconcile vocabulary every layer shares (#532).

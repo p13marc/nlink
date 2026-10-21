@@ -40,6 +40,7 @@ pub mod connection;
 pub mod events;
 pub mod expr;
 pub(crate) mod interval;
+pub(crate) mod lift;
 pub mod object;
 pub mod resync;
 pub mod types;

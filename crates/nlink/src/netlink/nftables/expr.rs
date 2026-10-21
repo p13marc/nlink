@@ -3269,6 +3269,15 @@ fn parse_payload(data: &[u8]) -> Option<RuleExpr> {
     })
 }
 
+/// A rule body and its comment, as nft prints the two.
+pub(crate) fn with_comment(body: String, comment: Option<&str>) -> String {
+    match comment {
+        Some(comment) if body.is_empty() => format!("comment \"{comment}\""),
+        Some(comment) => format!("{body} comment \"{comment}\""),
+        None => body,
+    }
+}
+
 impl super::types::RuleInfo {
     /// Decode this rule's [`expression_bytes`](Self::expression_bytes)
     /// into typed expressions.
@@ -3280,6 +3289,21 @@ impl super::types::RuleInfo {
     /// byte-wise, not through this decoder).
     pub fn expressions(&self) -> Vec<RuleExpr> {
         parse_expressions(&self.expression_bytes)
+    }
+
+    /// The rule as `nft list ruleset` prints it: `tcp dport 22 counter
+    /// packets 4 bytes 240 accept comment "ssh"` (#708).
+    ///
+    /// `None` when the rule holds something nlink does not read back
+    /// exactly as nft prints it: an expression it does not decode, a field
+    /// of a header it does not name, an anonymous set (the rule names it,
+    /// its elements are elsewhere), an object map (whose type the rule does
+    /// not say). Two things nft looks up on the host print as numbers
+    /// instead: an interface index (`iif 1`, where nft prints `iif "lo"`),
+    /// and the device of a `dup` or `fwd`.
+    pub fn nft_syntax(&self) -> Option<String> {
+        let body = super::lift::lift(&self.expressions(), self.family)?;
+        Some(with_comment(body, self.comment_text.as_deref()))
     }
 
     /// Cumulative `(packets, bytes)` from the first `counter`

@@ -788,12 +788,13 @@ impl NftablesDiff {
             let r = &add.rule;
             let key = r.handle_key().unwrap_or("<anonymous>");
             lines.push(format!(
-                "+ rule {:?} {}/{} [{}]{}",
+                "+ rule {:?} {}/{} [{}]{}{}",
                 r.family(),
                 r.table(),
                 r.chain(),
                 key,
                 placement_suffix(add.placement),
+                body_suffix(r),
             ));
         }
         for (tbl, fam, chain, h) in &self.rules_to_delete {
@@ -802,8 +803,9 @@ impl NftablesDiff {
         for (tbl, fam, chain, h, r) in &self.rules_to_replace {
             let key = r.handle_key().unwrap_or("<anonymous>");
             lines.push(format!(
-                "~ rule {fam:?} {tbl}/{chain} (handle={} key={key})",
-                h.0
+                "~ rule {fam:?} {tbl}/{chain} (handle={} key={key}){}",
+                h.0,
+                body_suffix(r),
             ));
         }
         for m in &self.rules_to_move {
@@ -816,12 +818,13 @@ impl NftablesDiff {
                 MoveReason::ChainRecreated => "its chain is recreated",
             };
             lines.push(format!(
-                "~ rule {:?} {}/{} (handle={} key={key}, re-added: {why}){}",
+                "~ rule {:?} {}/{} (handle={} key={key}, re-added: {why}){}{}",
                 m.family,
                 m.table,
                 m.chain,
                 m.from.0,
                 placement_suffix(m.placement),
+                body_suffix(&m.rule),
             ));
         }
         for f in &self.flowtables_to_add {
@@ -920,6 +923,14 @@ impl std::fmt::Display for NftablesDiff {
         #[allow(deprecated)]
         f.write_str(&self.summary())
     }
+}
+
+/// `: <the rule as nft prints it>`, when nlink can print it (#708).
+fn body_suffix(rule: &DeclaredRule) -> String {
+    rule.body()
+        .nft_syntax()
+        .map(|body| format!(": {body}"))
+        .unwrap_or_default()
 }
 
 /// ` (before handle=N)` / ` (after handle=N)` for a positioned rule.
