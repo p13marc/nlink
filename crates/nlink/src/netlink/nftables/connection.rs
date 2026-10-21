@@ -3229,31 +3229,12 @@ fn append_set_elements(
     Ok(())
 }
 
-/// Parse a flowtable from `NFT_MSG_GETFLOWTABLE` response payload.
 /// Whether the running kernel has the `NFT_MSG_DESTROY*` messages (6.3+):
 /// deletes that take something already gone as deleted. Read from
 /// `uname(2)` once; a kernel that predates them refuses a batch that
 /// carries one.
 pub fn kernel_has_destroy() -> bool {
-    static HAS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *HAS.get_or_init(|| {
-        // SAFETY: `uname` fills the struct it is given, and a zeroed
-        // `utsname` is a valid one (all byte arrays).
-        let mut name: libc::utsname = unsafe { std::mem::zeroed() };
-        if unsafe { libc::uname(&mut name) } != 0 {
-            return false;
-        }
-        let release: String = name
-            .release
-            .iter()
-            .take_while(|c| **c != 0)
-            .map(|c| *c as u8 as char)
-            .collect();
-        let mut parts = release.split(|c: char| !c.is_ascii_digit());
-        let major: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
-        let minor: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
-        (major, minor) >= (6, 3)
-    })
+    crate::netlink::kernel_version() >= (6, 3)
 }
 
 /// A base chain's devices, as nft writes them (#703): one as
@@ -3296,6 +3277,7 @@ fn append_flowtable_hook(builder: &mut MessageBuilder, priority: i32, devs: &[St
     builder.nest_end(hook);
 }
 
+/// Parse a flowtable from `NFT_MSG_GETFLOWTABLE` response payload.
 pub(crate) fn parse_flowtable(data: &[u8], family: Family) -> Option<super::types::Flowtable> {
     let mut ft = super::types::Flowtable {
         family,

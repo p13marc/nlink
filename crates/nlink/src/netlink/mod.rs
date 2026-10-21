@@ -217,3 +217,35 @@ pub(crate) use socket::NL_BATCH_SIZE;
 pub use socket::{NetlinkSocket, Protocol, rtnetlink_groups};
 pub use stream::{EventMeta, EventSource, EventSubscription, OwnedEventStream, WithMeta};
 pub use tc_options::NetemParameter;
+
+/// The running kernel's `(major, minor)`, from `uname(2)`, read once. `(0, 0)`
+/// if it cannot be read, which every "kernel X.Y or later" check takes for
+/// too old. A version names what the kernel *should* do; a distribution
+/// kernel can carry more, so a check on it chooses the safe path, not the
+/// only one.
+pub(crate) fn kernel_version() -> (u32, u32) {
+    static VERSION: std::sync::OnceLock<(u32, u32)> = std::sync::OnceLock::new();
+    *VERSION.get_or_init(|| {
+        // SAFETY: `uname` fills the struct it is given, and a zeroed
+        // `utsname` is a valid one (all byte arrays).
+        let mut name: libc::utsname = unsafe { std::mem::zeroed() };
+        if unsafe { libc::uname(&mut name) } != 0 {
+            return (0, 0);
+        }
+        let release: String = name
+            .release
+            .iter()
+            .take_while(|c| **c != 0)
+            .map(|c| *c as u8 as char)
+            .collect();
+        parse_kernel_version(&release)
+    })
+}
+
+/// `"6.12.48+deb13-amd64"` → `(6, 12)`; what is not a number reads as 0.
+pub(crate) fn parse_kernel_version(release: &str) -> (u32, u32) {
+    let mut parts = release.split(|c: char| !c.is_ascii_digit());
+    let major = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    let minor = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    (major, minor)
+}

@@ -18,8 +18,8 @@ use nlink::{
     netlink::{
         Connection, Netfilter,
         netfilter::{
-            ConntrackBuilder, ConntrackEvent, ConntrackGroup, ConntrackStatus, ConntrackTuple,
-            IpProtocol, TcpConntrackState,
+            ConntrackBuilder, ConntrackEvent, ConntrackFilter, ConntrackGroup, ConntrackStatus,
+            ConntrackTuple, IpProtocol, TcpConntrackState,
         },
         types::AddressFamily,
     },
@@ -360,6 +360,190 @@ async fn ct_flush_is_per_family() -> nlink::Result<()> {
         "flush_conntrack_all leaves nothing"
     );
 
+    Ok(())
+}
+
+/// Every entry, as (family, protocol, source port, destination port, zone),
+/// sorted.
+async fn ct_flows(
+    nf: &Connection<Netfilter>,
+) -> nlink::Result<Vec<(AddressFamily, u8, u16, u16, u16)>> {
+    let mut all = nf.get_conntrack().await?;
+    all.extend(nf.get_conntrack_v6().await?);
+    let mut v: Vec<_> = all
+        .iter()
+        .map(|e| {
+            let (sport, dport) = (e.orig.src_port.unwrap_or(0), e.orig.dst_port.unwrap_or(0));
+            (
+                e.family,
+                e.proto.number(),
+                sport,
+                dport,
+                e.zone.unwrap_or(0),
+            )
+        })
+        .collect();
+    v.sort_by_key(|&(f, p, s, d, z)| (u8::from(f), p, s, d, z));
+    Ok(v)
+}
+
+/// Two UDP flows to port 5000 in zone 0, and one entry beside them for
+/// each criterion of the filter: another port, another protocol, another
+/// zone, the other family.
+async fn seed_for_filters(nf: &Connection<Netfilter>) -> nlink::Result<()> {
+    nf.flush_conntrack_all().await?;
+    nf.add_conntrack(udp_entry(false, 40000, 5000)).await?;
+    nf.add_conntrack(udp_entry(false, 40001, 5000)).await?;
+    nf.add_conntrack(udp_entry(false, 40000, 5001)).await?;
+    nf.add_conntrack(
+        ConntrackBuilder::new_v4(IpProtocol::Tcp)
+            .orig(
+                ConntrackTuple::v4(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2))
+                    .ports(40000, 5000),
+            )
+            .status(ConntrackStatus::CONFIRMED)
+            .timeout(Duration::from_secs(120))
+            .tcp_state(TcpConntrackState::Established),
+    )
+    .await?;
+    nf.add_conntrack(udp_entry(false, 40000, 5000).zone(7))
+        .await?;
+    nf.add_conntrack(udp_entry(true, 40000, 5000)).await?;
+    Ok(())
+}
+
+const V4: AddressFamily = AddressFamily::Inet;
+const V6: AddressFamily = AddressFamily::Inet6;
+const UDP: u8 = 17;
+const TCP: u8 = 6;
+
+/// #882: a filtered flush, `conntrack -D -p udp --dport 5000` in zone 0,
+/// deletes the matching flows and leaves the rest: another port, another
+/// protocol, another zone, and the other family when the filter names one.
+///
+/// `flush_conntrack_matching` is one filtered flush per family on 6.12+,
+/// and `del_conntrack_matching` deletes entry by entry, which is what the
+/// flush falls back to on an older kernel. Both are run.
+#[tokio::test]
+async fn ct_flush_matching_leaves_every_other_entry() -> nlink::Result<()> {
+    nlink::require_root!();
+    nlink::require_module!("nf_conntrack");
+    nlink::require_module!("nf_conntrack_netlink");
+
+    let ns = TestNamespace::new("ct-filter")?;
+    let nf = nf_in_ns(&ns)?;
+    let video = ConntrackFilter::new()
+        .proto(IpProtocol::Udp)
+        .orig_dst_port(5000)
+        .zone(0);
+    let video_v4 = video.clone().family(AddressFamily::Inet);
+
+    seed_for_filters(&nf).await?;
+    let mut listed: Vec<_> = nf
+        .get_conntrack_matching(&video_v4)
+        .await?
+        .iter()
+        .map(|e| e.orig.src_port)
+        .collect();
+    listed.sort();
+    assert_eq!(
+        listed,
+        [Some(40000), Some(40001)],
+        "the dump lists the two v4 flows"
+    );
+
+    let others_v4 = [
+        (V4, UDP, 40000, 5000, 7),
+        (V4, UDP, 40000, 5001, 0),
+        (V4, TCP, 40000, 5000, 0),
+        (V6, UDP, 40000, 5000, 0),
+    ];
+    let mut others_v4 = others_v4.to_vec();
+    others_v4.sort_by_key(|&(f, p, s, d, z)| (u8::from(f), p, s, d, z));
+
+    nf.flush_conntrack_matching(&video_v4).await?;
+    assert_eq!(ct_flows(&nf).await?, others_v4, "flush_conntrack_matching");
+
+    seed_for_filters(&nf).await?;
+    assert_eq!(nf.del_conntrack_matching(&video_v4).await?, 2);
+    assert_eq!(ct_flows(&nf).await?, others_v4, "del_conntrack_matching");
+
+    // With no family, both families' flows go.
+    seed_for_filters(&nf).await?;
+    nf.flush_conntrack_matching(&video).await?;
+    let left = ct_flows(&nf).await?;
+    assert_eq!(left.len(), 3, "{left:?}");
+    assert!(!left.contains(&(V6, UDP, 40000, 5000, 0)), "{left:?}");
+
+    // A mark, masked.
+    seed_for_filters(&nf).await?;
+    nf.update_conntrack(udp_entry(false, 40000, 5001).mark(0x1f))
+        .await?;
+    nf.flush_conntrack_matching(&ConntrackFilter::new().mark(0x10, 0xf0))
+        .await?;
+    let left = ct_flows(&nf).await?;
+    assert_eq!(left.len(), 5, "only the marked flow goes: {left:?}");
+    assert!(!left.contains(&(V4, UDP, 40000, 5001, 0)), "{left:?}");
+    Ok(())
+}
+
+/// #882: an IPv6 address filter keeps to the address. The kernel's own
+/// comparison of one is inverted, so nlink compares it.
+#[tokio::test]
+async fn ct_filter_compares_ipv6_addresses() -> nlink::Result<()> {
+    nlink::require_root!();
+    nlink::require_module!("nf_conntrack");
+    nlink::require_module!("nf_conntrack_netlink");
+
+    let ns = TestNamespace::new("ct-filter-v6")?;
+    let nf = nf_in_ns(&ns)?;
+    let from = |src: &str| {
+        ConntrackBuilder::new_v6(IpProtocol::Udp)
+            .orig(
+                ConntrackTuple::v6(src.parse().unwrap(), "fd00::2".parse().unwrap())
+                    .ports(40000, 5000),
+            )
+            .status(ConntrackStatus::CONFIRMED)
+            .timeout(Duration::from_secs(120))
+    };
+    nf.add_conntrack(from("fd00::1")).await?;
+    nf.add_conntrack(from("fd00::3")).await?;
+    let one = ConntrackFilter::new()
+        .proto(IpProtocol::Udp)
+        .orig_src("fd00::1".parse::<std::net::IpAddr>().unwrap());
+
+    let listed = nf.get_conntrack_matching(&one).await?;
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].orig.src_ip, Some("fd00::1".parse().unwrap()));
+
+    nf.flush_conntrack_matching(&one).await?;
+    let left = nf.get_conntrack_v6().await?;
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert_eq!(
+        left[0].orig.src_ip,
+        Some("fd00::3".parse().unwrap()),
+        "the other address stays"
+    );
+    Ok(())
+}
+
+/// #882: a flush with an empty filter would be a flush of everything, and
+/// is refused.
+#[tokio::test]
+async fn ct_flush_matching_refuses_an_empty_filter() -> nlink::Result<()> {
+    nlink::require_root!();
+    nlink::require_module!("nf_conntrack");
+    nlink::require_module!("nf_conntrack_netlink");
+
+    let ns = TestNamespace::new("ct-filter-empty")?;
+    let nf = nf_in_ns(&ns)?;
+    nf.add_conntrack(udp_entry(false, 40000, 5000)).await?;
+    let err = nf
+        .flush_conntrack_matching(&ConntrackFilter::new())
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Invalid, "{err}");
+    assert_eq!(nf.get_conntrack().await?.len(), 1, "nothing was sent");
     Ok(())
 }
 

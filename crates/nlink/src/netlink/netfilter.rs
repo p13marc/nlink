@@ -69,6 +69,23 @@ const CTA_COUNTERS_ORIG: u16 = 9;
 const CTA_COUNTERS_REPLY: u16 = 10;
 const CTA_ID: u16 = 12;
 const CTA_ZONE: u16 = 18;
+const CTA_MARK_MASK: u16 = 21;
+const CTA_FILTER: u16 = 25;
+const CTA_STATUS_MASK: u16 = 26;
+
+// CTA_FILTER nested attributes (enum ctattr_filter)
+const CTA_FILTER_ORIG_FLAGS: u16 = 1;
+const CTA_FILTER_REPLY_FLAGS: u16 = 2;
+
+// Which fields of a CTA_FILTER tuple must match. The kernel keeps these in
+// `net/netfilter/nf_internals.h` (`CTA_FILTER_F_*`), not in a UAPI header,
+// so they have names of their own here: the UAPI audit looks up every
+// kernel name in the headers.
+const FILTER_IP_SRC: u32 = 1 << 0;
+const FILTER_IP_DST: u32 = 1 << 1;
+const FILTER_PROTO_NUM: u32 = 1 << 3;
+const FILTER_PROTO_SRC_PORT: u32 = 1 << 4;
+const FILTER_PROTO_DST_PORT: u32 = 1 << 5;
 
 // Tuple attributes
 const CTA_TUPLE_IP: u16 = 1;
@@ -537,15 +554,8 @@ impl ConntrackBuilder {
     /// An entry with no family (one not from the kernel) takes it from
     /// its original tuple's addresses.
     pub fn from_entry(entry: &ConntrackEntry) -> Self {
-        let family = match entry.family {
-            AddressFamily::Inet | AddressFamily::Inet6 => entry.family,
-            _ => match entry.orig.src_ip.or(entry.orig.dst_ip) {
-                Some(IpAddr::V6(_)) => AddressFamily::Inet6,
-                _ => AddressFamily::Inet,
-            },
-        };
         Self {
-            family: family.into(),
+            family: entry.effective_family().into(),
             orig: entry.orig.clone(),
             id: entry.id,
             zone: entry.zone,
@@ -699,6 +709,341 @@ impl ConntrackBuilder {
     }
 }
 
+/// Which conntrack entries a filtered dump or flush touches (#882), like
+/// the options of `conntrack -L` and `conntrack -D`. Every criterion set
+/// must match.
+///
+/// ```no_run
+/// # async fn example() -> nlink::Result<()> {
+/// use nlink::netlink::netfilter::{ConntrackFilter, IpProtocol};
+/// use nlink::netlink::{Connection, Netfilter};
+///
+/// let nf = Connection::<Netfilter>::new()?;
+/// // conntrack -D -p udp --dport 5000
+/// let video = ConntrackFilter::new().proto(IpProtocol::Udp).orig_dst_port(5000);
+/// nf.flush_conntrack_matching(&video).await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// The kernel is given the filter where it can apply it, and nlink applies
+/// it again to every entry the kernel returns, so a kernel that ignores it
+/// costs time, not entries: see
+/// [`get_conntrack_matching`](Connection::get_conntrack_matching) and
+/// [`flush_conntrack_matching`](Connection::flush_conntrack_matching).
+/// Ports match exactly: a range is one filter per port, or one dump
+/// checked with [`matches`](Self::matches).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[must_use = "a filter does nothing until a dump or a flush is given it"]
+pub struct ConntrackFilter {
+    family: Option<AddressFamily>,
+    proto: Option<IpProtocol>,
+    orig: TupleMatch,
+    reply: TupleMatch,
+    zone: Option<u16>,
+    mark: Option<(u32, u32)>,
+    status: Option<(u32, u32)>,
+}
+
+/// The fields of one direction's tuple a [`ConntrackFilter`] compares.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct TupleMatch {
+    src: Option<IpAddr>,
+    dst: Option<IpAddr>,
+    src_port: Option<u16>,
+    dst_port: Option<u16>,
+}
+
+impl TupleMatch {
+    fn has_ports(&self) -> bool {
+        self.src_port.is_some() || self.dst_port.is_some()
+    }
+
+    fn matches(&self, tuple: &ConntrackTuple) -> bool {
+        self.src.is_none_or(|a| tuple.src_ip == Some(a))
+            && self.dst.is_none_or(|a| tuple.dst_ip == Some(a))
+            && self.src_port.is_none_or(|p| tuple.src_port == Some(p))
+            && self.dst_port.is_none_or(|p| tuple.dst_port == Some(p))
+    }
+
+    /// The `CTA_FILTER` flags for this tuple, `proto` asking for the
+    /// protocol too. An IPv6 address is left out: see
+    /// [`ConntrackFilter::append_kernel_filter`].
+    fn kernel_flags(&self, v6: bool, proto: bool) -> u32 {
+        let mut flags = 0;
+        if self.src.is_some() && !v6 {
+            flags |= FILTER_IP_SRC;
+        }
+        if self.dst.is_some() && !v6 {
+            flags |= FILTER_IP_DST;
+        }
+        if proto {
+            flags |= FILTER_PROTO_NUM;
+        }
+        if self.src_port.is_some() {
+            flags |= FILTER_PROTO_SRC_PORT;
+        }
+        if self.dst_port.is_some() {
+            flags |= FILTER_PROTO_DST_PORT;
+        }
+        flags
+    }
+}
+
+impl ConntrackFilter {
+    /// A filter with no criterion yet, which matches every entry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Only entries of `family`: [`AddressFamily::Inet`] or
+    /// [`AddressFamily::Inet6`]. An address sets it too; with neither, a
+    /// dump or a flush covers both families.
+    pub fn family(mut self, family: AddressFamily) -> Self {
+        self.family = Some(family);
+        self
+    }
+
+    /// Only entries of this protocol. A port needs TCP or UDP.
+    pub fn proto(mut self, proto: IpProtocol) -> Self {
+        self.proto = Some(proto);
+        self
+    }
+
+    /// Only entries whose original source address is `addr`: `--orig-src`.
+    pub fn orig_src(mut self, addr: impl Into<IpAddr>) -> Self {
+        self.orig.src = Some(addr.into());
+        self
+    }
+
+    /// Only entries whose original destination address is `addr`:
+    /// `--orig-dst`.
+    pub fn orig_dst(mut self, addr: impl Into<IpAddr>) -> Self {
+        self.orig.dst = Some(addr.into());
+        self
+    }
+
+    /// Only entries whose original source port is `port`: `--sport`.
+    pub fn orig_src_port(mut self, port: u16) -> Self {
+        self.orig.src_port = Some(port);
+        self
+    }
+
+    /// Only entries whose original destination port is `port`: `--dport`.
+    pub fn orig_dst_port(mut self, port: u16) -> Self {
+        self.orig.dst_port = Some(port);
+        self
+    }
+
+    /// Only entries whose reply source address is `addr`: `--reply-src`.
+    pub fn reply_src(mut self, addr: impl Into<IpAddr>) -> Self {
+        self.reply.src = Some(addr.into());
+        self
+    }
+
+    /// Only entries whose reply destination address is `addr`:
+    /// `--reply-dst`.
+    pub fn reply_dst(mut self, addr: impl Into<IpAddr>) -> Self {
+        self.reply.dst = Some(addr.into());
+        self
+    }
+
+    /// Only entries whose reply source port is `port`: `--reply-port-src`.
+    pub fn reply_src_port(mut self, port: u16) -> Self {
+        self.reply.src_port = Some(port);
+        self
+    }
+
+    /// Only entries whose reply destination port is `port`:
+    /// `--reply-port-dst`.
+    pub fn reply_dst_port(mut self, port: u16) -> Self {
+        self.reply.dst_port = Some(port);
+        self
+    }
+
+    /// Only entries in `zone`. 0 is the default zone.
+    pub fn zone(mut self, zone: u16) -> Self {
+        self.zone = Some(zone);
+        self
+    }
+
+    /// Only entries whose mark, masked with `mask`, is `value`:
+    /// `--mark value/mask`. An entry with no mark has mark 0.
+    pub fn mark(mut self, value: u32, mask: u32) -> Self {
+        self.mark = Some((value, mask));
+        self
+    }
+
+    /// Only entries whose status, masked with `mask`, is `value`: with
+    /// `ConntrackStatus::ASSURED` for both, the assured ones.
+    pub fn status(mut self, value: ConntrackStatus, mask: ConntrackStatus) -> Self {
+        self.status = Some((value.bits(), mask.bits()));
+        self
+    }
+
+    /// Whether the filter sets no criterion, and so matches every entry.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Whether `entry` matches. A dump checks this on every entry the
+    /// kernel returns, whatever the kernel filtered.
+    pub fn matches(&self, entry: &ConntrackEntry) -> bool {
+        self.family.is_none_or(|f| entry.effective_family() == f)
+            && self.proto.is_none_or(|p| entry.proto == p)
+            && self.orig.matches(&entry.orig)
+            && self.reply.matches(&entry.reply)
+            && self.zone.is_none_or(|z| entry.zone.unwrap_or(0) == z)
+            && self
+                .mark
+                .is_none_or(|(value, mask)| entry.mark.unwrap_or(0) & mask == value)
+            && self
+                .status
+                .is_none_or(|(value, mask)| entry.status.unwrap_or(0) & mask == value)
+    }
+
+    /// The families a dump or a flush asks for, after checking that the
+    /// kernel and nlink would read the filter alike.
+    fn families(&self) -> Result<Vec<u8>> {
+        let invalid = |why: &str| Err(Error::invalid_message(format!("conntrack filter: {why}")));
+        let tcp_or_udp = matches!(self.proto, Some(IpProtocol::Tcp | IpProtocol::Udp));
+        if (self.orig.has_ports() || self.reply.has_ports()) && !tcp_or_udp {
+            // The kernel compares ports for TCP and UDP only: with any other
+            // protocol it would match every port.
+            return invalid("a port needs `proto(IpProtocol::Tcp)` or `proto(IpProtocol::Udp)`");
+        }
+        if self.status.is_some_and(|(_, mask)| mask == 0) {
+            return invalid("a status mask of 0 matches every entry, and the kernel refuses it");
+        }
+        let mut family = match self.family {
+            None => None,
+            Some(f @ (AddressFamily::Inet | AddressFamily::Inet6)) => Some(f),
+            Some(other) => {
+                return invalid(&format!("family {other:?}: conntrack is Inet or Inet6"));
+            }
+        };
+        let addresses = [self.orig.src, self.orig.dst, self.reply.src, self.reply.dst];
+        for addr in addresses.into_iter().flatten() {
+            let of_addr = if addr.is_ipv4() {
+                AddressFamily::Inet
+            } else {
+                AddressFamily::Inet6
+            };
+            match family {
+                Some(f) if f != of_addr => {
+                    return invalid(&format!("address {addr} is not of family {f:?}"));
+                }
+                _ => family = Some(of_addr),
+            }
+        }
+        Ok(match family {
+            Some(f) => vec![u8::from(f)],
+            None => vec![libc::AF_INET as u8, libc::AF_INET6 as u8],
+        })
+    }
+
+    /// Whether a kernel that filters a flush can be given this filter.
+    /// Not one with an IPv6 address: see
+    /// [`append_kernel_filter`](Self::append_kernel_filter).
+    fn kernel_can_flush(&self) -> bool {
+        let addresses = [self.orig.src, self.orig.dst, self.reply.src, self.reply.dst];
+        !addresses.into_iter().flatten().any(|a| a.is_ipv6())
+    }
+
+    /// Append the filter, for `family`, to a ctnetlink dump or delete.
+    ///
+    /// An IPv6 address is left out. The kernel compares one with
+    /// `!ipv6_addr_cmp()`, which is true when the two are *equal*
+    /// (`ctnetlink_filter_match_tuple`, from 5.8, which added `CTA_FILTER`,
+    /// to mainline as of 2026-10), so it keeps every entry but the ones the
+    /// filter names. nlink compares IPv6 addresses itself.
+    fn append_kernel_filter(&self, b: &mut MessageBuilder, family: u8) {
+        let v6 = family == libc::AF_INET6 as u8;
+        let orig_flags = self.orig.kernel_flags(v6, self.proto.is_some());
+        // A port needs the protocol in its own tuple's flags.
+        let reply_flags = self.reply.kernel_flags(v6, self.reply.has_ports());
+        let proto = self.proto.unwrap_or(IpProtocol::Other(0));
+        for (attr, tuple, flags) in [
+            (CTA_TUPLE_ORIG, &self.orig, orig_flags),
+            (CTA_TUPLE_REPLY, &self.reply, reply_flags),
+        ] {
+            if flags == 0 {
+                continue;
+            }
+            let outer = b.nest_start(attr);
+            if flags & (FILTER_IP_SRC | FILTER_IP_DST) != 0 {
+                let ip = b.nest_start(CTA_TUPLE_IP);
+                for (addr, v4_attr) in [(tuple.src, CTA_IP_V4_SRC), (tuple.dst, CTA_IP_V4_DST)] {
+                    if let Some(IpAddr::V4(a)) = addr {
+                        b.append_attr(v4_attr, &a.octets());
+                    }
+                }
+                b.nest_end(ip);
+            }
+            if flags & FILTER_PROTO_NUM != 0 {
+                let p = b.nest_start(CTA_TUPLE_PROTO);
+                b.append_attr_u8(CTA_PROTO_NUM, proto.number());
+                if let Some(port) = tuple.src_port {
+                    b.append_attr_u16_be(CTA_PROTO_SRC_PORT, port);
+                }
+                if let Some(port) = tuple.dst_port {
+                    b.append_attr_u16_be(CTA_PROTO_DST_PORT, port);
+                }
+                b.nest_end(p);
+            }
+            b.nest_end(outer);
+        }
+        if orig_flags | reply_flags != 0 {
+            let filter = b.nest_start(CTA_FILTER);
+            if orig_flags != 0 {
+                b.append_attr_u32(CTA_FILTER_ORIG_FLAGS, orig_flags);
+            }
+            if reply_flags != 0 {
+                b.append_attr_u32(CTA_FILTER_REPLY_FLAGS, reply_flags);
+            }
+            b.nest_end(filter);
+        }
+        if let Some(zone) = self.zone {
+            b.append_attr_u16_be(CTA_ZONE, zone);
+        }
+        if let Some((value, mask)) = self.mark {
+            b.append_attr_u32_be(CTA_MARK, value);
+            b.append_attr_u32_be(CTA_MARK_MASK, mask);
+        }
+        if let Some((value, mask)) = self.status {
+            b.append_attr_u32_be(CTA_STATUS, value);
+            b.append_attr_u32_be(CTA_STATUS_MASK, mask);
+        }
+    }
+}
+
+/// Whether the running kernel filters a ctnetlink flush by `CTA_FILTER`
+/// (6.12+). Before 6.12 it refuses `CTA_FILTER` on a flush (5.8 to 6.11,
+/// `EOPNOTSUPP`), or does not know it and flushes every entry (before 5.8),
+/// and before 6.8 it flushes every zone for a delete that names only a
+/// zone. A flush is sent there only when it is known to filter.
+fn kernel_filters_flush() -> bool {
+    filters_a_flush(crate::netlink::kernel_version())
+}
+
+fn filters_a_flush(kernel: (u32, u32)) -> bool {
+    kernel >= (6, 12)
+}
+
+impl ConntrackEntry {
+    /// The entry's family, or, for one not from the kernel, its original
+    /// tuple's.
+    fn effective_family(&self) -> AddressFamily {
+        match self.family {
+            AddressFamily::Inet | AddressFamily::Inet6 => self.family,
+            _ => match self.orig.src_ip.or(self.orig.dst_ip) {
+                Some(IpAddr::V6(_)) => AddressFamily::Inet6,
+                _ => AddressFamily::Inet,
+            },
+        }
+    }
+}
+
 impl ConntrackTuple {
     /// True iff every Option field is `None` — used to detect a
     /// builder that hasn't had its `orig` set.
@@ -819,13 +1164,114 @@ impl Connection<Netfilter> {
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_conntrack"))]
     pub async fn get_conntrack(&self) -> Result<Vec<ConntrackEntry>> {
-        self.get_conntrack_family(libc::AF_INET as u8).await
+        self.get_conntrack_family(libc::AF_INET as u8, None).await
     }
 
     /// Get connection tracking entries for IPv6.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "get_conntrack_v6"))]
     pub async fn get_conntrack_v6(&self) -> Result<Vec<ConntrackEntry>> {
-        self.get_conntrack_family(libc::AF_INET6 as u8).await
+        self.get_conntrack_family(libc::AF_INET6 as u8, None).await
+    }
+
+    /// The entries `filter` matches, of both families unless it names one
+    /// (#882): `conntrack -L` with options.
+    ///
+    /// The kernel filters the dump where it can (5.8+), and nlink checks
+    /// every entry it returns with [`ConntrackFilter::matches`]. A kernel
+    /// that ignores part of the filter returns more, and nlink drops the
+    /// rest; one that cannot filter a mark (no `CONFIG_NF_CONNTRACK_MARK`)
+    /// is asked again without the filter.
+    ///
+    /// # Errors
+    /// [`ErrorKind::Invalid`](crate::ErrorKind::Invalid) for a filter the
+    /// kernel would read differently: a port without TCP or UDP, an address
+    /// of another family, a status mask of 0.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "get_conntrack_matching"))]
+    pub async fn get_conntrack_matching(
+        &self,
+        filter: &ConntrackFilter,
+    ) -> Result<Vec<ConntrackEntry>> {
+        let mut entries = Vec::new();
+        for family in filter.families()? {
+            let dumped = match self.get_conntrack_family(family, Some(filter)).await {
+                Err(e) if e.is_not_supported() => self.get_conntrack_family(family, None).await?,
+                other => other?,
+            };
+            entries.extend(dumped.into_iter().filter(|e| filter.matches(e)));
+        }
+        Ok(entries)
+    }
+
+    /// Delete the entries `filter` matches one by one, and return how many
+    /// went (#882).
+    ///
+    /// It dumps them with [`get_conntrack_matching`](Self::get_conntrack_matching)
+    /// and deletes each by its tuple, zone and id
+    /// ([`del_conntrack_entry`](Self::del_conntrack_entry)). An entry that
+    /// expired or was replaced in between is skipped. It works on every
+    /// kernel; [`flush_conntrack_matching`](Self::flush_conntrack_matching)
+    /// is one request where the kernel can filter a flush.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_conntrack_matching"))]
+    pub async fn del_conntrack_matching(&self, filter: &ConntrackFilter) -> Result<usize> {
+        let mut deleted = 0;
+        for entry in self.get_conntrack_matching(filter).await? {
+            match self.del_conntrack_entry(&entry).await {
+                Ok(()) => deleted += 1,
+                Err(e) if e.is_not_found() => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(deleted)
+    }
+
+    /// Delete every entry `filter` matches: `conntrack -D` with options
+    /// (#882).
+    ///
+    /// On a kernel that filters a flush (6.12+), it is one delete per
+    /// family that carries the filter. Anywhere else it is
+    /// [`del_conntrack_matching`](Self::del_conntrack_matching): a kernel
+    /// before 6.12 refuses a filter on a flush, or, before 5.8, does not
+    /// know it and would flush everything. So is a filter with an IPv6
+    /// address, which no kernel compares correctly (see
+    /// [`ConntrackFilter`]).
+    ///
+    /// # Errors
+    /// [`ErrorKind::Invalid`](crate::ErrorKind::Invalid) for an empty
+    /// filter, which would match every entry: flush those with
+    /// [`flush_conntrack_all`](Self::flush_conntrack_all). And for a filter
+    /// the kernel would read differently, as for
+    /// [`get_conntrack_matching`](Self::get_conntrack_matching).
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_conntrack_matching"))]
+    pub async fn flush_conntrack_matching(&self, filter: &ConntrackFilter) -> Result<()> {
+        if filter.is_empty() {
+            return Err(Error::invalid_message(
+                "flush_conntrack_matching: an empty filter matches every entry; \
+                 flush them with `flush_conntrack_all`",
+            ));
+        }
+        let families = filter.families()?;
+        if !(kernel_filters_flush() && filter.kernel_can_flush()) {
+            return self.del_conntrack_matching(filter).await.map(drop);
+        }
+        for family in families {
+            let mut b = MessageBuilder::new(
+                ctnl_msg_type(IPCTNL_MSG_CT_DELETE),
+                NLMF_REQUEST | NLM_F_ACK,
+            );
+            // Version 1, so that the kernel keeps to the family (#880).
+            append_nfgenmsg_version(&mut b, family, 1);
+            filter.append_kernel_filter(&mut b, family);
+            match self.send_ack(b).await {
+                // A kernel without the mark filter refuses it before it
+                // deletes anything.
+                Err(e) if e.is_not_supported() => {
+                    self.del_conntrack_matching(&filter.clone().family(family.into()))
+                        .await?;
+                }
+                other => other?,
+            }
+        }
+        Ok(())
     }
 
     /// Inject a new conntrack entry.
@@ -1009,8 +1455,13 @@ impl Connection<Netfilter> {
         ])
     }
 
-    /// Get connection tracking entries for a specific address family.
-    async fn get_conntrack_family(&self, family: u8) -> Result<Vec<ConntrackEntry>> {
+    /// Get connection tracking entries for a specific address family, the
+    /// kernel given `filter` when there is one.
+    async fn get_conntrack_family(
+        &self,
+        family: u8,
+        filter: Option<&ConntrackFilter>,
+    ) -> Result<Vec<ConntrackEntry>> {
         // #134 — dual-mode recv (dump). Mutex mode: hold the request lock
         // for the whole send+recv (the F1 fix). Dispatcher mode: register
         // the seq (+ dump-serialization lock) so the loop coexists with
@@ -1022,23 +1473,16 @@ impl Connection<Netfilter> {
         // Plan 208 Phase 1+2 — wrap in with_timeout, seq filter,
         // NLM_F_DUMP_INTR detection.
         self.with_timeout(async move {
-            let mut buf = Vec::with_capacity(64);
-            let msg_type = ((NFNL_SUBSYS_CTNETLINK as u16) << 8) | (IPCTNL_MSG_CT_GET as u16);
+            let mut b =
+                MessageBuilder::new(ctnl_msg_type(IPCTNL_MSG_CT_GET), NLM_F_REQUEST | NLM_F_DUMP);
+            b.set_seq(seq);
+            b.set_pid(pid);
+            append_nfgenmsg(&mut b, family);
+            if let Some(filter) = filter {
+                filter.append_kernel_filter(&mut b, family);
+            }
 
-            buf.extend_from_slice(&0u32.to_ne_bytes());
-            buf.extend_from_slice(&msg_type.to_ne_bytes());
-            buf.extend_from_slice(&(NLM_F_REQUEST | NLM_F_DUMP).to_ne_bytes());
-            buf.extend_from_slice(&seq.to_ne_bytes());
-            buf.extend_from_slice(&pid.to_ne_bytes());
-
-            buf.push(family);
-            buf.push(0); // NFNETLINK_V0
-            buf.extend_from_slice(&0u16.to_be_bytes());
-
-            let len = buf.len() as u32;
-            buf[0..4].copy_from_slice(&len.to_ne_bytes());
-
-            self.socket().send(&buf).await?;
+            self.socket().send(&b.finish()).await?;
 
             let mut entries = Vec::new();
 
@@ -1595,6 +2039,259 @@ mod tests {
             back.mark, None,
             "a delete sends only what identifies the entry"
         );
+    }
+
+    fn udp(family: AddressFamily, src: &str, dport: u16) -> ConntrackEntry {
+        let src: IpAddr = src.parse().unwrap();
+        let dst: IpAddr = if src.is_ipv4() {
+            "10.0.0.2".parse().unwrap()
+        } else {
+            "fd00::2".parse().unwrap()
+        };
+        ConntrackEntry {
+            family,
+            proto: IpProtocol::Udp,
+            orig: ConntrackTuple {
+                src_ip: Some(src),
+                dst_ip: Some(dst),
+                src_port: Some(40000),
+                dst_port: Some(dport),
+                ..ConntrackTuple::default()
+            },
+            ..ConntrackEntry::default()
+        }
+    }
+
+    /// #882 — a filter matches an entry when every criterion it sets does.
+    #[test]
+    fn a_filter_matches_what_it_names() {
+        let v4 = udp(AddressFamily::Inet, "10.0.0.1", 5000);
+        let video = ConntrackFilter::new()
+            .proto(IpProtocol::Udp)
+            .orig_dst_port(5000);
+        assert!(video.matches(&v4));
+        assert!(
+            !video.matches(&udp(AddressFamily::Inet, "10.0.0.1", 5001)),
+            "another port"
+        );
+        assert!(
+            !video.matches(&ConntrackEntry {
+                proto: IpProtocol::Tcp,
+                ..v4.clone()
+            }),
+            "another protocol"
+        );
+        assert!(!video.clone().zone(7).matches(&v4), "zone 0 is not zone 7");
+        assert!(video.clone().zone(0).matches(&v4), "no zone is zone 0");
+        assert!(video.clone().zone(7).matches(&ConntrackEntry {
+            zone: Some(7),
+            ..v4.clone()
+        }));
+        assert!(
+            !video.clone().family(AddressFamily::Inet6).matches(&v4),
+            "the other family"
+        );
+        assert!(
+            video.matches(&udp(AddressFamily::Inet6, "fd00::1", 5000)),
+            "no family is both"
+        );
+
+        let marked = ConntrackFilter::new().mark(0x10, 0xf0);
+        assert!(marked.matches(&ConntrackEntry {
+            mark: Some(0x1f),
+            ..v4.clone()
+        }));
+        assert!(!marked.matches(&ConntrackEntry {
+            mark: Some(0x20),
+            ..v4.clone()
+        }));
+        assert!(!marked.matches(&v4), "no mark is mark 0");
+
+        let src = ConntrackFilter::new().orig_src("fd00::1".parse::<IpAddr>().unwrap());
+        assert!(src.matches(&udp(AddressFamily::Inet6, "fd00::1", 1)));
+        assert!(!src.matches(&udp(AddressFamily::Inet6, "fd00::9", 1)));
+        let assured =
+            ConntrackFilter::new().status(ConntrackStatus::ASSURED, ConntrackStatus::ASSURED);
+        assert!(assured.matches(&ConntrackEntry {
+            status: Some(0x0e),
+            ..v4.clone()
+        }));
+        assert!(!assured.matches(&ConntrackEntry {
+            status: Some(0x0a),
+            ..v4
+        }));
+        assert!(ConntrackFilter::new().is_empty() && !video.is_empty());
+    }
+
+    /// #882 — what the kernel would read differently from nlink is refused,
+    /// and the families follow from the filter.
+    #[test]
+    fn a_filter_the_kernel_would_read_differently_is_refused() {
+        let v4: IpAddr = "10.0.0.1".parse().unwrap();
+        let v6: IpAddr = "fd00::1".parse().unwrap();
+        for (filter, why) in [
+            (ConntrackFilter::new().orig_dst_port(5000), "a port needs"),
+            (
+                ConntrackFilter::new()
+                    .proto(IpProtocol::Icmp)
+                    .orig_dst_port(5000),
+                "a port needs",
+            ),
+            // SCTP has ports, but the kernel's filter compares them for TCP
+            // and UDP only.
+            (
+                ConntrackFilter::new()
+                    .proto(IpProtocol::Other(132))
+                    .reply_src_port(1),
+                "a port needs",
+            ),
+            (
+                ConntrackFilter::new()
+                    .family(AddressFamily::Inet6)
+                    .orig_src(v4),
+                "is not of family",
+            ),
+            (
+                ConntrackFilter::new().orig_src(v4).reply_dst(v6),
+                "is not of family",
+            ),
+            (
+                ConntrackFilter::new().family(AddressFamily::Bridge),
+                "conntrack is Inet or Inet6",
+            ),
+            (
+                ConntrackFilter::new().status(ConntrackStatus::empty(), ConntrackStatus::empty()),
+                "status mask of 0",
+            ),
+        ] {
+            let err = filter.families().unwrap_err();
+            assert!(err.to_string().contains(why), "{filter:?}: {err}");
+            assert_eq!(err.kind(), crate::ErrorKind::Invalid);
+        }
+        let both = vec![libc::AF_INET as u8, libc::AF_INET6 as u8];
+        assert_eq!(ConntrackFilter::new().zone(3).families().unwrap(), both);
+        assert_eq!(
+            ConntrackFilter::new().reply_dst(v6).families().unwrap(),
+            [libc::AF_INET6 as u8]
+        );
+        assert_eq!(
+            ConntrackFilter::new()
+                .family(AddressFamily::Inet)
+                .families()
+                .unwrap(),
+            [libc::AF_INET as u8]
+        );
+    }
+
+    /// The attributes of a ctnetlink request after its nfgenmsg, by type.
+    fn top_attrs(buf: &[u8]) -> Vec<(u16, Vec<u8>)> {
+        let mut input = &buf[NLMSG_HDRLEN + 4..];
+        let mut out = Vec::new();
+        while let Some((ty, payload)) = parse_nla(&mut input) {
+            out.push((ty & !crate::netlink::attr::NLA_F_NESTED, payload.to_vec()));
+        }
+        out
+    }
+
+    /// #882 — the kernel is given the filter as `ctnetlink_alloc_filter`
+    /// reads it: the tuple's fields, the `CTA_FILTER` flags saying which of
+    /// them count, the zone, and mark and status each with its mask. An
+    /// IPv6 address stays out, and keeps a flush on the client.
+    #[test]
+    fn the_kernel_filter_names_what_the_filter_does() {
+        let request = |filter: &ConntrackFilter, family: u8| {
+            let mut b = MessageBuilder::new(
+                ctnl_msg_type(IPCTNL_MSG_CT_DELETE),
+                NLMF_REQUEST | NLM_F_ACK,
+            );
+            append_nfgenmsg_version(&mut b, family, 1);
+            filter.append_kernel_filter(&mut b, family);
+            b.finish()
+        };
+        let filter = ConntrackFilter::new()
+            .proto(IpProtocol::Udp)
+            .orig_src(Ipv4Addr::new(10, 0, 0, 1))
+            .orig_dst_port(5000)
+            .reply_src_port(5000)
+            .zone(7)
+            .mark(0x10, 0xff)
+            .status(ConntrackStatus::ASSURED, ConntrackStatus::ASSURED);
+        let buf = request(&filter, libc::AF_INET as u8);
+        let back = parse_conntrack_body(&buf[NLMSG_HDRLEN..]).expect("parses");
+        assert_eq!(
+            back.orig.src_ip,
+            Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
+        );
+        assert_eq!((back.orig.dst_port, back.orig.src_port), (Some(5000), None));
+        assert_eq!(back.reply.src_port, Some(5000));
+        assert_eq!(
+            (back.proto, back.zone, back.mark),
+            (IpProtocol::Udp, Some(7), Some(0x10))
+        );
+
+        let attrs = top_attrs(&buf);
+        let get = |ty: u16| attrs.iter().find(|(t, _)| *t == ty).map(|(_, p)| p.clone());
+        assert_eq!(get(CTA_MARK_MASK), Some(0xffu32.to_be_bytes().to_vec()));
+        assert_eq!(get(CTA_STATUS_MASK), Some(0x04u32.to_be_bytes().to_vec()));
+        let mut nested = &get(CTA_FILTER).expect("CTA_FILTER")[..];
+        let mut flags = Vec::new();
+        while let Some((ty, payload)) = parse_nla(&mut nested) {
+            flags.push((ty, u32::from_ne_bytes(payload.try_into().unwrap())));
+        }
+        assert_eq!(
+            flags,
+            [
+                (
+                    CTA_FILTER_ORIG_FLAGS,
+                    FILTER_IP_SRC | FILTER_PROTO_NUM | FILTER_PROTO_DST_PORT
+                ),
+                (
+                    CTA_FILTER_REPLY_FLAGS,
+                    FILTER_PROTO_NUM | FILTER_PROTO_SRC_PORT
+                ),
+            ]
+        );
+        assert!(filter.kernel_can_flush());
+
+        let v6 = ConntrackFilter::new()
+            .proto(IpProtocol::Udp)
+            .orig_src("fd00::1".parse::<IpAddr>().unwrap())
+            .orig_dst_port(5000);
+        let buf = request(&v6, libc::AF_INET6 as u8);
+        let back = parse_conntrack_body(&buf[NLMSG_HDRLEN..]).expect("parses");
+        assert_eq!(
+            back.orig.src_ip, None,
+            "the kernel compares IPv6 addresses inverted"
+        );
+        assert_eq!(back.orig.dst_port, Some(5000));
+        assert!(!v6.kernel_can_flush());
+
+        // A filter with nothing for the tuples sends no CTA_FILTER.
+        let buf = request(&ConntrackFilter::new().zone(7), libc::AF_INET as u8);
+        assert_eq!(
+            top_attrs(&buf).iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+            [CTA_ZONE]
+        );
+    }
+
+    /// #882 — the kernel is sent a filtered flush from 6.12 on, and below
+    /// that the flush is a dump and a delete per entry.
+    #[test]
+    fn a_flush_is_filtered_by_the_kernel_from_6_12() {
+        use crate::netlink::parse_kernel_version as v;
+        assert_eq!(v("6.12.48+deb13-cloud-amd64"), (6, 12));
+        assert_eq!(v("5.8.0-63-generic"), (5, 8));
+        assert_eq!(v("7.0-rc1"), (7, 0));
+        assert_eq!(v(""), (0, 0));
+        for (kernel, filters) in [
+            ((5, 7), false),
+            ((6, 11), false),
+            ((6, 12), true),
+            ((7, 0), true),
+            ((0, 0), false),
+        ] {
+            assert_eq!(filters_a_flush(kernel), filters, "{kernel:?}");
+        }
     }
 
     /// An entry with no family takes it from its addresses.
