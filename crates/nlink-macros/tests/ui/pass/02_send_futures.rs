@@ -34,6 +34,16 @@ impl<P: Send + Sync> Conn<P> {
         format!("{}{a}", dev.into())
     }
 
+    /// An `impl Trait` inside a type: bounded, and no turbofish.
+    pub async fn nested_impl_trait(
+        &self,
+        label: Option<impl Into<String>>,
+        parts: (impl Into<String>, Vec<impl Into<String>>),
+    ) -> usize {
+        let (head, rest) = parts;
+        label.map(Into::into).unwrap_or_default().len() + head.into().len() + rest.len()
+    }
+
     pub async fn generic<T: Clone, const N: usize>(&self, items: &[T; N]) -> Vec<T>
     where
         T: std::fmt::Debug,

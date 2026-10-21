@@ -50,7 +50,9 @@ def attributes_above(lines, i):
 
 
 def checked(attrs):
-    return any("send_futures" in a for a in attrs)
+    """Whether one of the attributes is `#[nlink_macros::send_futures]` or
+    `#[send_futures(..)]`. A comment that names it does not count."""
+    return any(re.match(r"#\[\s*(nlink_macros\s*::\s*)?send_futures\b", a) for a in attrs)
 
 
 def audit(root):
@@ -109,6 +111,11 @@ def self_test():
             0,
         ),
         "bare_impl.rs": ("impl A {\n    /// doc\n    pub async fn f(&self) {}\n}\n", 1),
+        "comment_only.rs": (
+            "// not #[nlink_macros::send_futures]\n/// see send_futures\nimpl A {\n    pub async fn f(&self) {}\n}\n",
+            1,
+        ),
+        "other_attr.rs": ("#[derive(send_futures_lookalike)]\npub async fn g() {}\n", 1),
         "bare_free.rs": ("#[tracing::instrument]\npub async fn g() {}\n", 1),
         "in_mod.rs": ("mod m {\n    pub async fn g() {}\n}\n", 1),
         "other_impl.rs": (

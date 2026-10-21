@@ -240,7 +240,8 @@ fn checker(
             FnArg::Typed(typed) => {
                 let ident = format_ident!("__arg{i}");
                 let mut ty = (*typed.ty).clone();
-                impl_trait_args |= bound_impl_traits(&mut ty);
+                impl_trait_args |= has_impl_trait(&ty);
+                bound_impl_traits(&mut ty);
                 params.push(quote!(#ident: #ty));
                 args.push(quote!(#ident));
             }
@@ -300,20 +301,34 @@ fn has_impl_trait(ty: &Type) -> bool {
     any_impl(quote!(#ty))
 }
 
-/// Add `Send + Sync` to every `impl Trait` in `ty`, and say whether there
-/// was one.
-fn bound_impl_traits(ty: &mut Type) -> bool {
+/// Add `Send + Sync` to every `impl Trait` in `ty`, however deep:
+/// `Option<impl Into<String>>` and `(impl AsFd, u8)` too.
+fn bound_impl_traits(ty: &mut Type) {
     match ty {
         Type::ImplTrait(t) => {
             t.bounds
                 .push(TypeParamBound::Trait(parse_quote!(::core::marker::Send)));
             t.bounds
                 .push(TypeParamBound::Trait(parse_quote!(::core::marker::Sync)));
-            true
         }
         Type::Reference(r) => bound_impl_traits(&mut r.elem),
         Type::Paren(p) => bound_impl_traits(&mut p.elem),
+        Type::Group(g) => bound_impl_traits(&mut g.elem),
         Type::Slice(s) => bound_impl_traits(&mut s.elem),
-        _ => false,
+        Type::Array(a) => bound_impl_traits(&mut a.elem),
+        Type::Ptr(p) => bound_impl_traits(&mut p.elem),
+        Type::Tuple(t) => t.elems.iter_mut().for_each(bound_impl_traits),
+        Type::Path(p) => {
+            for segment in &mut p.path.segments {
+                if let syn::PathArguments::AngleBracketed(args) = &mut segment.arguments {
+                    for arg in &mut args.args {
+                        if let syn::GenericArgument::Type(ty) = arg {
+                            bound_impl_traits(ty);
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
