@@ -35,10 +35,11 @@ use winnow::{binary::be_u16, prelude::*};
 use super::{
     builder::MessageBuilder,
     connection::Connection,
-    error::Result,
+    error::{Error, Result},
     message::{NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REPLACE, NLM_F_REQUEST as NLMF_REQUEST},
     parse::PResult,
     protocol::Netfilter,
+    types::AddressFamily,
 };
 
 // Netlink constants
@@ -337,9 +338,18 @@ pub struct ConntrackCounters {
     pub bytes: u64,
 }
 
-/// A connection tracking entry.
+/// A connection tracking entry, as a dump or an event returns it.
+///
+/// Delete one with [`Connection::del_conntrack_entry`], or start a
+/// builder from it with [`ConntrackBuilder::from_entry`].
+/// `#[non_exhaustive]`, so that the next field the kernel reports is not
+/// a break (#883).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ConntrackEntry {
+    /// Address family: [`AddressFamily::Inet`] or
+    /// [`AddressFamily::Inet6`], from the message's nfgenmsg.
+    pub family: AddressFamily,
     /// IP protocol (TCP, UDP, ICMP, etc.).
     pub proto: IpProtocol,
     /// Original direction tuple.
@@ -356,6 +366,10 @@ pub struct ConntrackEntry {
     pub status: Option<u32>,
     /// Connection ID.
     pub id: Option<u32>,
+    /// Conntrack zone (`CTA_ZONE`). `None` is the default zone, 0: the
+    /// kernel reports a zone only when it is another one. A zone set for
+    /// one direction only (`CTA_TUPLE_ZONE`) is not read.
+    pub zone: Option<u16>,
     /// Original direction counters.
     pub counters_orig: Option<ConntrackCounters>,
     /// Reply direction counters.
@@ -365,6 +379,7 @@ pub struct ConntrackEntry {
 impl Default for ConntrackEntry {
     fn default() -> Self {
         Self {
+            family: AddressFamily::Unspec,
             proto: IpProtocol::Other(0),
             orig: ConntrackTuple::default(),
             reply: ConntrackTuple::default(),
@@ -373,6 +388,7 @@ impl Default for ConntrackEntry {
             mark: None,
             status: None,
             id: None,
+            zone: None,
             counters_orig: None,
             counters_reply: None,
         }
@@ -466,8 +482,8 @@ pub(crate) fn parse_conntrack_event(msg_type: u16, body: &[u8]) -> Option<Conntr
 /// For `add_conntrack` the kernel requires a non-empty `orig` tuple
 /// with src + dst + proto fields, plus `status(ConntrackStatus::CONFIRMED)`
 /// — without it the kernel will reject the message with `-EINVAL`.
-/// `del_conntrack` only needs enough of the tuple to identify the entry
-/// (or use `del_conntrack_by_id`).
+/// `del_conntrack` only needs enough of the tuple to identify the entry;
+/// [`Self::from_entry`] builds that from a dumped entry.
 #[derive(Debug, Clone)]
 #[must_use = "builders do nothing unless submitted to the connection"]
 pub struct ConntrackBuilder {
@@ -509,9 +525,38 @@ impl ConntrackBuilder {
         }
     }
 
-    /// The address family of this entry (`AF_INET` / `AF_INET6`).
-    pub fn family(&self) -> u8 {
-        self.family
+    /// A builder naming `entry`, as a dump or an event returned it: its
+    /// family, protocol, original tuple, zone and id (#883). That is what
+    /// [`Connection::del_conntrack`] needs, and what
+    /// [`Connection::del_conntrack_entry`] sends.
+    ///
+    /// It names the entry; it does not copy it. The reply tuple, status,
+    /// mark, timeout and TCP state stay unset, so set what an
+    /// `update_conntrack` should change.
+    ///
+    /// An entry with no family (one not from the kernel) takes it from
+    /// its original tuple's addresses.
+    pub fn from_entry(entry: &ConntrackEntry) -> Self {
+        let family = match entry.family {
+            AddressFamily::Inet | AddressFamily::Inet6 => entry.family,
+            _ => match entry.orig.src_ip.or(entry.orig.dst_ip) {
+                Some(IpAddr::V6(_)) => AddressFamily::Inet6,
+                _ => AddressFamily::Inet,
+            },
+        };
+        Self {
+            family: family.into(),
+            orig: entry.orig.clone(),
+            id: entry.id,
+            zone: entry.zone,
+            ..Self::new_v4(entry.proto)
+        }
+    }
+
+    /// The address family of this entry: [`AddressFamily::Inet`] or
+    /// [`AddressFamily::Inet6`].
+    pub fn family(&self) -> AddressFamily {
+        AddressFamily::from(self.family)
     }
 
     /// Set the original-direction tuple (client → server).
@@ -818,9 +863,24 @@ impl Connection<Netfilter> {
     /// Delete a conntrack entry identified by tuple.
     ///
     /// The orig tuple plus `family` are enough; reply / status / mark
-    /// are ignored by the kernel for delete.
+    /// are ignored by the kernel for delete. The kernel looks the tuple up
+    /// in the builder's zone (0 unless set), and when the builder carries
+    /// an id, deletes the entry only if its id matches.
+    ///
+    /// # Errors
+    /// - [`Error::is_not_found`] — no entry with that tuple in that zone,
+    ///   or one whose id is not the builder's.
+    /// - [`ErrorKind::Invalid`](crate::ErrorKind::Invalid) — the builder
+    ///   has no tuple. The kernel would take that for a flush of the whole
+    ///   table, every family and zone, so it is never sent (#878).
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_conntrack"))]
     pub async fn del_conntrack(&self, entry: ConntrackBuilder) -> Result<()> {
+        if entry.orig.is_empty() && entry.reply.as_ref().is_none_or(ConntrackTuple::is_empty) {
+            return Err(Error::invalid_message(
+                "del_conntrack: the builder has no tuple, and the kernel takes a delete \
+                 without one for a flush of the whole table; set `orig`",
+            ));
+        }
         let mut b = MessageBuilder::new(
             ctnl_msg_type(IPCTNL_MSG_CT_DELETE),
             NLMF_REQUEST | NLM_F_ACK,
@@ -830,18 +890,38 @@ impl Connection<Netfilter> {
         self.send_ack(b).await
     }
 
-    /// Delete a conntrack entry by its kernel-assigned ID (the
-    /// `id` field on a [`ConntrackEntry`] returned from
-    /// [`Self::get_conntrack`]).
-    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_conntrack_by_id"))]
-    pub async fn del_conntrack_by_id(&self, id: u32) -> Result<()> {
-        let mut b = MessageBuilder::new(
-            ctnl_msg_type(IPCTNL_MSG_CT_DELETE),
-            NLMF_REQUEST | NLM_F_ACK,
-        );
-        append_nfgenmsg(&mut b, libc::AF_UNSPEC as u8);
-        b.append_attr_u32_be(CTA_ID, id);
-        self.send_ack(b).await
+    /// Delete an entry a dump or an event returned (#878).
+    ///
+    /// Sends its family, original tuple, zone and id
+    /// ([`ConntrackBuilder::from_entry`]). The kernel finds the entry by
+    /// the tuple in that zone, then checks the id. An entry that has
+    /// expired, or been replaced by a new flow with the same tuple, is
+    /// left alone, and the call fails with [`Error::is_not_found`].
+    ///
+    /// This replaces `del_conntrack_by_id`, which sent the id alone. The
+    /// kernel cannot find an entry by its id, and took that request for a
+    /// flush of the whole table.
+    ///
+    /// ```no_run
+    /// # async fn example() -> nlink::Result<()> {
+    /// use nlink::netlink::{Connection, Netfilter};
+    ///
+    /// let nf = Connection::<Netfilter>::new()?;
+    /// for entry in nf.get_conntrack().await? {
+    ///     if entry.orig.dst_port == Some(5000) {
+    ///         match nf.del_conntrack_entry(&entry).await {
+    ///             Err(e) if e.is_not_found() => {} // gone meanwhile
+    ///             other => other?,
+    ///         }
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "del_conntrack_entry"))]
+    pub async fn del_conntrack_entry(&self, entry: &ConntrackEntry) -> Result<()> {
+        self.del_conntrack(ConntrackBuilder::from_entry(entry))
+            .await
     }
 
     /// Flush every IPv4 conntrack entry. Equivalent to
@@ -1031,9 +1111,12 @@ pub(crate) fn parse_conntrack_body(body: &[u8]) -> Option<ConntrackEntry> {
         return None;
     }
     let mut input = body;
-    let _nfmsg = NfGenMsg::parse(&mut input).ok()?;
+    let nfmsg = NfGenMsg::parse(&mut input).ok()?;
 
-    let mut entry = ConntrackEntry::default();
+    let mut entry = ConntrackEntry {
+        family: AddressFamily::from(nfmsg.family),
+        ..ConntrackEntry::default()
+    };
 
     while input.len() >= 4 {
         let (attr_type, attr_data) = parse_nla(&mut input)?;
@@ -1082,6 +1165,9 @@ pub(crate) fn parse_conntrack_body(body: &[u8]) -> Option<ConntrackEntry> {
                     attr_data[2],
                     attr_data[3],
                 ]));
+            }
+            CTA_ZONE if attr_data.len() >= 2 => {
+                entry.zone = Some(u16::from_be_bytes([attr_data[0], attr_data[1]]));
             }
             CTA_PROTOINFO => {
                 entry.tcp_state = parse_protoinfo(attr_data);
@@ -1452,6 +1538,63 @@ mod tests {
         assert_eq!(entry.timeout, Some(120));
         assert_eq!(entry.mark, Some(0x42));
         assert_eq!(entry.tcp_state, Some(TcpConntrackState::Established));
+    }
+
+    /// A delete built from a dumped entry carries what identifies it, and
+    /// the parser a dump and an event go through reads it back (#883).
+    #[test]
+    fn delete_from_an_entry_carries_its_family_zone_and_id() {
+        let entry = ConntrackEntry {
+            family: AddressFamily::Inet6,
+            proto: IpProtocol::Udp,
+            orig: ConntrackTuple::v6("fd00::1".parse().unwrap(), "fd00::2".parse().unwrap())
+                .ports(40000, 5000),
+            id: Some(42),
+            zone: Some(7),
+            mark: Some(0x10),
+            ..ConntrackEntry::default()
+        };
+        let builder = ConntrackBuilder::from_entry(&entry);
+        assert_eq!(builder.family(), AddressFamily::Inet6);
+
+        let mut b = MessageBuilder::new(
+            ctnl_msg_type(IPCTNL_MSG_CT_DELETE),
+            NLMF_REQUEST | NLM_F_ACK,
+        );
+        append_nfgenmsg(&mut b, builder.family);
+        builder.append_attrs(&mut b, true, false);
+        let buf = b.finish();
+
+        let back = parse_conntrack_body(&buf[NLMSG_HDRLEN..]).expect("parses");
+        assert_eq!(back.family, AddressFamily::Inet6);
+        assert_eq!(back.proto, IpProtocol::Udp);
+        assert_eq!(back.orig.dst_port, Some(5000));
+        assert_eq!((back.zone, back.id), (Some(7), Some(42)));
+        assert_eq!(
+            back.mark, None,
+            "a delete sends only what identifies the entry"
+        );
+    }
+
+    /// An entry with no family takes it from its addresses.
+    #[test]
+    fn from_entry_infers_a_missing_family() {
+        let v6 = ConntrackEntry {
+            orig: ConntrackTuple::v6("fd00::1".parse().unwrap(), "fd00::2".parse().unwrap()),
+            ..ConntrackEntry::default()
+        };
+        assert_eq!(
+            ConntrackBuilder::from_entry(&v6).family(),
+            AddressFamily::Inet6
+        );
+        let v4 = ConntrackEntry {
+            orig: ConntrackTuple::v4(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)),
+            ..ConntrackEntry::default()
+        };
+        assert_eq!(
+            ConntrackBuilder::from_entry(&v4).family(),
+            AddressFamily::Inet
+        );
     }
 
     /// A sub-second timeout is 1 s on the wire, not the 0 that expires the

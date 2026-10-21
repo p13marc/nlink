@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- **`del_conntrack_by_id` is gone: it flushed the whole conntrack table**
+  (#878, #883). The workspace is 0.33.0; see
+  `docs/migration_guide/0.32.0-to-0.33.0.md`.
+
+  It sent the id alone. The kernel finds an entry by its tuple and checks
+  the id only after that, so it took the request for a flush: every entry
+  in the namespace, both families, every zone. On a host, that is every
+  NAT binding and every stateful-firewall flow. Its test deleted the only
+  entry in its namespace, so it could not tell. stream-marker found it by
+  reading the kernel, and it reproduces on 6.12.
+  - `Connection<Netfilter>::del_conntrack_entry(&entry)` deletes an entry
+    a dump or an event returned. It sends the family, the original tuple,
+    the zone and the id. The kernel checks the id, so a flow replaced by
+    another with the same tuple fails with `is_not_found()` and stays.
+  - `ConntrackEntry` gains `family` and `zone`, read from every dump and
+    event, and is `#[non_exhaustive]`. `ConntrackBuilder::from_entry`
+    starts a builder from one. `ConntrackBuilder::family()` returns an
+    `AddressFamily`.
+  - `del_conntrack` refuses a builder with no tuple (`ErrorKind::Invalid`)
+    instead of sending it, because the kernel took that for the same flush.
+  - The privileged CI lane requires `nf_conntrack` and
+    `nf_conntrack_netlink` now. Before this, the conntrack tests could
+    skip there and still pass.
+
 ### Fixed
 
 - **No reconcile could be spawned** (#879). `tokio::spawn(async move {

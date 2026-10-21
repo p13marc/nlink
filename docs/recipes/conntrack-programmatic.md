@@ -2,7 +2,7 @@
 
 How to drive Linux's connection-tracking table directly from nlink:
 inject synthetic flows, watch them appear in the dump, update timeouts
-or marks, and delete by tuple or by ID. Uses
+or marks, and delete by tuple or from a dump. Uses
 `nlink::netlink::netfilter::ConntrackBuilder` for the write side and
 `Connection::<Netfilter>::get_conntrack` for the read side.
 
@@ -14,8 +14,8 @@ or marks, and delete by tuple or by ID. Uses
 - **Load-balancer control planes.** Programs that hand off connections
   between back-ends often need to install conntrack entries so the
   kernel's stateful firewall short-circuits the new path.
-- **Lab eviction.** Force-clear stuck flows by tuple or by ID without
-  shelling out to `conntrack -D`.
+- **Lab eviction.** Force-clear stuck flows by tuple, or the entries a
+  dump found, without shelling out to `conntrack -D`.
 
 Don't use it when:
 
@@ -38,9 +38,9 @@ Three operations:
    `status(ConntrackStatus::CONFIRMED)` — the kernel rejects
    unconfirmed entries on the netlink path.
 2. **Submit** via `add_conntrack` / `update_conntrack` /
-   `del_conntrack` / `del_conntrack_by_id` / `flush_conntrack`. The
-   first three take the same builder shape; ID-based delete and flush
-   take simpler arguments.
+   `del_conntrack` / `del_conntrack_entry` / `flush_conntrack`. The
+   first three take the same builder shape; `del_conntrack_entry` takes
+   an entry a dump returned, and flush takes nothing.
 3. **Verify** with `get_conntrack` (or `get_conntrack_v6`) and inspect
    the returned `ConntrackEntry` list — same struct returned for both
    organic kernel entries and ones you injected.
@@ -105,7 +105,6 @@ println!(
     "id={:?} mark={:?} state={:?} timeout={:?}",
     injected.id, injected.mark, injected.tcp_state, injected.timeout,
 );
-let id = injected.id.expect("kernel always assigns an id");
 
 // 3. Update the mark + timeout in place — same builder, different verb.
 nf.update_conntrack(
@@ -119,8 +118,10 @@ nf.update_conntrack(
         .mark(0x99),
 ).await?;
 
-// 4. Delete by ID — the cheapest path when you already have one.
-nf.del_conntrack_by_id(id).await?;
+// 4. Delete the entry the dump returned. That sends its tuple, zone and
+//    id: the kernel finds it by the tuple, and leaves it alone if the id
+//    no longer matches (a new flow with the same tuple).
+nf.del_conntrack_entry(injected).await?;
 
 // 5. Or delete by tuple, which works without a prior dump.
 nf.add_conntrack(
@@ -222,6 +223,11 @@ nf.add_conntrack(
 # Ok(())
 # }
 ```
+
+A dumped entry outside the default zone carries it in `zone`, and
+`del_conntrack_entry` sends it, so deleting from a dump never touches
+the same tuple in another zone. `ConntrackBuilder::from_entry` starts a
+builder from such an entry.
 
 There's no `flush_conntrack_by_zone` helper yet — file an issue
 if you need a zone-scoped connection wrapper.
