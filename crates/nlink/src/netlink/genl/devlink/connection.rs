@@ -38,6 +38,7 @@ impl GenlFamily for Devlink {
     }
 }
 
+#[nlink_macros::send_futures]
 impl Connection<Devlink> {
     /// Get the devlink family ID.
     pub fn family_id(&self) -> u16 {

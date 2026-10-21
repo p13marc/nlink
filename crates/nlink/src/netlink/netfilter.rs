@@ -1143,6 +1143,7 @@ impl NfGenMsg {
     }
 }
 
+#[nlink_macros::send_futures]
 impl Connection<Netfilter> {
     /// Get all connection tracking entries.
     ///
@@ -2544,6 +2545,7 @@ impl FromNetlink for ConntrackEntry {
     }
 }
 
+#[nlink_macros::send_futures]
 impl Connection<Netfilter> {
     /// Stream conntrack entries for `family` —
     /// [`libc::AF_INET`] / [`libc::AF_INET6`] / [`libc::AF_UNSPEC`]

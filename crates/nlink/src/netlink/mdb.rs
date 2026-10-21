@@ -245,6 +245,7 @@ impl MdbEntryBuilder {
     }
 }
 
+#[nlink_macros::send_futures]
 impl Connection<Route> {
     /// List all MDB entries for a bridge.
     ///

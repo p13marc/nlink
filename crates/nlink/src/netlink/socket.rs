@@ -114,6 +114,7 @@ pub struct NetlinkSocket {
     hook: Option<crate::replay::Hook>,
 }
 
+#[nlink_macros::send_futures]
 impl NetlinkSocket {
     /// Create a new netlink socket for the given protocol.
     pub fn new(protocol: Protocol) -> Result<Self> {
@@ -1465,6 +1466,7 @@ impl BatchBufs {
 }
 
 #[cfg(feature = "syscall_batch")]
+#[nlink_macros::send_futures]
 impl NetlinkSocket {
     /// Poll-based batched recv for `Stream` implementations
     /// (`DumpStream`, multicast event streams). Same semantics as

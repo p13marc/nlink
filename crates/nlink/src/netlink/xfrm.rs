@@ -1464,6 +1464,7 @@ impl XfrmSpBuilder {
     }
 }
 
+#[nlink_macros::send_futures]
 impl Connection<Xfrm> {
     /// Subscribe to XFRM multicast notification groups.
     ///
@@ -3221,6 +3222,7 @@ impl FromNetlink for SecurityPolicy {
     }
 }
 
+#[nlink_macros::send_futures]
 impl Connection<Xfrm> {
     /// Stream every IPsec Security Association the kernel knows
     /// about, one parsed [`SecurityAssociation`] per `next().await`.

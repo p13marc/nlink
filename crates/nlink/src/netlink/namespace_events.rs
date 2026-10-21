@@ -85,6 +85,7 @@ pub struct NamespaceEventSubscriber {
     socket: NetlinkSocket,
 }
 
+#[nlink_macros::send_futures]
 impl NamespaceEventSubscriber {
     /// Create a new subscriber for namespace events.
     ///

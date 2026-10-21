@@ -134,6 +134,7 @@ impl LinkRates {
     }
 }
 
+#[nlink_macros::send_futures]
 impl Connection<Route> {
     /// Every link's counters, by ifindex, in one `RTM_GETSTATS` dump
     /// (Linux 4.7+) (#525).
@@ -282,6 +283,7 @@ impl Default for StatsSnapshot {
     }
 }
 
+#[nlink_macros::send_futures]
 impl StatsSnapshot {
     /// An empty snapshot, taken now.
     pub fn new() -> Self {

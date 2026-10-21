@@ -55,6 +55,7 @@ impl GenlFamily for Ethtool {
     }
 }
 
+#[nlink_macros::send_futures]
 impl Connection<Ethtool> {
     /// Get the ethtool family ID.
     pub fn family_id(&self) -> u16 {

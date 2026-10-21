@@ -568,6 +568,7 @@ impl FdbEntryBuilder {
 // Connection Methods
 // ============================================================================
 
+#[nlink_macros::send_futures]
 impl Connection<Route> {
     /// Get all FDB entries for a bridge.
     ///

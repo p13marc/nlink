@@ -29,6 +29,7 @@ impl AsyncProtocolInit for Mptcp {
 }
 use crate::netlink::types::mptcp::{mptcp_pm_addr_attr, mptcp_pm_attr, mptcp_pm_cmd};
 
+#[nlink_macros::send_futures]
 impl Connection<Mptcp> {
     /// Get the MPTCP PM family ID.
     pub fn family_id(&self) -> u16 {

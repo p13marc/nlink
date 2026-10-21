@@ -175,6 +175,35 @@ All notable changes to this project will be documented in this file.
   version gate on both sides of 6.12, and what the kernel is sent.
   `conntrack-programmatic` has a section on it.
 
+- **Every public future is checked `Send` at compile time** (#884). #879's
+  eight reconcile entry points shipped unspawnable, and no test could tell,
+  because none spawned them. stream-marker asked for the check on every
+  public future, about 730 of them, in a way that a new one cannot skip.
+  - `#[nlink_macros::send_futures]` goes on an inherent impl block or a
+    free `pub async fn`. In test builds, each `pub async fn` it covers gets
+    a checker that calls it and requires the future to be `Send`.
+  - A checker takes the function's own parameters, borrowed as it borrows
+    them, which is the shape #879 failed in. Generic parameters, the
+    impl's included, are bounded `Send + Sync`, so a `Connection<P>` method
+    is checked for every protocol, not for one.
+  - All 737 public async fns are covered, and none needed a skip. A future
+    that is not `Send` on purpose would say why, with
+    `#[send_futures(skip = "why")]`.
+  - `scripts/audit-send-futures.sh`, in the audits job, fails on a
+    `pub async fn` the attribute does not cover. Its self-test runs
+    first.
+  - The checkers compile only in test builds, so the library is
+    unchanged.
+
+  With #879's fix reverted, the checkers fail to build 46 times: every
+  reconcile entry point, and the facade's `apply::*` functions that call
+  them, which the hand-written list in #879 did not cover. trybuild tests
+  in `nlink-macros` pin #879's shape (an `AsyncFnMut` retry taking an
+  async closure that borrows `self`) and an `Rc` held across an await as
+  compile failures. clippy's `future_not_send` lint cannot catch #879's
+  shape: it checks modulo lifetimes, and on 0.32.0 it never fired in
+  `reconcile.rs`.
+
 ### Documentation
 
 - **Three recipe statements that no longer held, and a pattern for

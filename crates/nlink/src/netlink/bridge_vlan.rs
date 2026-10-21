@@ -1066,6 +1066,7 @@ impl BridgeVlanEntryOptions {
 // Connection Methods
 // ============================================================================
 
+#[nlink_macros::send_futures]
 impl Connection<Route> {
     /// Resolve BridgeVlanBuilder interface reference.
     async fn resolve_bridge_vlan_interface(&self, config: &BridgeVlanBuilder) -> Result<u32> {

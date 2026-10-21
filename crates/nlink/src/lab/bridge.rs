@@ -46,6 +46,7 @@ pub struct LabBridge<'a> {
     name: String,
 }
 
+#[nlink_macros::send_futures]
 impl<'a> LabBridge<'a> {
     /// Start a new bridge builder for `name` inside `ns`.
     pub fn new(ns: &'a LabNamespace, name: impl Into<String>) -> Self {

@@ -103,6 +103,7 @@ pub struct Tc<'a> {
     dev: InterfaceRef,
 }
 
+#[nlink_macros::send_futures]
 impl<'a> Tc<'a> {
     /// The qdisc slot at `parent`.
     pub fn qdisc(&self, parent: Parent) -> QdiscAt<'a> {
@@ -149,6 +150,7 @@ impl std::fmt::Debug for QdiscAt<'_> {
     }
 }
 
+#[nlink_macros::send_futures]
 impl QdiscAt<'_> {
     /// The handle a new qdisc gets: its major (`1` for `1:`). Without one,
     /// a classful kind at the root gets `1:` and the others the kernel's

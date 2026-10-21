@@ -16,6 +16,7 @@ use crate::netlink::{
     protocol::Nftables,
 };
 
+#[nlink_macros::send_futures]
 impl Connection<Nftables> {
     // =========================================================================
     // Tables
@@ -2229,6 +2230,7 @@ pub struct Transaction {
     genid: Option<u32>,
 }
 
+#[nlink_macros::send_futures]
 impl Transaction {
     fn new() -> Self {
         Self {
@@ -4484,6 +4486,7 @@ impl FromNetlink for RuleInfo {
     }
 }
 
+#[nlink_macros::send_futures]
 impl Connection<Nftables> {
     /// Stream rules in `table` for `family` — one [`RuleInfo`]
     /// per `next().await`, bounded-memory. Preferred over the

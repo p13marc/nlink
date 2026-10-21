@@ -43,6 +43,7 @@ use crate::{
     },
 };
 
+#[nlink_macros::send_futures]
 impl<F> Connection<F>
 where
     F: ProtocolState + GenlFamily,

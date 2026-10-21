@@ -56,6 +56,7 @@ pub struct OvpnConfig {
     interfaces: Vec<OvpnInterfaceConfig>,
 }
 
+#[nlink_macros::send_futures]
 impl OvpnConfig {
     /// Start an empty config.
     pub fn new() -> Self {
@@ -372,6 +373,7 @@ pub struct OvpnDiff {
     pub keys_to_delete: Vec<(u32, u32, OvpnKeySlot)>,
 }
 
+#[nlink_macros::send_futures]
 impl OvpnDiff {
     /// `true` when no ops would be performed.
     pub fn is_empty(&self) -> bool {

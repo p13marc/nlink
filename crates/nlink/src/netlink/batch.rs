@@ -98,6 +98,7 @@ struct BatchOp {
     msg: Vec<u8>,
 }
 
+#[nlink_macros::send_futures]
 impl<'a> Batch<'a> {
     pub(crate) fn new(conn: &'a Connection<Route>) -> Self {
         Self {

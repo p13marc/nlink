@@ -94,6 +94,7 @@ pub struct NamespaceWatcher {
     pending_events: std::collections::VecDeque<NamespaceEvent>,
 }
 
+#[nlink_macros::send_futures]
 impl NamespaceWatcher {
     /// Create a new namespace watcher with default configuration.
     pub async fn new() -> Result<Self> {
@@ -361,6 +362,7 @@ type PendingRecv = std::pin::Pin<
     >,
 >;
 
+#[nlink_macros::send_futures]
 impl NamespaceEventStream {
     /// Receive the next event from the stream.
     pub async fn next(&mut self) -> Option<Result<NamespaceEvent>> {

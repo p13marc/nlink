@@ -72,6 +72,7 @@ pub struct Stack {
     pub wireguard: Option<WireguardConfig>,
 }
 
+#[nlink_macros::send_futures]
 impl Stack {
     /// Build an empty Stack.
     pub fn new() -> Self {
@@ -293,6 +294,7 @@ pub type StackDiff = StackPlan;
 #[deprecated(since = "0.32.0", note = "renamed `StackReport` (#519)")]
 pub type StackApplyReport = StackReport;
 
+#[nlink_macros::send_futures]
 impl StackPlan {
     /// `true` if no layer has anything to change.
     pub fn is_empty(&self) -> bool {

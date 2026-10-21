@@ -39,6 +39,7 @@ use crate::{Connection, Result};
 /// you.
 ///
 /// 0.19 Finding B — now `async`.
+#[nlink_macros::send_futures]
 pub async fn route_changes() -> Result<RouteResyncStream> {
     let conn = Connection::<Route>::new()?;
     let factory: ConnectionFactory<Route> =
@@ -48,6 +49,7 @@ pub async fn route_changes() -> Result<RouteResyncStream> {
 
 /// Watch RTNETLINK changes inside a named namespace.
 #[deprecated(since = "0.32.0", note = "use `route_changes_in(ns)`, which takes a name (#532)")]
+#[nlink_macros::send_futures]
 pub async fn route_changes_in_namespace(ns: &str) -> Result<RouteResyncStream> {
     route_changes_in(ns).await
 }
@@ -59,6 +61,7 @@ pub async fn route_changes_in_namespace(ns: &str) -> Result<RouteResyncStream> {
 /// The namespace is opened once. Every resync reconnects to that one, and
 /// ends the stream with `NamespaceDeleted` once its name is gone, rather
 /// than connect to a namespace created later under the same name (#520).
+#[nlink_macros::send_futures]
 pub async fn route_changes_in<'a>(
     ns: impl Into<namespace::NetnsTarget<'a>>,
 ) -> Result<RouteResyncStream> {
@@ -93,6 +96,7 @@ where
 /// namespace.
 ///
 /// 0.19 Finding B — now `async`.
+#[nlink_macros::send_futures]
 pub async fn nftables_changes() -> Result<NftablesResyncStream> {
     let conn = Connection::<Nftables>::new()?;
     let factory: ConnectionFactory<Nftables> =
@@ -102,6 +106,7 @@ pub async fn nftables_changes() -> Result<NftablesResyncStream> {
 
 /// Watch nftables ruleset mutations inside a named namespace.
 #[deprecated(since = "0.32.0", note = "use `nftables_changes_in(ns)`, which takes a name (#532)")]
+#[nlink_macros::send_futures]
 pub async fn nftables_changes_in_namespace(ns: &str) -> Result<NftablesResyncStream> {
     nftables_changes_in(ns).await
 }
@@ -110,6 +115,7 @@ pub async fn nftables_changes_in_namespace(ns: &str) -> Result<NftablesResyncStr
 ///
 /// Resyncs reconnect to the namespace the stream started in, as
 /// [`route_changes_in`] does (#520).
+#[nlink_macros::send_futures]
 pub async fn nftables_changes_in<'a>(
     ns: impl Into<namespace::NetnsTarget<'a>>,
 ) -> Result<NftablesResyncStream> {
@@ -139,6 +145,7 @@ pub async fn nftables_changes_in<'a>(
 /// [`WireguardWatcher::next_events`]. See Plan 199's
 /// migration-guide section for the kernel-source ground
 /// truth + the deferred-multicast patch history.
+#[nlink_macros::send_futures]
 pub async fn wireguard_changes(opts: WireguardWatchOptions) -> Result<WireguardWatcher> {
     let conn = Connection::<Wireguard>::new_async().await?;
     WireguardWatcher::new(conn, opts)
@@ -146,6 +153,7 @@ pub async fn wireguard_changes(opts: WireguardWatchOptions) -> Result<WireguardW
 
 /// Same as [`wireguard_changes`] inside a named namespace.
 #[deprecated(since = "0.32.0", note = "use `wireguard_changes_in(ns, opts)`, which takes a name (#532)")]
+#[nlink_macros::send_futures]
 pub async fn wireguard_changes_in_namespace(
     ns: &str,
     opts: WireguardWatchOptions,
@@ -154,6 +162,7 @@ pub async fn wireguard_changes_in_namespace(
 }
 
 /// Same as [`wireguard_changes`] inside a namespace (#532).
+#[nlink_macros::send_futures]
 pub async fn wireguard_changes_in<'a>(
     ns: impl Into<namespace::NetnsTarget<'a>>,
     opts: WireguardWatchOptions,

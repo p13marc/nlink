@@ -191,6 +191,7 @@ impl Uevent {
     }
 }
 
+#[nlink_macros::send_futures]
 impl Connection<KobjectUevent> {
     /// Create a new uevent connection subscribed to kernel events.
     ///

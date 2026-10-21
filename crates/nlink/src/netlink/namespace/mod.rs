@@ -104,6 +104,7 @@ pub enum NamespaceSpec<'a> {
     Pid(u32),
 }
 
+#[nlink_macros::send_futures]
 impl<'a> NamespaceSpec<'a> {
     /// Create a connection for this namespace specification.
     ///
@@ -438,6 +439,7 @@ pub fn connection_for_pid<P: ProtocolState + Default + SyncConstructible>(pid: u
 /// # }
 /// ```
 #[deprecated(since = "0.32.0", note = "use `Connection::new_in_async(name)` (#532)")]
+#[nlink_macros::send_futures]
 pub async fn connection_for_async<P: AsyncProtocolInit + AsyncConstructible>(name: &str) -> Result<Connection<P>> {
     Connection::<P>::new_in_async(name).await
 }
@@ -446,6 +448,7 @@ pub async fn connection_for_async<P: AsyncProtocolInit + AsyncConstructible>(nam
 ///
 /// See [`connection_for_async`] for details.
 #[deprecated(since = "0.32.0", note = "use `Connection::new_in_async(path)` (#532)")]
+#[nlink_macros::send_futures]
 pub async fn connection_for_path_async<P: AsyncProtocolInit + AsyncConstructible, T: AsRef<Path>>(
     path: T,
 ) -> Result<Connection<P>> {
@@ -456,6 +459,7 @@ pub async fn connection_for_path_async<P: AsyncProtocolInit + AsyncConstructible
 ///
 /// See [`connection_for_async`] for details.
 #[deprecated(since = "0.32.0", note = "use `Connection::new_in_async(NetnsRef::Pid(pid))` (#532)")]
+#[nlink_macros::send_futures]
 pub async fn connection_for_pid_async<P: AsyncProtocolInit + AsyncConstructible>(pid: u32) -> Result<Connection<P>> {
     Connection::<P>::new_in_async(NetnsRef::Pid(pid)).await
 }

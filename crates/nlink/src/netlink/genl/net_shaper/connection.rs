@@ -18,6 +18,7 @@ use super::messages::{
 use super::types::NetShaperScope;
 use super::NetShaper;
 
+#[nlink_macros::send_futures]
 impl Connection<NetShaper> {
     /// Read one shaper's state.
     ///

@@ -739,6 +739,7 @@ impl NexthopGroupBuilder {
 // Connection methods
 // ============================================================================
 
+#[nlink_macros::send_futures]
 impl Connection<Route> {
     /// Resolve NexthopBuilder interface reference.
     async fn resolve_nexthop_interface(&self, builder: &NexthopBuilder) -> Result<Option<u32>> {

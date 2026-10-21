@@ -481,6 +481,7 @@ pub mod __rt {
     /// Emitted by `#[genl_family]`-expanded `AsyncProtocolInit::resolve_async`
     /// impls. Downstream code shouldn't call this directly — let
     /// the macro handle it.
+    #[nlink_macros::send_futures]
     pub async fn resolve_genl_family(
         socket: &NetlinkSocket,
         name: &str,
@@ -503,6 +504,7 @@ pub mod __rt {
     /// family marker stores the map; the
     /// [`GenlFamily::mcast_group(name)`](crate::macros::GenlFamily)
     /// accessor reads it.
+    #[nlink_macros::send_futures]
     pub async fn resolve_genl_family_with_groups(
         socket: &NetlinkSocket,
         name: &str,

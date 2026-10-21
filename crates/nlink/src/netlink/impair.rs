@@ -197,6 +197,7 @@ pub struct PerPeerImpairer {
     assumed_link_rate: Rate,
 }
 
+#[nlink_macros::send_futures]
 impl PerPeerImpairer {
     /// Create a helper targeting `dev` by name.
     pub fn new(dev: impl Into<String>) -> Self {

@@ -86,6 +86,7 @@ use crate::{Connection, Result};
 ///
 /// Used internally by the resync wrapper; exposed here so
 /// callers building bespoke ENOBUFS handling can reuse it.
+#[nlink_macros::send_futures]
 pub async fn nftables_snapshot(conn: &Connection<Nftables>) -> Result<Vec<NftablesEvent>> {
     const ATTEMPTS: usize = 5;
     for _ in 0..ATTEMPTS {
@@ -177,6 +178,7 @@ pub type OwnedResyncStream =
 pub type BorrowedResyncStream<'a> =
     ResyncStream<'static, EventSubscription<'a, Nftables>, NftablesEvent, SnapshotFn>;
 
+#[nlink_macros::send_futures]
 impl Connection<Nftables> {
     /// Subscribe to every nftables multicast group + return an
     /// ENOBUFS-resilient event stream that **owns** the connection.

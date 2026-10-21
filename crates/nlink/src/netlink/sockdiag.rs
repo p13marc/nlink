@@ -99,6 +99,7 @@ const NDIAG_SHOW_GROUPS: u32 = 0x02;
 const NETLINK_DIAG_MEMINFO: u16 = 0;
 const NETLINK_DIAG_GROUPS: u16 = 1;
 
+#[nlink_macros::send_futures]
 impl Connection<SockDiag> {
     /// Query sockets matching the given filter.
     ///

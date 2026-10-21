@@ -23,18 +23,21 @@ use crate::{Connection, Result};
 
 /// Diff a network config against the host's default
 /// namespace.
+#[nlink_macros::send_futures]
 pub async fn network(cfg: &NetworkConfig) -> Result<ConfigDiff> {
     network_in(NetnsRef::Default, cfg).await
 }
 
 /// Diff a network config against a named namespace.
 #[deprecated(since = "0.32.0", note = "use `network_in(ns, …)`, which takes a name (#532)")]
+#[nlink_macros::send_futures]
 pub async fn network_in_namespace(ns: &str, cfg: &NetworkConfig) -> Result<ConfigDiff> {
     network_in(ns, cfg).await
 }
 
 /// Diff a network config against any namespace specification
 /// (named, path, or PID — container support, #169).
+#[nlink_macros::send_futures]
 pub async fn network_in<'a>(ns: impl Into<NetnsTarget<'a>>, cfg: &NetworkConfig) -> Result<ConfigDiff> {
     let ns: NetnsTarget<'a> = ns.into();
     network_in_with(ns, cfg, PlanOptions::default()).await
@@ -42,6 +45,7 @@ pub async fn network_in<'a>(ns: impl Into<NetnsTarget<'a>>, cfg: &NetworkConfig)
 
 /// [`network_in`] with [`PlanOptions`] — `purge(true)` includes the
 /// removals a purging apply would perform (#330).
+#[nlink_macros::send_futures]
 pub async fn network_in_with<'a>(
     ns: impl Into<NetnsTarget<'a>>,
     cfg: &NetworkConfig,
@@ -58,18 +62,21 @@ pub async fn network_in_with<'a>(
 
 /// Diff an nftables config against the host's default
 /// namespace.
+#[nlink_macros::send_futures]
 pub async fn nftables(cfg: &NftablesConfig) -> Result<NftablesDiff> {
     nftables_in(NetnsRef::Default, cfg).await
 }
 
 /// Diff an nftables config against a named namespace.
 #[deprecated(since = "0.32.0", note = "use `nftables_in(ns, …)`, which takes a name (#532)")]
+#[nlink_macros::send_futures]
 pub async fn nftables_in_namespace(ns: &str, cfg: &NftablesConfig) -> Result<NftablesDiff> {
     nftables_in(ns, cfg).await
 }
 
 /// Diff an nftables config against any namespace specification
 /// (named, path, or PID — container support, #169).
+#[nlink_macros::send_futures]
 pub async fn nftables_in<'a>(ns: impl Into<NetnsTarget<'a>>, cfg: &NftablesConfig) -> Result<NftablesDiff> {
     let ns: NetnsTarget<'a> = ns.into();
     let conn: Connection<Nftables> = ns.connection()?;
@@ -82,12 +89,14 @@ pub async fn nftables_in<'a>(ns: impl Into<NetnsTarget<'a>>, cfg: &NftablesConfi
 
 /// Diff a WireGuard config against the host's default
 /// namespace.
+#[nlink_macros::send_futures]
 pub async fn wireguard(cfg: &WireguardConfig) -> Result<WireguardConfigDiff> {
     wireguard_in(NetnsRef::Default, cfg).await
 }
 
 /// Diff a WireGuard config against a named namespace.
 #[deprecated(since = "0.32.0", note = "use `wireguard_in(ns, …)`, which takes a name (#532)")]
+#[nlink_macros::send_futures]
 pub async fn wireguard_in_namespace(
     ns: &str,
     cfg: &WireguardConfig,
@@ -97,6 +106,7 @@ pub async fn wireguard_in_namespace(
 
 /// Diff a WireGuard config against any namespace specification
 /// (named, path, or PID — container support, #169).
+#[nlink_macros::send_futures]
 pub async fn wireguard_in<'a>(
     ns: impl Into<NetnsTarget<'a>>,
     cfg: &WireguardConfig,

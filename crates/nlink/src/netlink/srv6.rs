@@ -860,6 +860,7 @@ impl Srv6LocalBuilder {
 // Connection Methods
 // ============================================================================
 
+#[nlink_macros::send_futures]
 impl Connection<Route> {
     /// Resolve interface for SRv6 local builder.
     async fn resolve_srv6_interface(&self, builder: &Srv6LocalBuilder) -> Result<Option<u32>> {

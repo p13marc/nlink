@@ -274,6 +274,7 @@ pub struct WireguardWatcher {
     first_poll: bool,
 }
 
+#[nlink_macros::send_futures]
 impl WireguardWatcher {
     /// Construct a new watcher. Returns
     /// `Error::invalid_message` if `opts.interfaces` is

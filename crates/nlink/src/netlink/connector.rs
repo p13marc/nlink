@@ -391,6 +391,7 @@ impl ProcEventHeader {
     }
 }
 
+#[nlink_macros::send_futures]
 impl Connection<Connector> {
     /// Create a new connector and register for process events.
     ///

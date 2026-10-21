@@ -176,6 +176,7 @@ impl NetconfMessage {
     }
 }
 
+#[nlink_macros::send_futures]
 impl Connection<Route> {
     /// Every interface's netconf in `family` (IPv4 or IPv6), with the `all`
     /// and `default` settings (#523).

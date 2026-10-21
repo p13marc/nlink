@@ -590,6 +590,7 @@ impl<P: EventSource> Unpin for OwnedEventStream<P> {}
 // Connection methods for EventSource protocols
 // ============================================================================
 
+#[nlink_macros::send_futures]
 impl<P: EventSource> Connection<P> {
     /// Create an event stream that borrows this connection.
     ///

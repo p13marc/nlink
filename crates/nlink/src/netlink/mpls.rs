@@ -602,6 +602,7 @@ impl MplsRouteBuilder {
 // Connection Methods
 // ============================================================================
 
+#[nlink_macros::send_futures]
 impl Connection<Route> {
     /// Resolve MplsRouteBuilder interface reference.
     async fn resolve_mpls_interface(&self, builder: &MplsRouteBuilder) -> Result<Option<u32>> {
