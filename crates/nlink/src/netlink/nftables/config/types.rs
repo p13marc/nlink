@@ -954,10 +954,10 @@ pub struct DeclaredRule {
     pub(crate) body: Rule,
 }
 
-/// A rule body as its `nft` text.
+/// A rule body as its `nft -s` text.
 #[cfg(feature = "serde")]
 fn nft_text<S: serde::Serializer>(body: &Rule, s: S) -> std::result::Result<S::Ok, S::Error> {
-    serde::Serialize::serialize(&body.nft_syntax(), s)
+    serde::Serialize::serialize(&body.nft_syntax_stateless(), s)
 }
 
 impl DeclaredRule {

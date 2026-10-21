@@ -344,10 +344,23 @@ if !diff.is_empty() {
 # }
 ```
 
-Each rule line of the diff ends with the rule as `nft list` prints it,
-`+ rule Inet filter/input [ssh]: tcp dport 22 accept` (#708). The rules in
-the kernel print the same way, through `RuleInfo::nft_syntax`, which is
-`None` for the rare rule nlink cannot print exactly as nft would (an
+Each rule line of the diff ends with the rule as `nft -s list` prints it
+(#708). A rule the diff deletes, replaces or moves shows what the kernel
+has, so the log says what a reconcile removed, including a rule someone
+added by hand:
+
+```text
++ rule Inet filter/input [ssh]: tcp dport 22 accept
+- rule Inet filter/input (handle=6): udp dport 5353 counter accept comment "by hand"
+~ rule Inet filter/input (handle=5 key=ntp): udp dport 123 accept -> udp dport 1123 accept
+```
+
+The same text is in each change's fields (`RuleDelete::current`,
+`RuleReplace::current`, `RuleMove::current`) and in the diff's JSON. It is
+stateless, as `nft -s` prints it, so a counter does not make two logs of
+the same change differ. The rules in the kernel print the same way through
+`RuleInfo::nft_syntax`, with their counts, or `nft_syntax_stateless`. Both
+are `None` for the rare rule nlink cannot print exactly as nft would (an
 anonymous set, an expression it does not decode):
 
 ```rust,no_run

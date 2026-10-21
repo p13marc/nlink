@@ -3306,6 +3306,18 @@ impl super::types::RuleInfo {
         Some(with_comment(body, self.comment_text.as_deref()))
     }
 
+    /// [`nft_syntax`](Self::nft_syntax) as `nft -s list ruleset`
+    /// (`--stateless`) prints it: `tcp dport 22 counter accept`, a counter
+    /// without its packets and bytes and a quota without what it has used.
+    /// The same rule prints the same way however much traffic it has seen,
+    /// which is why [`NftablesDiff`] shows rules this way.
+    ///
+    /// [`NftablesDiff`]: super::config::NftablesDiff
+    pub fn nft_syntax_stateless(&self) -> Option<String> {
+        let body = super::lift::lift_stateless(&self.expressions(), self.family)?;
+        Some(with_comment(body, self.comment_text.as_deref()))
+    }
+
     /// Cumulative `(packets, bytes)` from the first `counter`
     /// expression in this rule, if any.
     ///

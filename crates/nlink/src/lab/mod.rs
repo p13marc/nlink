@@ -440,15 +440,15 @@ fn uid_map_is_identity(map: &str) -> bool {
 /// [`require_root!`](crate::require_root) then fails instead of reporting
 /// `ok` without running, which is what every such test did on a job that
 /// lost root (#885). A flag, like [`strict_host_root`]: there is one thing
-/// being promised. Any value but an empty one, `0`, `false` or `no` sets
-/// it, in any case, so that a typo fails rather than skips.
+/// being promised. Any value but an empty one, `0`, `false`, `no` or `off`
+/// sets it, in any case, so that a typo fails rather than skips.
 pub fn strict_root() -> bool {
     env_flag("NLINK_TEST_STRICT_ROOT")
 }
 
 /// Whether the variable `name` is set to something other than off: an
-/// empty value, `0`, `false` or `no`, in any case. A value it does not
-/// know is on, so that `TRUE` or `yse` does not quietly turn a gate off.
+/// empty value, `0`, `false`, `no` or `off`, in any case. A value it does
+/// not know is on, so that `TRUE` or `yse` does not quietly turn a gate off.
 fn env_flag(name: &str) -> bool {
     std::env::var(name).is_ok_and(|v| flag_is_on(&v))
 }
@@ -456,7 +456,7 @@ fn env_flag(name: &str) -> bool {
 fn flag_is_on(value: &str) -> bool {
     let value = value.trim();
     !(value.is_empty()
-        || ["0", "false", "no"]
+        || ["0", "false", "no", "off"]
             .iter()
             .any(|off| value.eq_ignore_ascii_case(off)))
 }
@@ -496,8 +496,8 @@ pub fn skip_without_root() -> bool {
 /// would only teach everyone to ignore the job. They are covered by
 /// the maintainer's local root runs.
 ///
-/// Read as [`strict_root`] is: any value but an empty one, `0`, `false` or
-/// `no` sets it.
+/// Read as [`strict_root`] is: any value but an empty one, `0`, `false`,
+/// `no` or `off` sets it.
 pub fn strict_host_root() -> bool {
     env_flag("NLINK_TEST_STRICT_HOST_ROOT")
 }
@@ -853,7 +853,7 @@ mod tests {
         for on in ["1", "true", "TRUE", "yes", "Yes", "on", "yse"] {
             assert!(flag_is_on(on), "{on}");
         }
-        for off in ["", " ", "0", "false", "FALSE", "no", "No"] {
+        for off in ["", " ", "0", "false", "FALSE", "no", "No", "off", "OFF"] {
             assert!(!flag_is_on(off), "{off:?}");
         }
     }

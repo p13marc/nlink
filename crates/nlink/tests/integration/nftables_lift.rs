@@ -11,9 +11,11 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use nlink::netlink::Nftables;
+use nlink::netlink::nftables::config::NftablesConfig;
 use nlink::netlink::nftables::types::{
-    ChainName, CtDirection, CtState, CtStatus, Family, FibFlags, Generated, HeaderWrite, IcmpxCode,
-    LimitUnit, NatStatement, PacketField, PktType, Rule, SocketMatch, TcpFlags,
+    ChainName, ChainType, CtDirection, CtState, CtStatus, Family, FibFlags, Generated, HeaderWrite,
+    Hook, IcmpxCode, LimitUnit, NatStatement, PacketField, PktType, Priority, Rule, SocketMatch,
+    TcpFlags,
 };
 use nlink::netlink::nftables::{
     DynsetExpr, DynsetOp, LogExpr, LogLevel, NumgenKind, OsfTtl, Register,
@@ -809,5 +811,119 @@ async fn nft_syntax_of_what_nlink_builds_is_what_nft_lists() -> nlink::Result<()
         wrong.len(),
         wrong.join("\n")
     );
+    Ok(())
+}
+
+/// `nft -s -a list chain`'s rules, by handle.
+fn listed_stateless(
+    ns: &TestNamespace,
+    family: Family,
+    table: &str,
+    chain: &str,
+) -> nlink::Result<Vec<(u64, String)>> {
+    let out = ns.exec(
+        "nft",
+        &["-s", "-a", "list", "chain", family.name(), table, chain],
+    )?;
+    Ok(out
+        .lines()
+        .filter_map(|l| {
+            let (rule, handle) = l.trim().rsplit_once(" # handle ")?;
+            let handle = handle.parse().ok()?;
+            let is_rule = !rule.starts_with("table ") && !rule.starts_with("chain ");
+            is_rule.then(|| (handle, as_nft_1_1(rule)))
+        })
+        .collect())
+}
+
+/// A diff says what it deletes, replaces and moves as `nft -s list` prints
+/// it, whatever the rule has counted: a rule nft added with counted packets
+/// and a used quota, and rules nlink wrote.
+#[tokio::test]
+async fn the_diff_shows_what_the_kernel_has_as_nft_lists_it() -> nlink::Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let ns = TestNamespace::new("nft-lift-diff")?;
+    let nft = ns.connection_for::<Nftables>()?;
+    let input = |c: nlink::netlink::nftables::config::DeclaredChainBuilder| {
+        c.hook(Hook::Input)
+            .priority(Priority::Filter)
+            .chain_type(ChainType::Filter)
+            .exclusive()
+    };
+    let was = NftablesConfig::new().table("f", Family::Inet, |t| {
+        t.chain("input", input)
+            .rule_keyed("input", "ssh", |r| r.match_tcp_dport(22).counter().accept())
+            .rule_keyed("input", "dns", |r| r.match_udp_dport(53).counter().accept())
+            .rule_keyed("input", "web", |r| {
+                r.match_tcp_dport(80).quota_over(10 << 20).drop()
+            })
+            .rule_keyed("input", "ntp", |r| r.match_udp_dport(123).accept())
+    });
+    was.diff(&nft).await?.apply(&nft).await?;
+    install(
+        &ns,
+        "diff",
+        "add rule inet f input udp dport 5353 counter packets 5 bytes 300 \
+         quota over 10 mbytes used 2 kbytes accept comment \"by hand\"\n",
+    )?;
+
+    // dns and the foreign rule go, web and ssh change places, and ntp,
+    // in order either way, changes in place.
+    let now = NftablesConfig::new().table("f", Family::Inet, |t| {
+        t.chain("input", input)
+            .rule_keyed("input", "web", |r| {
+                r.match_tcp_dport(80).quota_over(10 << 20).drop()
+            })
+            .rule_keyed("input", "ssh", |r| r.match_tcp_dport(22).counter().accept())
+            .rule_keyed("input", "ntp", |r| r.match_udp_dport(1123).accept())
+    });
+    let diff = now.diff(&nft).await?;
+    let listed = listed_stateless(&ns, Family::Inet, "f", "input")?;
+    let at = |handle: u64| {
+        listed
+            .iter()
+            .find(|(h, _)| *h == handle)
+            .map(|(_, rule)| rule.clone())
+    };
+
+    let mut shown: Vec<(u64, Option<String>)> = Vec::new();
+    shown.extend(
+        diff.rules_to_delete
+            .iter()
+            .map(|d| (d.handle.0, d.current.clone())),
+    );
+    shown.extend(
+        diff.rules_to_replace
+            .iter()
+            .map(|r| (r.handle.0, r.current.clone())),
+    );
+    shown.extend(
+        diff.rules_to_move
+            .iter()
+            .map(|m| (m.from.0, m.current.clone())),
+    );
+    assert_eq!(diff.rules_to_delete.len(), 2, "{diff}");
+    assert_eq!(diff.rules_to_replace.len(), 1, "{diff}");
+    assert_eq!(diff.rules_to_move.len(), 1, "{diff}");
+    let text = diff.to_string();
+    for (handle, current) in &shown {
+        assert_eq!(*current, at(*handle), "handle {handle}: {diff}");
+        let current = current.as_deref().unwrap_or_default();
+        assert!(text.contains(current), "the diff shows `{current}`: {diff}");
+    }
+    assert!(
+        text.contains(r#"udp dport 5353 counter quota over 10 mbytes accept comment "by hand""#),
+        "{diff}"
+    );
+    assert!(
+        text.contains("key=ntp): udp dport 123 accept -> udp dport 1123 accept"),
+        "{diff}"
+    );
+
+    diff.apply(&nft).await?;
+    let again = now.diff(&nft).await?;
+    assert!(again.is_empty(), "{again}");
     Ok(())
 }

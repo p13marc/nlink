@@ -1246,6 +1246,10 @@ impl Connection<Netfilter> {
     /// [`ConntrackFilter`]). That path is a request per entry, and a flow
     /// that starts after its dump is not deleted.
     ///
+    /// Neither path is atomic across families. A filter with no family
+    /// deletes IPv4's entries, then IPv6's, and when the second fails the
+    /// first are already gone.
+    ///
     /// # Errors
     /// [`ErrorKind::Invalid`](crate::ErrorKind::Invalid) for an empty
     /// filter, which would match every entry: flush those with

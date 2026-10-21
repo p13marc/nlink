@@ -31,7 +31,18 @@ use super::{
 /// The rule body `exprs` as `nft list` prints it in a `family` table, or
 /// `None` when it holds something this does not read back exactly.
 pub(crate) fn lift(exprs: &[RuleExpr], family: Family) -> Option<String> {
+    lift_with(exprs, family, false)
+}
+
+/// [`lift`] as `nft -s list` (`--stateless`) prints it: a counter without
+/// its packets and bytes, a quota without what it has used.
+pub(crate) fn lift_stateless(exprs: &[RuleExpr], family: Family) -> Option<String> {
+    lift_with(exprs, family, true)
+}
+
+fn lift_with(exprs: &[RuleExpr], family: Family, stateless: bool) -> Option<String> {
     let mut lifter = Lifter::new(family);
+    lifter.stateless = stateless;
     for expr in exprs {
         lifter.step(expr)?;
     }
@@ -797,6 +808,8 @@ struct Lifter {
     /// The last statement, when it was an ordered comparison: nft writes a
     /// range as `>= first` then `<= last`, which this turns back into one.
     bound: Option<Bound>,
+    /// Leave out what the rule has counted, as `nft -s` does.
+    stateless: bool,
 }
 
 /// An ordered comparison, which the next one may close into a range.
@@ -823,6 +836,7 @@ impl Lifter {
             net,
             l4: None,
             bound: None,
+            stateless: false,
         }
     }
 
@@ -1454,6 +1468,10 @@ impl Lifter {
                 self.push(format!("tcp option {name} set {value}"));
                 Some(())
             }
+            RuleExpr::Counter { .. } if self.stateless => {
+                self.push("counter".into());
+                Some(())
+            }
             RuleExpr::Counter { packets, bytes } => {
                 self.push(format!("counter packets {packets} bytes {bytes}"));
                 Some(())
@@ -1473,7 +1491,8 @@ impl Lifter {
                 over,
                 ..
             } => {
-                self.push(quota_text(*bytes, *over, *consumed));
+                let used = if self.stateless { 0 } else { *consumed };
+                self.push(quota_text(*bytes, *over, used));
                 Some(())
             }
             RuleExpr::Connlimit { count, over } => {
@@ -2708,6 +2727,33 @@ mod tests {
         assert_eq!(
             bounded(CmpOp::Gte, CmpOp::Gt).as_deref(),
             Some("tcp dport >= 1000 tcp dport > 2000")
+        );
+    }
+
+    /// `nft -s` leaves out what a counter and a quota have counted, and
+    /// nothing else.
+    #[test]
+    fn stateless_leaves_out_what_was_counted() {
+        let exprs = [
+            RuleExpr::Counter {
+                packets: 4,
+                bytes: 240,
+            },
+            RuleExpr::Quota {
+                bytes: 10 * 1024 * 1024,
+                consumed: 2048,
+                over: true,
+                depleted: false,
+            },
+            RuleExpr::Verdict(Verdict::Accept),
+        ];
+        assert_eq!(
+            lift(&exprs, Family::Inet).as_deref(),
+            Some("counter packets 4 bytes 240 quota over 10 mbytes used 2 kbytes accept")
+        );
+        assert_eq!(
+            lift_stateless(&exprs, Family::Inet).as_deref(),
+            Some("counter quota over 10 mbytes accept")
         );
     }
 
