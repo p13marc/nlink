@@ -30,6 +30,13 @@ All notable changes to this project will be documented in this file.
     `nf_conntrack_netlink` now. Before this, the conntrack tests could
     skip there and still pass.
 
+- **`flush_conntrack()` and `flush_conntrack_v6()` flush only their own
+  family** (#880). Each flushed both: the kernel honours the nfgenmsg family
+  on a flush only when its version is not 0, and nlink sent 0. Both send
+  version 1 now. `flush_conntrack_all()` flushes both families, as
+  `flush_conntrack()` did. The test that existed seeded IPv4 entries only,
+  so it could not tell the difference.
+
 ### Fixed
 
 - **No reconcile could be spawned** (#879). `tokio::spawn(async move {

@@ -715,7 +715,14 @@ impl ConntrackTuple {
 
 /// Append the 4-byte nfgenmsg header onto a request builder.
 fn append_nfgenmsg(b: &mut MessageBuilder, family: u8) {
-    b.append_bytes(&[family, 0, 0, 0]); // family, version=NFNETLINK_V0, res_id=0
+    append_nfgenmsg_version(b, family, 0); // NFNETLINK_V0
+}
+
+/// [`append_nfgenmsg`] with an explicit version. ctnetlink reads it on a
+/// flush, where only a version that is not 0 makes it honour the family
+/// (#880). The headers name no version but `NFNETLINK_V0`.
+fn append_nfgenmsg_version(b: &mut MessageBuilder, family: u8, version: u8) {
+    b.append_bytes(&[family, version, 0, 0]); // family, version, res_id=0
 }
 
 /// Append a `CTA_TUPLE_*` nested attribute (one of `CTA_TUPLE_ORIG` /
@@ -878,7 +885,8 @@ impl Connection<Netfilter> {
         if entry.orig.is_empty() && entry.reply.as_ref().is_none_or(ConntrackTuple::is_empty) {
             return Err(Error::invalid_message(
                 "del_conntrack: the builder has no tuple, and the kernel takes a delete \
-                 without one for a flush of the whole table; set `orig`",
+                 without one for a flush of the whole table; set `orig`, or flush with \
+                 `flush_conntrack_all`",
             ));
         }
         let mut b = MessageBuilder::new(
@@ -924,17 +932,26 @@ impl Connection<Netfilter> {
             .await
     }
 
-    /// Flush every IPv4 conntrack entry. Equivalent to
-    /// `conntrack -F` for the v4 table.
+    /// Flush every IPv4 conntrack entry in the connection's namespace,
+    /// in every zone. IPv6 entries stay: until 0.33 this flushed both
+    /// families (#880), which [`Self::flush_conntrack_all`] still does.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_conntrack"))]
     pub async fn flush_conntrack(&self) -> Result<()> {
         self.flush_conntrack_family(libc::AF_INET as u8).await
     }
 
-    /// Flush every IPv6 conntrack entry.
+    /// Flush every IPv6 conntrack entry in the connection's namespace, in
+    /// every zone. IPv4 entries stay (#880).
     #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_conntrack_v6"))]
     pub async fn flush_conntrack_v6(&self) -> Result<()> {
         self.flush_conntrack_family(libc::AF_INET6 as u8).await
+    }
+
+    /// Flush every conntrack entry in the connection's namespace: both
+    /// families, every zone.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_conntrack_all"))]
+    pub async fn flush_conntrack_all(&self) -> Result<()> {
+        self.flush_conntrack_family(libc::AF_UNSPEC as u8).await
     }
 
     async fn flush_conntrack_family(&self, family: u8) -> Result<()> {
@@ -942,7 +959,11 @@ impl Connection<Netfilter> {
             ctnl_msg_type(IPCTNL_MSG_CT_DELETE),
             NLMF_REQUEST | NLM_F_ACK,
         );
-        append_nfgenmsg(&mut b, family);
+        // Version 1, not NFNETLINK_V0: a flush honours `nfgen_family` only
+        // when the version is not 0, and with 0 flushes every family
+        // (`ctnetlink_del_conntrack`, kept that way for old userspace,
+        // #880).
+        append_nfgenmsg_version(&mut b, family, 1);
         self.send_ack(b).await
     }
 
