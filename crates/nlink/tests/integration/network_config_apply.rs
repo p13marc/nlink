@@ -2303,7 +2303,7 @@ async fn ipv4_multipath_keeps_its_ipv6_gateways() -> Result<()> {
         assert!(applied.is_success(), "{applied:?}");
         let gw = |s: &str| s.parse::<Ipv6Addr>().unwrap();
         conn.add_route(
-            Ipv4Route::new("10.89.0.0", 24).multipath(vec![
+            Ipv4Route::new(std::net::Ipv4Addr::new(10, 89, 0, 0), 24).multipath(vec![
                 NextHop::new().gateway_v6(gw("fe80::1")).dev("d0"),
                 NextHop::new().gateway_v6(gw("fe80::2")).dev("d1"),
             ]),

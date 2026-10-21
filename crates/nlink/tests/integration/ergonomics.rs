@@ -82,7 +82,11 @@ async fn del_if_exists_family_swallows_absence_and_reports_deletion() -> nlink::
 
     // Absent everything → Ok(false), never an error.
     assert!(!conn.del_link_if_exists("ghost0").await?);
-    assert!(!conn.del_route_v4_if_exists("10.99.99.0", 24).await?);
+    assert!(
+        !conn
+            .del_route_v4_if_exists(std::net::Ipv4Addr::new(10, 99, 99, 0), 24)
+            .await?
+    );
     assert!(
         !conn
             .del_address_if_exists("lo", "10.99.99.1".parse().unwrap(), 32)
@@ -188,7 +192,7 @@ async fn wireguard_diff_reports_missing_device_and_ensure_creates_it() -> nlink:
     assert!(link.is_up(), "ensure_devices must bring the link up");
     ns.add_addr("wg-boot0", "10.100.0.1/24")?;
     conn.add_route(
-        nlink::netlink::route::Ipv4Route::new("10.2.0.0", 24)
+        nlink::netlink::route::Ipv4Route::new(std::net::Ipv4Addr::new(10, 2, 0, 0), 24)
             .gateway(std::net::Ipv4Addr::new(10, 100, 0, 2)),
     )
     .await

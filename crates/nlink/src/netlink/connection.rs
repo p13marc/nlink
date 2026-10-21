@@ -1837,13 +1837,14 @@ impl Connection<Route> {
     ///
     /// ```no_run
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use std::net::Ipv4Addr;
     /// use nlink::netlink::{Connection, Route};
     /// use nlink::netlink::route::Ipv4Route;
     ///
     /// let conn = Connection::<Route>::new()?;
     /// let results = conn.batch()
-    ///     .add_route(Ipv4Route::new("10.0.0.0", 8).dev_index(5))
-    ///     .add_route(Ipv4Route::new("10.1.0.0", 16).dev_index(5))
+    ///     .add_route(Ipv4Route::new(Ipv4Addr::new(10, 0, 0, 0), 8).dev_index(5))
+    ///     .add_route(Ipv4Route::new(Ipv4Addr::new(10, 1, 0, 0), 16).dev_index(5))
     ///     .execute()
     ///     .await?;
     /// # Ok(())

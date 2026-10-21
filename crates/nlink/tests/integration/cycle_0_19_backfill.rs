@@ -159,7 +159,7 @@ async fn plan_202_multipath_route_round_trips() -> Result<()> {
         ))
         .await?;
 
-        let r = Ipv4Route::new("192.0.2.0", 24).multipath(vec![
+        let r = Ipv4Route::new(Ipv4Addr::new(192, 0, 2, 0), 24).multipath(vec![
             NextHop::new()
                 .gateway_v4(Ipv4Addr::new(10, 0, 0, 254))
                 .dev("eth0"),

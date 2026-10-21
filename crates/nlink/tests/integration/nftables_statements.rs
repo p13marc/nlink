@@ -578,7 +578,7 @@ async fn tcp_mss_clamp_to_pmtu_uses_the_route_mtu() -> nlink::Result<()> {
         let route = add_dummy(&ns).await?;
         route
             .add_route(
-                Ipv4Route::new("10.98.0.2", 32)
+                Ipv4Route::new(Ipv4Addr::new(10, 98, 0, 2), 32)
                     .dev("dummy0")
                     .metrics(RouteMetrics::new().mtu(1400).advmss(1460)),
             )
