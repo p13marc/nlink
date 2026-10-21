@@ -90,6 +90,7 @@ pub use types::*;
 
 use super::{connection::Connection, error::Result, protocol::Route};
 
+#[nlink_macros::send_futures]
 impl NetworkConfig {
     /// Compute the difference between desired and current state.
     ///

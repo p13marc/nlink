@@ -57,6 +57,7 @@ pub struct ConnectionPool<P: ProtocolState> {
     pub(super) inner: Arc<PoolInner<P>>,
 }
 
+#[nlink_macros::send_futures]
 impl<P: ProtocolState> ConnectionPool<P> {
     /// Acquire a connection from the pool.
     ///
@@ -106,6 +107,7 @@ impl<P: ProtocolState> ConnectionPool<P> {
     }
 }
 
+#[nlink_macros::send_futures]
 impl<P: ProtocolState + Default + SyncConstructible + 'static> ConnectionPool<P> {
     /// Convenience: build a pool bound to a named network namespace.
     /// Equivalent to:
@@ -243,6 +245,7 @@ impl<P: ProtocolState> ConnectionPoolBuilder<P> {
     }
 }
 
+#[nlink_macros::send_futures]
 impl<P> ConnectionPoolBuilder<P>
 where
     P: ProtocolState + Default + SyncConstructible + 'static,
@@ -307,6 +310,7 @@ where
     }
 }
 
+#[nlink_macros::send_futures]
 impl<P> ConnectionPoolBuilder<P>
 where
     P: ProtocolState + AsyncProtocolInit + AsyncConstructible + 'static,

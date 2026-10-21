@@ -82,6 +82,7 @@ struct KeepOpen {
     _cgroup: Option<std::fs::File>,
 }
 
+#[nlink_macros::send_futures]
 impl NetnsCommand {
     /// `cmd`, to run in the namespace `ip netns` knows as `name`.
     pub fn new(name: &str, cmd: Command) -> Result<Self> {

@@ -499,6 +499,7 @@ pub struct ConfigDiff {
     )>,
 }
 
+#[nlink_macros::send_futures]
 impl ConfigDiff {
     /// What a route the diff read back has that it cannot say (#783).
     pub(crate) fn lost_of(&self, route: &DeclaredRoute) -> Option<String> {
@@ -1151,12 +1152,14 @@ impl std::fmt::Display for LinkChanges {
 }
 
 /// Compute the difference between desired and current state.
+#[nlink_macros::send_futures]
 pub async fn compute_diff(config: &NetworkConfig, conn: &Connection<Route>) -> Result<ConfigDiff> {
     compute_diff_with_options(config, conn, &PlanOptions::default()).await
 }
 
 /// Like [`compute_diff`] but honours [`PlanOptions`] (currently the
 /// `purge` flag — see [`PlanOptions::purge`]).
+#[nlink_macros::send_futures]
 pub async fn compute_diff_with_options(
     config: &NetworkConfig,
     conn: &Connection<Route>,
@@ -1243,6 +1246,7 @@ pub struct Snapshot {
     vrf_strict_mode: Option<bool>,
 }
 
+#[nlink_macros::send_futures]
 impl Snapshot {
     /// Read what a diff of any config needs, including what a recreate
     /// would destroy.

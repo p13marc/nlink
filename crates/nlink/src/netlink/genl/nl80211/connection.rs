@@ -40,6 +40,7 @@ impl GenlFamily for Nl80211 {
     }
 }
 
+#[nlink_macros::send_futures]
 impl Connection<Nl80211> {
     /// Get the nl80211 family ID.
     pub fn family_id(&self) -> u16 {

@@ -66,6 +66,7 @@ mod genl_family;
 mod genl_enum;
 mod genl_message;
 mod netlink_attrs;
+mod send_futures;
 
 /// Derive a typed-enum codec for a Generic Netlink **command** ID
 /// enum.
@@ -358,6 +359,30 @@ pub fn derive_netlink_attrs(input: TokenStream) -> TokenStream {
 pub fn genl_family(args: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as ItemStruct);
     genl_family::expand(args.into(), item)
+        .unwrap_or_else(|e| e.to_compile_error())
+        .into()
+}
+
+/// Check at compile time that public futures are `Send` (#884). nlink's
+/// own; not part of the derives' surface.
+///
+/// On an inherent `impl` block, every `pub async fn` in it gets a
+/// `#[cfg(test)]` checker that calls it with the same parameters and
+/// requires the future to be `Send`, given `Send + Sync` inputs and `Self`.
+/// On a free `pub async fn`, that one does. `#[send_futures(skip =
+/// "reason")]` on a method, or on a free function instead, records why its
+/// future is not `Send`.
+///
+/// ```text
+/// #[nlink_macros::send_futures]
+/// impl Connection<Route> {
+///     pub async fn get_links(&self) -> Result<Vec<LinkMessage>> { .. }
+/// }
+/// ```
+#[doc(hidden)]
+#[proc_macro_attribute]
+pub fn send_futures(args: TokenStream, item: TokenStream) -> TokenStream {
+    send_futures::expand(args.into(), item.into())
         .unwrap_or_else(|e| e.to_compile_error())
         .into()
 }

@@ -6226,6 +6226,7 @@ fn write_simple_link(
 // Connection Methods
 // ============================================================================
 
+#[nlink_macros::send_futures]
 impl Connection<Route> {
     /// Add a new network interface.
     ///

@@ -6361,6 +6361,7 @@ pub struct ActionMessage {
     pub options_raw: Vec<u8>,
 }
 
+#[nlink_macros::send_futures]
 impl Connection<Route> {
     /// Add a standalone shared action.
     ///

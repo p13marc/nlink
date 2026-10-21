@@ -474,6 +474,7 @@ where
 // compatibility (the inherent versions take priority over this
 // generic one when both apply).
 
+#[nlink_macros::send_futures]
 impl<P> Connection<P>
 where
     P: super::protocol::AsyncProtocolInit + super::protocol::construction::AsyncConstructible,
@@ -534,6 +535,7 @@ where
 // Shared methods for all protocol types
 // ============================================================================
 
+#[nlink_macros::send_futures]
 impl<P: ProtocolState> Connection<P> {
     /// Get the underlying socket.
     pub fn socket(&self) -> &NetlinkSocket {
@@ -1627,6 +1629,7 @@ impl RtnetlinkGroup {
 // Route protocol specific methods
 // ============================================================================
 
+#[nlink_macros::send_futures]
 impl Connection<Route> {
     /// Create a connection for the specified namespace.
     ///
@@ -1863,6 +1866,7 @@ use super::messages::{
     AddressMessage, LinkCond, LinkMessage, NeighborMessage, RouteMessage, RuleMessage, TcMessage,
 };
 
+#[nlink_macros::send_futures]
 impl Connection<Route> {
     /// Get all network interfaces.
     ///
@@ -3520,6 +3524,7 @@ impl Connection<Route> {
 
 use super::types::link::{IfInfoMsg, iff};
 
+#[nlink_macros::send_futures]
 impl Connection<Route> {
     /// Bring a network interface up.
     ///
@@ -3953,6 +3958,7 @@ use super::{
     types::nsid::{RTM_GETNSID, RTM_NEWNSID, RtGenMsg, netnsa},
 };
 
+#[nlink_macros::send_futures]
 impl Connection<Route> {
     /// Get the namespace ID for a given file descriptor.
     ///
@@ -4090,6 +4096,7 @@ use super::{
     protocol::Generic,
 };
 
+#[nlink_macros::send_futures]
 impl Connection<Generic> {
     /// Get information about a Generic Netlink family.
     ///

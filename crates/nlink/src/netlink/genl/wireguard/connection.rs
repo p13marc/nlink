@@ -37,6 +37,7 @@ impl AsyncProtocolInit for Wireguard {
     }
 }
 
+#[nlink_macros::send_futures]
 impl Connection<Wireguard> {
     /// Get the WireGuard family ID.
     pub fn family_id(&self) -> u16 {

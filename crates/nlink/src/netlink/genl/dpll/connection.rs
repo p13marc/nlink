@@ -22,6 +22,7 @@ use crate::netlink::{
 
 use super::Dpll;
 
+#[nlink_macros::send_futures]
 impl Connection<Dpll> {
     /// Query a single device by ID.
     ///

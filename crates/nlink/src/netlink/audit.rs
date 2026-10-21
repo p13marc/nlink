@@ -371,6 +371,7 @@ pub struct AuditEvent {
     pub data: String,
 }
 
+#[nlink_macros::send_futures]
 impl Connection<Audit> {
     /// Create a new Audit connection.
     ///

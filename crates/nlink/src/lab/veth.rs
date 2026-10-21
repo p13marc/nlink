@@ -45,6 +45,7 @@ pub struct LabVeth<'a> {
     peer_ns: Option<&'a LabNamespace>,
 }
 
+#[nlink_macros::send_futures]
 impl<'a> LabVeth<'a> {
     /// Start a new veth pair builder.
     pub fn new(local_name: impl Into<String>, peer_name: impl Into<String>) -> Self {

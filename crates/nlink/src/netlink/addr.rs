@@ -689,6 +689,7 @@ impl AddressConfig for Ipv6Address {
 // Connection Methods
 // ============================================================================
 
+#[nlink_macros::send_futures]
 impl Connection<Route> {
     /// Add an IP address to an interface.
     ///

@@ -1,0 +1,11 @@
+error: a skip needs its reason
+ --> tests/ui/fail/08_send_futures_skip_reason.rs:9:20
+  |
+9 |     #[send_futures(skip = "")]
+  |                    ^^^^^^^^^
+
+error: #[send_futures(skip = ..)] goes on a method, not on an impl block
+  --> tests/ui/fail/08_send_futures_skip_reason.rs:14:1
+   |
+14 | impl Counter {
+   | ^^^^

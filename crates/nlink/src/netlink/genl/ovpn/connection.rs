@@ -43,6 +43,7 @@ use crate::{
     },
 };
 
+#[nlink_macros::send_futures]
 impl Connection<Ovpn> {
     // ============================================================
     // Peer operations

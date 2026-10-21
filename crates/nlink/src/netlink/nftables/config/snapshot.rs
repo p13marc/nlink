@@ -225,6 +225,7 @@ fn set_info(set: &DeclaredSet, table: &str, family: Family, handle: u64) -> SetI
     }
 }
 
+#[nlink_macros::send_futures]
 impl NftablesConfig {
     /// Read what [`diff_snapshot`](Self::diff_snapshot) needs from the
     /// kernel (#527): every table, chain and flowtable, and the objects,

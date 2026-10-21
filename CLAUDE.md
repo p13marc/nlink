@@ -472,6 +472,16 @@ in parallel. For true parallel throughput use
 its own kernel-side socket queue, which the kernel processes
 in parallel).
 
+**Every public future is `Send` (#884).** A `pub async fn` lives in an
+impl block marked `#[nlink_macros::send_futures]`, or carries it itself
+when it is a free function. In test builds that gives it a checker: the
+function's own parameters, borrowed as it borrows them, and a requirement
+that its future be `Send`. `scripts/audit-send-futures.sh` fails the
+build on a `pub async fn` without one. #879 shipped eight reconcile
+entry points that no caller could `tokio::spawn`, and no test could tell.
+A future that is not `Send` on purpose takes
+`#[send_futures(skip = "why")]`. None is today.
+
 **Stream-shape APIs hold the lock for their lifetime — in the
 default mutex mode.** `conn.events().await`,
 `conn.into_events().await`, `conn.dump_stream::<T>(...).await?`

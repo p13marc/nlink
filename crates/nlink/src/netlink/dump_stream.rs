@@ -476,6 +476,7 @@ impl<P: ProtocolState, T: FromNetlink + Unpin> Unpin for DumpStream<'_, P, T> {}
 ///
 /// This is the building block; prefer the typed
 /// [`Connection::stream_links`] etc. when they exist.
+#[nlink_macros::send_futures]
 impl<P: ProtocolState> Connection<P> {
     /// Stream a dump response as it arrives, one typed message per
     /// `next().await`. Terminates on `NLMSG_DONE`.

@@ -97,6 +97,7 @@ fn build_chain(table: &str, family: Family, declared: &DeclaredChain) -> Result<
     Ok(chain)
 }
 
+#[nlink_macros::send_futures]
 impl NftablesDiff {
     /// Apply the diff to the kernel atomically — with one exception.
     ///
@@ -573,6 +574,7 @@ fn next_generation(genid: u32) -> u32 {
     }
 }
 
+#[nlink_macros::send_futures]
 impl super::NftablesConfig {
     /// Diff and apply, and on `ERESTART` — the ruleset changed between the
     /// diff and the commit, which the kernel refused (#482) — diff again

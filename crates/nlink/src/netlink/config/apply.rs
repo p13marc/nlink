@@ -326,6 +326,7 @@ impl std::fmt::Display for ApplyError {
 }
 
 /// Apply configuration to achieve desired state.
+#[nlink_macros::send_futures]
 pub async fn apply_config(
     config: &NetworkConfig,
     conn: &Connection<Route>,
@@ -336,6 +337,7 @@ pub async fn apply_config(
 }
 
 /// Apply a pre-computed diff.
+#[nlink_macros::send_futures]
 pub async fn apply_diff(
     diff: &ConfigDiff,
     conn: &Connection<Route>,
@@ -370,6 +372,7 @@ async fn apply_steps(
     execute_plan(&diff.plan(), conn, options).await
 }
 
+#[nlink_macros::send_futures]
 impl Plan {
     /// Run the steps, in order (#518). What
     /// [`ConfigDiff::apply`](super::ConfigDiff::apply) runs, and how a plan

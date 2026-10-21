@@ -59,6 +59,7 @@ impl Direction {
     }
 }
 
+#[nlink_macros::send_futures]
 impl Connection<Route> {
     /// Drop everything `dev` receives or sends, without touching its root
     /// qdisc (#515).

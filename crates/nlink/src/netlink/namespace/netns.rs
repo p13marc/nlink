@@ -149,6 +149,7 @@ impl Drop for Worker {
     }
 }
 
+#[nlink_macros::send_futures]
 impl Netns {
     /// Open the namespace `ip netns` knows as `name` (`/var/run/netns/<name>`).
     ///

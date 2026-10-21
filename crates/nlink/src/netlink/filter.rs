@@ -6354,6 +6354,7 @@ fn filter_info(config: &impl FilterConfig) -> (EthProto, FilterPriority) {
     )
 }
 
+#[nlink_macros::send_futures]
 impl Connection<Route> {
     /// Add a filter to an interface.
     ///

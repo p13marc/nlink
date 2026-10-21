@@ -158,6 +158,7 @@ impl HwsimRadio {
     }
 }
 
+#[nlink_macros::send_futures]
 impl Connection<Hwsim> {
     /// The resolved family id.
     pub fn family_id(&self) -> u16 {

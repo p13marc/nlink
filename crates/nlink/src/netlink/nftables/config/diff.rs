@@ -1492,6 +1492,7 @@ impl NftDiffOptions {
     }
 }
 
+#[nlink_macros::send_futures]
 impl NftablesConfig {
     /// Compute the diff between this declared config and the
     /// kernel's current state.

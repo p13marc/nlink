@@ -70,6 +70,7 @@ use crate::{Connection, Result};
 /// its first overflow and stayed empty (#503). Nexthops come before the
 /// routes that use them. Network-namespace ids are subscribed to but have
 /// no dump, so they are not here.
+#[nlink_macros::send_futures]
 pub async fn rtnetlink_snapshot(conn: &Connection<Route>) -> Result<Vec<NetworkEvent>> {
     let mut out = Vec::new();
 
@@ -180,6 +181,7 @@ pub type OwnedResyncStream =
 pub type BorrowedResyncStream<'a> =
     ResyncStream<'static, EventSubscription<'a, Route>, NetworkEvent, SnapshotFn>;
 
+#[nlink_macros::send_futures]
 impl Connection<Route> {
     /// Subscribe to every rtnetlink multicast group + return an
     /// ENOBUFS-resilient event stream that **owns** the

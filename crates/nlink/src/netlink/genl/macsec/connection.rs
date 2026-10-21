@@ -34,6 +34,7 @@ use crate::netlink::types::macsec::{
     macsec_sa_attr, macsec_secy_attr, macsec_txsc_stats_attr,
 };
 
+#[nlink_macros::send_futures]
 impl Connection<Macsec> {
     /// Get the MACsec family ID.
     pub fn family_id(&self) -> u16 {

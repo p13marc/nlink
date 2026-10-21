@@ -10,6 +10,7 @@ use super::messages::{
 };
 use super::types::{NetdevQueueType, QSTATS_SCOPE_QUEUE};
 
+#[nlink_macros::send_futures]
 impl Connection<Netdev> {
     /// The XDP and AF_XDP features of the device `ifindex`.
     pub async fn get_netdev(&self, ifindex: u32) -> Result<NetdevDevReply> {

@@ -419,6 +419,7 @@ impl NeighborConfig for Neighbor {
 // Connection Methods
 // ============================================================================
 
+#[nlink_macros::send_futures]
 impl Connection<Route> {
     /// Add a neighbor entry.
     ///

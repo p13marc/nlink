@@ -272,6 +272,7 @@ impl FibLookupResult {
     }
 }
 
+#[nlink_macros::send_futures]
 impl Connection<FibLookup> {
     /// Create a new FIB lookup connection.
     ///

@@ -9399,6 +9399,7 @@ impl ClassConfig for QfqClassConfig {
 // Connection extension methods
 // ============================================================================
 
+#[nlink_macros::send_futures]
 impl Connection<Route> {
     /// Add a qdisc to an interface.
     ///

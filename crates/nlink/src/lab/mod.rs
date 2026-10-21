@@ -123,6 +123,7 @@ pub struct LabNamespace {
     netns: namespace::Netns,
 }
 
+#[nlink_macros::send_futures]
 impl LabNamespace {
     /// Create a uniquely-named namespace.
     ///
@@ -359,6 +360,7 @@ impl Drop for LabNamespace {
 /// # Ok(())
 /// # }
 /// ```
+#[nlink_macros::send_futures]
 pub async fn with_namespace<F, Fut, T>(prefix: &str, f: F) -> Result<T>
 where
     F: FnOnce(LabNamespace) -> Fut,

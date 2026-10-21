@@ -34,18 +34,21 @@ use crate::{Connection, Result};
 /// # Ok(())
 /// # }
 /// ```
+#[nlink_macros::send_futures]
 pub async fn network(cfg: &NetworkConfig) -> Result<ApplyResult> {
     network_in(NetnsRef::Default, cfg).await
 }
 
 /// Apply a network config inside a named namespace.
 #[deprecated(since = "0.32.0", note = "use `network_in(ns, …)`, which takes a name (#532)")]
+#[nlink_macros::send_futures]
 pub async fn network_in_namespace(ns: &str, cfg: &NetworkConfig) -> Result<ApplyResult> {
     network_in(ns, cfg).await
 }
 
 /// Apply a network config inside any namespace specification
 /// (named, path, or PID — container support, #169).
+#[nlink_macros::send_futures]
 pub async fn network_in<'a>(ns: impl Into<NetnsTarget<'a>>, cfg: &NetworkConfig) -> Result<ApplyResult> {
     let ns: NetnsTarget<'a> = ns.into();
     network_in_with(ns, cfg, ApplyOptions::default()).await
@@ -53,6 +56,7 @@ pub async fn network_in<'a>(ns: impl Into<NetnsTarget<'a>>, cfg: &NetworkConfig)
 
 /// [`network_in`] with [`ApplyOptions`] — purge, dry-run,
 /// continue-on-error (#330).
+#[nlink_macros::send_futures]
 pub async fn network_in_with<'a>(
     ns: impl Into<NetnsTarget<'a>>,
     cfg: &NetworkConfig,
@@ -78,18 +82,21 @@ pub async fn network_in_with<'a>(
 /// # Ok(())
 /// # }
 /// ```
+#[nlink_macros::send_futures]
 pub async fn nftables(cfg: &NftablesConfig) -> Result<usize> {
     nftables_in(NetnsRef::Default, cfg).await
 }
 
 /// Apply an nftables config inside a named namespace.
 #[deprecated(since = "0.32.0", note = "use `nftables_in(ns, …)`, which takes a name (#532)")]
+#[nlink_macros::send_futures]
 pub async fn nftables_in_namespace(ns: &str, cfg: &NftablesConfig) -> Result<usize> {
     nftables_in(ns, cfg).await
 }
 
 /// Apply an nftables config inside any namespace specification
 /// (named, path, or PID — container support, #169).
+#[nlink_macros::send_futures]
 pub async fn nftables_in<'a>(ns: impl Into<NetnsTarget<'a>>, cfg: &NftablesConfig) -> Result<usize> {
     let ns: NetnsTarget<'a> = ns.into();
     let conn: Connection<Nftables> = ns.connection()?;
@@ -109,6 +116,7 @@ pub async fn nftables_in<'a>(ns: impl Into<NetnsTarget<'a>>, cfg: &NftablesConfi
 /// genetlink controller). Missing declared devices are created
 /// first via [`WireguardConfig::ensure_devices`] with a Route
 /// connection in the same namespace (#169).
+#[nlink_macros::send_futures]
 pub async fn wireguard(
     cfg: &WireguardConfig,
 ) -> Result<crate::netlink::genl::wireguard::WireguardApplyResult> {
@@ -117,6 +125,7 @@ pub async fn wireguard(
 
 /// Apply a WireGuard config inside a named namespace.
 #[deprecated(since = "0.32.0", note = "use `wireguard_in(ns, …)`, which takes a name (#532)")]
+#[nlink_macros::send_futures]
 pub async fn wireguard_in_namespace(
     ns: &str,
     cfg: &WireguardConfig,
@@ -131,6 +140,7 @@ pub async fn wireguard_in_namespace(
 /// are created through a Route connection in the same namespace
 /// before the GENL apply, so a bare `WireguardConfig` works
 /// end-to-end without a separate `NetworkConfig` layer.
+#[nlink_macros::send_futures]
 pub async fn wireguard_in<'a>(
     ns: impl Into<NetnsTarget<'a>>,
     cfg: &WireguardConfig,
@@ -157,6 +167,7 @@ pub(crate) async fn wireguard_keys_in<'a>(
 /// through a Route connection in the namespace. Returns the names
 /// created. This is what a `NetworkConfig` that addresses the tunnel
 /// needs to run *before* it — [`Stack`](super::Stack) does so (#330).
+#[nlink_macros::send_futures]
 pub async fn wireguard_devices_in<'a>(ns: impl Into<NetnsTarget<'a>>, cfg: &WireguardConfig) -> Result<Vec<String>> {
     let ns: NetnsTarget<'a> = ns.into();
     let route: Connection<Route> = ns.connection()?;

@@ -1571,6 +1571,7 @@ fn write_multipath_v6(
 /// NLM_F_REPLACE flag
 const NLM_F_REPLACE: u16 = 0x100;
 
+#[nlink_macros::send_futures]
 impl Connection<Route> {
     /// Resolve all interface references for a route configuration.
     async fn resolve_route_interfaces<R: RouteConfig>(

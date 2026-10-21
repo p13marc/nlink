@@ -179,6 +179,7 @@ pub struct RateLimiter {
     ingress: Option<RateLimit>,
 }
 
+#[nlink_macros::send_futures]
 impl RateLimiter {
     /// Create a new rate limiter for the specified interface.
     pub fn new(dev: &str) -> Self {
@@ -1182,6 +1183,7 @@ pub enum HostMatch {
     SrcSubnet(IpAddr, u8),
 }
 
+#[nlink_macros::send_futures]
 impl PerHostLimiter {
     /// Create a new per-host rate limiter with a default rate for unmatched
     /// traffic.

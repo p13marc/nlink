@@ -1,0 +1,15 @@
+error: implementation of `Send` is not general enough
+  --> tests/ui/fail/06_send_futures_async_closure.rs:19:1
+   |
+10 |       pub async fn retry<T>(&self, mut f: impl AsyncFnMut() -> T) -> T {
+   |  ______________________________________________________________________-
+11 | |         f().await
+12 | |     }
+   | |_____- this async fn captures a value whose type is not `Send`
+...
+19 |   #[nlink_macros::send_futures]
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ implementation of `Send` is not general enough
+   |
+   = note: `Send` would have to be implemented for the type `&'0 Config`, for any lifetime `'0`...
+   = note: ...but `Send` is actually implemented for the type `&'1 Config`, for some specific lifetime `'1`
+   = note: this error originates in the attribute macro `nlink_macros::send_futures` (in Nightly builds, run with -Z macro-backtrace for more info)

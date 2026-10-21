@@ -556,6 +556,7 @@ fn rates_since(
     }
 }
 
+#[nlink_macros::send_futures]
 impl Diagnostics {
     /// Create a new diagnostics runner with default configuration.
     pub fn new(conn: Connection<Route>) -> Self {

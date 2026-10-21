@@ -90,6 +90,7 @@ pub enum SELinuxEvent {
     },
 }
 
+#[nlink_macros::send_futures]
 impl Connection<SELinux> {
     /// Create a new SELinux connection.
     ///

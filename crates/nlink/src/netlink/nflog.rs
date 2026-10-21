@@ -175,6 +175,7 @@ const fn msg_type(msg: u16) -> u16 {
     (NFNL_SUBSYS_ULOG << 8) | msg
 }
 
+#[nlink_macros::send_futures]
 impl Connection<Nflog> {
     /// Receive group `group`'s packets on this connection (#528), each
     /// copied up to `copy_range` bytes (at most 0xffff). Read them with

@@ -300,6 +300,7 @@ pub struct WireguardConfig {
     devices: Vec<DeclaredWgDevice>,
 }
 
+#[nlink_macros::send_futures]
 impl WireguardConfig {
     /// Build an empty configuration.
     pub fn new() -> Self {
@@ -1426,6 +1427,7 @@ impl WireguardConfigDiff {
     }
 }
 
+#[nlink_macros::send_futures]
 impl WireguardConfigDiff {
     /// Apply this precomputed diff (#519): the config it was computed from
     /// supplies the declared values it writes. Mirrors

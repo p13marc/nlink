@@ -79,6 +79,7 @@ pub struct Fixture {
     frames: Vec<Frame>,
 }
 
+#[nlink_macros::send_futures]
 impl Fixture {
     /// A fixture of `frames`.
     pub fn new(frames: Vec<Frame>) -> Self {
@@ -182,6 +183,7 @@ pub struct Recorder {
     frames: Arc<Mutex<Vec<Frame>>>,
 }
 
+#[nlink_macros::send_futures]
 impl Recorder {
     /// An empty recording.
     pub fn new() -> Self {
