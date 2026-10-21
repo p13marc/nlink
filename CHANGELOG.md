@@ -124,6 +124,17 @@ All notable changes to this project will be documented in this file.
     namespace of its own when the parent is root. The probe skips, and it
     fails when the variable is set. Without the change it passed both ways.
 
+- **`flush_chain`, on the connection and in a transaction** (#886).
+  Neither could empty one chain, so replacing a chain's rules atomically
+  meant listing their handles and deleting them one by one under
+  `expect_generation`, on kernels before 6.3, which have no `destroy_*`.
+  `Connection<Nftables>::flush_chain(table, chain, family)` and
+  `Transaction::flush_chain` send a rule delete that names the chain and
+  no rule, which the kernel takes as every rule in it (`nft flush chain`).
+  In a transaction, rules added after it are what the chain holds when the
+  batch commits. `Transaction::flush_table` joins the connection's
+  `flush_table`. Requested by stream-marker.
+
 ### Documentation
 
 - **Three recipe statements that no longer held, and a pattern for

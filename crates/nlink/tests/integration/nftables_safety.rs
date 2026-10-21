@@ -287,3 +287,90 @@ async fn destroy_deletes_what_is_there_and_takes_the_gone_as_deleted() -> nlink:
     })
     .await
 }
+
+/// The rules in chain `chain` of `inet t`, and how many of them count.
+async fn rules_in(
+    conn: &nlink::Connection<Nftables>,
+    chain: &str,
+) -> nlink::Result<(usize, usize)> {
+    let rules: Vec<_> = conn
+        .list_rules("t", Family::Inet)
+        .await?
+        .into_iter()
+        .filter(|r| r.chain == chain)
+        .collect();
+    let counting = rules.iter().filter(|r| r.counter().is_some()).count();
+    Ok((rules.len(), counting))
+}
+
+/// #886: `flush_chain` deletes every rule in one chain and leaves the other
+/// chain's alone, on the connection and in a transaction. In a transaction
+/// with the replacement rules after it, the chain ends with exactly those:
+/// a chain's rules swapped in one batch, without listing their handles.
+#[tokio::test]
+async fn flush_chain_empties_one_chain_and_keeps_the_others() -> nlink::Result<()> {
+    require_root!();
+    nlink::require_modules!("nf_tables");
+
+    let ns = TestNamespace::new("nft-flush-chain")?;
+    let conn = ns.connection_for::<Nftables>()?;
+    with_timeout(async {
+        conn.add_table("t", Family::Inet).await?;
+        for chain in ["a", "b"] {
+            conn.add_chain(Chain::new("t", chain)?.family(Family::Inet))
+                .await?;
+            for _ in 0..3 {
+                conn.add_rule(
+                    Rule::new("t", chain)
+                        .family(Family::Inet)
+                        .counter()
+                        .accept(),
+                )
+                .await?;
+            }
+        }
+        assert_eq!(rules_in(&conn, "a").await?, (3, 3));
+        assert_eq!(rules_in(&conn, "b").await?, (3, 3));
+
+        conn.flush_chain("t", "a", Family::Inet).await?;
+        assert_eq!(rules_in(&conn, "a").await?, (0, 0), "a is flushed");
+        assert_eq!(rules_in(&conn, "b").await?, (3, 3), "b is not a");
+
+        conn.transaction()
+            .flush_chain("t", "b", Family::Inet)
+            .add_rule(Rule::new("t", "b").family(Family::Inet).accept())
+            .add_rule(Rule::new("t", "b").family(Family::Inet).drop())
+            .commit(&conn)
+            .await?;
+        assert_eq!(
+            rules_in(&conn, "b").await?,
+            (2, 0),
+            "b holds the two new rules, no counters"
+        );
+        assert_eq!(rules_in(&conn, "a").await?, (0, 0));
+
+        let err = conn
+            .flush_chain("t", "missing", Family::Inet)
+            .await
+            .unwrap_err();
+        assert!(err.is_not_found(), "a chain that is not there: {err}");
+
+        conn.add_rule(Rule::new("t", "a").family(Family::Inet).accept())
+            .await?;
+        conn.transaction()
+            .flush_table("t", Family::Inet)
+            .commit(&conn)
+            .await?;
+        assert!(
+            conn.list_rules("t", Family::Inet).await?.is_empty(),
+            "flush_table empties both"
+        );
+        assert_eq!(
+            conn.list_chains_in("t", Family::Inet).await?.len(),
+            2,
+            "and keeps the chains"
+        );
+        Ok(())
+    })
+    .await
+}
