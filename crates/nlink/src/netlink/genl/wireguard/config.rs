@@ -2513,9 +2513,6 @@ mod tests {
         assert!(rendered.contains("link missing"));
     }
 
-    /// #169 — serde shape: public keys as base64, secrets redacted to
-    /// presence booleans, keepalive in whole seconds. Pins the JSON
-    /// ABI for typed drift reporting.
     /// A diff with every field filled in, keys `0xAA`..`0xDD`.
     #[cfg(feature = "serde")]
     fn populated_diff() -> WireguardConfigDiff {
@@ -2547,6 +2544,9 @@ mod tests {
         diff
     }
 
+    /// #169 — serde shape: public keys as base64, secrets redacted to
+    /// presence booleans, keepalive in whole seconds. Pins the JSON
+    /// ABI for typed drift reporting.
     #[cfg(feature = "serde")]
     #[test]
     fn diff_serde_shape_redacts_secrets() {

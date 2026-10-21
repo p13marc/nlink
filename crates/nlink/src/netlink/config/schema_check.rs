@@ -7,11 +7,13 @@
 //! so a consumer validating real output against `json_schema_value()` was
 //! the first to notice.
 //!
-//! This validates draft-07 as `schemars` writes it, and nothing more. It is
-//! strict about what it does not know: a keyword it cannot check panics
-//! rather than pass, so a schema that grows a `pattern` makes the test
-//! learn it instead of skipping it. That is why it is not a dependency —
-//! both validators on crates.io pull in 30-odd crates for one test.
+//! This validates draft-07 as `schemars` writes it, and nothing more, which
+//! is why it is not a dependency: both validators on crates.io pull in
+//! 30-odd crates for one test. It is strict about what it does not know: a
+//! keyword it cannot check panics rather than pass, so a schema that grows
+//! a `pattern` makes the test learn it instead of skipping it. It sees only
+//! the parts of a schema the JSON reaches, which is why the tests fill in
+//! every root field.
 
 use serde_json::{Map, Value};
 
