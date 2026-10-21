@@ -2330,16 +2330,20 @@ impl NftablesConfig {
                     options.enforce_rule_order,
                 );
 
-                // What the kernel has at a handle the plan names: the planner
-                // only names the handles it was given.
-                let at = |handle: u64| {
-                    *kernel_rules
-                        .iter()
-                        .find(|kr| kr.handle == handle)
-                        .expect("a planned handle is a kernel rule's")
-                };
+                // What the kernel has at a handle the plan names. The planner
+                // only names the handles it was given, but a diff that cannot
+                // say what a rule was still deletes it.
+                let at = |handle: u64| kernel_rules.iter().copied().find(|kr| kr.handle == handle);
                 for handle in plan.deletes {
-                    diff.rules_to_delete.push(RuleDelete::of(at(handle)));
+                    let rule = at(handle);
+                    diff.rules_to_delete.push(RuleDelete {
+                        table: declared.name().to_string(),
+                        family: declared.family(),
+                        chain: chain_name.to_string(),
+                        handle: RuleHandle(handle),
+                        key: rule.and_then(|r| r.key.clone()),
+                        current: rule.and_then(RuleInfo::nft_syntax_stateless),
+                    });
                 }
                 for insert in plan.inserts {
                     let rule = declared_rules[insert.declared].clone();
@@ -2356,7 +2360,7 @@ impl NftablesConfig {
                             from: RuleHandle(from),
                             placement: insert.placement,
                             rule,
-                            current: at(from).nft_syntax_stateless(),
+                            current: at(from).and_then(RuleInfo::nft_syntax_stateless),
                             reason: insert.reason,
                             seq,
                         }),
@@ -2369,7 +2373,7 @@ impl NftablesConfig {
                         family: declared.family(),
                         chain: chain_name.to_string(),
                         handle: RuleHandle(handle),
-                        current: at(handle).nft_syntax_stateless(),
+                        current: at(handle).and_then(RuleInfo::nft_syntax_stateless),
                         rule: declared_rules[i].clone(),
                     });
                 }

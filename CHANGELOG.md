@@ -139,9 +139,10 @@ All notable changes to this project will be documented in this file.
   documentation now names its variable, and the `lab` module documents all
   three.
   - `nlink::lab::strict_root()` reads it. It and `NLINK_TEST_STRICT_HOST_ROOT`
-    are off only for an empty value, `0`, `false` or `no`, in any case. Any
-    other value is on, so a typo fails a skip instead of allowing it. Before,
-    only `1`, `true` and `yes` turned `NLINK_TEST_STRICT_HOST_ROOT` on.
+    are off only for an empty value, `0`, `false`, `no` or `off`, in any
+    case. Any other value is on, so a typo fails a skip instead of allowing
+    it. Before, only `1`, `true` and `yes` turned `NLINK_TEST_STRICT_HOST_ROOT`
+    on.
   - The privileged CI lane sets it. The integration tests' own
     `require_root!` is nlink's now, so it applies there.
   - A harness test runs a probe as a child, without root: in a user
