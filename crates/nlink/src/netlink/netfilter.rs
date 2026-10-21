@@ -954,9 +954,10 @@ impl ConntrackFilter {
     ///
     /// An IPv6 address is left out. The kernel compares one with
     /// `!ipv6_addr_cmp()`, which is true when the two are *equal*
-    /// (`ctnetlink_filter_match_tuple`, from 5.8, which added `CTA_FILTER`,
-    /// to mainline as of 2026-10), so it keeps every entry but the ones the
-    /// filter names. nlink compares IPv6 addresses itself.
+    /// (`ctnetlink_filter_match_tuple`, in every kernel since 5.8, which
+    /// added `CTA_FILTER`, through 6.12 and the mainline #882 was checked
+    /// against), so it keeps every entry but the ones the filter names. nlink
+    /// compares IPv6 addresses itself.
     fn append_kernel_filter(&self, b: &mut MessageBuilder, family: u8) {
         let v6 = family == libc::AF_INET6 as u8;
         let orig_flags = self.orig.kernel_flags(v6, self.proto.is_some());
@@ -1194,7 +1195,11 @@ impl Connection<Netfilter> {
         let mut entries = Vec::new();
         for family in filter.families()? {
             let dumped = match self.get_conntrack_family(family, Some(filter)).await {
-                Err(e) if e.is_not_supported() => self.get_conntrack_family(family, None).await?,
+                // Of what nlink sends, only a mark makes the kernel refuse a
+                // filter: one built without `CONFIG_NF_CONNTRACK_MARK`.
+                Err(e) if e.is_not_supported() && filter.mark.is_some() => {
+                    self.get_conntrack_family(family, None).await?
+                }
                 other => other?,
             };
             entries.extend(dumped.into_iter().filter(|e| filter.matches(e)));
@@ -1211,6 +1216,9 @@ impl Connection<Netfilter> {
     /// expired or was replaced in between is skipped. It works on every
     /// kernel; [`flush_conntrack_matching`](Self::flush_conntrack_matching)
     /// is one request where the kernel can filter a flush.
+    ///
+    /// It is not atomic: it costs a request per entry, and a flow that
+    /// starts after the dump is not deleted.
     #[tracing::instrument(level = "debug", skip_all, fields(method = "del_conntrack_matching"))]
     pub async fn del_conntrack_matching(&self, filter: &ConntrackFilter) -> Result<usize> {
         let mut deleted = 0;
@@ -1233,7 +1241,8 @@ impl Connection<Netfilter> {
     /// before 6.12 refuses a filter on a flush, or, before 5.8, does not
     /// know it and would flush everything. So is a filter with an IPv6
     /// address, which no kernel compares correctly (see
-    /// [`ConntrackFilter`]).
+    /// [`ConntrackFilter`]). That path is a request per entry, and a flow
+    /// that starts after its dump is not deleted.
     ///
     /// # Errors
     /// [`ErrorKind::Invalid`](crate::ErrorKind::Invalid) for an empty
@@ -1263,8 +1272,9 @@ impl Connection<Netfilter> {
             filter.append_kernel_filter(&mut b, family);
             match self.send_ack(b).await {
                 // A kernel without the mark filter refuses it before it
-                // deletes anything.
-                Err(e) if e.is_not_supported() => {
+                // deletes anything: `ctnetlink_flush_conntrack` builds the
+                // filter, and returns its error, before it walks the table.
+                Err(e) if e.is_not_supported() && filter.mark.is_some() => {
                     self.del_conntrack_matching(&filter.clone().family(family.into()))
                         .await?;
                 }
