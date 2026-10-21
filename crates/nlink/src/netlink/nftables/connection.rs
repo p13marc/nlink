@@ -311,6 +311,33 @@ impl Connection<Nftables> {
         self.nft_request_ack(builder).await
     }
 
+    /// Flush every rule from one chain, keeping the chain: `nft flush chain`
+    /// (#886).
+    ///
+    /// A rule delete that names a chain and no rule (`NFTA_RULE_HANDLE` or
+    /// `NFTA_RULE_ID`) deletes every rule in it (`nft_delrule_by_chain`). To
+    /// replace a chain's rules atomically, put
+    /// [`Transaction::flush_chain`] and the new rules in one transaction.
+    #[tracing::instrument(level = "debug", skip_all, fields(method = "flush_chain"))]
+    pub async fn flush_chain<T, C>(&self, table: T, chain: C, family: Family) -> Result<()>
+    where
+        T: TryInto<TableName>,
+        T::Error: Into<Error>,
+        C: TryInto<ChainName>,
+        C::Error: Into<Error>,
+    {
+        let table: TableName = table.try_into().map_err(Into::into)?;
+        let chain: ChainName = chain.try_into().map_err(Into::into)?;
+        let mut builder =
+            MessageBuilder::new(nft_msg_type(NFT_MSG_DELRULE), NLM_F_REQUEST | NLM_F_ACK);
+        let nfgenmsg = NfGenMsg::new(family);
+        builder.append(&nfgenmsg);
+        builder.append_attr_str(NFTA_RULE_TABLE, table.as_str());
+        builder.append_attr_str(NFTA_RULE_CHAIN, chain.as_str());
+
+        self.nft_request_ack(builder).await
+    }
+
     // =========================================================================
     // Chains
     // =========================================================================
@@ -2540,6 +2567,31 @@ impl Transaction {
         self.push_rule_delete(NFT_MSG_DESTROYRULE, table, chain, family, handle)
     }
 
+    /// Delete every rule in one chain and keep the chain, as `nft flush
+    /// chain` does (#886). Mirrors
+    /// [`Connection::<Nftables>::flush_chain`](Connection).
+    ///
+    /// With the replacement rules after it, the batch swaps a chain's rules
+    /// atomically on any kernel, without listing their handles first.
+    pub fn flush_chain(mut self, table: &str, chain: &str, family: Family) -> Self {
+        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_DELRULE), NLM_F_REQUEST);
+        builder.append(&NfGenMsg::new(family));
+        builder.append_attr_str(NFTA_RULE_TABLE, table);
+        builder.append_attr_str(NFTA_RULE_CHAIN, chain);
+        self.push(builder);
+        self
+    }
+
+    /// Delete every rule in every chain of a table and keep the chains.
+    /// Mirrors [`Connection::<Nftables>::flush_table`](Connection).
+    pub fn flush_table(mut self, table: &str, family: Family) -> Self {
+        let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_DELRULE), NLM_F_REQUEST);
+        builder.append(&NfGenMsg::new(family));
+        builder.append_attr_str(NFTA_RULE_TABLE, table);
+        self.push(builder);
+        self
+    }
+
     fn push_rule_delete(
         mut self,
         msg: u8,
@@ -4154,6 +4206,42 @@ mod transaction_tests {
         let handle = find_attr(body, NFTA_RULE_HANDLE).expect("NFTA_RULE_HANDLE missing");
         assert_eq!(handle.len(), 8, "handle must be u64 big-endian");
         assert_eq!(u64::from_be_bytes(handle.try_into().unwrap()), 0xDEAD_BEEF);
+    }
+
+    /// #886 — a flush names the table, and the chain for `flush_chain`, and
+    /// never a rule: that is what makes the kernel delete them all.
+    #[test]
+    fn flushes_name_no_rule() {
+        let tx = new_tx()
+            .flush_chain("filter", "input", Family::Inet)
+            .flush_table("filter", Family::Inet);
+        assert_eq!(tx.messages.len(), 2);
+        for (msg, chain) in tx.messages.iter().zip([Some("input"), None]) {
+            assert_header(msg, nft_msg_type(NFT_MSG_DELRULE), NLM_F_REQUEST);
+            let body = body_after_nfgenmsg(msg);
+            assert_eq!(
+                find_attr(body, NFTA_RULE_TABLE).as_deref(),
+                Some(&b"filter\0"[..])
+            );
+            assert_eq!(
+                find_attr(body, NFTA_RULE_CHAIN),
+                chain.map(|c| format!("{c}\0").into_bytes())
+            );
+            // Nothing else: a handle or a rule id would delete one rule.
+            let mut types = Vec::new();
+            let mut offset = 0;
+            while offset + 4 <= body.len() {
+                let len = u16::from_ne_bytes([body[offset], body[offset + 1]]) as usize;
+                types.push(u16::from_ne_bytes([body[offset + 2], body[offset + 3]]));
+                offset += (len + 3) & !3;
+            }
+            let want: &[u16] = if chain.is_some() {
+                &[NFTA_RULE_TABLE, NFTA_RULE_CHAIN]
+            } else {
+                &[NFTA_RULE_TABLE]
+            };
+            assert_eq!(types, want);
+        }
     }
 
     #[test]
