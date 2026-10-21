@@ -1020,9 +1020,10 @@ impl ConntrackFilter {
 
 /// Whether the running kernel filters a ctnetlink flush by `CTA_FILTER`
 /// (6.12+). Before 6.12 it refuses `CTA_FILTER` on a flush (5.8 to 6.11,
-/// `EOPNOTSUPP`), or does not know it and flushes every entry (before 5.8),
-/// and before 6.8 it flushes every zone for a delete that names only a
-/// zone. A flush is sent there only when it is known to filter.
+/// `EOPNOTSUPP`), or does not know it and flushes every entry (before 5.8).
+/// And before 6.8 its filter parses `CTA_ZONE` but never compares it, so a
+/// zone matched every zone. A flush is sent there only when it is known to
+/// filter.
 fn kernel_filters_flush() -> bool {
     filters_a_flush(crate::netlink::kernel_version())
 }

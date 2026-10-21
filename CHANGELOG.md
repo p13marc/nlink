@@ -152,8 +152,8 @@ All notable changes to this project will be documented in this file.
     part of it costs time, not entries.
   - **Flushes.** A flush carries the filter only on 6.12+. Before that a
     filter on a flush is refused (5.8 to 6.11), or unknown and taken for a
-    flush of everything (before 5.8). And before 6.8 a flush that names
-    only a zone flushes every zone. Below 6.12 the flush dumps the matches
+    flush of everything (before 5.8). And before 6.8 the kernel's filter
+    parses a zone but never compares it. Below 6.12 the flush dumps the matches
     and deletes each by tuple, zone and id. The versions are from the
     kernel's `ctnetlink_del_conntrack` and `ctnetlink_flush_conntrack`
     across 5.7 to 6.12.
