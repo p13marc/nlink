@@ -58,6 +58,24 @@ async fn traffic_helpers_count_deliveries_and_see_a_dead_wire() -> nlink::Result
 /// root it is a plain child.
 #[test]
 fn require_root_fails_instead_of_skipping_under_strict_root() {
+    // Root needs `unshare --user` to run a child without root. Where it
+    // cannot (no util-linux, user namespaces off), the test cannot do its
+    // job, and says so, rather than fail on the probe for another reason.
+    if nlink::lab::is_root() {
+        let probe = std::process::Command::new("unshare")
+            .args(["--user", "true"])
+            .output();
+        match probe {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => panic!(
+                "this test runs a child without root through `unshare --user`, which failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ),
+            Err(e) => panic!(
+                "this test runs a child without root through `unshare`, which is missing: {e}"
+            ),
+        }
+    }
     let run = |strict: bool| {
         let exe = std::env::current_exe().expect("the test binary's path");
         let mut cmd = if nlink::lab::is_root() {
@@ -93,6 +111,8 @@ fn require_root_fails_instead_of_skipping_under_strict_root() {
         text.contains("Skipping test: requires root"),
         "the probe ran without root:\n{text}"
     );
+    // libtest's summary: with `--exact`, a probe whose path changed would
+    // run nothing and still exit 0, and only this line would show it.
     assert!(text.contains("1 passed"), "the probe did not run:\n{text}");
 
     let (passed, text) = run(true);
