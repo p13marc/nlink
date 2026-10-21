@@ -212,7 +212,9 @@ All notable changes to this project will be documented in this file.
     nft drops. It joins prefixes, flag tests and bounds the way nft does.
   - `Rule::nft_syntax()` prints a rule before it is installed.
   - `NftablesDiff`'s `Display` ends each rule line with the rule:
-    `+ rule Inet filter/input [ssh]: tcp dport 22 accept`.
+    `+ rule Inet filter/input [ssh]: tcp dport 22 accept`. In its JSON, a
+    declared rule carries the same text as `nft` (`null` where nlink
+    cannot print it), so a `--check --json` says what changes.
   - `nlink-nft list rules` prints them as `nft -a list chain` does. Its
     JSON gains an `nft` field.
 

@@ -791,7 +791,7 @@ struct Lifter {
     /// Each statement's text, and whether a later field implies it.
     stmts: Vec<(String, bool)>,
     /// The protocol match each base depends on (nft's `pdeps`).
-    deps: [Option<Dep>; 4],
+    deps: [Option<Dep>; 5],
     net: Option<Net>,
     l4: Option<u8>,
     /// The last statement, when it was an ordered comparison: nft writes a
@@ -819,7 +819,7 @@ impl Lifter {
             family,
             regs: Default::default(),
             stmts: Vec::new(),
-            deps: [None; 4],
+            deps: [None; 5],
             net,
             l4: None,
             bound: None,
@@ -1236,6 +1236,7 @@ impl Lifter {
                 offset,
                 len,
             } => {
+                within_header(*offset, *len)?;
                 let hdr = self.hdr(*base)?;
                 let val = Val::Payload {
                     hdr,
@@ -1434,6 +1435,7 @@ impl Lifter {
                 len,
                 ..
             } => {
+                within_header(*offset, *len)?;
                 let hdr = self.hdr(*base)?;
                 let val = self.take(*sreg)?;
                 self.payload_write(hdr, *offset, *len, &val)
@@ -1974,6 +1976,12 @@ impl Lifter {
     }
 }
 
+/// A payload load no header field could be: past the headers nlink names,
+/// or wider than a register. Refused before any bit arithmetic on it.
+fn within_header(offset: u32, len: u32) -> Option<()> {
+    (offset <= 255 && (1..=16).contains(&len)).then_some(())
+}
+
 /// A set nft made for a rule's `{ ... }`: `__set0`, `__map0`.
 fn is_anonymous(set: &str) -> bool {
     set.starts_with("__")
@@ -2141,11 +2149,14 @@ fn nat_addresses(first: &[u8], last: Option<&[u8]>, v6: bool, ports: bool) -> Op
     let Some(last) = last else {
         return Some(wrap(address(first)?));
     };
+    if last.len() != first.len() {
+        return None;
+    }
     let bits = u32::try_from(first.len() * 8).ok()?;
     let (lo, hi) = (int(first, true)?, int(last, true)?);
     let host = lo ^ hi;
     if host != 0 && lo & host == 0 && host == low_bits(host.count_ones()) {
-        let prefix = bits - host.count_ones();
+        let prefix = bits.checked_sub(host.count_ones())?;
         return Some(format!("{}/{prefix}", address(first)?));
     }
     Some(format!(
@@ -2765,6 +2776,35 @@ mod tests {
                 }],
                 Family::Inet
             ),
+            None
+        );
+        // Bytes no kernel would dump, which must not panic.
+        let wild = [
+            RuleExpr::Payload {
+                dreg: Register::R0,
+                base: PayloadBase::Network,
+                offset: u32::MAX,
+                len: 4,
+            },
+            RuleExpr::Cmp {
+                sreg: Register::R0,
+                op: CmpOp::Eq,
+                data: vec![1; 4],
+            },
+        ];
+        assert_eq!(lift(&wild, Family::Ip), None);
+        let hash = [RuleExpr::Hash {
+            dreg: Register::R0,
+            kind: HashKind::Jenkins,
+            sreg: Some(Register::R1),
+            len: 8,
+            modulus: 2,
+            seed: None,
+            offset: 0,
+        }];
+        assert_eq!(lift(&hash, Family::Ip), None);
+        assert_eq!(
+            nat_addresses(&[10, 0, 0, 0], Some(&[0; 16]), false, false),
             None
         );
     }

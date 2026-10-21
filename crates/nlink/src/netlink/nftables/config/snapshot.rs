@@ -434,6 +434,36 @@ mod tests {
         );
     }
 
+    /// #708 — a rule in the diff's JSON is what nft would list, so a
+    /// `--check --json` says what changes.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn a_rule_in_the_diff_json_is_its_nft_text() {
+        let diff = lab(22, true)
+            .diff_against(&NftablesConfig::new(), &NftDiffOptions::default())
+            .unwrap();
+        let json = serde_json::to_value(&diff).unwrap();
+        let rules: Vec<_> = json["rules-to-add"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|add| {
+                (
+                    add["rule"]["handle-key"].clone(),
+                    add["rule"]["nft"].clone(),
+                )
+            })
+            .collect();
+        assert!(
+            rules.contains(&("ssh".into(), "tcp dport 22 accept".into())),
+            "{rules:?}"
+        );
+        assert!(
+            rules.contains(&("masq".into(), "masquerade".into())),
+            "{rules:?}"
+        );
+    }
+
     /// #876 — an `NftablesDiff` with every field filled in validates
     /// against the schema it publishes. The adds come from a real offline
     /// diff; the rest reuse what it declared.
