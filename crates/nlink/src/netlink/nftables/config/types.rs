@@ -497,7 +497,8 @@ impl DeclaredChainBuilder {
 
     /// Make this a base chain (#708). Without it the chain is a regular
     /// one. A changed hook, type, priority or device set recreates the
-    /// chain; a changed policy is applied in place.
+    /// chain; a changed policy is applied in place. A deprecated setter
+    /// called after it changes that part of what it set.
     ///
     /// ```
     /// use nlink::netlink::nftables::config::NftablesConfig;
@@ -576,7 +577,7 @@ impl DeclaredChainBuilder {
             &self.devices,
         ) {
             Ok(kind) => (kind, None),
-            Err(e) => (ChainKind::Regular, Some(e.to_string())),
+            Err(why) => (ChainKind::Regular, Some(why)),
         };
         DeclaredChain {
             name: self.name,

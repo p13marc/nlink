@@ -398,30 +398,28 @@ impl ChainKind {
         }
     }
 
-    /// The kind the deprecated setters describe, which can name what no
-    /// kind is: a policy without a hook, a nat chain on forward.
+    /// The kind the deprecated setters describe, or why it is none: they
+    /// can name a policy without a hook, a nat chain on forward.
     pub(crate) fn from_parts(
         hook: Option<Hook>,
         chain_type: Option<ChainType>,
         priority: Option<Priority>,
         policy: Option<Policy>,
         devices: &[String],
-    ) -> Result<Self> {
+    ) -> std::result::Result<Self, String> {
         let Some(hook) = hook else {
             if policy.is_some() {
-                return Err(Error::invalid_message(
-                    "a policy needs a base chain; a chain without a hook has none",
-                ));
+                return Err("a policy needs a base chain; a chain without a hook has none".into());
             }
             // The kernel reads a type, a priority and devices only in a
             // hook, so without one they say nothing.
             return Ok(Self::Regular);
         };
-        let base = BaseChain::try_new(
+        let base = BaseChain::of_parts(
             chain_type.unwrap_or(ChainType::Filter),
             hook,
             priority.unwrap_or(Priority::Filter),
-            devices.iter().cloned(),
+            devices.to_vec(),
         )?;
         Ok(Self::Base(match policy {
             Some(policy) => base.policy(policy),
@@ -534,9 +532,18 @@ impl BaseChain {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        let devices: Vec<String> = devices.into_iter().map(Into::into).collect();
+        let devices = devices.into_iter().map(Into::into).collect();
+        Self::of_parts(chain_type, hook, priority, devices).map_err(Error::invalid_message)
+    }
+
+    fn of_parts(
+        chain_type: ChainType,
+        hook: Hook,
+        priority: Priority,
+        devices: Vec<String>,
+    ) -> std::result::Result<Self, String> {
         let hook = hook.neutral();
-        let refuse = |why: String| Err(Error::invalid_message(why));
+        let refuse = Err;
         if hook.takes_devices() && devices.is_empty() {
             return refuse(format!("an {hook} chain needs a device"));
         }
@@ -2503,7 +2510,8 @@ impl Chain {
 
     /// Make this a base chain (#708): its type and hook, priority and
     /// policy. Without it the chain is a regular one, which only a `jump`
-    /// or `goto` enters.
+    /// or `goto` enters. A deprecated setter called after it changes that
+    /// part of what it set, and the chain is checked as a whole when sent.
     ///
     /// ```
     /// use nlink::netlink::nftables::{BaseChain, Chain, Family, FilterHook, Policy, Priority};
@@ -2585,7 +2593,7 @@ impl Chain {
             self.policy,
             &self.devices,
         )
-        .map_err(at)?;
+        .map_err(|why| at(Error::invalid_message(why)))?;
         if let Some(base) = kind.base() {
             base.check_family(self.family).map_err(at)?;
         }

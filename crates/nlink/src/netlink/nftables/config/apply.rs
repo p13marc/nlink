@@ -74,6 +74,14 @@ fn place_rule(tx: Transaction, body: Rule, placement: RulePlacement) -> Transact
 /// `NFT_MSG_NEWCHAIN`; the modify pass leaves out `NLM_F_EXCL`, so the
 /// kernel treats it as an update of the existing chain (#456).
 fn build_chain(table: &str, family: Family, declared: &DeclaredChain) -> Result<Chain> {
+    // `validate()` reports this before any diff exists; a diff built some
+    // other way must not turn the chain into a regular one.
+    if let Some(why) = &declared.invalid {
+        return Err(Error::invalid_message(format!(
+            "{table}/{}: {why}",
+            declared.name()
+        )));
+    }
     let mut chain = Chain::new(table, declared.name())?.family(family);
     if let Some(base) = declared.base() {
         chain = chain.base(base.clone());
@@ -623,5 +631,30 @@ mod generation_tests {
     fn the_generation_after_a_commit_skips_zero() {
         assert_eq!(next_generation(7), 8);
         assert_eq!(next_generation(u32::MAX), 1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::netlink::nftables::config::NftablesConfig;
+
+    /// #907 review: a chain the deprecated setters describe wrongly is an
+    /// error here too, not a regular chain, even in a diff that did not
+    /// come from `validate()`.
+    #[test]
+    #[allow(deprecated)]
+    fn a_chain_that_is_no_chain_is_not_built() {
+        use crate::netlink::nftables::{ChainType, Hook};
+        let cfg = NftablesConfig::new().table("t", Family::Ip, |t| {
+            t.chain("c", |c| c.hook(Hook::Forward).chain_type(ChainType::Nat))
+        });
+        let chain = &cfg.tables()[0].chains()[0];
+        let err = build_chain("t", Family::Ip, chain).expect_err("nat on forward");
+        assert!(
+            err.to_string()
+                .contains("t/c: a nat chain has no forward hook"),
+            "{err}"
+        );
     }
 }
