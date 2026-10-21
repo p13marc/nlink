@@ -30,7 +30,9 @@
 use std::time::Duration;
 
 use nlink::netlink::nftables::config::{NftDiffOptions, NftablesConfig, ReconcileOptions};
-use nlink::netlink::nftables::types::{ChainType, Family, Hook, Policy, Priority, SetKeyType};
+use nlink::netlink::nftables::types::{
+    BaseChain, ChainType, Devices, Family, FilterHook, Hook, NatHook, Policy, Priority, SetKeyType,
+};
 use nlink::netlink::Nftables;
 
 use crate::common::converge::{assert_converges, assert_transition, case};
@@ -40,9 +42,7 @@ use crate::common::{TestNamespace, with_timeout};
 fn cfg_with_n_rules(n: usize) -> NftablesConfig {
     NftablesConfig::new().table("filter_rec", Family::Inet, |mut t| {
         t = t.chain("input", |c| {
-            c.hook(Hook::Input)
-                .priority(Priority::Filter)
-                .policy(Policy::Drop)
+            c.base(BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Drop))
         });
         for i in 0..n {
             let port = 1000 + i as u16;
@@ -129,14 +129,10 @@ async fn reconcile_nat_exprs_without_attributes_are_idempotent() -> nlink::Resul
 
         let cfg = NftablesConfig::new().table("nat_dataless", Family::Inet, |t| {
             t.chain("postrouting", |c| {
-                c.hook(Hook::Postrouting)
-                    .priority(Priority::SrcNat)
-                    .chain_type(ChainType::Nat)
+                c.base(BaseChain::nat(NatHook::Postrouting, Priority::SrcNat))
             })
             .chain("prerouting", |c| {
-                c.hook(Hook::Prerouting)
-                    .priority(Priority::DstNat)
-                    .chain_type(ChainType::Nat)
+                c.base(BaseChain::nat(NatHook::Prerouting, Priority::DstNat))
             })
             .rule_keyed("postrouting", "masq", |r| {
                 r.match_saddr_v4("10.0.0.0".parse().unwrap(), 8).masquerade()
@@ -200,9 +196,7 @@ async fn reconcile_replace_one_rule_emits_replace_op() -> nlink::Result<()> {
         // Same keys, different port for "k0".
         let mutated = NftablesConfig::new().table("filter_rec", Family::Inet, |t| {
             t.chain("input", |c| {
-                c.hook(Hook::Input)
-                    .priority(Priority::Filter)
-                    .policy(Policy::Drop)
+                c.base(BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Drop))
             })
             .rule_keyed("input", "k0", |r| r.match_tcp_dport(9000).accept())
             .rule_keyed("input", "k1", |r| r.match_tcp_dport(1001).accept())
@@ -334,9 +328,7 @@ async fn nat_chain_chain_type_round_trips() -> nlink::Result<()> {
             Family::Inet,
             |t| {
                 t.chain("postrouting", |c| {
-                    c.hook(Hook::Postrouting)
-                        .priority(Priority::SrcNat)
-                        .chain_type(ChainType::Nat)
+                    c.base(BaseChain::nat(NatHook::Postrouting, Priority::SrcNat))
                 })
             },
         );
@@ -390,10 +382,10 @@ async fn netdev_chain_device_round_trips() -> nlink::Result<()> {
             Family::Netdev,
             |t| {
                 t.chain("ingress", |c| {
-                    c.hook(Hook::NetdevIngress)
-                        .priority(Priority::Filter)
-                        .chain_type(ChainType::Filter)
-                        .device("dummy0")
+                    c.base(BaseChain::filter(
+                        FilterHook::ingress("dummy0"),
+                        Priority::Filter,
+                    ))
                 })
             },
         );
@@ -442,16 +434,18 @@ async fn list_in_filters_match_only_target_table() -> nlink::Result<()> {
         let cfg = nlink::netlink::nftables::config::NftablesConfig::new()
             .table("li-t1", Family::Inet, |t| {
                 t.chain("c1", |c| {
-                    c.hook(Hook::Input)
-                        .priority(Priority::Filter)
-                        .policy(Policy::Accept)
+                    c.base(
+                        BaseChain::filter(FilterHook::Input, Priority::Filter)
+                            .policy(Policy::Accept),
+                    )
                 })
             })
             .table("li-t2", Family::Inet, |t| {
                 t.chain("c2", |c| {
-                    c.hook(Hook::Forward)
-                        .priority(Priority::Filter)
-                        .policy(Policy::Accept)
+                    c.base(
+                        BaseChain::filter(FilterHook::Forward, Priority::Filter)
+                            .policy(Policy::Accept),
+                    )
                 })
             });
         cfg.diff(&nft).await?.apply(&nft).await?;
@@ -533,9 +527,9 @@ async fn into_events_with_resync_recovers_from_enobufs() -> nlink::Result<()> {
         // through during the flood live in this chain.
         let cfg = NftablesConfig::new().table("flood", Family::Inet, |t| {
             t.chain("input", |c| {
-                c.hook(Hook::Input)
-                    .priority(Priority::Filter)
-                    .policy(Policy::Accept)
+                c.base(
+                    BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Accept),
+                )
             })
         });
         let seed = ns.connection_for::<Nftables>()?;
@@ -693,16 +687,18 @@ async fn nftables_snapshot_walks_ruleset() -> nlink::Result<()> {
         let cfg = NftablesConfig::new()
             .table("snap-t1", Family::Inet, |t| {
                 t.chain("input", |c| {
-                    c.hook(Hook::Input)
-                        .priority(Priority::Filter)
-                        .policy(Policy::Accept)
+                    c.base(
+                        BaseChain::filter(FilterHook::Input, Priority::Filter)
+                            .policy(Policy::Accept),
+                    )
                 })
             })
             .table("snap-t2", Family::Inet, |t| {
                 t.chain("fwd", |c| {
-                    c.hook(Hook::Forward)
-                        .priority(Priority::Filter)
-                        .policy(Policy::Accept)
+                    c.base(
+                        BaseChain::filter(FilterHook::Forward, Priority::Filter)
+                            .policy(Policy::Accept),
+                    )
                 })
             });
         cfg.diff(&nft).await?.apply(&nft).await?;
@@ -788,9 +784,7 @@ async fn dnat_v6_rule_round_trips() -> nlink::Result<()> {
         let target: Ipv6Addr = "fd30::2".parse().unwrap();
         let cfg = NftablesConfig::new().table("nat6", Family::Ip6, |t| {
             t.chain("prerouting", |c| {
-                c.hook(Hook::Prerouting)
-                    .priority(Priority::DstNat)
-                    .chain_type(ChainType::Nat)
+                c.base(BaseChain::nat(NatHook::Prerouting, Priority::DstNat))
             })
             .rule_keyed("prerouting", "dnat-v6", |r| {
                 r.match_tcp_dport(80).dnat_v6(target, Some(8080))
@@ -832,9 +826,7 @@ async fn snat_v6_rule_round_trips() -> nlink::Result<()> {
         let target: Ipv6Addr = "fd30::1".parse().unwrap();
         let cfg = NftablesConfig::new().table("nat6", Family::Ip6, |t| {
             t.chain("postrouting", |c| {
-                c.hook(Hook::Postrouting)
-                    .priority(Priority::SrcNat)
-                    .chain_type(ChainType::Nat)
+                c.base(BaseChain::nat(NatHook::Postrouting, Priority::SrcNat))
             })
             .rule_keyed("postrouting", "snat-v6", |r| {
                 r.match_saddr_v6("fd30::100".parse().unwrap(), 128)
@@ -876,7 +868,7 @@ async fn inet_addr_matches_round_trip() -> nlink::Result<()> {
         let v6: Ipv6Addr = "2001:db8::1".parse().unwrap();
         let cfg = NftablesConfig::new().table("filter_addr", Family::Inet, |t| {
             t.chain("input", |c| {
-                c.hook(Hook::Input).priority(Priority::Filter)
+                c.base(BaseChain::filter(FilterHook::Input, Priority::Filter))
             })
             .rule_keyed("input", "v4-exact", |r| r.match_saddr_v4(v4, 32).accept())
             .rule_keyed("input", "v4-prefix", |r| r.match_daddr_v4(v4, 24).accept())
@@ -913,7 +905,7 @@ async fn inet_icmp_type_matches_round_trip() -> nlink::Result<()> {
 
         let cfg = NftablesConfig::new().table("filter_icmp", Family::Inet, |t| {
             t.chain("input", |c| {
-                c.hook(Hook::Input).priority(Priority::Filter)
+                c.base(BaseChain::filter(FilterHook::Input, Priority::Filter))
             })
             .rule_keyed("input", "icmp", |r| r.match_icmp_type(8).accept())
             .rule_keyed("input", "icmpv6", |r| r.match_icmpv6_type(128).accept())
@@ -947,9 +939,7 @@ async fn snat_v6_addr_only_round_trips() -> nlink::Result<()> {
         let target: Ipv6Addr = "fd30::1".parse().unwrap();
         let cfg = NftablesConfig::new().table("n", Family::Ip6, |t| {
             t.chain("post", |c| {
-                c.hook(Hook::Postrouting)
-                    .priority(Priority::SrcNat)
-                    .chain_type(ChainType::Nat)
+                c.base(BaseChain::nat(NatHook::Postrouting, Priority::SrcNat))
             })
             .rule_keyed("post", "snat", |r| {
                 r.match_saddr_v6("fd30::100".parse().unwrap(), 128)
@@ -986,9 +976,7 @@ async fn inet_snat_with_prefix_source_round_trips() -> nlink::Result<()> {
         let target: Ipv6Addr = "fd30::1".parse().unwrap();
         let cfg = NftablesConfig::new().table("n", Family::Inet, |t| {
             t.chain("post", |c| {
-                c.hook(Hook::Postrouting)
-                    .priority(Priority::SrcNat)
-                    .chain_type(ChainType::Nat)
+                c.base(BaseChain::nat(NatHook::Postrouting, Priority::SrcNat))
             })
             .rule_keyed("post", "snat-prefix", |r| {
                 r.match_saddr_v6(src_prefix, 64).snat_v6(target, None)
@@ -1207,10 +1195,7 @@ async fn reconcile_changes_a_live_chain_policy() -> nlink::Result<()> {
         let cfg = |policy: Policy| {
             NftablesConfig::new().table("filter_pol", Family::Inet, move |t| {
                 t.chain("input", move |c| {
-                    c.hook(Hook::Input)
-                        .priority(Priority::Filter)
-                        .chain_type(ChainType::Filter)
-                        .policy(policy)
+                    c.base(BaseChain::filter(FilterHook::Input, Priority::Filter).policy(policy))
                 })
                 .rule_keyed("input", "ssh", |r| r.match_tcp_dport(22).accept())
             })
@@ -1252,16 +1237,14 @@ async fn reconcile_changes_a_live_chain_policy() -> nlink::Result<()> {
 
 /// `inet t` with chain `c` (a base chain on `hook` at `priority`, or a
 /// regular one) holding two keyed rules, `exclusive` or not.
-fn chain_c(base: Option<(Hook, Priority)>, exclusive: bool) -> NftablesConfig {
+fn chain_c(base: Option<(FilterHook, Priority)>, exclusive: bool) -> NftablesConfig {
     NftablesConfig::new().table("t", Family::Inet, move |t| {
         t.chain("c", move |c| {
             let c = if exclusive { c.exclusive() } else { c };
             match base {
-                Some((hook, priority)) => c
-                    .hook(hook)
-                    .priority(priority)
-                    .chain_type(ChainType::Filter)
-                    .policy(Policy::Accept),
+                Some((hook, priority)) => {
+                    c.base(BaseChain::filter(hook, priority).policy(Policy::Accept))
+                }
                 None => c,
             }
         })
@@ -1280,9 +1263,9 @@ async fn chain_changes_an_update_cannot_make_recreate_the_chain() -> nlink::Resu
     nlink::require_modules!("nf_tables");
 
     let steps = [
-        chain_c(Some((Hook::Input, Priority::Filter)), false),
-        chain_c(Some((Hook::Input, Priority::Custom(-10))), false),
-        chain_c(Some((Hook::Forward, Priority::Custom(-10))), false),
+        chain_c(Some((FilterHook::Input, Priority::Filter)), false),
+        chain_c(Some((FilterHook::Input, Priority::Custom(-10))), false),
+        chain_c(Some((FilterHook::Forward, Priority::Custom(-10))), false),
         chain_c(None, false),
     ];
     let want = [
@@ -1332,14 +1315,14 @@ async fn a_chain_recreate_over_a_rule_nlink_did_not_write_is_refused() -> nlink:
     with_timeout(async {
         let ns = TestNamespace::new("nft-chain-refuse")?;
         let nft = ns.connection_for::<Nftables>()?;
-        chain_c(Some((Hook::Input, Priority::Filter)), false)
+        chain_c(Some((FilterHook::Input, Priority::Filter)), false)
             .diff(&nft)
             .await?
             .apply(&nft)
             .await?;
         self::nft(&ns, "add rule inet t c tcp dport 8080 accept")?;
 
-        let moved = chain_c(Some((Hook::Input, Priority::Custom(-10))), false);
+        let moved = chain_c(Some((FilterHook::Input, Priority::Custom(-10))), false);
         let diff = moved.diff(&nft).await?;
         assert!(
             diff.chains_to_recreate
@@ -1369,7 +1352,7 @@ async fn a_chain_recreate_over_a_rule_nlink_did_not_write_is_refused() -> nlink:
             "the refused apply changed the chain"
         );
 
-        let exclusive = chain_c(Some((Hook::Input, Priority::Custom(-10))), true);
+        let exclusive = chain_c(Some((FilterHook::Input, Priority::Custom(-10))), true);
         exclusive.diff(&nft).await?.apply(&nft).await?;
         assert!(exclusive.diff(&nft).await?.is_empty());
         let rules = nft.list_rules("t", Family::Inet).await?;
@@ -1397,8 +1380,12 @@ async fn arp_chains_land_on_their_hooks() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables");
 
     let cfg = NftablesConfig::new().table("t", Family::Arp, |t| {
-        t.chain("in", |c| c.hook(Hook::Input).priority(Priority::Filter))
-            .chain("out", |c| c.hook(Hook::Output).priority(Priority::Filter))
+        t.chain("in", |c| {
+            c.base(BaseChain::filter(FilterHook::Input, Priority::Filter))
+        })
+        .chain("out", |c| {
+            c.base(BaseChain::filter(FilterHook::Output, Priority::Filter))
+        })
     });
     let ns = TestNamespace::new("nft-arp-hooks")?;
     assert_transition(&ns, &[cfg], false, async |_, _| {
@@ -1426,9 +1413,10 @@ async fn a_netdev_chain_moves_to_the_declared_device() -> nlink::Result<()> {
     let on = |dev: &'static str| {
         NftablesConfig::new().table("t", Family::Netdev, move |t| {
             t.chain("c", move |c| {
-                c.hook(Hook::NetdevIngress)
-                    .priority(Priority::Filter)
-                    .device(dev)
+                c.base(BaseChain::filter(
+                    FilterHook::ingress(dev),
+                    Priority::Filter,
+                ))
             })
             .rule_keyed("c", "count", |r| r.counter())
         })
@@ -1527,9 +1515,7 @@ async fn flowtable_changes_apply() -> nlink::Result<()> {
                 f.counter(counter).priority(priority)
             })
             .chain("forward", |c| {
-                c.hook(Hook::Forward)
-                    .priority(Priority::Filter)
-                    .chain_type(ChainType::Filter)
+                c.base(BaseChain::filter(FilterHook::Forward, Priority::Filter))
             })
             .rule_keyed("forward", "offload", |r| r.flow_offload("ft"))
         })
@@ -1595,9 +1581,7 @@ fn input_table(
 ) -> NftablesConfig {
     NftablesConfig::new().table("t", Family::Ip, move |t| {
         extra(t.chain("input", |c| {
-            c.hook(Hook::Input)
-                .priority(Priority::Filter)
-                .chain_type(ChainType::Filter)
+            c.base(BaseChain::filter(FilterHook::Input, Priority::Filter))
         }))
     })
 }
@@ -1638,9 +1622,7 @@ async fn removing_what_a_rule_used_converges_in_one_apply() -> nlink::Result<()>
             }
             t.object("x", ObjectConfig::Counter)
                 .chain("output", |c| {
-                    c.hook(Hook::Output)
-                        .priority(Priority::Filter)
-                        .chain_type(ChainType::Filter)
+                    c.base(BaseChain::filter(FilterHook::Output, Priority::Filter))
                 })
                 .rule_keyed("output", "count", |r| r.counter_named("x"))
         })
@@ -2134,9 +2116,9 @@ async fn gap_deltas_report_a_table_deleted_during_an_overflow() -> nlink::Result
         let ns = TestNamespace::new("nft-gap")?;
         let cfg = NftablesConfig::new().table("keep", Family::Inet, |t| {
             t.chain("input", |c| {
-                c.hook(Hook::Input)
-                    .priority(Priority::Filter)
-                    .policy(Policy::Accept)
+                c.base(
+                    BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Accept),
+                )
             })
         });
         let other = ns.connection_for::<Nftables>()?;
@@ -2227,10 +2209,13 @@ async fn the_offline_diff_is_the_kernel_diff() -> nlink::Result<()> {
         NftablesConfig::new().table("t", Family::Inet, move |t| {
             let t = t
                 .chain("input", move |c| {
-                    c.hook(Hook::Input)
-                        .priority(Priority::Filter)
-                        .chain_type(ChainType::Filter)
-                        .policy(if v2 { Policy::Drop } else { Policy::Accept })
+                    c.base(
+                        BaseChain::filter(FilterHook::Input, Priority::Filter).policy(if v2 {
+                            Policy::Drop
+                        } else {
+                            Policy::Accept
+                        }),
+                    )
                 })
                 .set("hosts", move |s| {
                     let s = s.key_type(SetKeyType::Ipv4Addr).ipv4(ip(1)).ipv4(ip(2));
@@ -2294,7 +2279,7 @@ async fn a_shared_table_keeps_what_another_tool_added() -> nlink::Result<()> {
     let config = |mode, ours: bool| {
         NftablesConfig::new().table("s", Family::Inet, move |t| {
             let t = t.mode(mode).chain("input", |c| {
-                c.hook(Hook::Input).priority(Priority::Filter).chain_type(ChainType::Filter)
+                c.base(BaseChain::filter(FilterHook::Input, Priority::Filter))
             });
             if ours {
                 t.chain("ours", |c| c)
@@ -2405,11 +2390,10 @@ async fn a_netdev_chain_on_two_devices_reads_and_writes_as_nft_does() -> nlink::
     nft.add_chain(
         Chain::new("b", "c")?
             .family(Family::Netdev)
-            .hook(Hook::NetdevIngress)
-            .priority(Priority::Filter)
-            .chain_type(ChainType::Filter)
-            .device("d0")
-            .device("d1"),
+            .base(BaseChain::filter(
+                FilterHook::ingress(["d0", "d1"]),
+                Priority::Filter,
+            )),
     )
     .await?;
     let listed = |table: &str| -> nlink::Result<String> {
@@ -2432,9 +2416,13 @@ fn ingress_on(devices: &[&'static str], veth: &'static str) -> NftablesConfig {
     let devices = devices.to_vec();
     NftablesConfig::new().table("t", Family::Netdev, move |t| {
         t.chain("in", move |c| {
-            devices
-                .iter()
-                .fold(c.hook(Hook::NetdevIngress).priority(Priority::Filter), |c, d| c.device(*d))
+            let devices =
+                Devices::try_from(devices.iter().map(|d| d.to_string()).collect::<Vec<_>>())
+                    .expect("at least one device");
+            c.base(BaseChain::filter(
+                FilterHook::ingress(devices),
+                Priority::Filter,
+            ))
         })
         .rule_keyed("in", "veth", move |r| r.match_iif(veth).match_l4proto(17).counter())
         .rule_keyed("in", "lo", |r| r.match_iif("lo").match_l4proto(17).counter())

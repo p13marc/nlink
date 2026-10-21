@@ -27,7 +27,8 @@ use std::time::Duration;
 
 use nlink::netlink::nftables::config::NftablesConfig;
 use nlink::netlink::nftables::types::{
-    ChainType, Family, Hook, PacketField, Priority, SetDataType, SetElement, SetKeyType, Verdict,
+    BaseChain, Family, FilterHook, PacketField, Priority, SetDataType, SetElement, SetKeyType,
+    Verdict,
 };
 use nlink::netlink::nftables::{ObjectConfig, ObjectState, ObjectType};
 use nlink::netlink::{Connection, Nftables, Route, namespace};
@@ -41,9 +42,7 @@ fn ruleset() -> nlink::Result<NftablesConfig> {
     ];
     Ok(NftablesConfig::new().table("demo", Family::Ip, move |t| {
         t.chain("out", |c| {
-            c.hook(Hook::Output)
-                .priority(Priority::Filter)
-                .chain_type(ChainType::Filter)
+            c.base(BaseChain::filter(FilterHook::Output, Priority::Filter))
         })
         .chain("high_ports", |c| c)
         .set("allowed_nets", move |s| {

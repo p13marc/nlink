@@ -17,7 +17,8 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use nlink::netlink::nftables::config::NftablesConfig;
 use nlink::netlink::nftables::types::{
-    ChainName, ChainType, CtState, Family, Hook, LimitUnit, Priority, SetKeyType, TcpFlags,
+    BaseChain, ChainName, CtState, Family, FilterHook, LimitUnit, NatHook, Priority, SetKeyType,
+    TcpFlags,
 };
 use nlink::netlink::nftables::{
     CmpOp, Expr, LogExpr, LookupExpr, MetaKey, NFT_REJECT_TCP_RST, PayloadBase, Register, Verdict,
@@ -56,15 +57,11 @@ async fn every_filter_rule_shape_reconciles() -> nlink::Result<()> {
     with_timeout(async {
         let cfg = NftablesConfig::new().table("shapes", Family::Inet, |t| {
             t.chain("input", |c| {
-                c.hook(Hook::Input)
-                    .priority(Priority::Filter)
-                    .chain_type(ChainType::Filter)
+                c.base(BaseChain::filter(FilterHook::Input, Priority::Filter))
             })
             .chain("sub", |c| c)
             .chain("forward", |c| {
-                c.hook(Hook::Forward)
-                    .priority(Priority::Mangle)
-                    .chain_type(ChainType::Filter)
+                c.base(BaseChain::filter(FilterHook::Forward, Priority::Mangle))
             })
             .set("allow4", |s| s.key_type(SetKeyType::Ipv4Addr).ipv4(v4))
             // Transport matchers.
@@ -202,9 +199,7 @@ async fn interface_name_matches_are_what_nft_writes() -> nlink::Result<()> {
     with_timeout(async {
         let cfg = NftablesConfig::new().table("t", Family::Inet, |t| {
             t.chain("ifn", |c| {
-                c.hook(Hook::Forward)
-                    .priority(Priority::Filter)
-                    .chain_type(ChainType::Filter)
+                c.base(BaseChain::filter(FilterHook::Forward, Priority::Filter))
             })
             .rule_keyed("ifn", "iif", |r| r.match_iif("d0").accept())
             .rule_keyed("ifn", "iif-not", |r| r.match_iif_not("d0").drop())
@@ -260,7 +255,9 @@ async fn reject_rules_reconcile_in_every_family() -> nlink::Result<()> {
         ] {
             cfg = cfg.table(name, family, |t| {
                 let t = t
-                    .chain("input", |c| c.hook(Hook::Input).priority(Priority::Filter))
+                    .chain("input", |c| {
+                        c.base(BaseChain::filter(FilterHook::Input, Priority::Filter))
+                    })
                     .rule_keyed("input", "reject", |r| r.match_tcp_dport(85).reject())
                     .rule_keyed("input", "rst", |r| r.reject_tcp_reset())
                     .rule_keyed("input", "rst-after-dport", |r| {
@@ -292,14 +289,10 @@ async fn every_nat_rule_shape_reconciles() -> nlink::Result<()> {
     with_timeout(async {
         let cfg = NftablesConfig::new().table("nat_shapes", Family::Inet, |t| {
             t.chain("postrouting", |c| {
-                c.hook(Hook::Postrouting)
-                    .priority(Priority::SrcNat)
-                    .chain_type(ChainType::Nat)
+                c.base(BaseChain::nat(NatHook::Postrouting, Priority::SrcNat))
             })
             .chain("prerouting", |c| {
-                c.hook(Hook::Prerouting)
-                    .priority(Priority::DstNat)
-                    .chain_type(ChainType::Nat)
+                c.base(BaseChain::nat(NatHook::Prerouting, Priority::DstNat))
             })
             .rule_keyed("postrouting", "masq", |r| {
                 r.match_saddr_v4("10.0.0.0".parse().unwrap(), 8).masquerade()
@@ -350,9 +343,7 @@ async fn flow_offload_rule_installs_and_reconciles() -> nlink::Result<()> {
         let cfg = NftablesConfig::new().table("flow", Family::Inet, |t| {
             t.flowtable("ft", |f| f)
                 .chain("forward", |c| {
-                    c.hook(Hook::Forward)
-                        .priority(Priority::Filter)
-                        .chain_type(ChainType::Filter)
+                    c.base(BaseChain::filter(FilterHook::Forward, Priority::Filter))
                 })
                 .rule_keyed("forward", "offload", |r| {
                     r.match_ct_state(CtState::ESTABLISHED).flow_offload("ft")
@@ -380,10 +371,10 @@ async fn nat_ranges_and_flags_reconcile_and_list_as_nft_writes_them() -> nlink::
     with_timeout(async {
         let cfg = NftablesConfig::new().table("natr", Family::Inet, |t| {
             t.chain("post", |c| {
-                c.hook(Hook::Postrouting).priority(Priority::SrcNat).chain_type(ChainType::Nat)
+                c.base(BaseChain::nat(NatHook::Postrouting, Priority::SrcNat))
             })
             .chain("pre", |c| {
-                c.hook(Hook::Prerouting).priority(Priority::DstNat).chain_type(ChainType::Nat)
+                c.base(BaseChain::nat(NatHook::Prerouting, Priority::DstNat))
             })
             .rule_keyed("post", "snat-range", |r| {
                 r.match_tcp_dport(1).nat(
@@ -454,7 +445,7 @@ async fn byte_limits_and_icmpx_codes_reconcile_and_list() -> nlink::Result<()> {
     with_timeout(async {
         let cfg = NftablesConfig::new().table("b", Family::Inet, |t| {
             t.chain("input", |c| {
-                c.hook(Hook::Input).priority(Priority::Filter).chain_type(ChainType::Filter)
+                c.base(BaseChain::filter(FilterHook::Input, Priority::Filter))
             })
             .object("tenk", nlink::netlink::nftables::ObjectConfig::Limit(LimitExpr::bytes(Bytes::kib(10), LimitUnit::Second).burst(2048)))
             .rule_keyed("input", "bytes", |r| {
@@ -506,7 +497,7 @@ async fn ranges_and_negations_reconcile_and_match_nft() -> nlink::Result<()> {
     with_timeout(async {
         let cfg = NftablesConfig::new().table("r", Family::Inet, |t| {
             t.chain("input", |c| {
-                c.hook(Hook::Input).priority(Priority::Filter).chain_type(ChainType::Filter)
+                c.base(BaseChain::filter(FilterHook::Input, Priority::Filter))
             })
             .rule_keyed("input", "dports", |r| {
                 r.match_range(PacketField::TcpDport, 1000u16, 2000u16).accept()
@@ -591,12 +582,12 @@ async fn fib_pkttype_and_notrack_are_what_nft_writes() -> nlink::Result<()> {
     with_timeout(async {
         let chain = |hook, priority| {
             move |c: nlink::netlink::nftables::config::DeclaredChainBuilder| {
-                c.hook(hook).priority(priority).chain_type(ChainType::Filter)
+                c.base(BaseChain::filter(hook, priority))
             }
         };
         let cfg = NftablesConfig::new().table("f", Family::Inet, |t| {
-            t.chain("pre", chain(Hook::Prerouting, Priority::Filter))
-                .chain("raw", chain(Hook::Prerouting, Priority::Raw))
+            t.chain("pre", chain(FilterHook::Prerouting, Priority::Filter))
+                .chain("raw", chain(FilterHook::Prerouting, Priority::Raw))
                 .rule_keyed("pre", "rpf", |r| {
                     r.match_fib_missing(FibFlags::SADDR | FibFlags::IIF).drop()
                 })
@@ -660,7 +651,7 @@ async fn ct_keys_are_what_nft_writes() -> nlink::Result<()> {
     with_timeout(async {
         let chain = |priority| {
             move |c: nlink::netlink::nftables::config::DeclaredChainBuilder| {
-                c.hook(Hook::Prerouting).priority(priority).chain_type(ChainType::Filter)
+                c.base(BaseChain::filter(FilterHook::Prerouting, priority))
             }
         };
         let ip = "10.0.0.1".parse().unwrap();
@@ -728,9 +719,7 @@ async fn comments_on_every_object_are_written_and_read() -> nlink::Result<()> {
         let cfg = NftablesConfig::new().table("c", Family::Inet, |t| {
             t.comment("lab table")
                 .chain("input", |c| {
-                    c.hook(Hook::Input)
-                        .priority(Priority::Filter)
-                        .chain_type(ChainType::Filter)
+                    c.base(BaseChain::filter(FilterHook::Input, Priority::Filter))
                         .comment("inbound")
                 })
                 .set("blocked", |s| {
@@ -804,9 +793,7 @@ async fn a_changed_comment_is_applied_by_recreating_with_the_option() -> nlink::
         NftablesConfig::new().table("c", Family::Inet, move |t| {
             t.comment(table)
                 .chain("input", move |c| {
-                    c.hook(Hook::Input)
-                        .priority(Priority::Filter)
-                        .chain_type(ChainType::Filter)
+                    c.base(BaseChain::filter(FilterHook::Input, Priority::Filter))
                         .comment(chain)
                 })
                 .set("blocked", move |s| {
@@ -960,8 +947,15 @@ async fn an_address_match_at_netdev_ingress_matches() -> nlink::Result<()> {
     let pair = crate::common::topo::NsPair::new("nftguard", 97).await?;
     let a_addr = pair.a_addr;
     let cfg = NftablesConfig::new().table("t", Family::Netdev, |t| {
-        t.chain("in", |c| c.hook(Hook::NetdevIngress).device(pair.b_if).priority(Priority::Filter))
-            .rule_keyed("in", "from-a", move |r| r.match_saddr_v4(a_addr, 32).match_l4proto(17).counter())
+        t.chain("in", |c| {
+            c.base(BaseChain::filter(
+                FilterHook::ingress(pair.b_if),
+                Priority::Filter,
+            ))
+        })
+        .rule_keyed("in", "from-a", move |r| {
+            r.match_saddr_v4(a_addr, 32).match_l4proto(17).counter()
+        })
     });
     let nft = pair.b.connection_for::<Nftables>()?;
     cfg.diff(&nft).await?.apply(&nft).await?;
@@ -995,16 +989,23 @@ async fn a_rule_installed_with_redundant_guards_diffs_empty() -> nlink::Result<(
     let declare = |old: bool| {
         let meta = meta.clone();
         NftablesConfig::new().table("t", Family::Ip, move |t| {
-            t.chain("in", |c| c.hook(Hook::Input).priority(Priority::Filter).chain_type(ChainType::Filter))
-                .rule_keyed("in", "k", move |r: Rule| {
-                    let r = if old {
-                        r.expr(RawExpr::new("meta", meta.clone()))
-                            .expr(Expr::Cmp { sreg: Register::R0, op: CmpOp::Eq, data: vec![2] })
-                    } else {
-                        r
-                    };
-                    r.match_saddr_v4(Ipv4Addr::new(10, 0, 0, 1), 32).match_tcp_dport(22).accept()
-                })
+            t.chain("in", |c| {
+                c.base(BaseChain::filter(FilterHook::Input, Priority::Filter))
+            })
+            .rule_keyed("in", "k", move |r: Rule| {
+                let r = if old {
+                    r.expr(RawExpr::new("meta", meta.clone())).expr(Expr::Cmp {
+                        sreg: Register::R0,
+                        op: CmpOp::Eq,
+                        data: vec![2],
+                    })
+                } else {
+                    r
+                };
+                r.match_saddr_v4(Ipv4Addr::new(10, 0, 0, 1), 32)
+                    .match_tcp_dport(22)
+                    .accept()
+            })
         })
     };
     declare(true).diff(&nft).await?.apply(&nft).await?;

@@ -8,8 +8,8 @@ use clap::{Parser, Subcommand};
 use nlink::netlink::{
     Connection, Nftables, Result,
     nftables::{
-        Chain, ChainType, Family, Hook, Policy, Priority, Rule, Set, SetElement, SetFlags,
-        SetKeyType, Transaction,
+        BaseChain, Chain, ChainType, Family, Hook, Policy, Priority, Rule, Set, SetElement,
+        SetFlags, SetKeyType, Transaction,
         config::{NftablesConfig, ReconcileOptions},
     },
 };
@@ -313,20 +313,17 @@ fn parse_family(s: &str) -> Result<Family> {
 }
 
 fn parse_hook(s: &str) -> Result<Hook> {
-    // Plan 211 M1 — `Hook::Ingress` was split into `NetdevIngress`
-    // (kernel `NF_NETDEV_INGRESS = 0`) and `InetIngress` (kernel
-    // `NF_INET_INGRESS = 5`). This CLI uses a `netdev:`/`inet:`
-    // prefix to disambiguate; bare `ingress` defaults to the
-    // netdev variant for backwards-compat with pre-0.19 commands.
+    // `Hook::Ingress` is numbered by the table's family (#708). The
+    // `netdev:` and `inet:` prefixes the 0.19 split needed are still
+    // accepted, and mean the same.
     match s {
         "prerouting" => Ok(Hook::Prerouting),
         "input" => Ok(Hook::Input),
         "forward" => Ok(Hook::Forward),
         "output" => Ok(Hook::Output),
         "postrouting" => Ok(Hook::Postrouting),
-        "ingress" | "netdev:ingress" => Ok(Hook::NetdevIngress),
-        "inet:ingress" => Ok(Hook::InetIngress),
-        "netdev:egress" => Ok(Hook::NetdevEgress),
+        "ingress" | "netdev:ingress" | "inet:ingress" => Ok(Hook::Ingress),
+        "egress" | "netdev:egress" => Ok(Hook::Egress),
         _ => Err(nlink::netlink::Error::invalid_attribute(format!(
             "unknown hook: {s}"
         ))),
@@ -370,20 +367,46 @@ fn build_chain(
     chain_type: Option<&str>,
     policy: Option<&str>,
 ) -> Result<Chain> {
-    let mut chain = Chain::new(table, name)?.family(family);
-    if let Some(h) = hook {
-        chain = chain.hook(parse_hook(h)?);
-    }
-    if let Some(p) = priority {
-        chain = chain.priority(parse_priority(p)?);
-    }
-    if let Some(t) = chain_type {
-        chain = chain.chain_type(parse_chain_type(t)?);
-    }
-    if let Some(p) = policy {
-        chain = chain.policy(parse_policy(p)?);
-    }
-    Ok(chain)
+    let chain = Chain::new(table, name)?.family(family);
+    let base = base_chain(
+        hook.map(parse_hook).transpose()?,
+        priority.map(parse_priority).transpose()?,
+        chain_type.map(parse_chain_type).transpose()?,
+        policy.map(parse_policy).transpose()?,
+    )?;
+    Ok(match base {
+        Some(base) => chain.base(base),
+        None => chain,
+    })
+}
+
+/// The base chain a hook, priority, type and policy describe: `None`
+/// without a hook (a regular chain, which takes no policy), a filter chain
+/// at priority 0 when only the hook is given.
+fn base_chain(
+    hook: Option<Hook>,
+    priority: Option<Priority>,
+    chain_type: Option<ChainType>,
+    policy: Option<Policy>,
+) -> Result<Option<BaseChain>> {
+    let Some(hook) = hook else {
+        if policy.is_some() {
+            return Err(nlink::netlink::Error::invalid_attribute(
+                "a policy needs a base chain: give the chain a hook",
+            ));
+        }
+        return Ok(None);
+    };
+    let base = BaseChain::try_new(
+        chain_type.unwrap_or(ChainType::Filter),
+        hook,
+        priority.unwrap_or(Priority::Filter),
+        Vec::<String>::new(),
+    )?;
+    Ok(Some(match policy {
+        Some(policy) => base.policy(policy),
+        None => base,
+    }))
 }
 
 /// Parse a rule spec (token slice) into a typed [`Rule`] (shared by
@@ -1006,10 +1029,7 @@ fn parse_ruleset(contents: &str) -> Result<NftablesConfig> {
     /// A chain with its options pre-resolved to typed enums.
     struct PendingChain {
         name: String,
-        hook: Option<Hook>,
-        priority: Option<Priority>,
-        chain_type: Option<ChainType>,
-        policy: Option<Policy>,
+        base: Option<BaseChain>,
     }
     /// A set with its key type, flags, and accumulated elements.
     struct PendingSet {
@@ -1084,12 +1104,11 @@ fn parse_ruleset(contents: &str) -> Result<NftablesConfig> {
                         "chain `{name}` references table `{table}` (family {family}) not declared earlier in the file"
                     ))
                 })?;
+                let base = base_chain(hook, priority, chain_type, policy)
+                    .map_err(|e| loc(e.to_string()))?;
                 t.chains.push(PendingChain {
                     name: (*name).to_string(),
-                    hook,
-                    priority,
-                    chain_type,
-                    policy,
+                    base,
                 });
             }
             ["add", "rule", family, table, chain, spec @ ..] => {
@@ -1214,31 +1233,16 @@ fn parse_ruleset(contents: &str) -> Result<NftablesConfig> {
         } = pt;
         cfg = cfg.table(name, family, move |mut tb| {
             for pc in chains {
-                let PendingChain {
-                    name,
-                    hook,
-                    priority,
-                    chain_type,
-                    policy,
-                } = pc;
+                let PendingChain { name, base } = pc;
                 // A desired-state file owns its chains: a rule it does not
                 // declare — including the unkeyed duplicates an older
                 // `reconcile` left behind — is deleted.
-                tb = tb.chain(name, move |mut cb| {
-                    cb = cb.exclusive();
-                    if let Some(h) = hook {
-                        cb = cb.hook(h);
+                tb = tb.chain(name, move |cb| {
+                    let cb = cb.exclusive();
+                    match base {
+                        Some(base) => cb.base(base),
+                        None => cb,
                     }
-                    if let Some(p) = priority {
-                        cb = cb.priority(p);
-                    }
-                    if let Some(ct) = chain_type {
-                        cb = cb.chain_type(ct);
-                    }
-                    if let Some(pol) = policy {
-                        cb = cb.policy(pol);
-                    }
-                    cb
                 });
             }
             for (chain, rule) in rules {
@@ -1740,6 +1744,33 @@ mod tests {
         assert!(build_chain(Family::Inet, "t", "c", None, Some("filtr"), None, None).is_err());
         assert!(build_chain(Family::Inet, "t", "c", None, None, Some("bogus"), None).is_err());
         assert!(build_chain(Family::Inet, "t", "c", None, None, None, Some("drpo")).is_err());
+        // And so is what no chain is (#708): a policy without a hook, a nat
+        // chain on forward, a route chain off output.
+        assert!(build_chain(Family::Inet, "t", "c", None, None, None, Some("drop")).is_err());
+        assert!(
+            build_chain(
+                Family::Ip,
+                "t",
+                "c",
+                Some("forward"),
+                None,
+                Some("nat"),
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            build_chain(
+                Family::Ip,
+                "t",
+                "c",
+                Some("input"),
+                None,
+                Some("route"),
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1817,9 +1848,15 @@ mod tests {
     #[test]
     fn hook_known_and_ingress_variants() {
         assert!(matches!(parse_hook("prerouting"), Ok(Hook::Prerouting)));
-        // bare `ingress` defaults to the netdev variant
-        assert!(matches!(parse_hook("ingress"), Ok(Hook::NetdevIngress)));
-        assert!(matches!(parse_hook("inet:ingress"), Ok(Hook::InetIngress)));
+        // Every spelling of ingress is the one hook, numbered by the
+        // table's family (#708).
+        for ingress in ["ingress", "netdev:ingress", "inet:ingress"] {
+            assert!(
+                matches!(parse_hook(ingress), Ok(Hook::Ingress)),
+                "{ingress}"
+            );
+        }
+        assert!(matches!(parse_hook("netdev:egress"), Ok(Hook::Egress)));
         assert!(parse_hook("sideways").is_err());
     }
 

@@ -42,19 +42,15 @@ detects EPERM cleanly.
 ```rust,no_run
 use nlink::{Connection, Nftables};
 use nlink::netlink::nftables::config::NftablesConfig;
-use nlink::netlink::nftables::types::{Family, Hook, Policy, Priority};
+use nlink::netlink::nftables::types::{BaseChain, Family, FilterHook, Policy, Priority};
 
 # async fn run() -> nlink::Result<()> {
 let cfg = NftablesConfig::new().table("filter", Family::Inet, |t| {
     t.chain("input", |c| {
-        c.hook(Hook::Input)
-            .priority(Priority::Filter)
-            .policy(Policy::Drop)
+        c.base(BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Drop))
     })
     .chain("output", |c| {
-        c.hook(Hook::Output)
-            .priority(Priority::Filter)
-            .policy(Policy::Accept)
+        c.base(BaseChain::filter(FilterHook::Output, Priority::Filter).policy(Policy::Accept))
     })
 });
 
@@ -115,10 +111,10 @@ identity key — same shape as `LinkConfig::name` or
 
 ```rust,no_run
 use nlink::netlink::nftables::config::NftablesConfig;
-use nlink::netlink::nftables::types::{Family, Hook, Policy};
+use nlink::netlink::nftables::types::{BaseChain, Family, FilterHook, Policy, Priority};
 
 let cfg = NftablesConfig::new().table("filter", Family::Inet, |t| {
-    t.chain("input", |c| c.hook(Hook::Input).policy(Policy::Drop))
+    t.chain("input", |c| c.base(BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Drop)))
         .rule_keyed("input", "ssh-allow", |r| r.match_tcp_dport(22).accept())
         .rule_keyed("input", "icmp-allow", |r| r.match_l4proto(1 /* IPPROTO_ICMP */).accept())
 });

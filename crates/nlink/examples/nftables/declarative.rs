@@ -26,7 +26,9 @@
 use std::net::Ipv4Addr;
 
 use nlink::netlink::nftables::config::NftablesConfig;
-use nlink::netlink::nftables::types::{Family, Hook, Policy, Priority, SetKeyType};
+use nlink::netlink::nftables::types::{
+    BaseChain, Family, FilterHook, Policy, Priority, SetKeyType,
+};
 use nlink::netlink::{Connection, Nftables};
 
 #[tokio::main]
@@ -36,9 +38,7 @@ async fn main() -> nlink::Result<()> {
     // -- Step 1: declare the desired state ----------------------
     let cfg = NftablesConfig::new().table("filter_demo", Family::Inet, |t| {
         t.chain("input", |c| {
-            c.hook(Hook::Input)
-                .priority(Priority::Filter)
-                .policy(Policy::Drop)
+            c.base(BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Drop))
         })
         .rule_keyed("input", "ssh-allow", |r| r.match_tcp_dport(22).accept())
         .rule_keyed("input", "icmp-allow", |r| {
@@ -81,9 +81,7 @@ async fn main() -> nlink::Result<()> {
     // -- Step 5: mutate one rule, keep the key ------------------
     let updated = NftablesConfig::new().table("filter_demo", Family::Inet, |t| {
         t.chain("input", |c| {
-            c.hook(Hook::Input)
-                .priority(Priority::Filter)
-                .policy(Policy::Drop)
+            c.base(BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Drop))
         })
         .rule_keyed("input", "ssh-allow", |r| r.match_tcp_dport(2222).accept()) // new port
         .rule_keyed("input", "icmp-allow", |r| r.match_l4proto(1).accept())

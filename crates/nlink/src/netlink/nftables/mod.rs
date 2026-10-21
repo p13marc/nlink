@@ -17,10 +17,7 @@
 //! conn.add_chain(
 //!     Chain::new("filter", "input")?
 //!         .family(Family::Inet)
-//!         .hook(Hook::Input)
-//!         .priority(Priority::Filter)
-//!         .policy(Policy::Accept)
-//!         .chain_type(ChainType::Filter)
+//!         .base(BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Accept)),
 //! ).await?;
 //!
 //! // Add a rule: accept TCP port 22

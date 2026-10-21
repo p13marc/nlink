@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use nlink::netlink::nftables::config::NftablesConfig;
 use nlink::netlink::nftables::types::{
-    Chain, ChainType, Family, Hook, LimitUnit, PacketField, Priority, Register, Rule, Set,
+    BaseChain, Chain, Family, FilterHook, LimitUnit, PacketField, Priority, Register, Rule, Set,
     SetElement, SetKeyType,
 };
 use nlink::netlink::nftables::{
@@ -27,9 +27,7 @@ async fn chain_with(conn: &Connection<Nftables>, set: &Set, rule: Rule) -> nlink
     conn.add_chain(
         Chain::new("t", "out")?
             .family(Family::Ip)
-            .hook(Hook::Output)
-            .priority(Priority::Filter)
-            .chain_type(ChainType::Filter),
+            .base(BaseChain::filter(FilterHook::Output, Priority::Filter)),
     )
     .await?;
     conn.add_set(set.clone()).await?;
@@ -150,9 +148,7 @@ async fn elements_expire_after_the_set_default_or_their_own_timeout() -> nlink::
 fn declared(set_timeout: Duration, rule_timeout: Duration) -> NftablesConfig {
     NftablesConfig::new().table("t", Family::Ip, move |t| {
         t.chain("out", |c| {
-            c.hook(Hook::Output)
-                .priority(Priority::Filter)
-                .chain_type(ChainType::Filter)
+            c.base(BaseChain::filter(FilterHook::Output, Priority::Filter))
         })
         .set("seen", move |s| {
             s.key_type(SetKeyType::Ipv4Addr)
@@ -363,9 +359,7 @@ async fn dynset_statements_read_and_write_as_nft_does() -> nlink::Result<()> {
     conn.add_chain(
         Chain::new("b", "out")?
             .family(Family::Inet)
-            .hook(Hook::Output)
-            .priority(Priority::Filter)
-            .chain_type(ChainType::Filter),
+            .base(BaseChain::filter(FilterHook::Output, Priority::Filter)),
     )
     .await?;
     let dynset = |op, set| DynsetExpr::new(op, set, Register::R0);
@@ -414,9 +408,7 @@ async fn dynset_statements_read_and_write_as_nft_does() -> nlink::Result<()> {
 fn flood(burst: u32) -> NftablesConfig {
     NftablesConfig::new().table("t", Family::Ip, move |t| {
         t.chain("out", |c| {
-            c.hook(Hook::Output)
-                .priority(Priority::Filter)
-                .chain_type(ChainType::Filter)
+            c.base(BaseChain::filter(FilterHook::Output, Priority::Filter))
         })
         .set("flood", |s| s.key_type(SetKeyType::Ipv4Addr).dynamic())
         .set("seen", |s| s.key_type(SetKeyType::Ipv4Addr).dynamic())

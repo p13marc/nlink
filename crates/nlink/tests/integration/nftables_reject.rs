@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use nlink::netlink::nftables::types::{Chain, ChainType, Family, Hook, Priority, Rule};
+use nlink::netlink::nftables::types::{BaseChain, Chain, Family, FilterHook, Priority, Rule};
 use nlink::netlink::{Connection, Nftables};
 
 use crate::common::TestNamespace;
@@ -19,9 +19,7 @@ async fn input_rule(conn: &Connection<Nftables>, family: Family, rule: Rule) -> 
     conn.add_chain(
         Chain::new("t", "in")?
             .family(family)
-            .hook(Hook::Input)
-            .priority(Priority::Filter)
-            .chain_type(ChainType::Filter),
+            .base(BaseChain::filter(FilterHook::Input, Priority::Filter)),
     )
     .await?;
     conn.add_rule(rule.family(family)).await

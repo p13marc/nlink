@@ -7,7 +7,7 @@ use std::net::Ipv4Addr;
 
 use nlink::netlink::nftables::config::{MoveReason, NftablesConfig};
 use nlink::netlink::nftables::types::{
-    Chain, ChainType, CtState, Family, Hook, LimitUnit, PacketField, Priority, Rule, Set,
+    BaseChain, Chain, CtState, Family, FilterHook, LimitUnit, PacketField, Priority, Rule, Set,
     SetDataType, SetElement,
 };
 use nlink::netlink::nftables::{
@@ -27,9 +27,7 @@ async fn ip_table_with_output(conn: &Connection<Nftables>) -> nlink::Result<()> 
     conn.add_chain(
         Chain::new("t", "out")?
             .family(Family::Ip)
-            .hook(Hook::Output)
-            .priority(Priority::Filter)
-            .chain_type(ChainType::Filter),
+            .base(BaseChain::filter(FilterHook::Output, Priority::Filter)),
     )
     .await
 }
@@ -193,9 +191,7 @@ async fn quotas_match_until_used_up_and_over_after() -> nlink::Result<()> {
 fn declared(quota: u64, rate: u64) -> NftablesConfig {
     NftablesConfig::new().table("t", Family::Ip, move |t| {
         t.chain("out", |c| {
-            c.hook(Hook::Output)
-                .priority(Priority::Filter)
-                .chain_type(ChainType::Filter)
+            c.base(BaseChain::filter(FilterHook::Output, Priority::Filter))
         })
         .object("web", ObjectConfig::Counter)
         .object("budget", ObjectConfig::Quota(QuotaExpr::new(quota)))
@@ -301,9 +297,7 @@ fn object_map(
 ) -> NftablesConfig {
     NftablesConfig::new().table("t", Family::Ip, move |t| {
         extra(t.chain("out", |c| {
-            c.hook(Hook::Output)
-                .priority(Priority::Filter)
-                .chain_type(ChainType::Filter)
+            c.base(BaseChain::filter(FilterHook::Output, Priority::Filter))
         }))
         .set("m", move |s| {
             let s = s
@@ -371,9 +365,7 @@ async fn a_bound_constant_set_takes_new_elements() -> nlink::Result<()> {
     let constant = |last: &'static [u8]| {
         NftablesConfig::new().table("t", Family::Ip, move |t| {
             t.chain("out", |c| {
-                c.hook(Hook::Output)
-                    .priority(Priority::Filter)
-                    .chain_type(ChainType::Filter)
+                c.base(BaseChain::filter(FilterHook::Output, Priority::Filter))
             })
             .set("k", move |s| {
                 last.iter().fold(
@@ -433,9 +425,7 @@ async fn ct_helpers_read_and_write_as_nft_does() -> nlink::Result<()> {
     conn.add_chain(
         Chain::new("b", "pre")?
             .family(Family::Inet)
-            .hook(Hook::Prerouting)
-            .priority(Priority::Filter)
-            .chain_type(ChainType::Filter),
+            .base(BaseChain::filter(FilterHook::Prerouting, Priority::Filter)),
     )
     .await?;
     let rule = || Rule::new("b", "pre").family(Family::Inet);
@@ -515,9 +505,7 @@ fn ftp_helper(l3proto: Option<u8>) -> NftablesConfig {
             None => helper,
         };
         t.chain("out", |c| {
-            c.hook(Hook::Output)
-                .priority(Priority::Filter)
-                .chain_type(ChainType::Filter)
+            c.base(BaseChain::filter(FilterHook::Output, Priority::Filter))
         })
         .object("ftp-std", ObjectConfig::CtHelper(helper))
         .rule_keyed("out", "related", |r| r.match_ct_state(CtState::RELATED).counter())
@@ -593,9 +581,7 @@ async fn secmark_reads_and_writes_as_nft_does() -> nlink::Result<()> {
     conn.add_chain(
         Chain::new("b", "out")?
             .family(Family::Inet)
-            .hook(Hook::Output)
-            .priority(Priority::Filter)
-            .chain_type(ChainType::Filter),
+            .base(BaseChain::filter(FilterHook::Output, Priority::Filter)),
     )
     .await?;
     conn.add_rule(
@@ -646,9 +632,7 @@ async fn a_declared_secmark_marks_packets() -> nlink::Result<()> {
     };
     let cfg = NftablesConfig::new().table("t", Family::Inet, |t| {
         t.chain("out", |c| {
-            c.hook(Hook::Output)
-                .priority(Priority::Filter)
-                .chain_type(ChainType::Filter)
+            c.base(BaseChain::filter(FilterHook::Output, Priority::Filter))
         })
         .object("s1", ObjectConfig::Secmark("unconfined".to_string()))
         .rule_keyed("out", "before", marked)

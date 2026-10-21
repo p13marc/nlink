@@ -13,9 +13,9 @@ use std::time::Duration;
 use nlink::netlink::Nftables;
 use nlink::netlink::nftables::config::NftablesConfig;
 use nlink::netlink::nftables::types::{
-    ChainName, ChainType, CtDirection, CtState, CtStatus, Family, FibFlags, Generated, HeaderWrite,
-    Hook, IcmpxCode, LimitUnit, NatStatement, PacketField, PktType, Priority, Rule, SocketMatch,
-    TcpFlags,
+    BaseChain, ChainName, CtDirection, CtState, CtStatus, Family, FibFlags, FilterHook, Generated,
+    HeaderWrite, IcmpxCode, LimitUnit, NatStatement, PacketField, PktType, Priority, Rule,
+    SocketMatch, TcpFlags,
 };
 use nlink::netlink::nftables::{
     DynsetExpr, DynsetOp, LogExpr, LogLevel, NumgenKind, OsfTtl, Register,
@@ -847,9 +847,7 @@ async fn the_diff_shows_what_the_kernel_has_as_nft_lists_it() -> nlink::Result<(
     let ns = TestNamespace::new("nft-lift-diff")?;
     let nft = ns.connection_for::<Nftables>()?;
     let input = |c: nlink::netlink::nftables::config::DeclaredChainBuilder| {
-        c.hook(Hook::Input)
-            .priority(Priority::Filter)
-            .chain_type(ChainType::Filter)
+        c.base(BaseChain::filter(FilterHook::Input, Priority::Filter))
             .exclusive()
     };
     let was = NftablesConfig::new().table("f", Family::Inet, |t| {

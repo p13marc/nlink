@@ -13,7 +13,9 @@
 use std::time::Duration;
 
 use nlink::netlink::nftables::config::{NftDiffOptions, NftablesConfig};
-use nlink::netlink::nftables::types::{Chain, ChainType, Family, Hook, Policy, Priority, Rule};
+use nlink::netlink::nftables::types::{
+    BaseChain, Chain, Family, FilterHook, Policy, Priority, Rule,
+};
 use nlink::netlink::Nftables;
 
 use crate::common::{TestNamespace, with_timeout};
@@ -22,10 +24,7 @@ use crate::common::{TestNamespace, with_timeout};
 fn only_my_table() -> NftablesConfig {
     NftablesConfig::new().table("myapp", Family::Inet, |t| {
         t.chain("input", |c| {
-            c.hook(Hook::Input)
-                .priority(Priority::Filter)
-                .policy(Policy::Accept)
-                .chain_type(ChainType::Filter)
+            c.base(BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Accept))
         })
     })
 }
@@ -135,10 +134,7 @@ async fn rules_install_in_declaration_order() -> nlink::Result<()> {
         conn.add_chain(
             Chain::new("ordering", "input")?
                 .family(Family::Inet)
-                .hook(Hook::Input)
-                .priority(Priority::Filter)
-                .chain_type(ChainType::Filter)
-                .policy(Policy::Drop),
+                .base(BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Drop)),
         )
         .await?;
 
@@ -245,9 +241,7 @@ async fn destroy_deletes_what_is_there_and_takes_the_gone_as_deleted() -> nlink:
         conn.add_chain(
             Chain::new("t", "in")?
                 .family(Family::Inet)
-                .hook(Hook::Input)
-                .priority(Priority::Filter)
-                .chain_type(ChainType::Filter),
+                .base(BaseChain::filter(FilterHook::Input, Priority::Filter)),
         )
         .await?;
         conn.add_rule(Rule::new("t", "in").family(Family::Inet).accept()).await?;

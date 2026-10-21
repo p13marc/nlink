@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use nlink::netlink::nftables::config::NftablesConfig;
 use nlink::netlink::nftables::types::{
-    Chain, ChainType, ExthdrOp, Family, Hook, MetaKey, Priority, Rule, Set, SetElement, SetFlags,
-    SetKeyType, TCPOPT_MAXSEG, TcpFlags,
+    BaseChain, Chain, ExthdrOp, Family, FilterHook, MetaKey, NatHook, Priority, Rule, Set,
+    SetElement, SetFlags, SetKeyType, TCPOPT_MAXSEG, TcpFlags,
 };
 use nlink::netlink::nftables::{CmpOp, Expr, Register, RuleExpr};
 use nlink::netlink::addr::Ipv4Address;
@@ -29,14 +29,12 @@ use crate::common::counters::{class_stats, rule_packets};
 use crate::common::traffic::{lo_up, send_tcp_syns, send_udp};
 use crate::common::{TestNamespace, with_timeout};
 
-async fn add_mangle_chain(conn: &Connection<Nftables>, hook: Hook) -> nlink::Result<()> {
+async fn add_mangle_chain(conn: &Connection<Nftables>, hook: FilterHook) -> nlink::Result<()> {
     conn.add_table("t", Family::Ip).await?;
     conn.add_chain(
         Chain::new("t", "c")?
             .family(Family::Ip)
-            .hook(hook)
-            .priority(Priority::Mangle)
-            .chain_type(ChainType::Filter),
+            .base(BaseChain::filter(hook, Priority::Mangle)),
     )
     .await
 }
@@ -56,13 +54,14 @@ async fn add_dummy(ns: &TestNamespace) -> nlink::Result<Connection<Route>> {
 /// An `output` and a `postrouting` mangle chain in table `ip t`.
 async fn add_output_and_postrouting(conn: &Connection<Nftables>) -> nlink::Result<()> {
     conn.add_table("t", Family::Ip).await?;
-    for (name, hook) in [("out", Hook::Output), ("post", Hook::Postrouting)] {
+    for (name, hook) in [
+        ("out", FilterHook::Output),
+        ("post", FilterHook::Postrouting),
+    ] {
         conn.add_chain(
             Chain::new("t", name)?
                 .family(Family::Ip)
-                .hook(hook)
-                .priority(Priority::Mangle)
-                .chain_type(ChainType::Filter),
+                .base(BaseChain::filter(hook, Priority::Mangle)),
         )
         .await?;
     }
@@ -146,7 +145,7 @@ async fn meta_mark_set_round_trips_through_the_kernel() -> nlink::Result<()> {
     let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
-        add_mangle_chain(&conn, Hook::Postrouting).await?;
+        add_mangle_chain(&conn, FilterHook::Postrouting).await?;
         conn.add_set(
             Set::new("t", "s")
                 .family(Family::Ip)
@@ -190,7 +189,7 @@ async fn tcp_mss_clamp_round_trips_through_the_kernel() -> nlink::Result<()> {
     let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
-        add_mangle_chain(&conn, Hook::Forward).await?;
+        add_mangle_chain(&conn, FilterHook::Forward).await?;
         conn.add_rule(
             Rule::new("t", "c")
                 .family(Family::Ip)
@@ -357,9 +356,7 @@ async fn reconcile_statements_are_idempotent() -> nlink::Result<()> {
     with_timeout(async {
         let cfg = NftablesConfig::new().table("mangle", Family::Ip, |t| {
             t.chain("forward", |c| {
-                c.hook(Hook::Forward)
-                    .priority(Priority::Mangle)
-                    .chain_type(ChainType::Filter)
+                c.base(BaseChain::filter(FilterHook::Forward, Priority::Mangle))
             })
             .rule_keyed("forward", "mss", |r| {
                 r.match_tcp_flags(TcpFlags::SYN, TcpFlags::SYN | TcpFlags::RST)
@@ -624,9 +621,7 @@ fn throttle_cfg(size: u32, addrs: &[Ipv4Addr]) -> NftablesConfig {
             s
         })
         .chain("post", |c| {
-            c.hook(Hook::Postrouting)
-                .priority(Priority::Mangle)
-                .chain_type(ChainType::Filter)
+            c.base(BaseChain::filter(FilterHook::Postrouting, Priority::Mangle))
         })
         .rule_keyed("post", "throttle", |r| {
             r.match_daddr_in_set("throttled")
@@ -740,9 +735,7 @@ async fn recreating_a_set_a_rule_references_converges() -> nlink::Result<()> {
                     .ipv4(Ipv4Addr::new(10, 45, 0, 1))
             })
             .chain("post", |c| {
-                c.hook(Hook::Postrouting)
-                    .priority(Priority::Mangle)
-                    .chain_type(ChainType::Filter)
+                c.base(BaseChain::filter(FilterHook::Postrouting, Priority::Mangle))
             })
             .rule_keyed("post", "bound-first", |r| r.match_saddr_in_set("s").counter())
             .rule_keyed("post", "plain-1", |r| r.match_tcp_dport(1).counter())
@@ -798,7 +791,7 @@ async fn rule_position_inserts_after_the_named_rule() -> nlink::Result<()> {
     let conn = ns.connection_for::<Nftables>()?;
 
     with_timeout(async {
-        add_mangle_chain(&conn, Hook::Postrouting).await?;
+        add_mangle_chain(&conn, FilterHook::Postrouting).await?;
         let rule = |port: u16, comment: &str| {
             Rule::new("t", "c")
                 .family(Family::Ip)
@@ -931,12 +924,12 @@ async fn nat_ranges_rewrite_traffic_as_declared() -> nlink::Result<()> {
     let (lo, hi) = (Ipv4Addr::new(10, 93, 0, 100), Ipv4Addr::new(10, 93, 0, 101));
     let nat_chain = |hook, priority| {
         move |c: nlink::netlink::nftables::config::DeclaredChainBuilder| {
-            c.hook(hook).priority(priority).chain_type(ChainType::Nat)
+            c.base(BaseChain::nat(hook, priority))
         }
     };
     let a = NftablesConfig::new().table("n", Family::Ip, |t| {
-        t.chain("post", nat_chain(Hook::Postrouting, Priority::SrcNat))
-            .chain("out", nat_chain(Hook::Output, Priority::DstNat))
+        t.chain("post", nat_chain(NatHook::Postrouting, Priority::SrcNat))
+            .chain("out", nat_chain(NatHook::Output, Priority::DstNat))
             .rule_keyed("post", "snat", |r| {
                 r.match_udp_dport(7000).nat(NatStatement::snat(lo).to(hi).ports(40000, 40010))
             })
@@ -950,7 +943,7 @@ async fn nat_ranges_rewrite_traffic_as_declared() -> nlink::Result<()> {
     let nft = pair.a.connection_for::<Nftables>()?;
     a.diff(&nft).await?.apply(&nft).await?;
     let b = NftablesConfig::new().table("n", Family::Ip, |t| {
-        t.chain("pre", nat_chain(Hook::Prerouting, Priority::DstNat))
+        t.chain("pre", nat_chain(NatHook::Prerouting, Priority::DstNat))
             .rule_keyed("pre", "redir", |r| {
                 r.match_udp_dport(7004).nat(NatStatement::redirect().port(7005))
             })
@@ -993,7 +986,7 @@ async fn a_byte_limit_drops_by_bytes() -> nlink::Result<()> {
     let with = |limit: LimitExpr| {
         NftablesConfig::new().table("f", Family::Inet, |t| {
             t.chain("in", |c| {
-                c.hook(Hook::Input).priority(Priority::Filter).chain_type(ChainType::Filter)
+                c.base(BaseChain::filter(FilterHook::Input, Priority::Filter))
             })
             .rule_keyed("in", "limit", move |r| r.match_udp_dport(7100).expr(limit).drop())
         })
@@ -1028,11 +1021,13 @@ async fn ranges_match_traffic() -> nlink::Result<()> {
     nlink::require_modules!("nf_tables", "veth");
 
     let pair = crate::common::topo::NsPair::new("nft-range", 95).await?;
-    let chain = |hook| move |c: nlink::netlink::nftables::config::DeclaredChainBuilder| {
-        c.hook(hook).priority(Priority::Filter).chain_type(ChainType::Filter)
+    let chain = |hook| {
+        move |c: nlink::netlink::nftables::config::DeclaredChainBuilder| {
+            c.base(BaseChain::filter(hook, Priority::Filter))
+        }
     };
     let b = NftablesConfig::new().table("f", Family::Inet, |t| {
-        t.chain("in", chain(Hook::Input))
+        t.chain("in", chain(FilterHook::Input))
             .rule_keyed("in", "range", |r| r.match_range(PacketField::UdpDport, 7200u16, 7210u16).drop())
             .rule_keyed("in", "not-range", |r| {
                 r.match_udp_sport_not(0)
@@ -1051,7 +1046,7 @@ async fn ranges_match_traffic() -> nlink::Result<()> {
     // Marks, in a's output: 0x15 is inside 0x10-0x20, 0x25 is not.
     let a = |mark: u32| {
         NftablesConfig::new().table("m", Family::Inet, move |t| {
-            t.chain("out", chain(Hook::Output))
+            t.chain("out", chain(FilterHook::Output))
                 .rule_keyed("out", "mark", move |r| r.match_udp_dport(7300).set_mark(mark))
                 .rule_keyed("out", "range", |r| r.match_range(PacketField::Mark, 0x10u32, 0x20u32).drop())
         })
@@ -1091,15 +1086,15 @@ async fn fib_and_notrack_act_on_traffic() -> nlink::Result<()> {
     }
     let chain = |hook, priority| {
         move |c: nlink::netlink::nftables::config::DeclaredChainBuilder| {
-            c.hook(hook).priority(priority).chain_type(ChainType::Filter)
+            c.base(BaseChain::filter(hook, priority))
         }
     };
     let b = |rpf: bool| {
         NftablesConfig::new().table("f", Family::Inet, move |t| {
             let t = t
-                .chain("raw", chain(Hook::Prerouting, Priority::Raw))
-                .chain("pre", chain(Hook::Prerouting, Priority::Filter))
-                .chain("in", chain(Hook::Input, Priority::Filter))
+                .chain("raw", chain(FilterHook::Prerouting, Priority::Raw))
+                .chain("pre", chain(FilterHook::Prerouting, Priority::Filter))
+                .chain("in", chain(FilterHook::Input, Priority::Filter))
                 .rule_keyed("raw", "notrack", |r| r.match_udp_dport(7700).notrack())
                 .rule_keyed("in", "untracked", |r| {
                     r.match_ct_state(CtState::UNTRACKED).counter().accept()
@@ -1121,7 +1116,7 @@ async fn fib_and_notrack_act_on_traffic() -> nlink::Result<()> {
     // a's traffic to 7702 leaves from 192.0.2.1, which b has no route to.
     let a = NftablesConfig::new().table("n", Family::Ip, |t| {
         t.chain("post", |c| {
-            c.hook(Hook::Postrouting).priority(Priority::SrcNat).chain_type(ChainType::Nat)
+            c.base(BaseChain::nat(NatHook::Postrouting, Priority::SrcNat))
         })
         .rule_keyed("post", "spoof", |r| {
             r.match_udp_dport(7702).nat(NatStatement::snat(Ipv4Addr::new(192, 0, 2, 1)))
@@ -1161,16 +1156,16 @@ async fn ct_keys_act_on_traffic() -> nlink::Result<()> {
     let pair = crate::common::topo::NsPair::new("nft-ct", 97).await?;
     let filter = |hook, priority| {
         move |c: nlink::netlink::nftables::config::DeclaredChainBuilder| {
-            c.hook(hook).priority(priority).chain_type(ChainType::Filter)
+            c.base(BaseChain::filter(hook, priority))
         }
     };
     let b_addr = std::net::IpAddr::V4(pair.b_addr);
     let b = NftablesConfig::new().table("c", Family::Ip, |t| {
-        t.chain("raw", filter(Hook::Prerouting, Priority::Raw))
+        t.chain("raw", filter(FilterHook::Prerouting, Priority::Raw))
             .chain("nat", |c| {
-                c.hook(Hook::Prerouting).priority(Priority::DstNat).chain_type(ChainType::Nat)
+                c.base(BaseChain::nat(NatHook::Prerouting, Priority::DstNat))
             })
-            .chain("in", filter(Hook::Input, Priority::Filter))
+            .chain("in", filter(FilterHook::Input, Priority::Filter))
             .rule_keyed("raw", "zone", |r| r.match_udp_dport(7900).set_ct_zone(9))
             .rule_keyed("nat", "dnat", |r| {
                 r.match_udp_dport(7901).nat(NatStatement::dnat_to_port(Family::Ip, 7911))
@@ -1224,7 +1219,7 @@ async fn nflog_reads_what_a_log_group_rule_sends() -> nlink::Result<()> {
     let pair = crate::common::topo::NsPair::new("nflog", 98).await?;
     let b = NftablesConfig::new().table("f", Family::Inet, |t| {
         t.chain("in", |c| {
-            c.hook(Hook::Input).priority(Priority::Filter).chain_type(ChainType::Filter)
+            c.base(BaseChain::filter(FilterHook::Input, Priority::Filter))
         })
         .rule_keyed("in", "log", |r| {
             r.match_udp_dport(7990).expr(LogExpr::new().group(5).prefix("lab: "))
@@ -1344,7 +1339,7 @@ async fn a_log_snaplen_cuts_what_nflog_reads() -> nlink::Result<()> {
     let pair = crate::common::topo::NsPair::new("nflogsl", 97).await?;
     let b = NftablesConfig::new().table("f", Family::Inet, |t| {
         t.chain("in", |c| {
-            c.hook(Hook::Input).priority(Priority::Filter).chain_type(ChainType::Filter)
+            c.base(BaseChain::filter(FilterHook::Input, Priority::Filter))
         })
         .rule_keyed("in", "log", |r| {
             r.match_udp_dport(7991).expr(LogExpr::new().group(6).prefix("cut: ").snaplen(24))
@@ -1442,7 +1437,7 @@ async fn a_port_write_moves_the_datagram() -> nlink::Result<()> {
 
     let b = NftablesConfig::new().table("w", Family::Inet, |t| {
         t.chain("pre", |c| {
-            c.hook(Hook::Prerouting).priority(Priority::Filter).chain_type(ChainType::Filter)
+            c.base(BaseChain::filter(FilterHook::Prerouting, Priority::Filter))
         })
         .rule_keyed("pre", "move", |r| {
             r.match_udp_dport(7992).set_header(HeaderWrite::UdpDport(7993))
@@ -1547,15 +1542,23 @@ async fn queue_dup_and_fwd_act_on_traffic() -> nlink::Result<()> {
     let x0 = b_route.get_link_by_name("x0").await?.expect("x0").ifindex();
     let b = NftablesConfig::new()
         .table("q", Family::Inet, |t| {
-            t.chain("in", |c| c.hook(Hook::Input).priority(Priority::Filter).chain_type(ChainType::Filter))
-                .rule_keyed("in", "drop-queue", |r| r.match_udp_dport(7997).expr(QueueExpr::num(7)))
-                .rule_keyed("in", "bypass-queue", |r| {
-                    r.match_udp_dport(7996).expr(QueueExpr::num(8).flags(QueueFlags::BYPASS))
-                })
+            t.chain("in", |c| {
+                c.base(BaseChain::filter(FilterHook::Input, Priority::Filter))
+            })
+            .rule_keyed("in", "drop-queue", |r| {
+                r.match_udp_dport(7997).expr(QueueExpr::num(7))
+            })
+            .rule_keyed("in", "bypass-queue", |r| {
+                r.match_udp_dport(7996)
+                    .expr(QueueExpr::num(8).flags(QueueFlags::BYPASS))
+            })
         })
         .table("f", Family::Netdev, |t| {
             t.chain("in", |c| {
-                c.hook(Hook::NetdevIngress).device(pair.b_if).priority(Priority::Filter)
+                c.base(BaseChain::filter(
+                    FilterHook::ingress(pair.b_if),
+                    Priority::Filter,
+                ))
             })
             .rule_keyed("in", "fwd", |r| r.match_udp_dport(7999).fwd_to(x0))
         });
@@ -1563,10 +1566,13 @@ async fn queue_dup_and_fwd_act_on_traffic() -> nlink::Result<()> {
     b.diff(&nft).await?.apply(&nft).await?;
     assert!(b.diff(&nft).await?.is_empty(), "the declared statements do not converge");
     let a = NftablesConfig::new().table("d", Family::Ip, |t| {
-        t.chain("out", |c| c.hook(Hook::Output).priority(Priority::Filter).chain_type(ChainType::Filter))
-            .rule_keyed("out", "dup", |r| {
-                r.match_udp_dport(7998).dup_to(pair.b_addr.into(), Some(pair.a_ifindex))
-            })
+        t.chain("out", |c| {
+            c.base(BaseChain::filter(FilterHook::Output, Priority::Filter))
+        })
+        .rule_keyed("out", "dup", |r| {
+            r.match_udp_dport(7998)
+                .dup_to(pair.b_addr.into(), Some(pair.a_ifindex))
+        })
     });
     let a_nft = pair.a.connection_for::<Nftables>()?;
     a.diff(&a_nft).await?.apply(&a_nft).await?;
@@ -1661,20 +1667,37 @@ async fn numgen_and_hash_marks_packets() -> nlink::Result<()> {
     lo_up(&ns).await?;
     let _route = add_dummy(&ns).await?;
     let cfg = NftablesConfig::new().table("t", Family::Ip, |t| {
-        t.chain("out", |c| c.hook(Hook::Output).priority(Priority::Mangle).chain_type(ChainType::Filter))
-            .rule_keyed("out", "gen", |r| {
-                r.match_udp_dport(7990)
-                    .generate(Generated::Numgen { kind: NumgenKind::Incremental, modulus: 2, offset: 0 })
-                    .set_meta_from(MetaKey::Mark)
-            })
-            .rule_keyed("out", "hash", |r| {
-                r.match_udp_dport(7991)
-                    .generate(Generated::Jhash { fields: vec![PacketField::Ip4Saddr], modulus: 1, seed: None, offset: 7 })
-                    .set_meta_from(MetaKey::Mark)
-            })
-            .rule_keyed("out", "m0", |r| r.match_udp_dport(7990).match_mark(0).counter())
-            .rule_keyed("out", "m1", |r| r.match_udp_dport(7990).match_mark(1).counter())
-            .rule_keyed("out", "m7", |r| r.match_udp_dport(7991).match_mark(7).counter())
+        t.chain("out", |c| {
+            c.base(BaseChain::filter(FilterHook::Output, Priority::Mangle))
+        })
+        .rule_keyed("out", "gen", |r| {
+            r.match_udp_dport(7990)
+                .generate(Generated::Numgen {
+                    kind: NumgenKind::Incremental,
+                    modulus: 2,
+                    offset: 0,
+                })
+                .set_meta_from(MetaKey::Mark)
+        })
+        .rule_keyed("out", "hash", |r| {
+            r.match_udp_dport(7991)
+                .generate(Generated::Jhash {
+                    fields: vec![PacketField::Ip4Saddr],
+                    modulus: 1,
+                    seed: None,
+                    offset: 7,
+                })
+                .set_meta_from(MetaKey::Mark)
+        })
+        .rule_keyed("out", "m0", |r| {
+            r.match_udp_dport(7990).match_mark(0).counter()
+        })
+        .rule_keyed("out", "m1", |r| {
+            r.match_udp_dport(7990).match_mark(1).counter()
+        })
+        .rule_keyed("out", "m7", |r| {
+            r.match_udp_dport(7991).match_mark(7).counter()
+        })
     });
     let nft = ns.connection_for::<Nftables>()?;
     cfg.diff(&nft).await?.apply(&nft).await?;
@@ -1762,8 +1785,12 @@ async fn tproxy_hands_the_datagram_to_a_transparent_socket() -> nlink::Result<()
 
     let pair = crate::common::topo::NsPair::new("nfttp", 94).await?;
     let b = NftablesConfig::new().table("t", Family::Ip, |t| {
-        t.chain("pre", |c| c.hook(Hook::Prerouting).priority(Priority::Mangle).chain_type(ChainType::Filter))
-            .rule_keyed("pre", "tproxy", |r| r.match_udp_dport(7980).tproxy(Family::Ip, None, Some(7981)))
+        t.chain("pre", |c| {
+            c.base(BaseChain::filter(FilterHook::Prerouting, Priority::Mangle))
+        })
+        .rule_keyed("pre", "tproxy", |r| {
+            r.match_udp_dport(7980).tproxy(Family::Ip, None, Some(7981))
+        })
     });
     let nft = pair.b.connection_for::<Nftables>()?;
     b.diff(&nft).await?.apply(&nft).await?;
@@ -1863,9 +1890,7 @@ async fn osf_names_each_syn() -> nlink::Result<()> {
     let nft = ns.connection_for::<Nftables>()?;
     let cfg = NftablesConfig::new().table("t", Family::Inet, |t| {
         t.chain("in", |c| {
-            c.hook(Hook::Input)
-                .priority(Priority::Filter)
-                .chain_type(ChainType::Filter)
+            c.base(BaseChain::filter(FilterHook::Input, Priority::Filter))
         })
         .rule_keyed("in", "unknown", |r| r.match_osf("unknown", OsfTtl::Exact, false).counter())
         .rule_keyed("in", "linux", |r| r.match_osf("Linux", OsfTtl::Skip, false).counter())

@@ -572,7 +572,7 @@ async fn nftables_fields_change_in_place() -> nlink::Result<()> {
 
     use nlink::netlink::nftables::config::NftablesConfig;
     use nlink::netlink::nftables::types::{
-        ChainType, Family, Hook, Priority, SetDataType, SetElement, SetKeyType,
+        BaseChain, Family, FilterHook, Priority, SetDataType, SetElement, SetKeyType,
     };
     use nlink::netlink::nftables::{LimitExpr, ObjectConfig, QuotaExpr};
     require_root!();
@@ -583,9 +583,7 @@ async fn nftables_fields_change_in_place() -> nlink::Result<()> {
     ) -> nlink::netlink::nftables::config::DeclaredTableBuilder| {
         NftablesConfig::new().table("t", Family::Ip, move |t| {
             f(t.chain("out", |c| {
-                c.hook(Hook::Output)
-                    .priority(Priority::Filter)
-                    .chain_type(ChainType::Filter)
+                c.base(BaseChain::filter(FilterHook::Output, Priority::Filter))
             }))
         })
     };

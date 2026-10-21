@@ -6,7 +6,7 @@ use std::net::Ipv4Addr;
 
 use nlink::netlink::nftables::config::NftablesConfig;
 use nlink::netlink::nftables::types::{
-    Chain, ChainName, ChainType, Family, Hook, PacketField, Priority, Rule, Set, SetDataType,
+    BaseChain, Chain, ChainName, Family, FilterHook, PacketField, Priority, Rule, Set, SetDataType,
     SetElement, SetKeyType, Verdict,
 };
 use nlink::netlink::{Connection, Nftables};
@@ -34,9 +34,7 @@ async fn ip_table_with_output(conn: &Connection<Nftables>) -> nlink::Result<()> 
     conn.add_chain(
         Chain::new("t", "out")?
             .family(Family::Ip)
-            .hook(Hook::Output)
-            .priority(Priority::Filter)
-            .chain_type(ChainType::Filter),
+            .base(BaseChain::filter(FilterHook::Output, Priority::Filter)),
     )
     .await
 }
@@ -139,9 +137,7 @@ async fn a_value_map_sets_each_destinations_mark() -> nlink::Result<()> {
 fn declared(to_c2: Ipv4Addr, ports_verdict: Verdict) -> NftablesConfig {
     NftablesConfig::new().table("t", Family::Ip, move |t| {
         t.chain("out", |c| {
-            c.hook(Hook::Output)
-                .priority(Priority::Filter)
-                .chain_type(ChainType::Filter)
+            c.base(BaseChain::filter(FilterHook::Output, Priority::Filter))
         })
         .chain("c2", |c| c)
         .chain("c3", |c| c)

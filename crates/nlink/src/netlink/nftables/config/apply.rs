@@ -75,20 +75,8 @@ fn place_rule(tx: Transaction, body: Rule, placement: RulePlacement) -> Transact
 /// kernel treats it as an update of the existing chain (#456).
 fn build_chain(table: &str, family: Family, declared: &DeclaredChain) -> Result<Chain> {
     let mut chain = Chain::new(table, declared.name())?.family(family);
-    if let Some(h) = declared.hook() {
-        chain = chain.hook(h);
-    }
-    if let Some(p) = declared.priority() {
-        chain = chain.priority(p);
-    }
-    if let Some(pol) = declared.policy() {
-        chain = chain.policy(pol);
-    }
-    if let Some(ct) = declared.chain_type() {
-        chain = chain.chain_type(ct);
-    }
-    for dev in declared.devices() {
-        chain = chain.device(dev);
+    if let Some(base) = declared.base() {
+        chain = chain.base(base.clone());
     }
     if let Some(comment) = declared.comment() {
         chain = chain.comment(comment);

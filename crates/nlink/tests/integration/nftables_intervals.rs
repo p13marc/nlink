@@ -6,7 +6,7 @@ use std::net::Ipv4Addr;
 
 use nlink::netlink::nftables::config::NftablesConfig;
 use nlink::netlink::nftables::types::{
-    Chain, ChainType, Family, Hook, PacketField, Priority, Rule, Set, SetElement, SetKeyType,
+    BaseChain, Chain, Family, FilterHook, PacketField, Priority, Rule, Set, SetElement, SetKeyType,
 };
 use nlink::netlink::{Connection, Nftables};
 
@@ -26,9 +26,7 @@ async fn counting_chain(
     conn.add_chain(
         Chain::new("t", "out")?
             .family(Family::Ip)
-            .hook(Hook::Output)
-            .priority(Priority::Filter)
-            .chain_type(ChainType::Filter),
+            .base(BaseChain::filter(FilterHook::Output, Priority::Filter)),
     )
     .await?;
     conn.add_set(set.clone()).await?;
@@ -319,9 +317,7 @@ async fn mark_ranges_read_and_write_as_nft_does() -> nlink::Result<()> {
     conn.add_chain(
         Chain::new("b", "out")?
             .family(Family::Ip)
-            .hook(Hook::Output)
-            .priority(Priority::Filter)
-            .chain_type(ChainType::Filter),
+            .base(BaseChain::filter(FilterHook::Output, Priority::Filter)),
     )
     .await?;
     let rule = || Rule::new("b", "out").family(Family::Ip);
@@ -350,9 +346,7 @@ fn ranges(elements: &[SetElement]) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
 fn marked(mark: u32, ranges: Vec<SetElement>) -> NftablesConfig {
     NftablesConfig::new().table("t", Family::Ip, move |t| {
         t.chain("out", |c| {
-            c.hook(Hook::Output)
-                .priority(Priority::Filter)
-                .chain_type(ChainType::Filter)
+            c.base(BaseChain::filter(FilterHook::Output, Priority::Filter))
         })
         .set("marks", move |s| s.key_type(SetKeyType::Mark).interval().elements(ranges))
         .rule_keyed("out", "mark", move |r| r.match_l4proto(17).set_mark(mark))
@@ -418,9 +412,7 @@ async fn declared_mark_ranges_match_the_marks_inside_them() -> nlink::Result<()>
 fn a_plain_lookup_in_an_interval_set_of_marks_is_refused() {
     let cfg = NftablesConfig::new().table("t", Family::Ip, |t| {
         t.chain("out", |c| {
-            c.hook(Hook::Output)
-                .priority(Priority::Filter)
-                .chain_type(ChainType::Filter)
+            c.base(BaseChain::filter(FilterHook::Output, Priority::Filter))
         })
         .set("marks", |s| s.key_type(SetKeyType::Mark).interval())
         .rule("out", |r| r.match_in_set(PacketField::Mark, "marks"))

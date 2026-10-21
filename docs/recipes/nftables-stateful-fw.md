@@ -73,7 +73,7 @@ use std::net::Ipv4Addr;
 
 use nlink::netlink::Connection;
 use nlink::netlink::nftables::{
-    Chain, ChainType, CtState, Family, Hook, LimitUnit, Policy, Priority, Rule,
+    BaseChain, Chain, CtState, Family, FilterHook, LimitUnit, Policy, Priority, Rule,
 };
 use nlink::netlink::Nftables;
 
@@ -88,22 +88,13 @@ conn.transaction()
     // 2. Three base chains hooked into netfilter.
     .add_chain(Chain::new("filter", "input")?
         .family(Family::Inet)
-        .hook(Hook::Input)
-        .chain_type(ChainType::Filter)
-        .priority(Priority::Filter)
-        .policy(Policy::Drop))
+        .base(BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Drop)))
     .add_chain(Chain::new("filter", "forward")?
         .family(Family::Inet)
-        .hook(Hook::Forward)
-        .chain_type(ChainType::Filter)
-        .priority(Priority::Filter)
-        .policy(Policy::Drop))
+        .base(BaseChain::filter(FilterHook::Forward, Priority::Filter).policy(Policy::Drop)))
     .add_chain(Chain::new("filter", "output")?
         .family(Family::Inet)
-        .hook(Hook::Output)
-        .chain_type(ChainType::Filter)
-        .priority(Priority::Filter)
-        .policy(Policy::Accept))
+        .base(BaseChain::filter(FilterHook::Output, Priority::Filter).policy(Policy::Accept)))
 
     // 3. INPUT: stateful shortcut, loopback, then per-service allows.
     .add_rule(Rule::new("filter", "input")
@@ -236,7 +227,7 @@ LAN client — then probe across:
 use nlink::lab::{LabNamespace, LabVeth};
 use nlink::netlink::Connection;
 use nlink::netlink::nftables::{
-    Chain, ChainType, CtState, Family, Hook, Policy, Priority, Rule,
+    BaseChain, Chain, CtState, Family, FilterHook, Policy, Priority, Rule,
 };
 use nlink::netlink::Nftables;
 
@@ -263,12 +254,10 @@ nft.transaction()
     .add_table("filter", Family::Inet)
     .add_chain(Chain::new("filter", "input")?
         .family(Family::Inet)
-        .hook(Hook::Input).chain_type(ChainType::Filter)
-        .priority(Priority::Filter).policy(Policy::Drop))
+        .base(BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Drop)))
     .add_chain(Chain::new("filter", "forward")?
         .family(Family::Inet)
-        .hook(Hook::Forward).chain_type(ChainType::Filter)
-        .priority(Priority::Filter).policy(Policy::Drop))
+        .base(BaseChain::filter(FilterHook::Forward, Priority::Filter).policy(Policy::Drop)))
     .add_rule(Rule::new("filter", "input")
         .family(Family::Inet)
         .match_ct_state(CtState::ESTABLISHED | CtState::RELATED)
