@@ -135,6 +135,46 @@ All notable changes to this project will be documented in this file.
   batch commits. `Transaction::flush_table` joins the connection's
   `flush_table`. Requested by stream-marker.
 
+- **Filtered conntrack dumps and deletes: `ConntrackFilter`** (#882).
+  `conntrack -D -p udp --dport 5000` took a dump of each family, a filter
+  in user space and one delete per entry. stream-marker does that for every
+  port whose mark changes. A `ConntrackFilter` names protocol, addresses
+  and ports in either direction, zone, mark and status:
+  - `get_conntrack_matching(&filter)` lists what it matches;
+  - `flush_conntrack_matching(&filter)` deletes it;
+  - `del_conntrack_matching(&filter)` deletes it entry by entry, and says
+    how many went.
+
+  The kernel is trusted only where its behaviour is known, because a
+  filter it does not apply to a delete makes the delete a flush:
+  - **Dumps.** A dump carries the filter (`CTA_FILTER`, 5.8+), and nlink
+    checks every entry the kernel returns again, so a kernel that ignores
+    part of it costs time, not entries.
+  - **Flushes.** A flush carries the filter only on 6.12+. Before that a
+    filter on a flush is refused (5.8 to 6.11), or unknown and taken for a
+    flush of everything (before 5.8). And before 6.8 the kernel's filter
+    parses a zone but never compares it. Below 6.12 the flush dumps the matches
+    and deletes each by tuple, zone and id. The versions are from the
+    kernel's `ctnetlink_del_conntrack` and `ctnetlink_flush_conntrack`
+    across 5.7 to 6.12.
+  - **IPv6 addresses never go to the kernel.** Its filter compares them
+    with `!ipv6_addr_cmp()`, which is true when they are equal, so it
+    keeps every entry but the named one. That has been the case from 5.8
+    to today's mainline. On this 6.12 host, a kernel-side dump by IPv6
+    source returned only the other flow, and a kernel-side flush by it
+    deleted the other flow and kept the named one. nlink compares IPv6
+    addresses itself, and a filter with one flushes entry by entry.
+  - **Refused.** A port without TCP or UDP is refused, since the kernel
+    compares no other protocol's ports and would match them all. So is a
+    status mask of 0, and an address of another family. An empty filter is
+    refused by `flush_conntrack_matching`; that is `flush_conntrack_all`.
+
+  The tests flush one filter's flows from a table that also holds another
+  port, protocol, zone and family. They run the kernel path (6.12) and the
+  entry-by-entry path, plus a mark and an IPv6 address. Unit tests pin the
+  version gate on both sides of 6.12, and what the kernel is sent.
+  `conntrack-programmatic` has a section on it.
+
 ### Documentation
 
 - **Three recipe statements that no longer held, and a pattern for

@@ -230,8 +230,55 @@ A dumped entry outside the default zone carries it in `zone`, and
 the same tuple in another zone. `ConntrackBuilder::from_entry` starts a
 builder from such an entry.
 
-There's no `flush_conntrack_by_zone` helper yet — file an issue
-if you need a zone-scoped connection wrapper.
+## Deleting what a filter matches
+
+`ConntrackFilter` names a slice of the table the way `conntrack -L` and
+`conntrack -D` options do: protocol, addresses and ports in either
+direction, zone, mark and status. `flush_conntrack_matching` deletes it,
+`get_conntrack_matching` lists it (#882):
+
+```rust,no_run
+# async fn example() -> nlink::Result<()> {
+use nlink::netlink::netfilter::{ConntrackFilter, IpProtocol};
+use nlink::netlink::{Connection, Netfilter};
+
+let nf = Connection::<Netfilter>::new()?;
+
+// conntrack -D -p udp --dport 5000, in zone 0, both families
+let video = ConntrackFilter::new().proto(IpProtocol::Udp).orig_dst_port(5000).zone(0);
+nf.flush_conntrack_matching(&video).await?;
+
+// Everything in zone 5
+nf.flush_conntrack_matching(&ConntrackFilter::new().zone(5)).await?;
+
+// List before deleting, or delete one by one and count
+let marked = ConntrackFilter::new().mark(0x10, 0xff);
+println!("{} marked flows", nf.get_conntrack_matching(&marked).await?.len());
+let deleted = nf.del_conntrack_matching(&marked).await?;
+# let _ = deleted;
+# Ok(())
+# }
+```
+
+What the kernel is trusted with, and what it is not:
+
+- **A dump** carries the filter on 5.8+, and nlink checks every entry the
+  kernel returns again. A kernel that ignores part of the filter costs
+  time, not entries.
+- **A flush** carries it only on 6.12+, the first kernel that applies a
+  filter to a flush. Before that a filter on a flush is refused (5.8 to
+  6.11), or unknown and taken for a flush of everything (before 5.8). So
+  there `flush_conntrack_matching` dumps the matches and deletes each by
+  its tuple, zone and id, which is what `del_conntrack_matching` always
+  does.
+- **IPv6 addresses** are never given to the kernel. Its filter compares
+  them inverted: given `fd00::1`, it matched every entry *but* that one.
+  On 6.12 a kernel-side flush deleted the wrong flows. nlink compares IPv6
+  addresses itself, so a filter with one flushes entry by entry.
+- A port needs `proto(IpProtocol::Tcp)` or `proto(IpProtocol::Udp)`: the
+  kernel compares no other protocol's ports, so it would match them all.
+  An empty filter is refused by `flush_conntrack_matching`; that is
+  `flush_conntrack_all`.
 
 ## Subscribing to events
 
