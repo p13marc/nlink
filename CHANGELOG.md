@@ -152,10 +152,10 @@ All notable changes to this project will be documented in this file.
   - **Validation moves into lowering.** What the builder refused, it still
     refuses, with the same messages. A spec's value that does not fit its
     field is refused too: `tcp dport: 70000 does not fit in 16 bits`.
-  - **Breaks:** `DeclaredRule::exprs()` returns a `Vec<Expr>`: the
+  - **Breaks:** `DeclaredRule::exprs()` returns `Result<Vec<Expr>>`: the
     expressions the rule sends, its spec lowered for the table's family
-    with the guards nft writes. It used to return a slice of what the
-    builder had pushed. It is empty for a rule that does not lower.
+    with the guards nft writes, or the error `validate()` reports for it.
+    It used to return a slice of what the builder had pushed.
     `DeclaredRule::spec()` returns the body.
 
   `builder_bytes.txt` records what 222 builder calls send in four

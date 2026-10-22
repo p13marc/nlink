@@ -570,10 +570,21 @@ fn a_rule_that_fails_to_build_fails_the_config() {
     });
     let e = cfg.validate().unwrap_err().to_string();
     assert!(e.contains("t/input: `10.0.0.300` is no address"), "{e}");
+    assert_eq!(e.matches("invalid message").count(), 1, "{e}");
+
+    // An error with a context keeps it, once.
+    let cfg = NftablesConfig::new().table("t", Family::Inet, |t| {
+        t.chain("input", |c| c).try_rule("input", |r| {
+            let addr = parse("::g").map_err(|e| e.with_context("reading trusted"))?;
+            Ok(r.match_saddr(addr, 128).accept())
+        })
+    });
+    let e = cfg.validate().unwrap_err().to_string();
     assert!(
-        !e.contains("invalid message: t/input: invalid message"),
+        e.contains("t/input: reading trusted: `::g` is no address"),
         "{e}"
     );
+    assert_eq!(e.matches("invalid message").count(), 1, "{e}");
 
     let cfg = NftablesConfig::new().table("t", Family::Inet, |t| {
         t.chain("input", |c| c).push_rule(

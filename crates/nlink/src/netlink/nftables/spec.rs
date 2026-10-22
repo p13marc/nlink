@@ -1148,10 +1148,7 @@ impl Lowering {
             && let Compared::Cmp(_, data) = &mut data
         {
             self.hton(data.len() as u32);
-            // One integer of the field's width, host order to network.
-            if cfg!(target_endian = "little") {
-                data.reverse();
-            }
+            *data = network_order(data);
         }
         match data {
             Compared::Cmp(op, data) => self.cmp(op, data),
@@ -1285,6 +1282,7 @@ impl Lowering {
                 }
             }
             (_, Value::Masked { value, mask }) => {
+                op.inverted().ok_or_else(|| only_eq("a mask"))?;
                 let bytes = |n| field.int(n).ok_or_else(wrong);
                 let data = bytes(value & mask)??;
                 let mask = bytes(*mask)??;
@@ -1794,6 +1792,15 @@ enum Compared {
     },
 }
 
+/// One integer of a field's width, from host to network byte order.
+fn network_order(host: &[u8]) -> Vec<u8> {
+    match *host {
+        [a, b] => u16::from_ne_bytes([a, b]).to_be_bytes().to_vec(),
+        [a, b, c, d] => u32::from_ne_bytes([a, b, c, d]).to_be_bytes().to_vec(),
+        _ => host.to_vec(),
+    }
+}
+
 fn octets(addr: IpAddr) -> Vec<u8> {
     match addr {
         IpAddr::V4(a) => a.octets().to_vec(),
@@ -1879,6 +1886,10 @@ mod tests {
                 "ct reply saddr: cannot be matched against Int(1)",
             ),
             (Match::eq(Field::CtLabel, 128u8).into(), "ct label: bit 128 is past 127"),
+            (
+                Match::new(Field::Mark, MatchOp::Gt, Value::Masked { value: 1, mask: 0xff }).into(),
+                "meta mark: a mask is matched with == or !=, not >",
+            ),
             (Stmt::Dup { addr: None, dev: None }.into(), "dup: to an address, a device, or both"),
             (
                 Stmt::Vmap { key: Field::CtState, map: "m".into() }.into(),
@@ -1921,6 +1932,65 @@ mod tests {
             err.unwrap_err()
                 .to_string()
                 .contains("tcp dport: 70000 does not fit in 16 bits")
+        );
+    }
+
+    /// An ordered compare on a host-order field compares it in network
+    /// order, on any host: the load is turned, and so is the value.
+    #[test]
+    fn an_order_on_a_host_order_field_compares_in_network_order() {
+        let lowered = |field, n: u32| {
+            RuleSpec::new()
+                .then(Match::new(field, MatchOp::Gt, n))
+                .lower_items()
+                .unwrap()
+        };
+        let hton = |len| Expr::Byteorder {
+            sreg: Register::R0,
+            dreg: Register::R0,
+            op: ByteorderOp::Hton,
+            len,
+            size: len,
+        };
+        let gt = |data: &[u8]| Expr::Cmp {
+            sreg: Register::R0,
+            op: CmpOp::Gt,
+            data: data.to_vec(),
+        };
+        assert_eq!(
+            lowered(Field::Mark, 0x10),
+            [
+                Expr::Meta {
+                    dreg: Register::R0,
+                    key: MetaKey::Mark,
+                },
+                hton(4),
+                gt(&[0, 0, 0, 0x10]),
+            ]
+        );
+        assert_eq!(
+            lowered(Field::CtZone, 0x102),
+            [
+                Expr::Ct {
+                    dreg: Register::R0,
+                    key: CtKey::Zone,
+                },
+                hton(2),
+                gt(&[1, 2]),
+            ]
+        );
+        // A port is in network order already.
+        assert_eq!(
+            lowered(Field::TcpDport, 0x102)[2..],
+            [
+                Expr::Payload {
+                    dreg: Register::R0,
+                    base: PayloadBase::Transport,
+                    offset: 2,
+                    len: 2,
+                },
+                gt(&[1, 2]),
+            ]
         );
     }
 

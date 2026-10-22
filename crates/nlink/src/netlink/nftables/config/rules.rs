@@ -306,7 +306,7 @@ fn check_interval_lookups(table: &super::types::DeclaredTable) -> Result<()> {
     use crate::netlink::nftables::types::{ByteorderOp, swaps_range_keys};
     use crate::netlink::nftables::Expr;
     for rule in table.rules() {
-        let exprs = rule.exprs();
+        let exprs = rule.exprs()?;
         for (i, expr) in exprs.iter().enumerate() {
             let Expr::Lookup(lookup) = expr else { continue };
             let Some(set) = table.sets().iter().find(|s| s.name() == lookup.set) else {

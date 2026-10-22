@@ -380,12 +380,16 @@ impl DeclaredTableBuilder {
         F: FnOnce(Rule) -> crate::netlink::error::Result<Rule>,
     {
         f(self.new_rule(chain)).unwrap_or_else(|e| {
+            // Its contexts and message, without the "invalid message: " the
+            // rule's own error puts in front again.
             let why = match e.detail() {
-                crate::netlink::error::ErrorDetail::InvalidMessage(why)
-                    if e.context().is_empty() =>
-                {
-                    why.clone()
-                }
+                crate::netlink::error::ErrorDetail::InvalidMessage(why) => e
+                    .context()
+                    .iter()
+                    .map(String::as_str)
+                    .chain([why.as_str()])
+                    .collect::<Vec<_>>()
+                    .join(": "),
                 _ => e.to_string(),
             };
             let mut rule = self.new_rule(chain);
@@ -1114,10 +1118,10 @@ impl DeclaredRule {
         self.body.spec()
     }
     /// The expressions the rule sends in its table: its spec, lowered for
-    /// the table's family. Empty when it does not lower, which `validate()`
-    /// reports.
-    pub fn exprs(&self) -> Vec<Expr> {
-        self.body.lowered().unwrap_or_default()
+    /// the table's family, or why it does not lower, as `validate()`
+    /// reports it.
+    pub fn exprs(&self) -> crate::netlink::error::Result<Vec<Expr>> {
+        self.body.lowered()
     }
 }
 
