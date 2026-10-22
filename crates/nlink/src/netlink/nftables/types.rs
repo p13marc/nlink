@@ -4101,6 +4101,11 @@ impl SetKeyType {
             rest >>= Self::CONCAT_TYPE_BITS;
         }
         ids.reverse();
+        // A field of id 0 is no type; and a leading one could not even be
+        // seen, so nothing can be said of the fields.
+        if ids.contains(&0) {
+            return other;
+        }
         let parts: Vec<Option<Self>> = ids.iter().map(|id| single(*id)).collect();
         let known: u32 = parts
             .iter()
@@ -4110,8 +4115,9 @@ impl SetKeyType {
         let unknown = parts.iter().filter(|p| p.is_none()).count();
         match unknown {
             0 if known == len => Self::Concat(parts.into_iter().flatten().collect()),
-            // One component nlink cannot name takes what the others leave.
-            1 if len > known => Self::Concat(
+            // One component nlink cannot name takes what the others leave,
+            // padded to 4 bytes as every field of a concatenation is.
+            1 if len > known && (len - known) % 4 == 0 => Self::Concat(
                 parts
                     .into_iter()
                     .zip(&ids)
@@ -4425,7 +4431,9 @@ impl SetDataType {
         object_type: Option<u32>,
     ) -> std::result::Result<Option<Self>, String> {
         if flags.contains(SetFlags::OBJECT) {
-            let id = object_type.unwrap_or_default();
+            let Some(id) = object_type else {
+                return Err("an object map without an object type".into());
+            };
             return super::object::ObjectType::from_u32(id)
                 .map(|t| Some(Self::Object(t)))
                 .ok_or_else(|| format!("object type {id}"));

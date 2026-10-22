@@ -379,6 +379,24 @@ mod tests {
                 len: 12
             }
         );
+        // A field of id 0, inside, says nothing of where the fields are.
+        let zero = (7 << 12) | 13;
+        assert_eq!(
+            SetKeyType::from_kernel(zero, 12),
+            SetKeyType::Other {
+                type_id: zero,
+                len: 12
+            }
+        );
+        // The unknown part's room must be whole 4-byte words.
+        let odd = (41 << 6) | 7;
+        assert_eq!(
+            SetKeyType::from_kernel(odd, 22),
+            SetKeyType::Other {
+                type_id: odd,
+                len: 22
+            }
+        );
     }
 
     /// A map's data type reads back; an object map of a type nlink does not
@@ -409,6 +427,10 @@ mod tests {
         assert_eq!(
             SetDataType::from_kernel(SetFlags::OBJECT, None, None, Some(99)),
             Err("object type 99".to_string())
+        );
+        assert_eq!(
+            SetDataType::from_kernel(SetFlags::OBJECT, None, None, None),
+            Err("an object map without an object type".to_string())
         );
     }
 }
