@@ -4117,7 +4117,7 @@ impl SetKeyType {
             0 if known == len => Self::Concat(parts.into_iter().flatten().collect()),
             // One component nlink cannot name takes what the others leave,
             // padded to 4 bytes as every field of a concatenation is.
-            1 if len > known && (len - known) % 4 == 0 => Self::Concat(
+            1 if len > known && (len - known).is_multiple_of(4) => Self::Concat(
                 parts
                     .into_iter()
                     .zip(&ids)
