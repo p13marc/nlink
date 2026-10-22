@@ -1095,7 +1095,8 @@ enum ChainChange {
     Recreate(String),
 }
 
-/// Has a declared set's shape drifted from what the kernel holds?
+/// What of a declared set's shape differs from what the kernel holds: why
+/// it is recreated (#708), and empty when nothing has drifted.
 ///
 /// Sets were matched by **name alone**, so changing a set's key type,
 /// or adding `NFT_SET_INTERVAL`/`constant`, produced an empty diff
@@ -1108,13 +1109,6 @@ enum ChainChange {
 /// there is no "update" — so drift means delete and recreate, which
 /// also discards its elements. They are re-added from the declaration
 /// in the same transaction.
-#[cfg(test)]
-fn set_has_drifted(declared: &DeclaredSet, current: &SetInfo) -> bool {
-    !set_drift(declared, current).is_empty()
-}
-
-/// What of a set's shape differs from the declaration: why it is recreated
-/// (#708).
 fn set_drift(declared: &DeclaredSet, current: &SetInfo) -> Vec<String> {
     use super::super::types::SetKeyType;
     let mut why = Vec::new();
@@ -3275,9 +3269,12 @@ mod tests {
         let mut current = set_info(&SetKeyType::Ipv4Addr, crate::netlink::nftables::NFT_SET_MAP);
         current.data_type = Some(crate::netlink::nftables::NFT_DATA_VERDICT);
         current.data_len = Some(16);
-        assert!(!set_has_drifted(&declared, &current), "the kernel sizes a verdict");
+        assert!(
+            set_drift(&declared, &current).is_empty(),
+            "the kernel sizes a verdict"
+        );
         current.data_type = Some(19);
-        assert!(set_has_drifted(&declared, &current));
+        assert!(!set_drift(&declared, &current).is_empty());
     }
 
     #[test]
@@ -3337,7 +3334,7 @@ mod tests {
 
         // A size is changed in place, not by recreating the set.
         current.size = Some(16);
-        assert!(!set_has_drifted(&declared, &current));
+        assert!(set_drift(&declared, &current).is_empty());
     }
 
     fn rule_info(expression_bytes: Vec<u8>) -> RuleInfo {
@@ -3468,7 +3465,7 @@ mod tests {
     fn a_set_that_matches_the_kernel_is_not_drift() {
         let declared = declared_set(SetKeyType::Ipv4Addr, 0);
         let current = set_info(&SetKeyType::Ipv4Addr, 0);
-        assert!(!set_has_drifted(&declared, &current));
+        assert!(set_drift(&declared, &current).is_empty());
     }
 
     #[test]
@@ -3477,7 +3474,7 @@ mod tests {
         // diff while every rule matching `@s` silently mismatched.
         let declared = declared_set(SetKeyType::InetService, 0);
         let current = set_info(&SetKeyType::Ipv4Addr, 0);
-        assert!(set_has_drifted(&declared, &current));
+        assert!(!set_drift(&declared, &current).is_empty());
     }
 
     #[test]
@@ -3488,24 +3485,24 @@ mod tests {
         let declared = declared_set(SetKeyType::Ipv6Addr, 0);
         let mut current = set_info(&SetKeyType::Ipv6Addr, 0);
         current.key_len = 4;
-        assert!(set_has_drifted(&declared, &current));
+        assert!(!set_drift(&declared, &current).is_empty());
     }
 
     #[test]
     fn changed_flags_are_drift() {
         let declared = declared_set(SetKeyType::Ipv4Addr, crate::netlink::nftables::NFT_SET_CONSTANT);
         let current = set_info(&SetKeyType::Ipv4Addr, 0);
-        assert!(set_has_drifted(&declared, &current));
+        assert!(!set_drift(&declared, &current).is_empty());
     }
 
     #[test]
     fn a_concat_key_is_compared_by_both_id_and_length() {
         let concat = SetKeyType::Concat(vec![SetKeyType::Ipv4Addr, SetKeyType::InetService]);
         let declared = declared_set(concat.clone(), 0);
-        assert!(!set_has_drifted(&declared, &set_info(&concat, 0)));
+        assert!(set_drift(&declared, &set_info(&concat, 0)).is_empty());
         // Same components, different order — a different key entirely.
         let swapped = SetKeyType::Concat(vec![SetKeyType::InetService, SetKeyType::Ipv4Addr]);
-        assert!(set_has_drifted(&declared, &set_info(&swapped, 0)));
+        assert!(!set_drift(&declared, &set_info(&swapped, 0)).is_empty());
     }
 
     #[test]
@@ -3514,9 +3511,9 @@ mod tests {
         let concat = SetKeyType::Concat(vec![SetKeyType::Ipv4Addr, SetKeyType::InetService]);
         let declared = declared_set(concat.clone(), NFT_SET_INTERVAL);
         let reported = set_info(&concat, NFT_SET_INTERVAL | NFT_SET_CONCAT);
-        assert!(!set_has_drifted(&declared, &reported));
+        assert!(set_drift(&declared, &reported).is_empty());
         // Without it, the set was not made with its field lengths: recreate.
-        assert!(set_has_drifted(&declared, &set_info(&concat, NFT_SET_INTERVAL)));
+        assert!(!set_drift(&declared, &set_info(&concat, NFT_SET_INTERVAL)).is_empty());
         assert!(!declared.merges_ranges(), "each field is its own range");
     }
 }

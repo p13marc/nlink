@@ -650,7 +650,9 @@ pub enum Change<T> {
     Update {
         /// What the kernel holds.
         from: T,
-        /// What it will hold.
+        /// What it will hold: `from` with what the update sends. An update
+        /// sends what changed, so the rest stays as the kernel has it; a
+        /// chain or a rule sends itself whole, so it is the declaration's.
         to: T,
     },
     /// Deleted and created again.
@@ -682,6 +684,17 @@ impl<T> Change<T> {
         match self {
             Self::Remove(_) => None,
             Self::Add(t) | Self::Update { to: t, .. } | Self::Recreate { to: t, .. } => Some(t),
+        }
+    }
+
+    /// What it is about: what the kernel will hold for an add, what it
+    /// holds for the rest.
+    fn subject(&self) -> &T {
+        match self {
+            Self::Add(t)
+            | Self::Remove(t)
+            | Self::Update { from: t, .. }
+            | Self::Recreate { from: t, .. } => t,
         }
     }
 
@@ -792,16 +805,20 @@ pub(crate) fn build(
         echo: &echo,
     }
     .run();
-    #[cfg(debug_assertions)]
+    // A miss is an nlink bug: every debug build, and so every test, fails
+    // on one; a release build says so, and the plan is still what apply
+    // sends.
     if let Err(why) = covers_the_plan(diff, &changes) {
-        panic!("the typed changes are not the plan's (#708): {why}\n{changes:#?}");
+        if cfg!(debug_assertions) {
+            panic!("the typed changes are not the plan's (#708): {why}\n{changes:#?}");
+        }
+        tracing::error!(%why, "the typed changes are not the plan's (#708)");
     }
     changes
 }
 
 /// Whether `changes`, cascades included, are each of the plan's entries
-/// exactly once: what [`build`] is checked against in every debug build.
-#[cfg(debug_assertions)]
+/// exactly once: what [`build`] is checked against.
 fn covers_the_plan(d: &super::NftablesDiff, changes: &[NftChange]) -> Result<(), String> {
     use std::collections::BTreeMap;
     let recreated = |item: &NftItem| d.provenance.recreated.iter().any(|(i, _)| i == item);
@@ -979,11 +996,11 @@ fn covers_the_plan(d: &super::NftablesDiff, changes: &[NftChange]) -> Result<(),
     for change in changes.iter().flat_map(NftChange::flatten) {
         let (key, n) = match change {
             NftChange::Table(c) => {
-                let t = c.from().or(c.to()).unwrap();
+                let t = c.subject();
                 (format!("table {} {} {}", c.op(), t.family, t.name), 1)
             }
             NftChange::Chain(c) => {
-                let t = c.from().or(c.to()).unwrap();
+                let t = c.subject();
                 (
                     format!("chain {} {} {}/{}", c.op(), t.family, t.table, t.name),
                     1,
@@ -1013,28 +1030,28 @@ fn covers_the_plan(d: &super::NftablesDiff, changes: &[NftChange]) -> Result<(),
                 _ => return Err(format!("a rule change without a side: {change:?}")),
             },
             NftChange::Set(c) => {
-                let t = c.from().or(c.to()).unwrap();
+                let t = c.subject();
                 (
                     format!("set {} {} {}/{}", c.op(), t.family, t.table, t.name),
                     1,
                 )
             }
             NftChange::Elements(c) => {
-                let t = c.from().or(c.to()).unwrap();
+                let t = c.subject();
                 (
                     format!("elements {} {} {}/{}", c.op(), t.family, t.table, t.set),
                     t.elements.len(),
                 )
             }
             NftChange::Object(c) => {
-                let t = c.from().or(c.to()).unwrap();
+                let t = c.subject();
                 (
                     format!("object {} {} {}/{}", c.op(), t.family, t.table, t.name),
                     1,
                 )
             }
             NftChange::Flowtable(c) => {
-                let t = c.from().or(c.to()).unwrap();
+                let t = c.subject();
                 (
                     format!("flowtable {} {} {}/{}", c.op(), t.family, t.table, t.name),
                     1,
@@ -1851,6 +1868,25 @@ mod change_tests {
             .map(|c| format!("{} {}", c.op(), c.kind()))
             .collect();
         (only, cascade)
+    }
+
+    /// The check every build runs sees a change the builder left out, and
+    /// one it made twice.
+    #[test]
+    fn the_plan_check_sees_a_change_left_out() {
+        let before = table(|t| {
+            t.set("s", |s| s.key_type(SetKeyType::Ipv4Addr))
+                .rule_keyed("input", "a", |r| r.accept())
+        });
+        let diff = table(|t| t)
+            .diff_against(&before, &NftDiffOptions::default())
+            .unwrap();
+        assert_eq!(diff.changes.len(), 2, "{diff}");
+        assert_eq!(covers_the_plan(&diff, &diff.changes), Ok(()));
+        let fewer = &diff.changes[1..];
+        assert!(covers_the_plan(&diff, fewer).is_err(), "{fewer:?}");
+        let twice = [diff.changes.clone(), diff.changes[..1].to_vec()].concat();
+        assert!(covers_the_plan(&diff, &twice).is_err(), "{twice:?}");
     }
 
     #[test]
