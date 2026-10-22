@@ -12,7 +12,7 @@ use std::net::Ipv4Addr;
 use nlink::netlink::{
     Connection, Nftables,
     nftables::{
-        Chain, ChainType, CtState, Family, Hook, LimitUnit, Policy, Priority, Rule, Set,
+        BaseChain, Chain, CtState, Family, FilterHook, LimitUnit, Policy, Priority, Rule, Set,
         SetElement, SetKeyType,
     },
 };
@@ -67,10 +67,7 @@ async fn run_demo(conn: &Connection<Nftables>) -> nlink::netlink::Result<()> {
     conn.add_chain(
         Chain::new("example", "input")?
             .family(Family::Inet)
-            .hook(Hook::Input)
-            .chain_type(ChainType::Filter)
-            .priority(Priority::Filter)
-            .policy(Policy::Drop),
+            .base(BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Drop)),
     )
     .await?;
     println!("Created chain: input (policy drop)");

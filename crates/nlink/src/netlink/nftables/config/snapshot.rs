@@ -114,13 +114,13 @@ impl RulesetSnapshot {
                 comment: table.comment().map(str::to_string),
             });
             for chain in table.chains() {
-                let base = chain.hook().is_some();
+                let base = chain.is_base();
                 snapshot.chains.push(ChainInfo {
                     table: name.clone(),
                     name: chain.name().to_string(),
                     family,
                     hook: chain.hook().map(|h| h.number(family)),
-                    priority: chain.priority().map(|p| p.to_i32()).or(base.then_some(0)),
+                    priority: chain.priority().map(|p| p.to_i32()),
                     chain_type: chain.chain_type(),
                     device: chain.device().map(str::to_string),
                     devices: chain.devices().to_vec(),
@@ -305,7 +305,7 @@ mod tests {
     use crate::netlink::nftables::config::NftDiffOptions;
     use crate::netlink::nftables::expr::{LimitExpr, QuotaExpr};
     use crate::netlink::nftables::types::{
-        ChainName, ChainType, Hook, LimitUnit, Policy, Priority, SetKeyType, Verdict,
+        BaseChain, ChainName, FilterHook, LimitUnit, NatHook, Policy, Priority, SetKeyType, Verdict,
     };
 
     fn ip(last: u8) -> Ipv4Addr {
@@ -319,10 +319,10 @@ mod tests {
                 let t = t
                     .comment("lab")
                     .chain("input", |c| {
-                        c.hook(Hook::Input)
-                            .priority(Priority::Filter)
-                            .chain_type(ChainType::Filter)
-                            .policy(Policy::Drop)
+                        c.base(
+                            BaseChain::filter(FilterHook::Input, Priority::Filter)
+                                .policy(Policy::Drop),
+                        )
                     })
                     .chain("sub", |c| c)
                     .set("nets", |s| {
@@ -352,7 +352,7 @@ mod tests {
             })
             .table("n", Family::Ip, |t| {
                 t.chain("post", |c| {
-                    c.hook(Hook::Postrouting).priority(Priority::SrcNat).chain_type(ChainType::Nat)
+                    c.base(BaseChain::nat(NatHook::Postrouting, Priority::SrcNat))
                 })
                 .rule_keyed("post", "masq", |r| r.masquerade())
             })

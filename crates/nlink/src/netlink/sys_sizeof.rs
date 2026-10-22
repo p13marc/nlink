@@ -260,7 +260,8 @@ mod tests {
     /// Plan 211 M1 regression guard. Pre-fix `Hook::Ingress`
     /// always encoded `0`, which silently installed `Family::Inet`
     /// ingress chains on `Prerouting` instead of the real
-    /// `NF_INET_INGRESS = 5` hook.
+    /// `NF_INET_INGRESS = 5` hook. It is numbered by the family now
+    /// (#708).
     #[test]
     fn nft_hook_variants_match_kernel_uapi() {
         use crate::netlink::nftables::{Family, Hook};
@@ -272,17 +273,51 @@ mod tests {
         assert_eq!(inet(Hook::Output), nf_hook::LOCAL_OUT);
         assert_eq!(inet(Hook::Postrouting), nf_hook::POST_ROUTING);
         assert_eq!(
-            inet(Hook::InetIngress),
+            inet(Hook::Ingress),
             nf_hook::INET_INGRESS,
-            "InetIngress was Hook::Ingress=0 pre-0.19 (Plan 211 M1); \
+            "Hook::Ingress encoded 0 pre-0.19 (Plan 211 M1); \
              kernel expects NF_INET_INGRESS=5"
         );
         let netdev = |h: Hook| h.number(Family::Netdev);
-        assert_eq!(netdev(Hook::NetdevIngress), nf_hook::NETDEV_INGRESS);
-        assert_eq!(netdev(Hook::NetdevEgress), nf_hook::NETDEV_EGRESS);
+        assert_eq!(netdev(Hook::Ingress), nf_hook::NETDEV_INGRESS);
+        assert_eq!(netdev(Hook::Egress), nf_hook::NETDEV_EGRESS);
         // ARP numbers its two hooks on its own (#484).
         assert_eq!(Hook::Input.number(Family::Arp), nf_hook::ARP_IN);
         assert_eq!(Hook::Output.number(Family::Arp), nf_hook::ARP_OUT);
+        // The deprecated per-family spellings keep their numbers.
+        #[allow(deprecated)]
+        {
+            assert_eq!(inet(Hook::InetIngress), nf_hook::INET_INGRESS);
+            assert_eq!(netdev(Hook::NetdevIngress), nf_hook::NETDEV_INGRESS);
+            assert_eq!(netdev(Hook::NetdevEgress), nf_hook::NETDEV_EGRESS);
+        }
+        // A chain read back names the hook it was given.
+        let hooks = [
+            Hook::Prerouting,
+            Hook::Input,
+            Hook::Forward,
+            Hook::Output,
+            Hook::Postrouting,
+            Hook::Ingress,
+            Hook::Egress,
+        ];
+        let families = [
+            Family::Ip,
+            Family::Ip6,
+            Family::Inet,
+            Family::Arp,
+            Family::Bridge,
+            Family::Netdev,
+        ];
+        for family in families {
+            for hook in hooks.into_iter().filter(|h| h.is_valid_for_family(family)) {
+                assert_eq!(
+                    Hook::from_number(family, hook.number(family)),
+                    Some(hook),
+                    "{family} {hook}"
+                );
+            }
+        }
     }
 
     /// Plan 211 M1 — `is_valid_for_family` correctly disambiguates
@@ -291,30 +326,37 @@ mod tests {
     fn nft_hook_is_valid_for_family_disambiguates_correctly() {
         use crate::netlink::nftables::{Family, Hook};
 
-        // NetdevIngress on Netdev: OK
-        assert!(Hook::NetdevIngress.is_valid_for_family(Family::Netdev));
-        // NetdevIngress on Inet: NOT OK (was a silent wire-shape
-        // bug pre-Plan 211)
-        assert!(!Hook::NetdevIngress.is_valid_for_family(Family::Inet));
-        // InetIngress on Inet: OK
-        assert!(Hook::InetIngress.is_valid_for_family(Family::Inet));
-        // InetIngress on Netdev: NOT OK
-        assert!(!Hook::InetIngress.is_valid_for_family(Family::Netdev));
+        // Ingress: inet's and netdev's; the ip and ip6 filter chain types
+        // have none, and nft refuses it there (#708).
+        assert!(Hook::Ingress.is_valid_for_family(Family::Netdev));
+        assert!(Hook::Ingress.is_valid_for_family(Family::Inet));
+        assert!(!Hook::Ingress.is_valid_for_family(Family::Ip));
+        assert!(!Hook::Ingress.is_valid_for_family(Family::Ip6));
+        // Egress: netdev's only.
+        assert!(Hook::Egress.is_valid_for_family(Family::Netdev));
+        assert!(!Hook::Egress.is_valid_for_family(Family::Inet));
         // Standard L3 hooks on Inet/Ip/Ip6: OK
         assert!(Hook::Prerouting.is_valid_for_family(Family::Inet));
         assert!(Hook::Forward.is_valid_for_family(Family::Ip6));
         // Standard L3 hooks on Netdev: NOT OK
         assert!(!Hook::Prerouting.is_valid_for_family(Family::Netdev));
-        // NetdevEgress on Netdev: OK
-        assert!(Hook::NetdevEgress.is_valid_for_family(Family::Netdev));
-        // Neither netdev hook on Bridge: the bridge family has no ingress
-        // hook, and `NetdevIngress` there encoded as its prerouting (#484).
-        assert!(!Hook::NetdevEgress.is_valid_for_family(Family::Bridge));
-        assert!(!Hook::NetdevIngress.is_valid_for_family(Family::Bridge));
+        // Neither ingress nor egress on Bridge: the bridge family has no
+        // ingress hook, and `NetdevIngress` there encoded as its
+        // prerouting (#484).
+        assert!(!Hook::Egress.is_valid_for_family(Family::Bridge));
+        assert!(!Hook::Ingress.is_valid_for_family(Family::Bridge));
         // ARP: input and output only.
         assert!(Hook::Input.is_valid_for_family(Family::Arp));
         assert!(Hook::Output.is_valid_for_family(Family::Arp));
         assert!(!Hook::Forward.is_valid_for_family(Family::Arp));
         assert!(!Hook::Prerouting.is_valid_for_family(Family::Arp));
+        // The deprecated spellings stay tied to their family.
+        #[allow(deprecated)]
+        {
+            assert!(Hook::NetdevIngress.is_valid_for_family(Family::Netdev));
+            assert!(!Hook::NetdevIngress.is_valid_for_family(Family::Inet));
+            assert!(Hook::InetIngress.is_valid_for_family(Family::Inet));
+            assert!(!Hook::InetIngress.is_valid_for_family(Family::Ip));
+        }
     }
 }

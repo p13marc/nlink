@@ -82,20 +82,18 @@ impl std::str::FromStr for Family {
 
 /// Netfilter hook point.
 ///
-/// **Plan 211 M1 (0.19) breaking change**: `Ingress` was split into
-/// `NetdevIngress` and `InetIngress` because the kernel hook
-/// numbers differ by family. Pre-0.19 the singular `Ingress`
-/// always encoded `0`, which was correct only for
-/// `Family::Netdev` / `Family::Bridge` (`NF_NETDEV_INGRESS = 0`).
-/// On `Family::Inet`/`Ipv4`/`Ipv6`, ingress is
-/// `NF_INET_INGRESS = 5`, so the old encoding installed the
-/// chain on `Prerouting` instead — silent wrong-hook attachment.
+/// Its number depends on the family (`NF_INET_*`, `NF_NETDEV_*`,
+/// `NF_ARP_*`), so it is sent through [`number`](Self::number).
+/// [`Ingress`](Self::Ingress) is `NF_INET_INGRESS = 5` in an inet table and
+/// `NF_NETDEV_INGRESS = 0` in a netdev one.
 ///
-/// `NetdevEgress` is also new (`NF_NETDEV_EGRESS = 1`).
+/// 0.19 split a family-blind `Ingress`, which always encoded `0` and so put
+/// an inet chain on prerouting, into `NetdevIngress` and `InetIngress`
+/// (Plan 211 M1). Since `number` takes the family, one `Ingress` is right
+/// in both again (#708), and the split variants are deprecated.
 ///
-/// Migration: callers must pick the variant matching the chain's
-/// family. Use [`Hook::is_valid_for_family`] to validate at
-/// build time.
+/// A base chain is built as a [`BaseChain`], whose hooks are
+/// [`FilterHook`] and [`NatHook`]; this type names the hook of one.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
@@ -107,16 +105,21 @@ pub enum Hook {
     Forward,
     Output,
     Postrouting,
-    /// Ingress hook for `Family::Netdev` / `Family::Bridge`.
-    /// Encodes `NF_NETDEV_INGRESS = 0`.
+    /// Ingress hook for `Family::Netdev`. Encodes `NF_NETDEV_INGRESS = 0`.
+    #[deprecated(since = "0.33.0", note = "use `Hook::Ingress`, numbered by the family")]
     NetdevIngress,
-    /// Ingress hook for `Family::Inet` / `Family::Ipv4` /
-    /// `Family::Ipv6`. Encodes `NF_INET_INGRESS = 5`. Available
-    /// since kernel 5.10.
+    /// Ingress hook for `Family::Inet`. Encodes `NF_INET_INGRESS = 5`.
+    #[deprecated(since = "0.33.0", note = "use `Hook::Ingress`, numbered by the family")]
     InetIngress,
-    /// Egress hook for `Family::Netdev`. Encodes
-    /// `NF_NETDEV_EGRESS = 1`. Available since kernel 5.16.
+    /// Egress hook for `Family::Netdev`. Encodes `NF_NETDEV_EGRESS = 1`.
+    #[deprecated(since = "0.33.0", note = "use `Hook::Egress`")]
     NetdevEgress,
+    /// The ingress hook: `NF_INET_INGRESS` in an inet table (kernel 5.10+),
+    /// `NF_NETDEV_INGRESS` in a netdev one. It takes a device.
+    Ingress,
+    /// The egress hook of a netdev table (`NF_NETDEV_EGRESS`, kernel
+    /// 5.16+). It takes a device.
+    Egress,
 }
 
 impl Hook {
@@ -125,14 +128,39 @@ impl Hook {
     /// The numbers are per family: the `arp` family has its own
     /// (`NF_ARP_IN = 0`, `NF_ARP_OUT = 1`, `netfilter_arp.h`), so an `arp`
     /// input chain sent as the inet `NF_INET_LOCAL_IN = 1` filtered
-    /// *outgoing* ARP, and an output chain was refused (#484).
+    /// *outgoing* ARP, and an output chain was refused (#484). Ingress is
+    /// `NF_NETDEV_INGRESS = 0` in a netdev table and `NF_INET_INGRESS = 5`
+    /// elsewhere.
     pub fn number(self, family: Family) -> u32 {
         match (family, self) {
-            (Family::Arp, Self::Input) => 0,  // NF_ARP_IN
-            (Family::Arp, Self::Output) => 1, // NF_ARP_OUT
+            (Family::Arp, Self::Input) => 0,      // NF_ARP_IN
+            (Family::Arp, Self::Output) => 1,     // NF_ARP_OUT
+            (Family::Netdev, Self::Ingress) => 0, // NF_NETDEV_INGRESS
+            (_, Self::Ingress) => 5,              // NF_INET_INGRESS
+            (_, Self::Egress) => 1,               // NF_NETDEV_EGRESS
             #[allow(deprecated)]
             _ => self.to_u32(),
         }
+    }
+
+    /// The hook numbered `number` in a chain of `family`: the inverse of
+    /// [`number`](Self::number), for a chain read back from the kernel.
+    pub fn from_number(family: Family, number: u32) -> Option<Self> {
+        Some(match (family, number) {
+            (Family::Arp, 0) => Self::Input,
+            (Family::Arp, 1) => Self::Output,
+            (Family::Arp, _) => return None,
+            (Family::Netdev, 0) => Self::Ingress,
+            (Family::Netdev, 1) => Self::Egress,
+            (Family::Netdev, _) => return None,
+            (_, 0) => Self::Prerouting,
+            (_, 1) => Self::Input,
+            (_, 2) => Self::Forward,
+            (_, 3) => Self::Output,
+            (_, 4) => Self::Postrouting,
+            (_, 5) => Self::Ingress,
+            _ => return None,
+        })
     }
 
     /// Returns the kernel hook number for the `inet`, `ip`, `ip6`, `bridge`
@@ -140,12 +168,13 @@ impl Hook {
     /// `include/uapi/linux/netfilter.h` (`enum nf_inet_hooks`) and
     /// `include/uapi/linux/netfilter_netdev.h`
     /// (`enum nf_dev_hooks`). Wrong for `arp`, which numbers its hooks
-    /// differently: use [`number`](Self::number).
+    /// differently, and for an inet `Ingress`: use [`number`](Self::number).
     #[deprecated(
         since = "0.31.0",
         note = "the number depends on the family; use `number(family)`"
     )]
     pub fn to_u32(self) -> u32 {
+        #[allow(deprecated)]
         match self {
             Self::Prerouting => 0,    // NF_INET_PRE_ROUTING
             Self::Input => 1,         // NF_INET_LOCAL_IN
@@ -155,21 +184,24 @@ impl Hook {
             Self::InetIngress => 5,   // NF_INET_INGRESS
             Self::NetdevIngress => 0, // NF_NETDEV_INGRESS
             Self::NetdevEgress => 1,  // NF_NETDEV_EGRESS
+            Self::Ingress => 0,       // NF_NETDEV_INGRESS
+            Self::Egress => 1,        // NF_NETDEV_EGRESS
         }
     }
 
-    /// Returns `true` if this hook is valid for the given family.
-    /// Useful for validating chain definitions at build time before
-    /// the kernel rejects them with EINVAL.
+    /// Returns `true` if a `filter` chain in a `family` table can take this
+    /// hook, as the kernel's chain types allow: the five L3 hooks in ip,
+    /// ip6, inet and bridge tables, input and output in arp, ingress in
+    /// inet and netdev, egress in netdev.
     pub fn is_valid_for_family(self, family: Family) -> bool {
+        #[allow(deprecated)]
         match (self, family) {
-            // Netdev hooks need Netdev family. The bridge family has no
-            // ingress hook: `NetdevIngress` there encoded as 0, which is
-            // the bridge's prerouting (#484).
-            (Self::NetdevIngress | Self::NetdevEgress, Family::Netdev) => true,
-            // InetIngress needs an Inet/Ipv4/Ipv6 family.
-            (Self::InetIngress, Family::Inet | Family::Ip | Family::Ip6) => true,
-            // Standard L3 hooks valid on Inet/Ip/Ip6/Bridge.
+            (Self::Ingress | Self::NetdevIngress, Family::Netdev) => true,
+            (Self::Egress | Self::NetdevEgress, Family::Netdev) => true,
+            // The ip and ip6 filter chain types have no ingress hook; only
+            // inet's has (`nft_chain_filter_inet`). nft refuses it with
+            // "the ip family does not support this hook".
+            (Self::Ingress | Self::InetIngress, Family::Inet) => true,
             (
                 Self::Prerouting
                 | Self::Input
@@ -183,6 +215,39 @@ impl Hook {
             (Self::Input | Self::Output, Family::Arp) => true,
             _ => false,
         }
+    }
+
+    /// The ingress and egress hooks bind to a device.
+    fn takes_devices(self) -> bool {
+        matches!(self.neutral(), Self::Ingress | Self::Egress)
+    }
+
+    /// The hook with the deprecated per-family spellings folded in.
+    fn neutral(self) -> Self {
+        #[allow(deprecated)]
+        match self {
+            Self::NetdevIngress | Self::InetIngress => Self::Ingress,
+            Self::NetdevEgress => Self::Egress,
+            other => other,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self.neutral() {
+            Self::Prerouting => "prerouting",
+            Self::Input => "input",
+            Self::Forward => "forward",
+            Self::Output => "output",
+            Self::Postrouting => "postrouting",
+            Self::Ingress => "ingress",
+            _ => "egress",
+        }
+    }
+}
+
+impl std::fmt::Display for Hook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
     }
 }
 
@@ -223,10 +288,13 @@ impl ChainType {
 }
 
 /// Chain priority (determines ordering).
+///
+/// Two priorities are equal when they are the same number:
+/// `Priority::Custom(0) == Priority::Filter`.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub enum Priority {
     Raw,
@@ -250,7 +318,29 @@ impl Priority {
             Self::Custom(v) => v,
         }
     }
+
+    /// The priority numbered `n`, by its name when it has one: what
+    /// [`ChainInfo::kind`] reads back.
+    pub fn from_i32(n: i32) -> Self {
+        match n {
+            -300 => Self::Raw,
+            -150 => Self::Mangle,
+            -100 => Self::DstNat,
+            0 => Self::Filter,
+            50 => Self::Security,
+            100 => Self::SrcNat,
+            n => Self::Custom(n),
+        }
+    }
 }
+
+impl PartialEq for Priority {
+    fn eq(&self, other: &Self) -> bool {
+        self.to_i32() == other.to_i32()
+    }
+}
+
+impl Eq for Priority {}
 
 /// Default policy for a base chain.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -269,6 +359,381 @@ impl Policy {
             Self::Accept => 1,
             Self::Drop => 0,
         }
+    }
+
+    /// The policy the kernel numbers `n` (`NF_DROP = 0`, `NF_ACCEPT = 1`).
+    pub fn from_u32(n: u32) -> Option<Self> {
+        match n {
+            0 => Some(Self::Drop),
+            1 => Some(Self::Accept),
+            _ => None,
+        }
+    }
+}
+
+/// What a chain is (#708): one only a `jump` or `goto` enters, or one
+/// hooked into the packet path.
+///
+/// A regular chain has no hook, type, priority or policy, so it cannot be
+/// given one. A base chain has them all, in a [`BaseChain`].
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ChainKind {
+    /// Entered only by a `jump` or a `goto`.
+    #[default]
+    Regular,
+    /// Hooked into the packet path.
+    Base(BaseChain),
+}
+
+impl ChainKind {
+    /// The base chain, if this is one.
+    pub fn base(&self) -> Option<&BaseChain> {
+        match self {
+            Self::Base(base) => Some(base),
+            Self::Regular => None,
+        }
+    }
+
+    /// The kind the deprecated setters describe, or why it is none: they
+    /// can name a policy without a hook, a nat chain on forward.
+    pub(crate) fn from_parts(
+        hook: Option<Hook>,
+        chain_type: Option<ChainType>,
+        priority: Option<Priority>,
+        policy: Option<Policy>,
+        devices: &[String],
+    ) -> std::result::Result<Self, String> {
+        let Some(hook) = hook else {
+            if policy.is_some() {
+                return Err("a policy needs a base chain; a chain without a hook has none".into());
+            }
+            // The kernel reads a type, a priority and devices only in a
+            // hook, so without one they say nothing.
+            return Ok(Self::Regular);
+        };
+        let base = BaseChain::of_parts(
+            chain_type.unwrap_or(ChainType::Filter),
+            hook,
+            priority.unwrap_or(Priority::Filter),
+            devices.to_vec(),
+        )?;
+        Ok(Self::Base(match policy {
+            Some(policy) => base.policy(policy),
+            None => base,
+        }))
+    }
+}
+
+/// A base chain: its type and hook, its priority, and its default policy
+/// (#708).
+///
+/// It is built from a hook its type has, so a `nat` chain on forward, a
+/// `route` chain off output, and an ingress chain without a device cannot
+/// be written:
+///
+/// ```
+/// use nlink::netlink::nftables::{BaseChain, FilterHook, NatHook, Policy, Priority};
+///
+/// let input = BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Drop);
+/// let snat = BaseChain::nat(NatHook::Postrouting, Priority::SrcNat);
+/// let reroute = BaseChain::route(Priority::Mangle);
+/// let ingress = BaseChain::filter(FilterHook::ingress(["eth0", "eth1"]), Priority::Filter);
+/// assert_eq!(ingress.devices(), ["eth0", "eth1"]);
+/// ```
+///
+/// What depends on the table's family is checked when the family is
+/// known, before anything is sent ([`check_family`](Self::check_family)):
+/// the hooks a family has, `nat` and `route` chains only in ip, ip6 and
+/// inet tables, and a `nat` chain's priority above conntrack's.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseChain {
+    #[cfg_attr(feature = "serde", serde(rename = "type"))]
+    chain_type: ChainType,
+    hook: Hook,
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
+    devices: Vec<String>,
+    priority: Priority,
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    policy: Option<Policy>,
+}
+
+impl BaseChain {
+    /// `type filter hook <hook> priority <priority>`.
+    pub fn filter(hook: FilterHook, priority: Priority) -> Self {
+        let (hook, devices) = match hook {
+            FilterHook::Prerouting => (Hook::Prerouting, Vec::new()),
+            FilterHook::Input => (Hook::Input, Vec::new()),
+            FilterHook::Forward => (Hook::Forward, Vec::new()),
+            FilterHook::Output => (Hook::Output, Vec::new()),
+            FilterHook::Postrouting => (Hook::Postrouting, Vec::new()),
+            FilterHook::Ingress(devices) => (Hook::Ingress, devices.0),
+            FilterHook::Egress(devices) => (Hook::Egress, devices.0),
+        };
+        Self::of(ChainType::Filter, hook, devices, priority)
+    }
+
+    /// `type nat hook <hook> priority <priority>`, in an ip, ip6 or inet
+    /// table. Its priority must be above conntrack's (-200): NAT needs the
+    /// connection tracked first.
+    pub fn nat(hook: NatHook, priority: Priority) -> Self {
+        let hook = match hook {
+            NatHook::Prerouting => Hook::Prerouting,
+            NatHook::Input => Hook::Input,
+            NatHook::Output => Hook::Output,
+            NatHook::Postrouting => Hook::Postrouting,
+        };
+        Self::of(ChainType::Nat, hook, Vec::new(), priority)
+    }
+
+    /// `type route hook output priority <priority>`, in an ip, ip6 or inet
+    /// table: a packet a rule changes (its mark, its addresses) is routed
+    /// again. Output is the only hook a route chain has.
+    pub fn route(priority: Priority) -> Self {
+        Self::of(ChainType::Route, Hook::Output, Vec::new(), priority)
+    }
+
+    fn of(chain_type: ChainType, hook: Hook, devices: Vec<String>, priority: Priority) -> Self {
+        Self {
+            chain_type,
+            hook,
+            devices,
+            priority,
+            policy: None,
+        }
+    }
+
+    /// The default policy: what happens to a packet no rule decides. A
+    /// chain created without one accepts, and a declared chain without one
+    /// keeps whatever the kernel has.
+    pub fn policy(mut self, policy: Policy) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+
+    /// A base chain from parts known only at run time, such as a
+    /// configuration file or a command line, or an error saying why they
+    /// make none: a `nat` chain on forward or ingress, a `route` chain off
+    /// output, an ingress or egress hook without a device, a device on any
+    /// other hook.
+    pub fn try_new<I, S>(
+        chain_type: ChainType,
+        hook: Hook,
+        priority: Priority,
+        devices: I,
+    ) -> Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let devices = devices.into_iter().map(Into::into).collect();
+        Self::of_parts(chain_type, hook, priority, devices).map_err(Error::invalid_message)
+    }
+
+    fn of_parts(
+        chain_type: ChainType,
+        hook: Hook,
+        priority: Priority,
+        devices: Vec<String>,
+    ) -> std::result::Result<Self, String> {
+        let hook = hook.neutral();
+        let refuse = Err;
+        if hook.takes_devices() && devices.is_empty() {
+            return refuse(format!("an {hook} chain needs a device"));
+        }
+        if !hook.takes_devices() && !devices.is_empty() {
+            return refuse(format!(
+                "a chain on the {hook} hook takes no device; ingress and egress chains do"
+            ));
+        }
+        match (chain_type, hook) {
+            (ChainType::Filter, _) => Ok(Self::of(chain_type, hook, devices, priority)),
+            (ChainType::Nat, Hook::Prerouting | Hook::Input | Hook::Output | Hook::Postrouting) => {
+                Ok(Self::of(chain_type, hook, devices, priority))
+            }
+            (ChainType::Nat, _) => refuse(format!("a nat chain has no {hook} hook")),
+            (ChainType::Route, Hook::Output) => Ok(Self::route(priority)),
+            (ChainType::Route, _) => refuse("a route chain hooks output only".into()),
+        }
+    }
+
+    /// Whether a `family` table can hold this chain, as the kernel's chain
+    /// types allow, or an error saying why not:
+    /// - a filter chain on a hook the family has (see
+    ///   [`Hook::is_valid_for_family`]);
+    /// - a nat or route chain in an ip, ip6 or inet table;
+    /// - a nat chain above conntrack's priority (`NF_IP_PRI_CONNTRACK`,
+    ///   -200).
+    pub fn check_family(&self, family: Family) -> Result<()> {
+        match self.family_problem(family) {
+            Some(why) => Err(Error::invalid_message(why)),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn family_problem(&self, family: Family) -> Option<String> {
+        let l3 = matches!(family, Family::Ip | Family::Ip6 | Family::Inet);
+        match self.chain_type {
+            ChainType::Filter if !self.hook.is_valid_for_family(family) => {
+                Some(format!("the {family} family has no {} hook", self.hook))
+            }
+            ChainType::Nat | ChainType::Route if !l3 => Some(format!(
+                "the {family} family has no {} chains",
+                self.chain_type.as_str()
+            )),
+            ChainType::Nat if self.priority.to_i32() <= -200 => {
+                Some("a nat chain's priority must be above -200 (conntrack)".into())
+            }
+            _ => None,
+        }
+    }
+
+    /// `filter`, `nat` or `route`.
+    pub fn chain_type(&self) -> ChainType {
+        self.chain_type
+    }
+
+    /// The hook.
+    pub fn hook(&self) -> Hook {
+        self.hook
+    }
+
+    /// The devices an ingress or egress chain is bound to; empty for any
+    /// other.
+    pub fn devices(&self) -> &[String] {
+        &self.devices
+    }
+
+    /// The priority.
+    pub fn priority(&self) -> Priority {
+        self.priority
+    }
+
+    /// The default policy, if one was given.
+    pub fn default_policy(&self) -> Option<Policy> {
+        self.policy
+    }
+}
+
+/// The hook of a `type filter` chain (#708).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FilterHook {
+    Prerouting,
+    Input,
+    Forward,
+    Output,
+    Postrouting,
+    /// `hook ingress`, on devices: an inet table's (kernel 5.10+) or a
+    /// netdev table's.
+    Ingress(Devices),
+    /// `hook egress`, on devices: a netdev table's (kernel 5.16+).
+    Egress(Devices),
+}
+
+impl FilterHook {
+    /// `hook ingress device eth0`, or `devices = { eth0, eth1 }`.
+    pub fn ingress(devices: impl Into<Devices>) -> Self {
+        Self::Ingress(devices.into())
+    }
+
+    /// `hook egress device eth0`, or `devices = { eth0, eth1 }`.
+    pub fn egress(devices: impl Into<Devices>) -> Self {
+        Self::Egress(devices.into())
+    }
+}
+
+/// The hook of a `type nat` chain (#708). There is no forward NAT: a
+/// forwarded packet is translated at prerouting and postrouting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NatHook {
+    Prerouting,
+    Input,
+    Output,
+    Postrouting,
+}
+
+/// The devices an ingress or egress chain is bound to: at least one
+/// (#708). One is sent as `NFTA_HOOK_DEV`, several as `NFTA_HOOK_DEVS`.
+///
+/// ```
+/// use nlink::netlink::nftables::Devices;
+///
+/// assert_eq!(Devices::from("eth0").as_slice(), ["eth0"]);
+/// assert_eq!(Devices::new("eth0").and("eth1"), Devices::from(["eth0", "eth1"]));
+/// assert!(Devices::try_from(Vec::<String>::new()).is_err());
+/// ```
+///
+/// An empty array does not compile:
+///
+/// ```compile_fail
+/// use nlink::netlink::nftables::Devices;
+///
+/// let none: [&str; 0] = [];
+/// let _ = Devices::from(none);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Devices(Vec<String>);
+
+impl Devices {
+    /// One device.
+    pub fn new(device: impl Into<String>) -> Self {
+        Self(vec![device.into()])
+    }
+
+    /// And another.
+    pub fn and(mut self, device: impl Into<String>) -> Self {
+        self.0.push(device.into());
+        self
+    }
+
+    /// The devices, in the order given.
+    pub fn as_slice(&self) -> &[String] {
+        &self.0
+    }
+}
+
+impl From<&str> for Devices {
+    fn from(device: &str) -> Self {
+        Self::new(device)
+    }
+}
+
+impl From<String> for Devices {
+    fn from(device: String) -> Self {
+        Self::new(device)
+    }
+}
+
+impl<S: Into<String>, const N: usize> From<[S; N]> for Devices {
+    fn from(devices: [S; N]) -> Self {
+        const {
+            assert!(
+                N > 0,
+                "an ingress or egress chain needs at least one device"
+            )
+        };
+        Self(devices.into_iter().map(Into::into).collect())
+    }
+}
+
+impl TryFrom<Vec<String>> for Devices {
+    type Error = Error;
+
+    fn try_from(devices: Vec<String>) -> Result<Self> {
+        if devices.is_empty() {
+            return Err(Error::invalid_message(
+                "an ingress or egress chain needs at least one device",
+            ));
+        }
+        Ok(Self(devices))
     }
 }
 
@@ -2043,42 +2508,96 @@ impl Chain {
         self
     }
 
+    /// Make this a base chain (#708): its type and hook, priority and
+    /// policy. Without it the chain is a regular one, which only a `jump`
+    /// or `goto` enters. A deprecated setter called after it changes that
+    /// part of what it set, and the chain is checked as a whole when sent.
+    ///
+    /// ```
+    /// use nlink::netlink::nftables::{BaseChain, Chain, Family, FilterHook, Policy, Priority};
+    ///
+    /// let input = Chain::new("filter", "input")?
+    ///     .family(Family::Inet)
+    ///     .base(BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Drop));
+    /// # Ok::<(), nlink::Error>(())
+    /// ```
+    pub fn base(mut self, base: BaseChain) -> Self {
+        self.hook = Some(base.hook);
+        self.priority = Some(base.priority);
+        self.chain_type = Some(base.chain_type);
+        self.policy = base.policy;
+        self.devices = base.devices;
+        self
+    }
+
     /// Set the hook point (makes this a base chain).
+    #[deprecated(
+        since = "0.33.0",
+        note = "use `base(BaseChain::filter(..))`, `nat` or `route`"
+    )]
     pub fn hook(mut self, hook: Hook) -> Self {
         self.hook = Some(hook);
         self
     }
 
     /// Set the chain priority.
+    #[deprecated(since = "0.33.0", note = "a `BaseChain` takes its priority")]
     pub fn priority(mut self, priority: Priority) -> Self {
         self.priority = Some(priority);
         self
     }
 
     /// Set the chain type.
+    #[deprecated(
+        since = "0.33.0",
+        note = "use `base(BaseChain::filter(..))`, `BaseChain::nat` or `BaseChain::route`"
+    )]
     pub fn chain_type(mut self, chain_type: ChainType) -> Self {
         self.chain_type = Some(chain_type);
         self
     }
 
     /// Set the default policy.
+    #[deprecated(since = "0.33.0", note = "use `BaseChain::policy`")]
     pub fn policy(mut self, policy: Policy) -> Self {
         self.policy = Some(policy);
         self
     }
 
     /// Bind a base chain to an interface (`type filter hook ingress device
-    /// eth0 priority -150`). **Required** for the netdev hooks
-    /// ([`Hook::NetdevIngress`]/[`Hook::NetdevEgress`]) and for
-    /// [`Hook::InetIngress`] — without it the kernel rejects the chain.
-    /// On any other hook a recent kernel refuses it (`EOPNOTSUPP`).
-    ///
-    /// Call it again to bind the chain to several devices (`devices = {
-    /// eth0, eth1 }`, #703): one goes as `NFTA_HOOK_DEV`, several as
-    /// `NFTA_HOOK_DEVS`, as nft writes them. It used to replace the device.
+    /// eth0 priority -150`). Call it again to bind the chain to several
+    /// devices (#703).
+    #[deprecated(
+        since = "0.33.0",
+        note = "use `FilterHook::ingress(..)` or `FilterHook::egress(..)`"
+    )]
     pub fn device(mut self, dev: impl Into<String>) -> Self {
         self.devices.push(dev.into());
         self
+    }
+
+    /// What this chain is, checked against its family, or why it is no
+    /// chain the kernel would create.
+    pub(crate) fn kind(&self) -> Result<ChainKind> {
+        let at = |e: Error| {
+            e.with_context(format!(
+                "chain {}/{}",
+                self.table.as_str(),
+                self.name.as_str()
+            ))
+        };
+        let kind = ChainKind::from_parts(
+            self.hook,
+            self.chain_type,
+            self.priority,
+            self.policy,
+            &self.devices,
+        )
+        .map_err(|why| at(Error::invalid_message(why)))?;
+        if let Some(base) = kind.base() {
+            base.check_family(self.family).map_err(at)?;
+        }
+        Ok(kind)
     }
 }
 
@@ -2122,6 +2641,31 @@ pub struct ChainInfo {
     /// Created by nlink's declarative apply: it carries nlink's ownership
     /// tag (#527).
     pub managed: bool,
+}
+
+impl ChainInfo {
+    /// What the chain is (#708), or `None` for a base chain whose hook or
+    /// type nlink does not know.
+    ///
+    /// A base chain always reads back with a policy, since the kernel
+    /// reports the one it uses: `Accept` unless one was set.
+    pub fn kind(&self) -> Option<ChainKind> {
+        let Some(number) = self.hook else {
+            return Some(ChainKind::Regular);
+        };
+        let devices = if self.devices.is_empty() {
+            self.device.iter().cloned().collect()
+        } else {
+            self.devices.clone()
+        };
+        Some(ChainKind::Base(BaseChain {
+            chain_type: self.chain_type?,
+            hook: Hook::from_number(self.family, number)?,
+            devices,
+            priority: Priority::from_i32(self.priority.unwrap_or(0)),
+            policy: self.policy.and_then(Policy::from_u32),
+        }))
+    }
 }
 
 // =============================================================================

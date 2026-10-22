@@ -349,33 +349,20 @@ impl Connection<Nftables> {
     ///
     /// ```no_run
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # use nlink::netlink::nftables::Chain;
-    /// # use nlink::netlink::nftables::ChainType;
-    /// # use nlink::netlink::nftables::Family;
-    /// # use nlink::netlink::nftables::Hook;
-    /// # use nlink::netlink::nftables::Policy;
-    /// # use nlink::netlink::nftables::Priority;
+    /// # use nlink::netlink::nftables::{BaseChain, Chain, Family, FilterHook, Policy, Priority};
     /// # let conn = nlink::Connection::<nlink::netlink::Nftables>::new()?;
     /// conn.add_chain(
     ///     Chain::new("filter", "input")?
     ///         .family(Family::Inet)
-    ///         .hook(Hook::Input)
-    ///         .priority(Priority::Filter)
-    ///         .policy(Policy::Accept)
-    ///         .chain_type(ChainType::Filter)
+    ///         .base(BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Drop)),
     /// ).await?;
     /// # Ok(())
     /// # }
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_chain"))]
     pub async fn add_chain(&self, chain: Chain) -> Result<()> {
-        // Validate: base chains require type
-        if chain.hook.is_some() && chain.chain_type.is_none() {
-            return Err(Error::invalid_message(
-                "base chains with a hook require chain_type",
-            ));
-        }
-
+        // A shape the kernel would refuse fails here, before any I/O.
+        let kind = chain.kind()?;
         let mut builder = MessageBuilder::new(
             nft_msg_type(NFT_MSG_NEWCHAIN),
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
@@ -384,23 +371,7 @@ impl Connection<Nftables> {
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_CHAIN_TABLE, chain.table.as_str());
         builder.append_attr_str(NFTA_CHAIN_NAME, chain.name.as_str());
-
-        if let Some(chain_type) = chain.chain_type {
-            builder.append_attr_str(NFTA_CHAIN_TYPE, chain_type.as_str());
-        }
-
-        if let Some(hook) = chain.hook {
-            let hook_nest = builder.nest_start(NFTA_CHAIN_HOOK | 0x8000);
-            builder.append_attr_u32_be(NFTA_HOOK_HOOKNUM, hook.number(chain.family));
-            let priority = chain.priority.unwrap_or(Priority::Filter).to_i32();
-            builder.append_attr_u32_be(NFTA_HOOK_PRIORITY, priority as u32);
-            append_hook_devices(&mut builder, &chain.devices);
-            builder.nest_end(hook_nest);
-        }
-
-        if let Some(policy) = chain.policy {
-            builder.append_attr_u32_be(NFTA_CHAIN_POLICY, policy.to_u32());
-        }
+        append_chain_kind(&mut builder, chain.family, &kind);
         append_userdata(&mut builder, NFTA_CHAIN_USERDATA, NFTNL_UDATA_COMMENT, chain.comment.as_deref(), chain.owned)?;
 
         self.nft_request_ack(builder).await
@@ -925,14 +896,12 @@ impl Connection<Nftables> {
     ///
     /// ```no_run
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # use nlink::netlink::nftables::{Chain, ChainType, Family, Hook, Policy, Priority, Rule};
+    /// # use nlink::netlink::nftables::{BaseChain, Chain, Family, FilterHook, Policy};
+    /// # use nlink::netlink::nftables::{Priority, Rule};
     /// # let conn = nlink::Connection::<nlink::netlink::Nftables>::new()?;
     /// let chain = Chain::new("filter", "input")?
     ///     .family(Family::Inet)
-    ///     .hook(Hook::Input)
-    ///     .priority(Priority::Filter)
-    ///     .chain_type(ChainType::Filter)
-    ///     .policy(Policy::Accept);
+    ///     .base(BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Accept));
     /// let rule = Rule::new("filter", "input").family(Family::Inet);
     ///
     /// conn.transaction()
@@ -2324,28 +2293,19 @@ impl Transaction {
     }
 
     fn push_newchain(mut self, chain: Chain, flags: u16) -> Self {
+        let kind = match chain.kind() {
+            Ok(kind) => kind,
+            Err(e) => {
+                self.defer(e);
+                return self;
+            }
+        };
         let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_NEWCHAIN), flags);
         let nfgenmsg = NfGenMsg::new(chain.family);
         builder.append(&nfgenmsg);
         builder.append_attr_str(NFTA_CHAIN_TABLE, chain.table.as_str());
         builder.append_attr_str(NFTA_CHAIN_NAME, chain.name.as_str());
-
-        if let Some(chain_type) = chain.chain_type {
-            builder.append_attr_str(NFTA_CHAIN_TYPE, chain_type.as_str());
-        }
-
-        if let Some(hook) = chain.hook {
-            let hook_nest = builder.nest_start(NFTA_CHAIN_HOOK | 0x8000);
-            builder.append_attr_u32_be(NFTA_HOOK_HOOKNUM, hook.number(chain.family));
-            let priority = chain.priority.unwrap_or(Priority::Filter).to_i32();
-            builder.append_attr_u32_be(NFTA_HOOK_PRIORITY, priority as u32);
-            append_hook_devices(&mut builder, &chain.devices);
-            builder.nest_end(hook_nest);
-        }
-
-        if let Some(policy) = chain.policy {
-            builder.append_attr_u32_be(NFTA_CHAIN_POLICY, policy.to_u32());
-        }
+        append_chain_kind(&mut builder, chain.family, &kind);
         if let Err(e) = append_userdata(
             &mut builder,
             NFTA_CHAIN_USERDATA,
@@ -3239,6 +3199,21 @@ pub fn kernel_has_destroy() -> bool {
     crate::netlink::kernel_version() >= (6, 3)
 }
 
+/// A base chain's type, hook nest and policy; nothing for a regular chain,
+/// which has none of them.
+fn append_chain_kind(builder: &mut MessageBuilder, family: Family, kind: &ChainKind) {
+    let Some(base) = kind.base() else { return };
+    builder.append_attr_str(NFTA_CHAIN_TYPE, base.chain_type().as_str());
+    let hook_nest = builder.nest_start(NFTA_CHAIN_HOOK | 0x8000);
+    builder.append_attr_u32_be(NFTA_HOOK_HOOKNUM, base.hook().number(family));
+    builder.append_attr_u32_be(NFTA_HOOK_PRIORITY, base.priority().to_i32() as u32);
+    append_hook_devices(builder, base.devices());
+    builder.nest_end(hook_nest);
+    if let Some(policy) = base.default_policy() {
+        builder.append_attr_u32_be(NFTA_CHAIN_POLICY, policy.to_u32());
+    }
+}
+
 /// A base chain's devices, as nft writes them (#703): one as
 /// `NFTA_HOOK_DEV`, several as `NFTA_HOOK_DEVS` of `NFTA_DEVICE_NAME`s —
 /// which the kernel dumps the same way.
@@ -3416,10 +3391,10 @@ mod transaction_tests {
         let chain = Chain::new("ft", "ingress")
             .unwrap()
             .family(Family::Netdev)
-            .hook(Hook::NetdevIngress)
-            .priority(Priority::Filter)
-            .chain_type(ChainType::Filter)
-            .device("eth0");
+            .base(BaseChain::filter(
+                FilterHook::ingress("eth0"),
+                Priority::Filter,
+            ));
         let tx = new_tx().add_chain(chain);
         assert_eq!(tx.messages.len(), 1);
 
@@ -3438,9 +3413,10 @@ mod transaction_tests {
         let chain = Chain::new("ft", "ingress")
             .unwrap()
             .family(Family::Netdev)
-            .hook(Hook::NetdevIngress)
-            .device("eth0")
-            .device("eth1");
+            .base(BaseChain::filter(
+                FilterHook::ingress(["eth0", "eth1"]),
+                Priority::Filter,
+            ));
         let tx = new_tx().add_chain(chain);
         let body = body_after_nfgenmsg(&tx.messages[0]);
         let hook_nest = find_attr(body, NFTA_CHAIN_HOOK).expect("NFTA_CHAIN_HOOK missing");
@@ -3462,9 +3438,7 @@ mod transaction_tests {
         let chain = Chain::new("nat", "postrouting")
             .unwrap()
             .family(Family::Inet)
-            .hook(Hook::Postrouting)
-            .priority(Priority::SrcNat)
-            .chain_type(ChainType::Nat);
+            .base(BaseChain::nat(NatHook::Postrouting, Priority::SrcNat));
         let tx = new_tx().add_chain(chain);
         let body = body_after_nfgenmsg(&tx.messages[0]);
         let ct = find_attr(body, NFTA_CHAIN_TYPE).expect("NFTA_CHAIN_TYPE missing");

@@ -83,7 +83,7 @@ The same as one declared ruleset:
 ```rust,no_run
 use nlink::netlink::nftables::config::NftablesConfig;
 use nlink::netlink::nftables::types::{
-    Family, Hook, PacketField, Policy, Priority, SetElement, SetKeyType,
+    BaseChain, Family, FilterHook, PacketField, Policy, Priority, SetElement, SetKeyType,
 };
 use std::net::Ipv4Addr;
 use std::time::Duration;
@@ -93,9 +93,7 @@ let net = |a, b, c, d, len| SetElement::ipv4_prefix(Ipv4Addr::new(a, b, c, d), l
 let trusted = vec![net(10, 0, 0, 0, 8)?, net(192, 168, 1, 0, 24)?];
 let cfg = NftablesConfig::new().table("filter", Family::Ip, move |t| {
     t.chain("input", |c| {
-        c.hook(Hook::Input)
-            .priority(Priority::Filter)
-            .policy(Policy::Drop)
+        c.base(BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Drop))
     })
     .set("trusted", move |s| s.key_type(SetKeyType::Ipv4Addr).interval().elements(trusted))
     .set("web", |s| {

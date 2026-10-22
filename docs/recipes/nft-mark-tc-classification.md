@@ -79,7 +79,7 @@ use std::net::Ipv4Addr;
 
 use nlink::TcHandle;
 use nlink::netlink::nftables::config::NftablesConfig;
-use nlink::netlink::nftables::{ChainType, Family, Hook, Priority, SetKeyType};
+use nlink::netlink::nftables::{BaseChain, Family, FilterHook, Priority, SetKeyType};
 use nlink::netlink::{Connection, Nftables};
 
 # async fn example() -> nlink::Result<()> {
@@ -94,9 +94,7 @@ let cfg = NftablesConfig::new().table("qos", Family::Ip, |t| {
             .ipv4(Ipv4Addr::new(10, 45, 0, 7))
     })
     .chain("post", |c| {
-        c.hook(Hook::Postrouting)
-            .priority(Priority::Mangle)
-            .chain_type(ChainType::Filter)
+        c.base(BaseChain::filter(FilterHook::Postrouting, Priority::Mangle))
     })
     // ip daddr @throttled meta priority set 1:10
     .rule_keyed("post", "throttle", |r| {
@@ -130,7 +128,7 @@ only the bits under `mask` (iptables `MARK --set-mark value/mask`).
 
 ```rust,no_run
 # use nlink::netlink::nftables::config::NftablesConfig;
-# use nlink::netlink::nftables::{ChainType, Family, Hook, Priority};
+# use nlink::netlink::nftables::{BaseChain, ChainType, Family, FilterHook, Hook, Priority};
 # use nlink::netlink::{Connection, Nftables};
 use nlink::netlink::filter::FwFilter;
 use nlink::netlink::Route;
@@ -142,9 +140,7 @@ const THROTTLED: u32 = 0x10;
 
 let cfg = NftablesConfig::new().table("qos", Family::Ip, |t| {
     t.chain("post", |c| {
-        c.hook(Hook::Postrouting)
-            .priority(Priority::Mangle)
-            .chain_type(ChainType::Filter)
+        c.base(BaseChain::filter(FilterHook::Postrouting, Priority::Mangle))
     })
     // ip daddr @throttled meta mark set mark and 0xffffff00 or 0x10
     .rule_keyed("post", "throttle", |r| {
@@ -182,13 +178,11 @@ packet:
 
 ```rust,no_run
 # use nlink::netlink::nftables::config::NftablesConfig;
-# use nlink::netlink::nftables::{ChainType, CtState, Family, Hook, Priority};
+# use nlink::netlink::nftables::{BaseChain, ChainType, CtState, Family, FilterHook, Hook, Priority};
 # fn cfg() -> NftablesConfig {
 NftablesConfig::new().table("qos", Family::Ip, |t| {
     t.chain("post", |c| {
-        c.hook(Hook::Postrouting)
-            .priority(Priority::Mangle)
-            .chain_type(ChainType::Filter)
+        c.base(BaseChain::filter(FilterHook::Postrouting, Priority::Mangle))
     })
     // ct state new ip daddr @throttled ct mark set 0x10
     .rule_keyed("post", "classify-new", |r| {
@@ -215,13 +209,11 @@ allows:
 
 ```rust,no_run
 # use nlink::netlink::nftables::config::NftablesConfig;
-# use nlink::netlink::nftables::{ChainType, Family, Hook, Priority, TcpFlags};
+# use nlink::netlink::nftables::{BaseChain, ChainType, Family, FilterHook, Hook, Priority, TcpFlags};
 # fn cfg() -> NftablesConfig {
 NftablesConfig::new().table("qos", Family::Ip, |t| {
     t.chain("forward", |c| {
-        c.hook(Hook::Forward)
-            .priority(Priority::Mangle)
-            .chain_type(ChainType::Filter)
+        c.base(BaseChain::filter(FilterHook::Forward, Priority::Mangle))
     })
     // tcp flags syn / syn,rst tcp option maxseg size set rt mtu
     .rule_keyed("forward", "mss", |r| {

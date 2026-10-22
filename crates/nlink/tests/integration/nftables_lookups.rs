@@ -7,7 +7,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use nlink::netlink::nftables::config::NftablesConfig;
 use nlink::netlink::nftables::types::{
-    Chain, ChainType, CtState, Family, Hook, LimitUnit, PacketField, Priority, Rule, Set,
+    BaseChain, Chain, CtState, Family, FilterHook, LimitUnit, PacketField, Priority, Rule, Set,
     SetElement, SetKeyType, SetPolicy,
 };
 use nlink::netlink::nftables::{
@@ -26,9 +26,7 @@ async fn add_output_chain(conn: &Connection<Nftables>) -> nlink::Result<()> {
     conn.add_chain(
         Chain::new("t", "out")?
             .family(Family::Inet)
-            .hook(Hook::Output)
-            .priority(Priority::Filter)
-            .chain_type(ChainType::Filter),
+            .base(BaseChain::filter(FilterHook::Output, Priority::Filter)),
     )
     .await
 }
@@ -192,14 +190,10 @@ async fn a_raw_notrack_untracks_and_converges() -> nlink::Result<()> {
         lo_up(&ns).await?;
         let cfg = NftablesConfig::new().table("t", Family::Inet, |t| {
             t.chain("raw", |c| {
-                c.hook(Hook::Output)
-                    .priority(Priority::Raw)
-                    .chain_type(ChainType::Filter)
+                c.base(BaseChain::filter(FilterHook::Output, Priority::Raw))
             })
             .chain("out", |c| {
-                c.hook(Hook::Output)
-                    .priority(Priority::Filter)
-                    .chain_type(ChainType::Filter)
+                c.base(BaseChain::filter(FilterHook::Output, Priority::Filter))
             })
             .rule_keyed("raw", "notrack", |r| {
                 r.match_udp_dport(9).expr(RawExpr::without_data("notrack"))
@@ -282,9 +276,7 @@ async fn set_statements_and_policy_read_and_write_as_nft_does() -> nlink::Result
     conn.add_chain(
         Chain::new("b", "out")?
             .family(Family::Inet)
-            .hook(Hook::Output)
-            .priority(Priority::Filter)
-            .chain_type(ChainType::Filter),
+            .base(BaseChain::filter(FilterHook::Output, Priority::Filter)),
     )
     .await?;
     for set in ["c", "m"] {
@@ -320,9 +312,7 @@ async fn set_statements_and_policy_read_and_write_as_nft_does() -> nlink::Result
 fn counted_hosts(quota: u64, policy: Option<SetPolicy>) -> NftablesConfig {
     NftablesConfig::new().table("t", Family::Inet, move |t| {
         t.chain("out", |c| {
-            c.hook(Hook::Output)
-                .priority(Priority::Filter)
-                .chain_type(ChainType::Filter)
+            c.base(BaseChain::filter(FilterHook::Output, Priority::Filter))
         })
         .set("hosts", move |s| {
             let s = s

@@ -5,7 +5,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use nlink::netlink::nftables::config::NftablesConfig;
 use nlink::netlink::nftables::types::{
-    Chain, ChainType, Family, Hook, PacketField, Priority, Rule, Set, SetElement, SetKeyType,
+    BaseChain, Chain, Family, FilterHook, PacketField, Priority, Rule, Set, SetElement, SetKeyType,
 };
 use nlink::netlink::{Connection, Nftables};
 
@@ -18,9 +18,7 @@ async fn output_chain(conn: &Connection<Nftables>, set: &Set, elements: &[SetEle
     conn.add_chain(
         Chain::new("t", "out")?
             .family(Family::Ip)
-            .hook(Hook::Output)
-            .priority(Priority::Filter)
-            .chain_type(ChainType::Filter),
+            .base(BaseChain::filter(FilterHook::Output, Priority::Filter)),
     )
     .await?;
     conn.add_set(set.clone()).await?;
@@ -127,9 +125,7 @@ async fn a_net_and_port_range_matches_inside_both_ranges_only() -> nlink::Result
 fn declared(elements: Vec<SetElement>) -> NftablesConfig {
     NftablesConfig::new().table("t", Family::Inet, move |t| {
         t.chain("out", |c| {
-            c.hook(Hook::Output)
-                .priority(Priority::Filter)
-                .chain_type(ChainType::Filter)
+            c.base(BaseChain::filter(FilterHook::Output, Priority::Filter))
         })
         .set("v6", |s| {
             s.key_type(SetKeyType::Concat(vec![

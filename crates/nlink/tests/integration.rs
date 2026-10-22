@@ -191,6 +191,11 @@ mod nftables_statements;
 #[path = "integration/nftables_lift.rs"]
 mod nftables_lift;
 
+// #708 (e): every chain type and hook in every family, through nft and
+// through `BaseChain`; the kernel decides which exist.
+#[path = "integration/nftables_chain_kinds.rs"]
+mod nftables_chain_kinds;
+
 // Every rule shape nlink writes must reconcile to an empty diff: the kernel
 // echoes some attributes whether or not they were sent, and drops others.
 #[path = "integration/nftables_echo.rs"]

@@ -125,9 +125,9 @@ async fn tour(conn: Connection<Route>) -> Result<(), Box<dyn std::error::Error>>
 
     // Declarative nftables ruleset — atomic batch commit.
     use nlink::netlink::nftables::config::NftablesConfig;
-    use nlink::netlink::nftables::types::{Family, Hook, Policy, Priority};
+    use nlink::netlink::nftables::types::{BaseChain, Family, FilterHook, Policy, Priority};
     let cfg = NftablesConfig::new().table("filter", Family::Inet, |t| {
-        t.chain("input", |c| c.hook(Hook::Input).priority(Priority::Filter).policy(Policy::Drop))
+        t.chain("input", |c| c.base(BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Drop)))
             .rule("input", |r| r.match_iif("lo").accept())
             .rule("input", |r| r.match_tcp_dport(22).accept())
     });

@@ -2417,7 +2417,7 @@ mod tests {
     #[test]
     fn chain_changes_the_kernel_cannot_update_are_recreates() {
         let chain_change_ = |d: &DeclaredChain, c: &ChainInfo| chain_change(d, c, false);
-        use crate::netlink::nftables::{ChainType, Hook, Policy, Priority};
+        use crate::netlink::nftables::{BaseChain, ChainType, FilterHook, Hook, Policy, Priority};
 
         let declared =
             |f: fn(super::super::DeclaredChainBuilder) -> super::super::DeclaredChainBuilder| {
@@ -2442,9 +2442,7 @@ mod tests {
             managed: true,
         };
         fn base(c: super::super::DeclaredChainBuilder) -> super::super::DeclaredChainBuilder {
-            c.hook(Hook::Input)
-                .priority(Priority::Filter)
-                .chain_type(ChainType::Filter)
+            c.base(BaseChain::filter(FilterHook::Input, Priority::Filter))
         }
         assert_eq!(chain_change_(&declared(base), &live), ChainChange::None);
         assert_eq!(
@@ -2459,7 +2457,12 @@ mod tests {
             ChainChange::Recreate("priority 0 -> -10".into())
         );
         assert_eq!(
-            chain_change_(&declared(|c| base(c).hook(Hook::Forward)), &live),
+            chain_change_(
+                &declared(
+                    |c| base(c).base(BaseChain::filter(FilterHook::Forward, Priority::Filter))
+                ),
+                &live
+            ),
             ChainChange::Recreate("hook 1 -> 2".into())
         );
         assert_eq!(
@@ -2490,7 +2493,7 @@ mod tests {
 
     #[test]
     fn summary_renders_change_lines() {
-        use super::super::super::types::{Family, Hook, Policy, Priority};
+        use super::super::super::types::{BaseChain, Family, FilterHook, Policy, Priority};
         use super::super::types::DeclaredChain;
         // Manually populate a diff to test the rendering — the
         // async diff() needs a live socket.
@@ -2499,9 +2502,7 @@ mod tests {
             .push((Family::Inet, "legacy".to_string()));
         let cfg = NftablesConfig::new().table("filter", Family::Inet, |t| {
             t.chain("input", |c| {
-                c.hook(Hook::Input)
-                    .priority(Priority::Filter)
-                    .policy(Policy::Drop)
+                c.base(BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Drop))
             })
         });
         d.tables_to_add.push(cfg.tables()[0].clone());

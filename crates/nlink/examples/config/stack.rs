@@ -23,7 +23,7 @@
 use nlink::facade::Stack;
 use nlink::netlink::config::NetworkConfig;
 use nlink::netlink::nftables::config::NftablesConfig;
-use nlink::netlink::nftables::{Family, Hook, Policy, Priority};
+use nlink::netlink::nftables::{BaseChain, Family, FilterHook, Policy, Priority};
 
 fn desired() -> Stack {
     Stack::new()
@@ -33,14 +33,17 @@ fn desired() -> Stack {
                 .address("stack0", "192.0.2.1/24")
                 .expect("valid CIDR"),
         )
-        .nftables(NftablesConfig::new().table("stack_demo", Family::Inet, |t| {
-            t.chain("input", |c| {
-                c.hook(Hook::Input)
-                    .priority(Priority::Filter)
-                    .policy(Policy::Accept)
-            })
-            .rule("input", |r| r.match_iif("stack0").counter().accept())
-        }))
+        .nftables(
+            NftablesConfig::new().table("stack_demo", Family::Inet, |t| {
+                t.chain("input", |c| {
+                    c.base(
+                        BaseChain::filter(FilterHook::Input, Priority::Filter)
+                            .policy(Policy::Accept),
+                    )
+                })
+                .rule("input", |r| r.match_iif("stack0").counter().accept())
+            }),
+        )
 }
 
 #[tokio::main]

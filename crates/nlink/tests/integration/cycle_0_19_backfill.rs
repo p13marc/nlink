@@ -770,7 +770,7 @@ async fn plan_204_c1_verdict_jump_round_trips_through_kernel() -> Result<()> {
     nlink::require_module!("nf_tables");
     with_timeout(async {
         use nlink::netlink::Nftables;
-        use nlink::netlink::nftables::types::{Chain, Family, Hook, Rule};
+        use nlink::netlink::nftables::types::{BaseChain, Chain, Family, FilterHook, Rule};
 
         let ns = TestNamespace::new("p204-c1-jump")?;
         let conn = nlink::Connection::<Nftables>::new_in(ns.name())?;
@@ -780,8 +780,10 @@ async fn plan_204_c1_verdict_jump_round_trips_through_kernel() -> Result<()> {
         // jump target).
         let parent = Chain::new("t", "parent")?
             .family(Family::Inet)
-            .hook(Hook::Input)
-            .priority(nlink::netlink::nftables::Priority::Custom(0));
+            .base(BaseChain::filter(
+                FilterHook::Input,
+                nlink::netlink::nftables::Priority::Custom(0),
+            ));
         let child = Chain::new("t", "child")?.family(Family::Inet);
 
         conn.transaction()
@@ -880,7 +882,7 @@ async fn plan_211_m1_inet_ingress_chain_installs_on_correct_hook() -> Result<()>
     nlink::require_module!("nf_tables");
     with_timeout(async {
         use nlink::netlink::Nftables;
-        use nlink::netlink::nftables::types::{Chain, Family, Hook};
+        use nlink::netlink::nftables::types::{BaseChain, Chain, Family, FilterHook};
 
         let ns = TestNamespace::new("p211-m1-ingress")?;
         let conn = nlink::Connection::<Nftables>::new_in(ns.name())?;
@@ -888,26 +890,27 @@ async fn plan_211_m1_inet_ingress_chain_installs_on_correct_hook() -> Result<()>
         // Install the Prerouting chain first — always supported.
         let prerouting = Chain::new("t", "pre")?
             .family(Family::Inet)
-            .hook(Hook::Prerouting)
-            .priority(nlink::netlink::nftables::Priority::Custom(0));
+            .base(BaseChain::filter(
+                FilterHook::Prerouting,
+                nlink::netlink::nftables::Priority::Custom(0),
+            ));
         conn.transaction()
             .add_table("t", Family::Inet)
             .add_chain(prerouting)
             .commit(&conn)
             .await?;
 
-        // Now try the InetIngress chain on the same table at the
-        // same priority. Pre-Plan-211 this would EEXIST against
-        // the Prerouting chain because both aliased to the same
-        // hook value. Post-fix InetIngress = NF_INET_INGRESS (5).
-        //
-        // NetdevIngress chains require a `device` attribute;
-        // InetIngress on the Inet family doesn't (it's process-
-        // global ingress, no per-iface bind).
-        let inet_ingress = Chain::new("t", "ingress")?
-            .family(Family::Inet)
-            .hook(Hook::InetIngress)
-            .priority(nlink::netlink::nftables::Priority::Custom(0));
+        // Now try an ingress chain on the same table at the same
+        // priority. Pre-Plan-211 this would EEXIST against the
+        // Prerouting chain because both aliased to the same hook
+        // value. In an inet table ingress is NF_INET_INGRESS (5).
+        let inet_ingress =
+            Chain::new("t", "ingress")?
+                .family(Family::Inet)
+                .base(BaseChain::filter(
+                    FilterHook::ingress("lo"),
+                    nlink::netlink::nftables::Priority::Custom(0),
+                ));
 
         match conn
             .transaction()
@@ -1049,15 +1052,17 @@ async fn plan_204_c1_verdict_goto_round_trips_through_kernel() -> Result<()> {
     nlink::require_module!("nf_tables");
     with_timeout(async {
         use nlink::netlink::Nftables;
-        use nlink::netlink::nftables::types::{Chain, Family, Hook, Rule};
+        use nlink::netlink::nftables::types::{BaseChain, Chain, Family, FilterHook, Rule};
 
         let ns = TestNamespace::new("p204-c1-goto")?;
         let conn = nlink::Connection::<Nftables>::new_in(ns.name())?;
 
         let parent = Chain::new("t", "parent")?
             .family(Family::Inet)
-            .hook(Hook::Input)
-            .priority(nlink::netlink::nftables::Priority::Custom(0));
+            .base(BaseChain::filter(
+                FilterHook::Input,
+                nlink::netlink::nftables::Priority::Custom(0),
+            ));
         let child = Chain::new("t", "child")?.family(Family::Inet);
 
         conn.transaction()

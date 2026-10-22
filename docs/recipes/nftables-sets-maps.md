@@ -308,7 +308,8 @@ and the elements rules added stay.
 ```rust,no_run
 use nlink::netlink::nftables::config::NftablesConfig;
 use nlink::netlink::nftables::types::{
-    Family, Hook, PacketField, Priority, SetDataType, SetElement, SetKeyType, Verdict,
+    BaseChain, Family, FilterHook, PacketField, Priority, SetDataType, SetElement, SetKeyType,
+    Verdict,
 };
 use nlink::netlink::nftables::{ObjectConfig, ObjectType, QuotaExpr};
 use std::net::Ipv4Addr;
@@ -316,7 +317,7 @@ use std::time::Duration;
 
 # async fn run(conn: &nlink::Connection<nlink::netlink::Nftables>) -> nlink::Result<()> {
 let cfg = NftablesConfig::new().table("filter", Family::Inet, |t| {
-    t.chain("input", |c| c.hook(Hook::Input).priority(Priority::Filter))
+    t.chain("input", |c| c.base(BaseChain::filter(FilterHook::Input, Priority::Filter)))
     .set("allowed_nets", |s| {
         s.key_type(SetKeyType::Ipv4Addr)
             .interval()

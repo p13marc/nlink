@@ -23,13 +23,12 @@
 //!
 //! ```no_run
 //! use nlink::{Connection, Nftables, NftablesConfig};
-//! use nlink::netlink::nftables::{Family, Hook, Priority, Policy};
+//! use nlink::netlink::nftables::{BaseChain, Family, FilterHook, Policy, Priority};
 //!
 //! # async fn run() -> nlink::Result<()> {
+//! let input = BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Drop);
 //! let cfg = NftablesConfig::new()
-//!     .table("filter", Family::Inet, |t| t
-//!         .chain("input", |c| c
-//!             .hook(Hook::Input).priority(Priority::Filter).policy(Policy::Drop)));
+//!     .table("filter", Family::Inet, |t| t.chain("input", |c| c.base(input)));
 //!
 //! let conn = Connection::<Nftables>::new()?;
 //! let diff = cfg.diff(&conn).await?;

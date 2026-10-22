@@ -216,14 +216,21 @@ impl super::types::NftablesConfig {
     ///   the diff places rules in declared order;
     /// - every declared set element must fit its set;
     /// - a rule's chain must be declared: an undeclared chain is deleted;
-    /// - a base chain needs a hook its family has (`arp` has input and
-    ///   output; `bridge` no ingress), a `netdev` or inet
-    ///   `ingress` chain needs a device, a `route` chain hooks output, and a
-    ///   `nat` chain's priority is above -200;
-    /// - a regular chain (no hook) has no policy.
+    /// - a base chain needs what its table's family has
+    ///   ([`BaseChain::check_family`]): a hook the family has (`arp` has
+    ///   input and output, `bridge` and `ip` no ingress), `nat` and `route`
+    ///   chains only in ip, ip6 and inet tables, and a `nat` chain's
+    ///   priority above -200;
+    /// - what the deprecated chain setters describe must be a chain: no
+    ///   policy without a hook, an ingress or egress hook with a device, a
+    ///   `route` chain on output, a `nat` chain off forward and ingress. A
+    ///   [`BaseChain`] cannot describe any of these (#708).
     ///
     /// The kernel refuses each of these chains, or — for a hook of another
     /// family — installs something else (#484).
+    ///
+    /// [`BaseChain`]: crate::netlink::nftables::BaseChain
+    /// [`BaseChain::check_family`]: crate::netlink::nftables::BaseChain::check_family
     ///
     /// [`diff`]: Self::diff
     pub fn validate(&self) -> Result<()> {
@@ -323,38 +330,26 @@ fn check_interval_lookups(table: &super::types::DeclaredTable) -> Result<()> {
     Ok(())
 }
 
-/// The chain checks of [`validate`](super::types::NftablesConfig::validate).
+/// The chain checks of [`validate`](super::types::NftablesConfig::validate):
+/// what the deprecated setters describe that no chain is, and what the
+/// table's family does not have ([`BaseChain::family_problem`]).
+///
+/// [`BaseChain::family_problem`]: crate::netlink::nftables::BaseChain
 fn validate_chain(
     table: &str,
     family: crate::netlink::nftables::Family,
     chain: &super::types::DeclaredChain,
 ) -> Result<()> {
-    use crate::netlink::nftables::{ChainType, Family, Hook, Priority};
-
-    let at = format!("{table}/{}", chain.name());
-    let refuse = |why: String| Err(Error::invalid_message(format!("{at}: {why}")));
-    let Some(hook) = chain.hook() else {
-        if chain.policy().is_some() {
-            return refuse("a policy needs a base chain; a chain without a hook has none".into());
-        }
-        return Ok(());
-    };
-    if !hook.is_valid_for_family(family) {
-        return refuse(format!("the {family:?} family has no {hook:?} hook"));
-    }
-    if (family == Family::Netdev || hook == Hook::InetIngress) && chain.devices().is_empty() {
-        return refuse(format!("a {hook:?} chain needs a device"));
-    }
-    // No type is `filter`: the kernel's default.
-    match chain.chain_type().unwrap_or(ChainType::Filter) {
-        ChainType::Route if hook != Hook::Output => {
-            refuse("a route chain hooks output only".into())
-        }
-        // `NF_IP_PRI_CONNTRACK`: NAT needs the connection tracked first.
-        ChainType::Nat if chain.priority().unwrap_or(Priority::Filter).to_i32() <= -200 => {
-            refuse("a nat chain's priority must be above -200 (conntrack)".into())
-        }
-        _ => Ok(()),
+    let problem = chain
+        .invalid
+        .clone()
+        .or_else(|| chain.base().and_then(|base| base.family_problem(family)));
+    match problem {
+        Some(why) => Err(Error::invalid_message(format!(
+            "{table}/{}: {why}",
+            chain.name()
+        ))),
+        None => Ok(()),
     }
 }
 
@@ -685,9 +680,100 @@ mod tests {
     use super::*;
 
     /// Each chain the kernel would refuse, or read as another chain, and
-    /// a rule in an undeclared chain, fail `validate()` (#484).
+    /// a rule in an undeclared chain, fail `validate()` (#484). With a
+    /// `BaseChain` only the family can be wrong (#708); the matrix is the
+    /// one `nftables_chain_kinds` checks against the kernel.
     #[test]
     fn validate_refuses_chains_the_kernel_would_not_take() {
+        use crate::netlink::nftables::config::{DeclaredChainBuilder, NftablesConfig};
+        use crate::netlink::nftables::{BaseChain, Family, FilterHook, NatHook, Priority};
+
+        let check = |family: Family, base: BaseChain| {
+            NftablesConfig::new()
+                .table("t", family, move |t| t.chain("c", |c| c.base(base)))
+                .validate()
+                .map_err(|e| e.to_string())
+        };
+        let filter = |hook| BaseChain::filter(hook, Priority::Filter);
+        let refused = [
+            (
+                Family::Arp,
+                filter(FilterHook::Forward),
+                "the arp family has no forward hook",
+            ),
+            (
+                Family::Bridge,
+                filter(FilterHook::ingress("d0")),
+                "no ingress hook",
+            ),
+            // ip and ip6 have no ingress hook; only inet has (#708).
+            (
+                Family::Ip,
+                filter(FilterHook::ingress("d0")),
+                "no ingress hook",
+            ),
+            (
+                Family::Ip6,
+                filter(FilterHook::ingress("d0")),
+                "no ingress hook",
+            ),
+            (
+                Family::Inet,
+                filter(FilterHook::egress("d0")),
+                "no egress hook",
+            ),
+            (Family::Netdev, filter(FilterHook::Input), "no input hook"),
+            (
+                Family::Bridge,
+                BaseChain::nat(NatHook::Prerouting, Priority::DstNat),
+                "the bridge family has no nat chains",
+            ),
+            (
+                Family::Arp,
+                BaseChain::route(Priority::Filter),
+                "no route chains",
+            ),
+            (
+                Family::Ip,
+                BaseChain::nat(NatHook::Prerouting, Priority::Raw),
+                "above -200",
+            ),
+        ];
+        for (family, base, want) in refused {
+            let err = check(family, base).expect_err(want);
+            assert!(err.contains(want), "{family:?}: {err}");
+        }
+        let accepted = [
+            (Family::Arp, filter(FilterHook::Input)),
+            (Family::Arp, filter(FilterHook::Output)),
+            (Family::Bridge, filter(FilterHook::Forward)),
+            (Family::Ip, BaseChain::route(Priority::Filter)),
+            (
+                Family::Ip6,
+                BaseChain::nat(NatHook::Postrouting, Priority::SrcNat),
+            ),
+            (Family::Inet, filter(FilterHook::ingress(["d0", "d1"]))),
+            (Family::Netdev, filter(FilterHook::ingress("d0"))),
+            (Family::Netdev, filter(FilterHook::egress("d0"))),
+        ];
+        for (family, base) in accepted {
+            assert_eq!(check(family, base), Ok(()), "{family:?}");
+        }
+        let regular: fn(DeclaredChainBuilder) -> DeclaredChainBuilder = |c| c;
+        assert_eq!(
+            NftablesConfig::new()
+                .table("t", Family::Inet, |t| t.chain("c", regular))
+                .validate()
+                .map_err(|e| e.to_string()),
+            Ok(())
+        );
+    }
+
+    /// The deprecated setters can still describe what no chain is; the
+    /// config holds the reason and `validate()` reports it (#708).
+    #[test]
+    #[allow(deprecated)]
+    fn validate_refuses_what_the_deprecated_setters_describe() {
         use crate::netlink::nftables::config::{DeclaredChainBuilder, NftablesConfig};
         use crate::netlink::nftables::{ChainType, Family, Hook, Policy, Priority};
 
@@ -697,71 +783,64 @@ mod tests {
                 .validate()
                 .map_err(|e| e.to_string())
         };
-        let refused = [
+        type Chain = fn(DeclaredChainBuilder) -> DeclaredChainBuilder;
+        let refused: [(Family, Chain, &str); 7] = [
+            (Family::Inet, |c| c.policy(Policy::Drop), "a policy needs"),
             (
-                Family::Arp,
-                check(Family::Arp, |c| c.hook(Hook::Forward)),
-                "no Forward hook",
-            ),
-            (
-                Family::Bridge,
-                check(Family::Bridge, |c| c.hook(Hook::NetdevIngress).device("d0")),
-                "no NetdevIngress hook",
+                Family::Netdev,
+                |c| c.hook(Hook::NetdevIngress),
+                "an ingress chain needs a device",
             ),
             (
                 Family::Inet,
-                check(Family::Inet, |c| c.policy(Policy::Drop)),
-                "a policy needs",
+                |c| c.hook(Hook::InetIngress),
+                "an ingress chain needs a device",
             ),
             (
                 Family::Netdev,
-                check(Family::Netdev, |c| c.hook(Hook::NetdevIngress)),
-                "needs a device",
-            ),
-            (
-                Family::Inet,
-                check(Family::Inet, |c| c.hook(Hook::InetIngress)),
-                "needs a device",
+                |c| c.hook(Hook::Egress),
+                "an egress chain needs a device",
             ),
             (
                 Family::Ip,
-                check(Family::Ip, |c| {
-                    c.hook(Hook::Input).chain_type(ChainType::Route)
-                }),
+                |c| c.hook(Hook::Input).chain_type(ChainType::Route),
                 "hooks output only",
             ),
             (
                 Family::Ip,
-                check(Family::Ip, |c| {
-                    c.hook(Hook::Prerouting)
-                        .chain_type(ChainType::Nat)
-                        .priority(Priority::Raw)
-                }),
-                "above -200",
+                |c| c.hook(Hook::Forward).chain_type(ChainType::Nat),
+                "a nat chain has no forward hook",
+            ),
+            (
+                Family::Ip,
+                |c| c.hook(Hook::Input).device("d0"),
+                "takes no device",
             ),
         ];
-        for (family, outcome, want) in refused {
-            let err = outcome.expect_err(want);
+        for (family, chain, want) in refused {
+            let err = check(family, chain).expect_err(want);
             assert!(err.contains(want), "{family:?}: {err}");
         }
-        type Chain = fn(DeclaredChainBuilder) -> DeclaredChainBuilder;
-        let accepted: [(Family, Chain); 6] = [
-            (Family::Arp, |c| c.hook(Hook::Input)),
-            (Family::Arp, |c| c.hook(Hook::Output)),
+        // A hook alone is a filter chain at priority 0, as the kernel makes
+        // it; the old spellings of ingress mean the family's own.
+        let accepted: [(Family, Chain); 3] = [
             (Family::Ip, |c| {
-                c.hook(Hook::Output).chain_type(ChainType::Route)
-            }),
-            (Family::Ip, |c| {
-                c.hook(Hook::Prerouting)
-                    .chain_type(ChainType::Nat)
-                    .priority(Priority::DstNat)
+                c.hook(Hook::Input).priority(Priority::Custom(5))
             }),
             (Family::Netdev, |c| c.hook(Hook::NetdevIngress).device("d0")),
-            (Family::Inet, |c| c),
+            (Family::Inet, |c| c.device("d0").hook(Hook::InetIngress)),
         ];
         for (family, chain) in accepted {
             assert_eq!(check(family, chain), Ok(()), "{family:?}");
         }
+    }
+
+    /// A rule in an undeclared chain, and a match no interface could have,
+    /// fail `validate()` (#484).
+    #[test]
+    fn validate_refuses_rules_the_kernel_would_not_take() {
+        use crate::netlink::nftables::Family;
+        use crate::netlink::nftables::config::NftablesConfig;
 
         let stray = NftablesConfig::new()
             .table("t", Family::Inet, |t| t.rule("c", |r| r.accept()))

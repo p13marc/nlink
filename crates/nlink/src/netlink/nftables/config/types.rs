@@ -4,8 +4,8 @@
 use super::super::{
     expr::{ElementStatement, Expr},
     types::{
-        ChainType, Family, Hook, Policy, Priority, Rule, Set, SetDataType, SetElement, SetFlags,
-        SetKeyType, SetPolicy,
+        BaseChain, ChainKind, ChainType, Family, Hook, Policy, Priority, Rule, Set, SetDataType,
+        SetElement, SetFlags, SetKeyType, SetPolicy,
     },
     object::{Object, ObjectConfig},
 };
@@ -376,23 +376,23 @@ impl DeclaredTableBuilder {
 // DeclaredChain
 // =============================================================================
 
-/// A declared chain — name + optional base-chain hook spec.
-/// Non-base (regular) chains omit the hook fields.
+/// A declared chain: its name and [`ChainKind`], a regular chain or a base
+/// chain with its hook, type, priority and policy.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeclaredChain {
     pub(crate) name: String,
-    pub(crate) hook: Option<Hook>,
-    pub(crate) priority: Option<Priority>,
-    pub(crate) policy: Option<Policy>,
-    pub(crate) chain_type: Option<ChainType>,
-    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
-    pub(crate) devices: Vec<String>,
+    pub(crate) kind: ChainKind,
     pub(crate) exclusive: bool,
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub(crate) comment: Option<String>,
+    /// Why the deprecated setters describe no chain (a policy without a
+    /// hook, a nat chain on forward), which
+    /// [`validate`](NftablesConfig::validate) reports.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) invalid: Option<String>,
 }
 
 impl DeclaredChain {
@@ -410,35 +410,47 @@ impl DeclaredChain {
     pub fn name(&self) -> &str {
         &self.name
     }
+    /// What the chain is (#708).
+    pub fn kind(&self) -> &ChainKind {
+        &self.kind
+    }
+    /// The base chain, if this is one.
+    pub fn base(&self) -> Option<&BaseChain> {
+        self.kind.base()
+    }
+    /// The base chain's hook.
     pub fn hook(&self) -> Option<Hook> {
-        self.hook
+        self.base().map(BaseChain::hook)
     }
+    /// The base chain's priority.
     pub fn priority(&self) -> Option<Priority> {
-        self.priority
+        self.base().map(BaseChain::priority)
     }
+    /// The base chain's policy, if one was declared.
     pub fn policy(&self) -> Option<Policy> {
-        self.policy
+        self.base().and_then(BaseChain::default_policy)
     }
+    /// The base chain's type.
     pub fn chain_type(&self) -> Option<ChainType> {
-        self.chain_type
+        self.base().map(BaseChain::chain_type)
     }
     /// The device of a chain bound to one; see [`devices`](Self::devices)
     /// for one bound to several.
     pub fn device(&self) -> Option<&str> {
-        match self.devices.as_slice() {
+        match self.devices() {
             [one] => Some(one),
             _ => None,
         }
     }
     /// Every device the chain is bound to (#703).
     pub fn devices(&self) -> &[String] {
-        &self.devices
+        self.base().map_or(&[], BaseChain::devices)
     }
 
     /// Is this a base chain (one that hooks into the kernel
     /// packet path)? Non-base chains are jump-only.
     pub fn is_base(&self) -> bool {
-        self.hook.is_some()
+        self.base().is_some()
     }
 }
 
@@ -483,61 +495,96 @@ impl DeclaredChainBuilder {
         self
     }
 
-    /// Set the hook (makes this a base chain). Pair with
-    /// [`Self::priority`].
+    /// Make this a base chain (#708). Without it the chain is a regular
+    /// one. A changed hook, type, priority or device set recreates the
+    /// chain; a changed policy is applied in place. A deprecated setter
+    /// called after it changes that part of what it set.
+    ///
+    /// ```
+    /// use nlink::netlink::nftables::config::NftablesConfig;
+    /// use nlink::netlink::nftables::{BaseChain, Family, FilterHook, NatHook, Policy, Priority};
+    ///
+    /// let cfg = NftablesConfig::new().table("fw", Family::Inet, |t| {
+    ///     t.chain("input", |c| {
+    ///         c.base(BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Drop))
+    ///     })
+    ///     .chain("post", |c| c.base(BaseChain::nat(NatHook::Postrouting, Priority::SrcNat)))
+    ///     .chain("from-lan", |c| c)
+    /// });
+    /// cfg.validate()?;
+    /// # Ok::<(), nlink::Error>(())
+    /// ```
+    pub fn base(mut self, base: BaseChain) -> Self {
+        self.hook = Some(base.hook());
+        self.priority = Some(base.priority());
+        self.chain_type = Some(base.chain_type());
+        self.policy = base.default_policy();
+        self.devices = base.devices().to_vec();
+        self
+    }
+
+    /// Set the hook (makes this a base chain).
+    #[deprecated(
+        since = "0.33.0",
+        note = "use `base(BaseChain::filter(..))`, `nat` or `route`"
+    )]
     pub fn hook(mut self, hook: Hook) -> Self {
         self.hook = Some(hook);
         self
     }
 
-    /// Set the chain priority. Only meaningful for base chains.
+    /// Set the chain priority.
+    #[deprecated(since = "0.33.0", note = "a `BaseChain` takes its priority")]
     pub fn priority(mut self, p: Priority) -> Self {
         self.priority = Some(p);
         self
     }
 
     /// Set the default policy for the chain (`Accept` or `Drop`).
-    /// Only meaningful for base chains; non-base chains return
-    /// to the calling chain unconditionally.
+    #[deprecated(since = "0.33.0", note = "use `BaseChain::policy`")]
     pub fn policy(mut self, p: Policy) -> Self {
         self.policy = Some(p);
         self
     }
 
-    /// Set the chain type. [`ChainType::Filter`] is the kernel
-    /// default for base chains; [`ChainType::Nat`] is
-    /// **required** for `prerouting`/`postrouting` NAT chains —
-    /// without it `masquerade`/`snat`/`dnat` verdicts refuse to
-    /// load with `EOPNOTSUPP` and the apply rolls back.
-    /// Mirrors the imperative [`Chain::chain_type`](crate::netlink::nftables::types::Chain::chain_type) setter.
+    /// Set the chain type.
+    #[deprecated(
+        since = "0.33.0",
+        note = "use `base(BaseChain::filter(..))`, `BaseChain::nat` or `BaseChain::route`"
+    )]
     pub fn chain_type(mut self, ct: ChainType) -> Self {
         self.chain_type = Some(ct);
         self
     }
 
-    /// Bind a base chain to a specific interface (`type filter hook
-    /// ingress device eth0 priority -150`). **Required** for the
-    /// [`Family::Netdev`] hooks and for `Hook::InetIngress`, which
-    /// [`validate`](super::NftablesConfig::validate) checks; a recent kernel
-    /// refuses it on any other hook (`EOPNOTSUPP`). Mirrors the imperative
-    /// [`Chain::device`](crate::netlink::nftables::types::Chain::device)
-    /// setter: call it again to bind several devices (#703). A changed set
-    /// of devices recreates the chain.
+    /// Bind a base chain to an interface; call it again for several
+    /// (#703).
+    #[deprecated(
+        since = "0.33.0",
+        note = "use `FilterHook::ingress(..)` or `FilterHook::egress(..)`"
+    )]
     pub fn device(mut self, dev: impl Into<String>) -> Self {
         self.devices.push(dev.into());
         self
     }
 
     fn into_chain(self) -> DeclaredChain {
+        let (kind, invalid) = match ChainKind::from_parts(
+            self.hook,
+            self.chain_type,
+            self.priority,
+            self.policy,
+            &self.devices,
+        ) {
+            Ok(kind) => (kind, None),
+            Err(why) => (ChainKind::Regular, Some(why)),
+        };
         DeclaredChain {
             name: self.name,
-            hook: self.hook,
-            priority: self.priority,
-            policy: self.policy,
-            chain_type: self.chain_type,
-            devices: self.devices,
+            kind,
             exclusive: self.exclusive,
             comment: self.comment,
+            invalid,
         }
     }
 }
@@ -1082,7 +1129,7 @@ impl DeclaredFlowtableBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::netlink::nftables::NFT_TABLE_F_PERSIST;
+    use crate::netlink::nftables::{FilterHook, NFT_TABLE_F_PERSIST, NatHook};
 
     #[test]
     fn empty_config_has_no_tables() {
@@ -1096,9 +1143,9 @@ mod tests {
         let cfg = NftablesConfig::new().table("filter", Family::Inet, |t| {
             t.persist(true)
                 .chain("input", |c| {
-                    c.hook(Hook::Input)
-                        .priority(Priority::Filter)
-                        .policy(Policy::Drop)
+                    c.base(
+                        BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Drop),
+                    )
                 })
                 .rule("input", |r| r)
                 .rule_keyed("input", "allow-icmp", |r| r)
@@ -1154,9 +1201,7 @@ mod tests {
     fn declared_chain_type_round_trips_to_struct() {
         let cfg = NftablesConfig::new().table("nat", Family::Inet, |t| {
             t.chain("postrouting", |c| {
-                c.hook(Hook::Postrouting)
-                    .priority(Priority::SrcNat)
-                    .chain_type(ChainType::Nat)
+                c.base(BaseChain::nat(NatHook::Postrouting, Priority::SrcNat))
             })
         });
         let chain = cfg.tables().first().unwrap().chains().first().unwrap();
@@ -1169,10 +1214,10 @@ mod tests {
     fn declared_chain_device_round_trips_to_struct() {
         let cfg = NftablesConfig::new().table("ft", Family::Netdev, |t| {
             t.chain("ingress", |c| {
-                c.hook(Hook::NetdevIngress)
-                    .priority(Priority::Filter)
-                    .chain_type(ChainType::Filter)
-                    .device("eth0")
+                c.base(BaseChain::filter(
+                    FilterHook::ingress("eth0"),
+                    Priority::Filter,
+                ))
             })
         });
         let chain = cfg.tables().first().unwrap().chains().first().unwrap();
@@ -1180,18 +1225,33 @@ mod tests {
         assert_eq!(chain.device(), Some("eth0"));
     }
 
+    /// A base chain has a type, a hook and a priority, always; a regular
+    /// chain has none, nor a policy (#708).
     #[test]
-    fn declared_chain_omits_chain_type_and_device_by_default() {
+    fn a_base_chain_says_what_it_is_and_a_regular_one_has_nothing() {
         let cfg = NftablesConfig::new().table("filter", Family::Inet, |t| {
             t.chain("input", |c| {
-                c.hook(Hook::Input)
-                    .priority(Priority::Filter)
-                    .policy(Policy::Drop)
+                c.base(BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Drop))
             })
+            .chain("jumps", |c| c)
         });
-        let chain = cfg.tables().first().unwrap().chains().first().unwrap();
-        assert_eq!(chain.chain_type(), None);
-        assert_eq!(chain.device(), None);
-        assert_eq!(chain.policy(), Some(Policy::Drop));
+        let [input, jumps] = cfg.tables()[0].chains() else {
+            panic!("two chains")
+        };
+        assert_eq!(input.chain_type(), Some(ChainType::Filter));
+        assert_eq!(input.hook(), Some(Hook::Input));
+        assert_eq!(input.priority(), Some(Priority::Filter));
+        assert_eq!(input.device(), None);
+        assert_eq!(input.policy(), Some(Policy::Drop));
+        assert_eq!(jumps.kind(), &ChainKind::Regular);
+        assert_eq!(
+            (
+                jumps.chain_type(),
+                jumps.hook(),
+                jumps.priority(),
+                jumps.policy()
+            ),
+            (None, None, None, None)
+        );
     }
 }

@@ -5,7 +5,7 @@
 //! replaced (which resets its counters), not duplicated, not moved.
 
 use nlink::netlink::nftables::config::NftablesConfig;
-use nlink::netlink::nftables::types::{ChainType, Family, Hook, Priority, Rule};
+use nlink::netlink::nftables::types::{BaseChain, Family, FilterHook, Priority, Rule};
 use nlink::netlink::{Connection, Nftables};
 
 use crate::common::traffic::{lo_up, send_udp};
@@ -22,9 +22,7 @@ where
 {
     NftablesConfig::new().table("t", Family::Ip, move |mut t| {
         t = t.chain("out", |c| {
-            c.hook(Hook::Output)
-                .priority(Priority::Filter)
-                .chain_type(ChainType::Filter)
+            c.base(BaseChain::filter(FilterHook::Output, Priority::Filter))
         });
         for (key, body) in rules {
             t = t.rule_keyed("out", key, body);
@@ -225,9 +223,7 @@ async fn an_overlong_key_is_an_error() -> nlink::Result<()> {
         let key = "k".repeat(122);
         let config = NftablesConfig::new().table("t", Family::Ip, move |t| {
             t.chain("out", |c| {
-                c.hook(Hook::Output)
-                    .priority(Priority::Filter)
-                    .chain_type(ChainType::Filter)
+                c.base(BaseChain::filter(FilterHook::Output, Priority::Filter))
             })
             .rule_keyed("out", key.clone(), |r| r.match_udp_dport(1))
         });
@@ -251,9 +247,7 @@ async fn unkeyed_rules_converge() -> nlink::Result<()> {
     with_timeout(async {
         let config = NftablesConfig::new().table("t", Family::Ip, |t| {
             t.chain("out", |c| {
-                c.hook(Hook::Output)
-                    .priority(Priority::Filter)
-                    .chain_type(ChainType::Filter)
+                c.base(BaseChain::filter(FilterHook::Output, Priority::Filter))
             })
             .rule("out", |r| r.match_udp_dport(1).counter())
             .rule("out", |r| r.match_udp_dport(2).counter())
@@ -320,9 +314,7 @@ async fn an_exclusive_chain_removes_foreign_rules() -> nlink::Result<()> {
     with_timeout(async {
         let config = NftablesConfig::new().table("t", Family::Ip, |t| {
             t.chain("out", |c| {
-                c.hook(Hook::Output)
-                    .priority(Priority::Filter)
-                    .chain_type(ChainType::Filter)
+                c.base(BaseChain::filter(FilterHook::Output, Priority::Filter))
                     .exclusive()
             })
             .rule_keyed("out", "k", |r| r.match_udp_dport(1))

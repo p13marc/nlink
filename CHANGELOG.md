@@ -70,7 +70,62 @@ All notable changes to this project will be documented in this file.
   diff deletes, replaces or moves has to read as `nft -s -a list chain`
   prints it at that handle.
 
+- **A base chain is a `BaseChain`, built from a hook its type has** (#708,
+  its (e)). A chain is a `ChainKind`: `Regular`, which only a jump or goto
+  enters, or `Base(BaseChain)`. `BaseChain::filter(FilterHook, Priority)`,
+  `BaseChain::nat(NatHook, Priority)` and `BaseChain::route(Priority)`
+  build one, `.policy(..)` sets its policy, and `Chain::base` and
+  `DeclaredChainBuilder::base` take it:
+
+  ```text
+  t.chain("input", |c| c.base(BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Drop)))
+  t.chain("post", |c| c.base(BaseChain::nat(NatHook::Postrouting, Priority::SrcNat)))
+  t.chain("in0", |c| c.base(BaseChain::filter(FilterHook::ingress(["eth0", "eth1"]), Priority::Filter)))
+  ```
+
+  Five shapes the kernel refuses can no longer be written: a policy, type or
+  priority on a regular chain, a nat chain on forward or ingress, a route
+  chain off output, and an ingress or egress chain without a device
+  (`Devices` holds at least one; an empty array is a compile error). What
+  depends on the table's family is checked before anything is sent, by
+  `validate()` and now also by `Connection::add_chain` and `Transaction`
+  (`BaseChain::check_family`):
+  - the hooks a family has;
+  - nat and route chains only in ip, ip6 and inet tables;
+  - a nat priority above -200.
+
+  `BaseChain::try_new` builds one from parts known only at run time, as
+  `nlink-nft` does. `ChainInfo::kind()` reads a kernel chain back as one.
+  - The old setters (`hook`, `priority`, `chain_type`, `policy`, `device` on
+    `Chain` and `DeclaredChainBuilder`) are deprecated and still work.
+    `Hook::Ingress` and `Hook::Egress` are numbered by the family, so
+    `NetdevIngress`, `InetIngress` and `NetdevEgress` are deprecated too.
+  - **Breaks:** a declared chain's JSON in a diff is `"kind": "regular"` or
+    `"kind": {"base": {"type", "hook", "devices", "priority", "policy"}}`,
+    not flat `hook`/`priority`/`chain-type`/`devices` fields.
+  - **Behaviour:** the diff compares every base chain's type and priority.
+    One declared with a hook alone is a filter chain at priority 0, as the
+    kernel makes it, so a kernel chain of another type or priority is
+    recreated where it used to be left. `DeclaredChain::chain_type()` and
+    `priority()` are `Some` for every base chain. A `Chain` with a hook and
+    no type is a filter chain instead of an error. `Priority` compares by
+    value: `Custom(0) == Filter`.
+
+  In `nftables_chain_kinds`, the kernel is the oracle. nft and nlink each
+  try every family, chain type and hook, 131 shapes, and must accept and
+  refuse the same ones. nlink creates each of the 43 both accept: nft must
+  list it as it lists its own, and `ChainInfo::kind()` must read back what
+  was sent. Every kind each family has converges declared together, and so
+  do changes of type, hook, priority, policy and devices, and what the
+  deprecated setters write. The lane's module list gains `nft_chain_nat`.
+
 ### Fixed
+
+- **An ingress chain in an ip or ip6 table passed `validate()`** (#708).
+  Only inet's filter chain type has the ingress hook; the kernel refuses
+  one in an ip or ip6 table with `EOPNOTSUPP` at apply time. Now
+  `validate()` refuses it first. Put back, the old rule fails two shapes of
+  `nftables_chain_kinds`.
 
 - **No reconcile could be spawned** (#879). `tokio::spawn(async move {
   cfg.apply_reconcile(&conn, opts).await })` did not compile ("implementation
