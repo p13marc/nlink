@@ -4389,6 +4389,7 @@ mod tests {
         assert_eq!(
             keys(crate::netlink::nftables::config::NftablesDiff::json_schema_value()),
             [
+                "blocked",
                 "chains-to-add",
                 "chains-to-delete",
                 "chains-to-modify",
@@ -4397,7 +4398,6 @@ mod tests {
                 "flowtables-to-delete",
                 "flowtables-to-update",
                 "generation",
-                "kept-in-use",
                 "objects-to-add",
                 "objects-to-delete",
                 "objects-to-update",
@@ -4410,7 +4410,6 @@ mod tests {
                 "sets-to-add",
                 "sets-to-delete",
                 "sets-to-update",
-                "tables-refused",
                 "tables-to-add",
                 "tables-to-delete",
                 "tables-to-modify",

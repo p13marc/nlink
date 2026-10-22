@@ -1325,11 +1325,14 @@ async fn a_chain_recreate_over_a_rule_nlink_did_not_write_is_refused() -> nlink:
         let moved = chain_c(Some((FilterHook::Input, Priority::Custom(-10))), false);
         let diff = moved.diff(&nft).await?;
         assert!(
-            diff.chains_to_recreate
-                .first()
-                .is_some_and(|r| r.is_refused()),
+            matches!(
+                diff.blocked.as_slice(),
+                [nlink::netlink::nftables::config::Blocked::ChainRecreate { chain, rules, .. }]
+                    if chain == "c" && rules.len() == 1
+            ),
             "{diff}"
         );
+        assert!(diff.chains_to_recreate.is_empty(), "{diff}");
         assert!(diff.to_string().contains("recreate refused"), "{diff}");
         let err = diff.apply(&nft).await.expect_err("the recreate is refused");
         assert!(err.is_not_supported(), "{err}");
@@ -1489,7 +1492,14 @@ async fn table_flags_change_in_place() -> nlink::Result<()> {
 
     let nft_conn = ns.connection_for::<Nftables>()?;
     let diff = table(NFT_TABLE_F_PERSIST).diff(&nft_conn).await?;
-    assert_eq!(diff.tables_refused.len(), 1, "{diff}");
+    assert!(
+        matches!(
+            diff.blocked.as_slice(),
+            [nlink::netlink::nftables::config::Blocked::TableFlags { from: 0, to, .. }]
+                if *to == NFT_TABLE_F_PERSIST
+        ),
+        "{diff}"
+    );
     let err = diff
         .apply(&nft_conn)
         .await
@@ -1698,11 +1708,20 @@ async fn what_a_hand_added_rule_uses_is_kept() -> nlink::Result<()> {
             .map(|(_, _, c)| c.as_str())
             .collect();
         assert_eq!(deleted, ["unused"], "{diff}");
-        let mut kept: Vec<String> = diff.kept_in_use.iter().map(|k| k.to_string()).collect();
+        let mut kept: Vec<String> = diff
+            .blocked
+            .iter()
+            .filter_map(|b| match b {
+                nlink::netlink::nftables::config::Blocked::InUse { item, rules } => {
+                    Some(format!("{item} by {}", rules.len()))
+                }
+                _ => None,
+            })
+            .collect();
         kept.sort();
         assert_eq!(
             kept,
-            ["chain Ip t/dbg", "object Ip t/handmade (Counter)"],
+            ["chain Ip t/dbg by 1", "object Ip t/handmade (Counter) by 1"],
             "{diff}"
         );
 

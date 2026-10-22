@@ -13,7 +13,7 @@
 use std::time::Duration;
 
 use super::super::expr::ElementStatement;
-use super::super::object::{ObjectConfig, ObjectInfo};
+use super::super::object::{ObjectConfig, ObjectInfo, ObjectType};
 use super::super::types::{
     ChainInfo, ChainKind, Family, Flowtable, RuleInfo, SetDataType, SetElement, SetFlags, SetInfo,
     SetKeyType, SetPolicy, Table,
@@ -286,9 +286,372 @@ impl NftFlowtable {
     }
 }
 
+/// A chain, set, flowtable or object a [`Blocked`] entry is about (#708).
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(tag = "type", rename_all = "kebab-case"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NftItem {
+    /// A chain.
+    Chain {
+        /// Owning table.
+        table: String,
+        /// Owning family.
+        family: Family,
+        /// Chain name.
+        name: String,
+    },
+    /// A named set or map.
+    Set {
+        /// Owning table.
+        table: String,
+        /// Owning family.
+        family: Family,
+        /// Set name.
+        name: String,
+    },
+    /// A flowtable.
+    Flowtable {
+        /// Owning table.
+        table: String,
+        /// Owning family.
+        family: Family,
+        /// Flowtable name.
+        name: String,
+    },
+    /// A named object.
+    Object {
+        /// Owning table.
+        table: String,
+        /// Owning family.
+        family: Family,
+        /// Object name.
+        name: String,
+        /// Object type.
+        object_type: ObjectType,
+    },
+}
+
+impl std::fmt::Display for NftItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (kind, table, family, name) = match self {
+            Self::Chain {
+                table,
+                family,
+                name,
+            } => ("chain", table, family, name),
+            Self::Set {
+                table,
+                family,
+                name,
+            } => ("set", table, family, name),
+            Self::Flowtable {
+                table,
+                family,
+                name,
+            } => ("flowtable", table, family, name),
+            Self::Object {
+                table,
+                family,
+                name,
+                object_type,
+            } => return write!(f, "object {family:?} {table}/{name} ({object_type:?})"),
+        };
+        write!(f, "{kind} {family:?} {table}/{name}")
+    }
+}
+
+/// What the diff cannot do, or leaves alone so as not to break what it
+/// does not own (#708). An entry that [`refuses`](Self::refuses) makes
+/// [`apply`](super::NftablesDiff::apply) fail before it writes anything; the
+/// others are said and skipped.
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "serde",
+    serde(
+        tag = "kind",
+        rename_all = "kebab-case",
+        rename_all_fields = "kebab-case"
+    )
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Blocked {
+    /// Table flags the kernel does not change on a live table: only
+    /// dormant can, and persist or owner needs the table deleted with what
+    /// it holds, which the diff will not do (#479). Refuses.
+    TableFlags {
+        /// The table's family.
+        family: Family,
+        /// The table.
+        table: String,
+        /// Its flags.
+        from: u32,
+        /// The declared flags.
+        to: u32,
+    },
+    /// A table to recreate, holding rules nlink did not write: deleting it
+    /// would delete them. Refuses.
+    TableRecreate {
+        /// The table's family.
+        family: Family,
+        /// The table.
+        table: String,
+        /// Why it is recreated.
+        reason: String,
+        /// The rules it would delete.
+        rules: Vec<NftRule>,
+    },
+    /// A chain to recreate, holding rules nlink did not write, which it
+    /// could not put back (#478). Refuses; an
+    /// [`exclusive`](super::DeclaredChainBuilder::exclusive) chain deletes
+    /// them instead.
+    ChainRecreate {
+        /// The table's family.
+        family: Family,
+        /// The table.
+        table: String,
+        /// The chain.
+        chain: String,
+        /// Why it is recreated: what cannot change on the live chain.
+        reason: String,
+        /// The rules it would delete.
+        rules: Vec<NftRule>,
+    },
+    /// A set, object or flowtable to recreate that a rule nlink did not
+    /// write uses: the kernel would refuse to delete it (`EBUSY`) and fail
+    /// the whole batch. Refuses.
+    Bound {
+        /// What is recreated.
+        item: NftItem,
+        /// The rules that use it.
+        rules: Vec<NftRule>,
+    },
+    /// An undeclared chain, set, flowtable or object in a managed table,
+    /// left in place because a rule that stays, one nlink does not manage,
+    /// uses it (#459). Kept: deleting it would fail every apply.
+    InUse {
+        /// What is kept.
+        item: NftItem,
+        /// The rules that use it.
+        rules: Vec<NftRule>,
+    },
+    /// An object of a type nlink does not model, in a managed table: it
+    /// cannot say what it is, so it does not delete it. Kept.
+    UnmodelledObject {
+        /// The table's family.
+        family: Family,
+        /// The table.
+        table: String,
+        /// The object.
+        name: String,
+        /// Its `NFT_OBJECT_*` type.
+        object_type: u32,
+    },
+}
+
+/// The rules a blocked entry is about: each by its handle, or by its text
+/// when it has none.
+fn rules_named(rules: &[NftRule]) -> String {
+    rules
+        .iter()
+        .map(|r| match (r.handle, &r.nft) {
+            (Some(h), _) => format!("rule handle {}", h.0),
+            (None, Some(nft)) => format!("rule `{nft}`"),
+            (None, None) => format!("a rule in {}", r.chain),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+impl Blocked {
+    /// Whether this makes [`apply`](super::NftablesDiff::apply) fail.
+    pub fn refuses(&self) -> bool {
+        matches!(
+            self,
+            Self::TableFlags { .. }
+                | Self::TableRecreate { .. }
+                | Self::ChainRecreate { .. }
+                | Self::Bound { .. }
+        )
+    }
+
+    /// The error a refusing entry makes the apply fail with.
+    pub(crate) fn refusal(&self) -> Option<crate::netlink::error::Error> {
+        use crate::netlink::error::Error;
+        use crate::ErrorObject;
+        Some(match self {
+            Self::TableFlags {
+                family,
+                table,
+                from,
+                to,
+            } => Error::not_supported(format!(
+                "table {family:?} {table}: flags {from:#x} -> {to:#x}: only dormant can change on a \
+                 live table. Delete the table and apply again to recreate it with the new flags."
+            ))
+            .with_object(ErrorObject::NftTable {
+                family: family.to_string(),
+                name: table.clone(),
+            }),
+            Self::TableRecreate {
+                family,
+                table,
+                reason,
+                rules,
+            } => Error::not_supported(format!(
+                "table {family:?} {table}: {reason} needs the table recreated, which would \
+                 delete rules nlink did not write: {}. Remove them and apply again.",
+                rules_named(rules)
+            ))
+            .with_object(ErrorObject::NftTable {
+                family: family.to_string(),
+                name: table.clone(),
+            }),
+            Self::ChainRecreate {
+                family,
+                table,
+                chain,
+                reason,
+                rules,
+            } => Error::not_supported(format!(
+                "chain {table}/{chain}: {reason} cannot be changed on the live chain, and \
+                 recreating it would delete rules nlink did not write: {}. Remove them, or \
+                 declare the chain exclusive, and apply again.",
+                rules_named(rules)
+            ))
+            .with_object(ErrorObject::NftChain {
+                family: family.to_string(),
+                table: table.clone(),
+                name: chain.clone(),
+            }),
+            Self::Bound { item, rules } => {
+                let error = Error::not_supported(format!(
+                    "{item} is recreated, and rules nlink did not write use it, so the kernel \
+                     would refuse to delete it: {}. Remove them and apply again.",
+                    rules_named(rules)
+                ));
+                match item {
+                    NftItem::Set { table, family, name } => error.with_object(ErrorObject::NftSet {
+                        family: family.to_string(),
+                        table: table.clone(),
+                        name: name.clone(),
+                    }),
+                    NftItem::Object { table, family, name, .. } => {
+                        error.with_object(ErrorObject::NftObject {
+                            family: family.to_string(),
+                            table: table.clone(),
+                            name: name.clone(),
+                        })
+                    }
+                    NftItem::Flowtable { table, family, name } => {
+                        error.with_object(ErrorObject::NftFlowtable {
+                            family: family.to_string(),
+                            table: table.clone(),
+                            name: name.clone(),
+                        })
+                    }
+                    NftItem::Chain { table, family, name } => error.with_object(ErrorObject::NftChain {
+                        family: family.to_string(),
+                        table: table.clone(),
+                        name: name.clone(),
+                    }),
+                }
+            }
+            Self::InUse { .. } | Self::UnmodelledObject { .. } => return None,
+        })
+    }
+}
+
+impl std::fmt::Display for Blocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TableFlags {
+                family,
+                table,
+                from,
+                to,
+            } => write!(
+                f,
+                "table {family:?} {table} (refused: flags {from:#x} -> {to:#x}: only dormant can \
+                 change on a live table)"
+            ),
+            Self::TableRecreate {
+                family,
+                table,
+                reason,
+                rules,
+            } => write!(
+                f,
+                "table {family:?} {table} (recreate refused: {reason}; it would delete rules nlink \
+                 did not write: {})",
+                rules_named(rules)
+            ),
+            Self::ChainRecreate {
+                family,
+                table,
+                chain,
+                reason,
+                rules,
+            } => write!(
+                f,
+                "chain {family:?} {table}/{chain} (recreate refused: {reason}; it would delete \
+                 rules nlink did not write: {})",
+                rules_named(rules)
+            ),
+            Self::Bound { item, rules } => write!(
+                f,
+                "{item} (recreate refused: rules nlink did not write use it: {})",
+                rules_named(rules)
+            ),
+            Self::InUse { item, .. } => {
+                write!(f, "{item} kept: a rule nlink does not manage uses it")
+            }
+            Self::UnmodelledObject {
+                family,
+                table,
+                name,
+                object_type,
+            } => write!(
+                f,
+                "object {family:?} {table}/{name} kept: nlink does not model its type ({object_type})"
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A refusal names each rule it is about: by handle, or by its text
+    /// when it has none.
+    #[test]
+    fn a_refusal_names_every_rule() {
+        let rule = |handle: Option<u64>| NftRule {
+            family: Family::Ip,
+            table: "t".into(),
+            chain: "c".into(),
+            key: None,
+            handle: handle.map(RuleHandle),
+            placement: None,
+            spec: RuleSpec::new(),
+            nft: Some("ip saddr @s drop".into()),
+        };
+        let blocked = Blocked::ChainRecreate {
+            family: Family::Ip,
+            table: "t".into(),
+            chain: "c".into(),
+            reason: "hook 1 -> 3".into(),
+            rules: vec![rule(Some(4)), rule(None)],
+        };
+        let named = "rule handle 4, rule `ip saddr @s drop`";
+        assert!(blocked.to_string().contains(named), "{blocked}");
+        let refusal = blocked.refusal().unwrap().to_string();
+        assert!(refusal.contains(named), "{refusal}");
+    }
 
     const KEYS: [SetKeyType; 8] = [
         SetKeyType::Ipv4Addr,
