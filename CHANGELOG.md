@@ -119,6 +119,52 @@ All notable changes to this project will be documented in this file.
   do changes of type, hook, priority, policy and devices, and what the
   deprecated setters write. The lane's module list gains `nft_chain_nat`.
 
+- **The diff says its changes as typed values: `Change<T>`** (#708, (b)).
+  `NftablesDiff::changes` is a `Vec<NftChange>`, one entry per table,
+  chain, rule, set, batch of elements, object or flowtable the diff
+  changes. Each entry is a `Change<T>`:
+  - `Add(T)` or `Remove(T)`;
+  - `Update { from, to }`;
+  - `Recreate { from, to, reason, cascade }`.
+
+  `from` is what the kernel holds, read back (`NftX::from_kernel`); `to`
+  is what it will hold.
+  - **Rules:** a rule's place is part of it. `from.handle` says where it
+    is, `to.placement` where it goes. A replace in place keeps its handle;
+    a reorder is an `Update` with a placement.
+  - **Recreates and their cascades:** a recreate says why, and carries what
+    goes with it. The cascade is listed once, not again at the top:
+
+    | Recreate | Its cascade |
+    |---|---|
+    | set | its elements, and the rules moved out of its way |
+    | chain | its rules |
+    | object | its rules, and the object-map elements that hold it |
+    | flowtable | its rules |
+    | table | everything declared in it |
+  - **Queries:** `tables()`, `chains()`, `rules()`, `sets()`,
+    `elements()`, `objects()` and `flowtables()` list the top-level
+    changes of each kind, `NftChange::flatten()` walks a cascade, and
+    `refusal()` is the error `apply` would fail with.
+  - **JSON:** each change is `{"type": "chain", "op": "recreate", "from",
+    "to", "reason", "cascade"}`.
+  - **Still there:** the per-kind lists `apply` sends are unchanged
+    alongside it.
+
+  **What the planner now records:** why it recreates each set, object or
+  flowtable (`key Ipv4Addr -> Mark`, `priority 0 -> 10`), and which
+  object-map elements it puts back only for their object.
+
+  **Tests:**
+  - Every debug build checks that the changes, cascades included, are the
+    plan's entries exactly once, so every diff in the test suites is
+    checked.
+  - After each apply in the convergence harness, every change's `to` must
+    be what the kernel reads back. This found one gap in the simulated
+    echo, now fixed: a packet limit object's burst 0 is stored as 5.
+  - The offline diff's changes equal the kernel diff's.
+  - Each kind of recreate has its cascade tested.
+
 - **What the diff cannot do is one `blocked` list, refused up front**
   (#708, (b)). `NftablesDiff::blocked` is a `Vec<Blocked>`.
   - **Replaced:** it takes the place of three shapes:

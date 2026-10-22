@@ -62,7 +62,8 @@ mod types;
 pub(crate) use diff::expression_bytes;
 pub(crate) use rules::{canonical_body, canonical_elements};
 pub use change::{
-    Blocked, NftChain, NftElements, NftFlowtable, NftItem, NftObject, NftRule, NftSet, NftTable,
+    Blocked, Change, NftChain, NftChange, NftElements, NftFlowtable, NftItem, NftObject, NftRule,
+    NftSet, NftTable,
 };
 pub use snapshot::RulesetSnapshot;
 

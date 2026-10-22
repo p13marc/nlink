@@ -161,7 +161,14 @@ impl RulesetSnapshot {
                             over: q.over,
                             depleted: false,
                         },
-                        ObjectConfig::Limit(l) => ObjectState::Limit(l.clone()),
+                        // The kernel stores a packet limit's burst 0 as 5.
+                        ObjectConfig::Limit(l) => {
+                            let mut l = l.clone();
+                            if l.burst == 0 && l.kind == super::super::types::LimitKind::Packets {
+                                l.burst = 5;
+                            }
+                            ObjectState::Limit(l)
+                        }
                         ObjectConfig::CtHelper(h) => ObjectState::CtHelper(h.clone()),
                         ObjectConfig::Secmark(c) => ObjectState::Secmark(c.clone()),
                     },

@@ -4394,6 +4394,7 @@ mod tests {
                 "chains-to-delete",
                 "chains-to-modify",
                 "chains-to-recreate",
+                "changes",
                 "flowtables-to-add",
                 "flowtables-to-delete",
                 "flowtables-to-update",
