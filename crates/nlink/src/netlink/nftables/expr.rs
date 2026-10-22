@@ -3556,7 +3556,7 @@ impl super::types::RuleInfo {
         parse_expressions(&self.expression_bytes)
     }
 
-    /// The rule as a [`RuleSpec`](super::RuleSpec) (#708): its expressions
+    /// The rule as a [`RuleSpec`] (#708): its expressions
     /// lifted to the matches, statements and verdict that write them, and
     /// its comment, without nlink's key. What nlink has no item for stays a
     /// raw [`Expr`]. Lowering the spec in the rule's family gives this rule's
