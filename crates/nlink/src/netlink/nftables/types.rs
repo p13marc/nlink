@@ -391,6 +391,18 @@ pub enum ChainKind {
 }
 
 impl ChainKind {
+    /// The kind with a base chain's devices in order: the kernel keeps a
+    /// chain's devices as a set (#708).
+    pub(crate) fn with_sorted_devices(self) -> Self {
+        match self {
+            Self::Base(mut base) => {
+                base.devices.sort();
+                Self::Base(base)
+            }
+            regular => regular,
+        }
+    }
+
     /// The base chain, if this is one.
     pub fn base(&self) -> Option<&BaseChain> {
         match self {
@@ -4037,12 +4049,83 @@ pub enum SetKeyType {
     /// is degenerate but accepted — the kernel treats it as a
     /// normal key).
     Concat(Vec<SetKeyType>),
+    /// A key type nlink has no name for, as the kernel reports it (#708):
+    /// nft's datatype id and the key's length. Read back from a set nft
+    /// made (`type ifname`); declared, it is sent as it is.
+    Other {
+        /// The nft datatype id, `NFTA_SET_KEY_TYPE`.
+        type_id: u32,
+        /// The key's length in bytes, `NFTA_SET_KEY_LEN`.
+        len: u32,
+    },
 }
 
 impl SetKeyType {
     /// Number of bits each component occupies in a `Concat` type word.
     /// nft's `TYPE_BITS`.
     const CONCAT_TYPE_BITS: u32 = 6;
+
+    /// The key type the kernel reports as `type_id` and `len`
+    /// (`NFTA_SET_KEY_TYPE`, `NFTA_SET_KEY_LEN`), read back (#708). A
+    /// concatenation's id holds a component per 6 bits, the first in the
+    /// highest. A type nlink has no name for, or a length that does not
+    /// add up, is [`Other`](Self::Other), so the read-back never fails and
+    /// never guesses.
+    pub fn from_kernel(type_id: u32, len: u32) -> Self {
+        let other = Self::Other { type_id, len };
+        let single = |id: u32| -> Option<Self> {
+            Some(match id {
+                7 => Self::Ipv4Addr,
+                8 => Self::Ipv6Addr,
+                9 => Self::EtherAddr,
+                12 => Self::InetProto,
+                13 => Self::InetService,
+                19 => Self::Mark,
+                20 => Self::IfIndex,
+                23 => Self::ClassId,
+                _ => return None,
+            })
+        };
+        let mask = (1 << Self::CONCAT_TYPE_BITS) - 1;
+        if type_id <= mask {
+            return match single(type_id) {
+                Some(key) if key.len() == len => key,
+                _ => other,
+            };
+        }
+        // The components, first to last.
+        let mut ids = Vec::new();
+        let mut rest = type_id;
+        while rest != 0 {
+            ids.push(rest & mask);
+            rest >>= Self::CONCAT_TYPE_BITS;
+        }
+        ids.reverse();
+        let parts: Vec<Option<Self>> = ids.iter().map(|id| single(*id)).collect();
+        let known: u32 = parts
+            .iter()
+            .flatten()
+            .map(|p| p.len().next_multiple_of(4))
+            .sum();
+        let unknown = parts.iter().filter(|p| p.is_none()).count();
+        match unknown {
+            0 if known == len => Self::Concat(parts.into_iter().flatten().collect()),
+            // One component nlink cannot name takes what the others leave.
+            1 if len > known => Self::Concat(
+                parts
+                    .into_iter()
+                    .zip(&ids)
+                    .map(|(p, id)| {
+                        p.unwrap_or(Self::Other {
+                            type_id: *id,
+                            len: len - known,
+                        })
+                    })
+                    .collect(),
+            ),
+            _ => other,
+        }
+    }
 
     /// The **nftables userspace datatype id** carried in `NFTA_SET_KEY_TYPE`
     /// (nft's `enum datatypes`, `include/datatype.h`).
@@ -4055,14 +4138,15 @@ impl SetKeyType {
     /// `inet_protocol`), and `IfIndex` was 15 (which is `tcp_flag`).
     pub fn type_id(&self) -> u32 {
         match self {
-            Self::Ipv4Addr => 7,      // TYPE_IPADDR
-            Self::Ipv6Addr => 8,      // TYPE_IP6ADDR
-            Self::EtherAddr => 9,     // TYPE_ETHERADDR
-            Self::InetProto => 12,    // TYPE_INET_PROTOCOL
-            Self::InetService => 13,  // TYPE_INET_SERVICE
-            Self::Mark => 19,         // TYPE_MARK
-            Self::IfIndex => 20,      // TYPE_IFINDEX
-            Self::ClassId => 23,      // TYPE_CLASSID
+            Self::Ipv4Addr => 7,     // TYPE_IPADDR
+            Self::Ipv6Addr => 8,     // TYPE_IP6ADDR
+            Self::EtherAddr => 9,    // TYPE_ETHERADDR
+            Self::InetProto => 12,   // TYPE_INET_PROTOCOL
+            Self::InetService => 13, // TYPE_INET_SERVICE
+            Self::Mark => 19,        // TYPE_MARK
+            Self::IfIndex => 20,     // TYPE_IFINDEX
+            Self::ClassId => 23,     // TYPE_CLASSID
+            Self::Other { type_id, .. } => *type_id,
             Self::Concat(parts) => {
                 // nft's `concat_subtype_add(type, sub) = type << TYPE_BITS | sub`,
                 // applied left-to-right across the component list. That puts
@@ -4121,6 +4205,7 @@ impl SetKeyType {
             Self::ClassId => 4,
             Self::Mark => 4,
             Self::InetProto => 1,
+            Self::Other { len, .. } => *len,
             Self::Concat(parts) => {
                 // Each component is padded to 4-byte alignment before the next
                 // starts. This is where EtherAddr's 6 bytes become 8.
@@ -4330,6 +4415,31 @@ pub enum SetDataType {
 }
 
 impl SetDataType {
+    /// What a set maps to, as the kernel reports it (#708): `Ok(None)` for
+    /// a plain set, the object type's number as the error for an object
+    /// map of a type nlink has no name for.
+    pub(crate) fn from_kernel(
+        flags: SetFlags,
+        data_type: Option<u32>,
+        data_len: Option<u32>,
+        object_type: Option<u32>,
+    ) -> std::result::Result<Option<Self>, String> {
+        if flags.contains(SetFlags::OBJECT) {
+            let id = object_type.unwrap_or_default();
+            return super::object::ObjectType::from_u32(id)
+                .map(|t| Some(Self::Object(t)))
+                .ok_or_else(|| format!("object type {id}"));
+        }
+        if !flags.contains(SetFlags::MAP) {
+            return Ok(None);
+        }
+        Ok(Some(match data_type {
+            Some(super::NFT_DATA_VERDICT) => Self::Verdict,
+            Some(id) => Self::Value(SetKeyType::from_kernel(id, data_len.unwrap_or_default())),
+            None => return Err("map without a data type".into()),
+        }))
+    }
+
     /// `NFTA_SET_DATA_TYPE`: `NFT_DATA_VERDICT` for a verdict map, else the
     /// value type's nft datatype id (the kernel stores it opaquely).
     /// An object map has no data type; it is `NFT_SET_OBJECT` with

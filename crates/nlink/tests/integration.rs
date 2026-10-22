@@ -201,6 +201,11 @@ mod nftables_chain_kinds;
 #[path = "integration/nftables_spec.rs"]
 mod nftables_spec;
 
+// #708 (b): what the kernel holds reads back as the typed diff's values,
+// the same as what a config says it holds.
+#[path = "integration/nftables_readback.rs"]
+mod nftables_readback;
+
 // Every rule shape nlink writes must reconcile to an empty diff: the kernel
 // echoes some attributes whether or not they were sent, and drops others.
 #[path = "integration/nftables_echo.rs"]

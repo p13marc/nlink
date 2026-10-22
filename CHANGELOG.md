@@ -336,6 +336,32 @@ All notable changes to this project will be documented in this file.
   compile failures. clippy's `future_not_send` lint cannot catch #879's
   shape: it checks modulo lifetimes, and on 0.32.0 it never fired in
   `reconcile.rs`.
+- **What the kernel holds reads back as typed values** (#708). One type
+  per kind of object, the same on both sides of a change:
+  - `NftTable`, `NftChain`, `NftRule`, `NftSet`, `NftElements`, `NftObject`
+    and `NftFlowtable`, in `nftables::config`;
+  - each has a `from_kernel` that reads a snapshot's entry. A rule reads
+    back as its lifted `RuleSpec` and its `nft -s` text.
+
+  A read-back never fails and never guesses. What nlink cannot name is
+  kept as the kernel said it:
+  - **A key type:** `SetKeyType::from_kernel(type_id, len)` decodes a
+    concatenation 6 bits per field. A type nlink has no name for is the new
+    `SetKeyType::Other { type_id, len }`: nft's `ifname` reads back as
+    `Other { type_id: 41, len: 16 }`.
+  - **An object or statement:** an object map of a type nlink does not
+    model, or a set statement it cannot decode, is named in
+    `NftSet::unread`.
+
+  **The echo, fixed:** `RulesetSnapshot::from_config` now gives a set a
+  `dynset` writes to, and that declares no size, the size 65535 that the
+  kernel gives it.
+
+  The test, `kernel_read_backs_match_the_simulated_echo`, applies a config
+  with a table, four chains, twelve sets and maps, four objects, a
+  flowtable and five rules. Each one the kernel holds must read back as
+  `from_config`'s echo of it. The set size above was the one difference.
+
 - **A kernel rule reads back as a `RuleSpec`** (#708, (c)'s lift).
   `RuleInfo::spec()` and `RuleSpec::lift(exprs, family)` are the inverse
   of lowering. Each expression becomes the item that writes it: a match,
