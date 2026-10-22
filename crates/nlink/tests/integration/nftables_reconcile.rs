@@ -29,14 +29,16 @@
 
 use std::time::Duration;
 
-use nlink::netlink::nftables::config::{NftDiffOptions, NftablesConfig, ReconcileOptions};
+use nlink::netlink::nftables::config::{
+    Change, NftChange, NftDiffOptions, NftablesConfig, ReconcileOptions,
+};
 use nlink::netlink::nftables::types::{
     BaseChain, ChainType, Devices, Family, FilterHook, Hook, NatHook, Policy, Priority, SetKeyType,
 };
 use nlink::netlink::Nftables;
 
 use crate::common::converge::{assert_converges, assert_transition, case};
-use crate::common::{TestNamespace, with_timeout};
+use crate::common::{TestNamespace, nft, with_timeout};
 
 /// Build a canonical "filter / input" config with N keyed rules.
 fn cfg_with_n_rules(n: usize) -> NftablesConfig {
@@ -65,9 +67,9 @@ async fn reconcile_empty_to_full_applies_everything() -> nlink::Result<()> {
 
         let cfg = cfg_with_n_rules(3);
         let diff = cfg.diff(&nft).await?;
-        assert_eq!(diff.tables_to_add.len(), 1, "one new table");
-        assert_eq!(diff.chains_to_add.len(), 1, "one new chain");
-        assert_eq!(diff.rules_to_add.len(), 3, "three new rules");
+        assert_eq!(nft::count(&diff, "table", "add"), 1, "one new table");
+        assert_eq!(nft::count(&diff, "chain", "add"), 1, "one new chain");
+        assert_eq!(nft::count(&diff, "rule", "add"), 3, "three new rules");
 
         let applied = diff.apply(&nft).await?;
         assert!(applied >= 5, "apply count should cover table+chain+rules");
@@ -173,9 +175,21 @@ async fn reconcile_add_one_rule_in_existing_chain() -> nlink::Result<()> {
         cfg_with_n_rules(1).diff(&nft).await?.apply(&nft).await?;
         let bigger = cfg_with_n_rules(2);
         let diff = bigger.diff(&nft).await?;
-        assert_eq!(diff.tables_to_add.len(), 0, "table already present");
-        assert_eq!(diff.chains_to_add.len(), 0, "chain already present");
-        assert_eq!(diff.rules_to_add.len(), 1, "only the new rule should be added");
+        assert_eq!(
+            nft::count(&diff, "table", "add"),
+            0,
+            "table already present"
+        );
+        assert_eq!(
+            nft::count(&diff, "chain", "add"),
+            0,
+            "chain already present"
+        );
+        assert_eq!(
+            nft::count(&diff, "rule", "add"),
+            1,
+            "only the new rule should be added"
+        );
         diff.apply(&nft).await?;
         Ok(())
     })
@@ -204,11 +218,11 @@ async fn reconcile_replace_one_rule_emits_replace_op() -> nlink::Result<()> {
 
         let diff = mutated.diff(&nft).await?;
         assert_eq!(
-            diff.rules_to_replace.len(),
+            nft::replaced(&diff).len(),
             1,
             "one rule changed — should be a single in-place replace"
         );
-        assert!(diff.rules_to_add.is_empty(), "no new rules expected");
+        assert_eq!(nft::count(&diff, "rule", "add"), 0, "no new rules expected");
         diff.apply(&nft).await?;
         Ok(())
     })
@@ -229,7 +243,7 @@ async fn reconcile_delete_one_rule_emits_delete_op() -> nlink::Result<()> {
         let smaller = cfg_with_n_rules(1);
         let diff = smaller.diff(&nft).await?;
         assert_eq!(
-            diff.rules_to_delete.len(),
+            nft::count(&diff, "rule", "remove"),
             1,
             "one rule absent from desired state → one delete"
         );
@@ -258,7 +272,7 @@ async fn reconcile_cascade_delete_table_via_empty_config() -> nlink::Result<()> 
         // Without the opt-in, an empty config is a no-op on tables.
         let teardown = NftablesConfig::new();
         assert!(
-            teardown.diff(&nft).await?.tables_to_delete.is_empty(),
+            teardown.diff(&nft).await?.tables().next().is_none(),
             "plain diff() must never propose a table deletion (#190)"
         );
 
@@ -267,7 +281,7 @@ async fn reconcile_cascade_delete_table_via_empty_config() -> nlink::Result<()> 
             .diff_with_options(&nft, &NftDiffOptions::default().purge_tables(true))
             .await?;
         assert_eq!(
-            diff.tables_to_delete.len(),
+            nft::count(&diff, "table", "remove"),
             1,
             "purge_tables(true) must propose dropping the table"
         );
@@ -1028,11 +1042,15 @@ async fn reconcile_empty_to_set_with_elements_applies() -> nlink::Result<()> {
 
         let cfg = cfg_with_set(&[(10, 0, 0, 1), (10, 0, 0, 2)]);
         let diff = cfg.diff(&nft).await?;
-        assert_eq!(diff.tables_to_add.len(), 1, "one new table");
-        assert_eq!(diff.sets_to_add.len(), 1, "one new set");
+        assert_eq!(nft::count(&diff, "table", "add"), 1, "one new table");
+        assert_eq!(nft::count(&diff, "set", "add"), 1, "one new set");
         // Elements of a brand-new set are installed wholesale.
-        assert_eq!(diff.set_elements_to_add.len(), 1, "one element batch");
-        assert_eq!(diff.set_elements_to_add[0].elements.len(), 2, "two elements");
+        assert_eq!(nft::elements(&diff, "add").len(), 1, "one element batch");
+        assert_eq!(
+            nft::elements(&diff, "add")[0].elements.len(),
+            2,
+            "two elements"
+        );
 
         diff.apply(&nft).await?;
 
@@ -1086,19 +1104,19 @@ async fn reconcile_add_one_set_element() -> nlink::Result<()> {
         // Declare the same set with one extra element.
         let bigger = cfg_with_set(&[(10, 0, 0, 1), (10, 0, 0, 2)]);
         let diff = bigger.diff(&nft).await?;
-        assert!(diff.sets_to_add.is_empty(), "set already exists");
+        assert_eq!(nft::count(&diff, "set", "add"), 0, "set already exists");
         assert_eq!(
-            diff.set_elements_to_add.len(),
+            nft::elements(&diff, "add").len(),
             1,
             "exactly one element-add batch"
         );
         assert_eq!(
-            diff.set_elements_to_add[0].elements.len(),
+            nft::elements(&diff, "add")[0].elements.len(),
             1,
             "only the single new element is added (element-level diff)"
         );
         assert!(
-            diff.set_elements_to_remove.is_empty(),
+            nft::elements(&diff, "remove").is_empty(),
             "nothing to remove"
         );
         diff.apply(&nft).await?;
@@ -1130,14 +1148,14 @@ async fn reconcile_remove_one_set_element() -> nlink::Result<()> {
         // Declare the same set with one element dropped.
         let smaller = cfg_with_set(&[(10, 0, 0, 1)]);
         let diff = smaller.diff(&nft).await?;
-        assert!(diff.set_elements_to_add.is_empty(), "nothing to add");
+        assert!(nft::elements(&diff, "add").is_empty(), "nothing to add");
         assert_eq!(
-            diff.set_elements_to_remove.len(),
+            nft::elements(&diff, "remove").len(),
             1,
             "exactly one element-remove batch"
         );
         assert_eq!(
-            diff.set_elements_to_remove[0].elements.len(),
+            nft::elements(&diff, "remove")[0].elements.len(),
             1,
             "only the undeclared element is removed"
         );
@@ -1170,7 +1188,11 @@ async fn reconcile_delete_set_when_removed_from_config() -> nlink::Result<()> {
         // Same table, but the set is gone from the declaration.
         let no_set = NftablesConfig::new().table("filter_set", Family::Inet, |t| t);
         let diff = no_set.diff(&nft).await?;
-        assert_eq!(diff.sets_to_delete.len(), 1, "the dropped set is deleted");
+        assert_eq!(
+            nft::count(&diff, "set", "remove"),
+            1,
+            "the dropped set is deleted"
+        );
         diff.apply(&nft).await?;
 
         let sets = nft.list_sets_in("filter_set", Family::Inet).await?;
@@ -1211,7 +1233,7 @@ async fn reconcile_changes_a_live_chain_policy() -> nlink::Result<()> {
         assert!(before.is_some());
 
         let diff = cfg(Policy::Accept).diff(&nft).await?;
-        assert_eq!(diff.chains_to_modify.len(), 1, "{diff:?}");
+        assert_eq!(nft::count(&diff, "chain", "update"), 1, "{diff:?}");
         diff.apply(&nft).await?; // EEXIST before #456
 
         let chains = nft.list_chains_in("filter_pol", Family::Inet).await?;
@@ -1332,7 +1354,7 @@ async fn a_chain_recreate_over_a_rule_nlink_did_not_write_is_refused() -> nlink:
             ),
             "{diff}"
         );
-        assert!(diff.chains_to_recreate.is_empty(), "{diff}");
+        assert_eq!(nft::count(&diff, "chain", "recreate"), 0, "{diff}");
         assert!(diff.to_string().contains("recreate refused"), "{diff}");
         let err = diff.apply(&nft).await.expect_err("the recreate is refused");
         assert!(err.is_not_supported(), "{err}");
@@ -1700,12 +1722,26 @@ async fn what_a_hand_added_rule_uses_is_kept() -> nlink::Result<()> {
         }
 
         let diff = cfg.diff(&conn).await?;
-        assert!(diff.sets_to_delete.is_empty(), "{diff}");
-        assert!(diff.objects_to_delete.is_empty(), "{diff}");
+        let removes = |c: &nlink::netlink::nftables::config::NftChange| {
+            matches!(c.op(), "remove" | "recreate")
+        };
+        assert!(
+            !diff.changes.iter().any(|c| c.kind() == "set" && removes(c)),
+            "{diff}"
+        );
+        assert!(
+            !diff
+                .changes
+                .iter()
+                .any(|c| c.kind() == "object" && removes(c)),
+            "{diff}"
+        );
         let deleted: Vec<&str> = diff
-            .chains_to_delete
-            .iter()
-            .map(|(_, _, c)| c.as_str())
+            .chains()
+            .filter_map(|c| match c {
+                Change::Remove(c) => Some(c.name.as_str()),
+                _ => None,
+            })
             .collect();
         assert_eq!(deleted, ["unused"], "{diff}");
         let mut kept: Vec<String> = diff
@@ -2076,7 +2112,7 @@ async fn one_commit_moves_the_generation_by_one() -> nlink::Result<()> {
                 .rule_keyed("c", "k", |r| r.accept())
         });
         let diff = cfg.diff(&nft).await?;
-        assert_eq!(diff.sets_to_update.len(), 1, "{diff}");
+        assert_eq!(nft::count(&diff, "set", "update"), 1, "{diff}");
         assert!(diff.change_count() > 1, "a set update and more: {diff}");
         diff.apply(&nft).await?;
         assert!(cfg.diff(&nft).await?.is_empty());
@@ -2101,7 +2137,14 @@ async fn an_absent_table_is_deleted_and_stays_gone() -> nlink::Result<()> {
 
         let gone = NftablesConfig::new().absent_table("filter_rec", Family::Inet);
         let diff = gone.diff(&nft).await?;
-        assert_eq!(diff.tables_to_delete, [(Family::Inet, "filter_rec".to_string())], "{diff}");
+        let removed: Vec<_> = diff
+            .tables()
+            .filter_map(|c| match c {
+                Change::Remove(t) => Some((t.family, t.name.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(removed, [(Family::Inet, "filter_rec")], "{diff}");
         diff.apply(&nft).await?;
         let tables: Vec<String> = nft.list_tables().await?.into_iter().map(|t| t.name).collect();
         assert_eq!(tables, ["theirs"], "only the absent table goes");
@@ -2186,95 +2229,8 @@ async fn gap_deltas_report_a_table_deleted_during_an_overflow() -> nlink::Result
 /// What a diff would do, without the kernel's handles: the same changes,
 /// however the rules happen to be numbered.
 fn diff_shape(d: &nlink::netlink::nftables::config::NftablesDiff) -> Vec<String> {
+    // From and to, where nothing but a handle is the kernel's own.
     let mut shape = Vec::new();
-    shape.extend(
-        d.tables_to_add
-            .iter()
-            .map(|t| format!("+table {}", t.name())),
-    );
-    shape.extend(
-        d.tables_to_delete
-            .iter()
-            .map(|(f, n)| format!("-table {f} {n}")),
-    );
-    shape.extend(
-        d.chains_to_add
-            .iter()
-            .map(|(t, _, c)| format!("+chain {t} {}", c.name())),
-    );
-    shape.extend(
-        d.chains_to_modify
-            .iter()
-            .map(|(t, _, c)| format!("~chain {t} {}", c.name())),
-    );
-    shape.extend(
-        d.chains_to_delete
-            .iter()
-            .map(|(t, _, c)| format!("-chain {t} {c}")),
-    );
-    shape.extend(
-        d.rules_to_add
-            .iter()
-            .map(|a| format!("+rule {:?}", a.rule.handle_key())),
-    );
-    shape.extend(
-        d.rules_to_delete
-            .iter()
-            .map(|r| format!("-rule {} {}", r.table, r.chain)),
-    );
-    shape.extend(
-        d.rules_to_replace
-            .iter()
-            .map(|r| format!("~rule {:?}", r.rule.handle_key())),
-    );
-    shape.extend(
-        d.rules_to_move
-            .iter()
-            .map(|m| format!(">rule {:?}", m.rule.handle_key())),
-    );
-    shape.extend(
-        d.sets_to_add
-            .iter()
-            .map(|(t, _, s)| format!("+set {t} {}", s.name())),
-    );
-    shape.extend(
-        d.sets_to_delete
-            .iter()
-            .map(|(t, _, s)| format!("-set {t} {s}")),
-    );
-    shape.extend(
-        d.sets_to_update
-            .iter()
-            .map(|(t, _, s)| format!("~set {t} {}", s.name())),
-    );
-    shape.extend(
-        d.set_elements_to_add
-            .iter()
-            .map(|c| format!("+{} elements {}", c.elements.len(), c.set.name())),
-    );
-    shape.extend(
-        d.set_elements_to_remove
-            .iter()
-            .map(|c| format!("-{} elements {}", c.elements.len(), c.set.name())),
-    );
-    shape.extend(
-        d.objects_to_add
-            .iter()
-            .map(|(t, _, o)| format!("+object {t} {}", o.name())),
-    );
-    shape.extend(
-        d.objects_to_update
-            .iter()
-            .map(|(t, _, o)| format!("~object {t} {}", o.name())),
-    );
-    shape.extend(
-        d.objects_to_delete
-            .iter()
-            .map(|(t, _, o, _)| format!("-object {t} {o}")),
-    );
-    // #708: the typed changes too, from and to, where nothing but a
-    // handle is the kernel's own.
-    use nlink::netlink::nftables::config::{Change, NftChange};
     for change in d.changes.iter().flat_map(NftChange::flatten) {
         let line = match change {
             NftChange::Rule(c) => {
@@ -2423,9 +2379,16 @@ async fn a_shared_table_keeps_what_another_tool_added() -> nlink::Result<()> {
         })
     };
     let names = |d: &nlink::netlink::nftables::config::NftablesDiff| {
-        let mut n: Vec<String> = d.chains_to_delete.iter().map(|(_, _, c)| c.clone()).collect();
-        n.extend(d.sets_to_delete.iter().map(|(_, _, s)| s.clone()));
-        n.extend(d.objects_to_delete.iter().map(|(_, _, o, _)| o.clone()));
+        let mut n: Vec<String> = d
+            .changes
+            .iter()
+            .filter_map(|c| match c {
+                NftChange::Chain(Change::Remove(c)) => Some(c.name.clone()),
+                NftChange::Set(Change::Remove(s)) => Some(s.name.clone()),
+                NftChange::Object(Change::Remove(o)) => Some(o.name.clone()),
+                _ => None,
+            })
+            .collect();
         n.sort();
         n
     };

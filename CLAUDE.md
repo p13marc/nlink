@@ -983,8 +983,8 @@ The 2026-10-12 run worked through every open issue after #534:
 - **Tooling:** `replay` (#168), the YNL spec gate (#167) and
   `ip vrf exec` (#257).
 
-#708's typed redesigns (`ChainKind`, `RuleSpec`/`lift`, `Change<T>`) move
-to a later cycle. #747 moved `nlink-config` from the deprecated
+#708's typed redesigns (`ChainKind`, `RuleSpec`/`lift`, `Change<T>`) moved
+to the 0.33 cycle. #747 moved `nlink-config` from the deprecated
 `serde_yaml` to `serde_norway`, its maintained fork, just before the cut.
 
 The 2026-10-13 run swept tc(8) parity across every kind. Each action,
@@ -1160,6 +1160,17 @@ because nothing could set a value. Both bugs sat behind a green suite.
 `CHANGELOG.md ## [Unreleased]` and is promoted to the next `## [X.Y.0]` at
 cut time. The workspace version stays at the last release until a cycle's
 first breaking PR bumps it (the cargo-semver-checks convention).
+
+The 0.33 cycle (breaking; the workspace is at 0.33.0) started from
+stream-marker's review of 0.32 (#889) and finished #708's typed nftables
+redesign:
+- **Chains:** a chain is a `ChainKind`, `Regular` or `Base(BaseChain)`.
+- **Rules:** a rule body is a `RuleSpec`. `lower` is the only encoder, and
+  `RuleSpec::lift` reads a kernel rule back, checked by lowering it again.
+- **The diff:** `NftablesDiff` is `changes: Vec<NftChange>` of
+  `Change<T>`, each side a kernel read-back (`NftX::from_kernel`), plus
+  `blocked: Vec<Blocked>`. The batch plan `apply` sends is crate-private.
+  Every debug build checks that the changes cover that plan exactly.
 
 0.27.0 was the declarative-configuration cycle, and its lesson is narrower
 than 0.26.0's but worth carrying: **almost every bug in it needed a second

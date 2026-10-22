@@ -706,7 +706,9 @@ impl<T> Change<T> {
         }
     }
 
-    fn op(&self) -> &'static str {
+    /// What it does, as its JSON `op` says it: `"add"`, `"remove"`,
+    /// `"update"` or `"recreate"`.
+    pub fn op(&self) -> &'static str {
         match self {
             Self::Add(_) => "add",
             Self::Remove(_) => "remove",
@@ -786,6 +788,225 @@ impl NftChange {
             Self::Object(_) => "object",
             Self::Flowtable(_) => "flowtable",
         }
+    }
+}
+
+/// The lines a change prints as, its cascade's indented under it (#708).
+/// `parent` is the recreate a cascade belongs to: it says why a rule in it
+/// is moved.
+pub(crate) fn lines(
+    change: &NftChange,
+    parent: Option<&NftChange>,
+    indent: usize,
+    out: &mut Vec<String>,
+) {
+    let pad = " ".repeat(indent);
+    let elements = |n: usize| format!("{n} element{}", if n == 1 { "" } else { "s" });
+    let line = match change {
+        NftChange::Table(c) => match c {
+            Change::Add(t) => format!("+ table {:?} {}", t.family, t.name),
+            Change::Remove(t) => format!("- table {:?} {}", t.family, t.name),
+            Change::Update { to, .. } => format!(
+                "~ table {:?} {} (flags={:#x})",
+                to.family, to.name, to.flags
+            ),
+            Change::Recreate { to, reason, .. } => {
+                format!("-/+ table {:?} {} (recreate: {reason})", to.family, to.name)
+            }
+        },
+        NftChange::Chain(c) => {
+            let at = |t: &NftChain| format!("{:?} {}/{}", t.family, t.table, t.name);
+            match c {
+                Change::Add(t) => format!("+ chain {}", at(t)),
+                Change::Remove(t) => format!("- chain {}", at(t)),
+                Change::Update { to, .. } => {
+                    let base = to.kind.as_ref().and_then(ChainKind::base);
+                    format!(
+                        "~ chain {} (policy={:?} hook={:?} priority={:?} type={:?} devices={:?})",
+                        at(to),
+                        base.and_then(|b| b.default_policy()),
+                        base.map(|b| b.hook()),
+                        base.map(|b| b.priority()),
+                        base.map(|b| b.chain_type()),
+                        base.map(|b| b.devices().to_vec()).unwrap_or_default(),
+                    )
+                }
+                Change::Recreate { to, reason, .. } => {
+                    format!("-/+ chain {} (recreate: {reason})", at(to))
+                }
+            }
+        }
+        NftChange::Rule(c) => {
+            let at = |t: &NftRule| format!("{:?} {}/{}", t.family, t.table, t.chain);
+            let key = |t: &NftRule| t.key.clone().unwrap_or_else(|| "<anonymous>".into());
+            let handle = |t: &NftRule| t.handle.map_or(0, |h| h.0);
+            let placement = |p: Option<RulePlacement>| match p {
+                Some(RulePlacement::Before(h)) => format!(" (before handle={})", h.0),
+                Some(RulePlacement::After(h)) => format!(" (after handle={})", h.0),
+                Some(RulePlacement::Append) | None => String::new(),
+            };
+            let body = |from: Option<&str>, to: Option<&str>| match (from, to) {
+                (Some(now), Some(to)) if now != to => format!(": {now} -> {to}"),
+                (_, Some(to)) => format!(": {to}"),
+                (Some(now), None) => format!(" (now: {now})"),
+                (None, None) => String::new(),
+            };
+            match c {
+                Change::Add(t) => format!(
+                    "+ rule {} [{}]{}{}",
+                    at(t),
+                    key(t),
+                    placement(t.placement),
+                    t.nft
+                        .as_deref()
+                        .map(|b| format!(": {b}"))
+                        .unwrap_or_default()
+                ),
+                Change::Remove(t) => format!(
+                    "- rule {}{} (handle={}){}",
+                    at(t),
+                    t.key
+                        .as_deref()
+                        .map(|k| format!(" [{k}]"))
+                        .unwrap_or_default(),
+                    handle(t),
+                    t.nft
+                        .as_deref()
+                        .map(|b| format!(": {b}"))
+                        .unwrap_or_default()
+                ),
+                Change::Update { from, to } | Change::Recreate { from, to, .. }
+                    if to.placement.is_none() =>
+                {
+                    format!(
+                        "~ rule {} (handle={} key={}){}",
+                        at(to),
+                        handle(from),
+                        key(to),
+                        body(from.nft.as_deref(), to.nft.as_deref())
+                    )
+                }
+                Change::Update { from, to } | Change::Recreate { from, to, .. } => {
+                    let why = match parent {
+                        Some(NftChange::Chain(_)) => "its chain is recreated",
+                        Some(NftChange::Set(_)) => "its set is recreated",
+                        Some(NftChange::Object(_)) => "its object is recreated",
+                        Some(NftChange::Flowtable(_)) => "its flowtable is recreated",
+                        Some(NftChange::Table(_)) => "its table is recreated",
+                        // A rule or an element batch carries no cascade.
+                        Some(NftChange::Rule(_) | NftChange::Elements(_)) | None => {
+                            "out of declared order"
+                        }
+                    };
+                    format!(
+                        "~ rule {} (handle={} key={}, re-added: {why}){}{}",
+                        at(to),
+                        handle(from),
+                        key(to),
+                        placement(to.placement),
+                        body(from.nft.as_deref(), to.nft.as_deref())
+                    )
+                }
+            }
+        }
+        NftChange::Set(c) => {
+            let at = |t: &NftSet| format!("{:?} {}/{}", t.family, t.table, t.name);
+            match c {
+                Change::Add(t) => format!("+ set {}", at(t)),
+                Change::Remove(t) => format!("- set {}", at(t)),
+                Change::Update { to, .. } => {
+                    let mut what = format!(
+                        "size={}",
+                        to.size.map_or_else(|| "-".to_string(), |n| n.to_string())
+                    );
+                    if let Some(t) = to.timeout {
+                        what.push_str(&format!(", timeout={t:?}"));
+                    }
+                    if let Some(gc) = to.gc_interval {
+                        what.push_str(&format!(", gc-interval={gc:?}"));
+                    }
+                    format!("~ set {} ({what})", at(to))
+                }
+                Change::Recreate { to, reason, .. } => {
+                    format!("-/+ set {} (recreate: {reason})", at(to))
+                }
+            }
+        }
+        NftChange::Elements(c) => match c {
+            Change::Remove(t) => format!(
+                "- {} {:?} {}/{}",
+                elements(t.elements.len()),
+                t.family,
+                t.table,
+                t.set
+            ),
+            Change::Add(t) | Change::Update { to: t, .. } | Change::Recreate { to: t, .. } => {
+                format!(
+                    "+ {} {:?} {}/{}",
+                    elements(t.elements.len()),
+                    t.family,
+                    t.table,
+                    t.set
+                )
+            }
+        },
+        NftChange::Object(c) => {
+            let at = |t: &NftObject| format!("{:?} {}/{}", t.family, t.table, t.name);
+            match c {
+                Change::Add(t) => format!("+ object {} {:?}", at(t), t.config),
+                Change::Remove(t) => format!("- object {} ({:?})", at(t), t.config.object_type()),
+                Change::Update { to, .. } => format!("~ object {} {:?}", at(to), to.config),
+                Change::Recreate { to, reason, .. } => {
+                    format!("-/+ object {} (recreate: {reason})", at(to))
+                }
+            }
+        }
+        NftChange::Flowtable(c) => {
+            let at = |t: &NftFlowtable| format!("{:?} {}/{}", t.family, t.table, t.name);
+            match c {
+                Change::Add(t) => format!("+ flowtable {}", at(t)),
+                Change::Remove(t) => format!("- flowtable {}", at(t)),
+                Change::Update { from, to } => {
+                    let mut parts = Vec::new();
+                    let added: Vec<&str> = to
+                        .devices
+                        .iter()
+                        .filter(|d| !from.devices.contains(d))
+                        .map(String::as_str)
+                        .collect();
+                    let removed: Vec<&str> = from
+                        .devices
+                        .iter()
+                        .filter(|d| !to.devices.contains(d))
+                        .map(String::as_str)
+                        .collect();
+                    if !added.is_empty() {
+                        parts.push(format!("+devices {}", added.join(",")));
+                    }
+                    if !removed.is_empty() {
+                        parts.push(format!("-devices {}", removed.join(",")));
+                    }
+                    parts.push(format!("flags={:#x}", to.flags));
+                    format!("~ flowtable {} ({})", at(to), parts.join(" "))
+                }
+                Change::Recreate { to, reason, .. } => {
+                    format!("-/+ flowtable {} (recreate: {reason})", at(to))
+                }
+            }
+        }
+    };
+    out.push(format!("{pad}{line}"));
+    for c in change.cascade() {
+        lines(c, Some(change), indent + 2, out);
+    }
+}
+
+impl std::fmt::Display for NftChange {
+    /// The change's line, and its cascade's indented under it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut out = Vec::new();
+        lines(self, None, 0, &mut out);
+        f.write_str(&out.join("\n"))
     }
 }
 

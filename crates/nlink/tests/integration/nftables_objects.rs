@@ -5,7 +5,7 @@
 
 use std::net::Ipv4Addr;
 
-use nlink::netlink::nftables::config::{MoveReason, NftablesConfig};
+use nlink::netlink::nftables::config::{Change, NftablesConfig};
 use nlink::netlink::nftables::types::{
     BaseChain, Chain, CtState, Family, FilterHook, LimitUnit, PacketField, Priority, Rule, Set,
     SetDataType, SetElement,
@@ -245,8 +245,8 @@ async fn declared_objects_converge_and_keep_their_state() -> nlink::Result<()> {
         // A bigger quota: updated in place, its consumption kept.
         let bigger = declared(2_000_000, 1000);
         let diff = bigger.diff(&conn).await?;
-        assert_eq!(diff.objects_to_update.len(), 1, "{diff}");
-        assert!(diff.objects_to_delete.is_empty(), "{diff}");
+        let objects: Vec<_> = diff.objects().collect();
+        assert!(matches!(objects[..], [Change::Update { .. }]), "{diff}");
         diff.apply(&conn).await?;
         match object(&conn, "budget").await? {
             ObjectState::Quota { bytes, consumed, .. } => {
@@ -264,9 +264,16 @@ async fn declared_objects_converge_and_keep_their_state() -> nlink::Result<()> {
         let before = order(&conn.list_rules("t", Family::Ip).await?);
         let faster = declared(2_000_000, 2000);
         let diff = faster.diff(&conn).await?;
-        assert_eq!(diff.objects_to_delete.len(), 1, "{diff}");
-        assert_eq!(diff.rules_to_move.len(), 1, "{diff}");
-        assert_eq!(diff.rules_to_move[0].reason, MoveReason::BoundToRecreatedObject);
+        let objects: Vec<_> = diff.objects().collect();
+        let [Change::Recreate { cascade, .. }] = objects[..] else {
+            panic!("the limit is recreated: {diff}");
+        };
+        let cascade: Vec<_> = cascade.iter().map(|c| (c.kind(), c.op())).collect();
+        assert_eq!(
+            cascade,
+            [("rule", "update")],
+            "the rule using it moves with it: {diff}"
+        );
         diff.apply(&conn).await?;
         assert_eq!(order(&conn.list_rules("t", Family::Ip).await?), before);
         match object(&conn, "rate").await? {

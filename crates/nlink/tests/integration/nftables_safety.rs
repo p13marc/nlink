@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use nlink::netlink::nftables::config::{NftDiffOptions, NftablesConfig};
+use nlink::netlink::nftables::config::{Change, NftDiffOptions, NftablesConfig};
 use nlink::netlink::nftables::types::{
     BaseChain, Chain, Family, FilterHook, Policy, Priority, Rule,
 };
@@ -56,9 +56,8 @@ async fn apply_does_not_delete_an_undeclared_table() -> nlink::Result<()> {
         // Apply a config that says nothing about it.
         let diff = only_my_table().diff(&conn).await?;
         assert!(
-            diff.tables_to_delete.is_empty(),
-            "diff() must never schedule a table deletion; it scheduled {:?}",
-            diff.tables_to_delete,
+            !diff.tables().any(|c| matches!(c, Change::Remove(_))),
+            "diff() must never schedule a table deletion; it scheduled {diff}",
         );
         diff.apply(&conn).await?;
 
@@ -93,9 +92,8 @@ async fn purge_is_opt_in_and_still_works() -> nlink::Result<()> {
             .diff_with_options(&conn, &NftDiffOptions::default().purge_tables(true))
             .await?;
         assert!(
-            diff.tables_to_delete
-                .iter()
-                .any(|(_, name)| name == "foreign"),
+            diff.tables()
+                .any(|c| matches!(c, Change::Remove(t) if t.name == "foreign")),
             "purge_tables(true) must schedule the undeclared table for deletion",
         );
         diff.apply(&conn).await?;

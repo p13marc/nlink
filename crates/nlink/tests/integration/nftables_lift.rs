@@ -11,7 +11,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use nlink::netlink::Nftables;
-use nlink::netlink::nftables::config::NftablesConfig;
+use nlink::netlink::nftables::config::{NftChange, NftablesConfig};
 use nlink::netlink::nftables::types::{
     BaseChain, ChainName, CtDirection, CtState, CtStatus, Family, FibFlags, FilterHook, Generated,
     HeaderWrite, IcmpxCode, LimitUnit, NatStatement, PacketField, PktType, Priority, Rule,
@@ -23,7 +23,7 @@ use nlink::netlink::nftables::{
 use nlink::netlink::types::route::RouteType;
 use nlink::{Bytes, TcHandle};
 
-use crate::common::TestNamespace;
+use crate::common::{TestNamespace, nft};
 
 /// The rule lines of `nft list chain <family> <table> <chain>`.
 fn listed(
@@ -1017,24 +1017,16 @@ async fn the_diff_shows_what_the_kernel_has_as_nft_lists_it() -> nlink::Result<(
     };
 
     let mut shown: Vec<(u64, Option<String>)> = Vec::new();
-    shown.extend(
-        diff.rules_to_delete
-            .iter()
-            .map(|d| (d.handle.0, d.current.clone())),
-    );
-    shown.extend(
-        diff.rules_to_replace
-            .iter()
-            .map(|r| (r.handle.0, r.current.clone())),
-    );
-    shown.extend(
-        diff.rules_to_move
-            .iter()
-            .map(|m| (m.from.0, m.current.clone())),
-    );
-    assert_eq!(diff.rules_to_delete.len(), 2, "{diff}");
-    assert_eq!(diff.rules_to_replace.len(), 1, "{diff}");
-    assert_eq!(diff.rules_to_move.len(), 1, "{diff}");
+    for change in nft::all(&diff) {
+        if let NftChange::Rule(c) = change
+            && let Some(from) = c.from()
+        {
+            shown.push((from.handle.unwrap().0, from.nft.clone()));
+        }
+    }
+    assert_eq!(nft::count(&diff, "rule", "remove"), 2, "{diff}");
+    assert_eq!(nft::replaced(&diff).len(), 1, "{diff}");
+    assert_eq!(nft::moved(&diff).len(), 1, "{diff}");
     let text = diff.to_string();
     for (handle, current) in &shown {
         assert_eq!(*current, at(*handle), "handle {handle}: {diff}");

@@ -9,7 +9,7 @@ use nlink::netlink::nftables::types::{BaseChain, Family, FilterHook, Priority, R
 use nlink::netlink::{Connection, Nftables};
 
 use crate::common::traffic::{lo_up, send_udp};
-use crate::common::{TestNamespace, with_timeout};
+use crate::common::{TestNamespace, nft, with_timeout};
 
 /// A declared rule: its key and how to build its body.
 type KeyedRule = (&'static str, fn(Rule) -> Rule);
@@ -126,7 +126,7 @@ async fn reordering_moves_only_the_rules_that_must_move() -> nlink::Result<()> {
         let cab: Vec<KeyedRule> = vec![("c", c), ("a", a), ("b", b)];
         let cab = cfg(cab);
         let diff = cab.diff(&conn).await?;
-        assert_eq!(diff.rules_to_move.len(), 1, "only c moves: {diff}");
+        assert_eq!(nft::moved(&diff).len(), 1, "only c moves: {diff}");
         diff.apply(&conn).await?;
 
         assert_eq!(keys(&conn).await?, ["c", "a", "b"]);
@@ -202,8 +202,8 @@ async fn a_keyed_rule_with_a_comment_keeps_its_identity() -> nlink::Result<()> {
         let edited: Vec<KeyedRule> =
             vec![("k", |r| r.match_udp_dport(1).comment("allow the other thing"))];
         let diff = cfg(edited).diff(&conn).await?;
-        assert_eq!(diff.rules_to_replace.len(), 1, "{diff}");
-        assert!(diff.rules_to_add.is_empty() && diff.rules_to_delete.is_empty(), "{diff}");
+        assert_eq!(nft::replaced(&diff).len(), 1, "{diff}");
+        assert_eq!(diff.change_count(), 1, "{diff}");
         Ok(())
     })
     .await
@@ -291,7 +291,7 @@ async fn duplicate_keyed_rules_are_cleaned_up() -> nlink::Result<()> {
         assert_eq!(keys(&conn).await?, ["k", "k"]);
 
         let diff = config.diff(&conn).await?;
-        assert_eq!(diff.rules_to_delete.len(), 1, "{diff}");
+        assert_eq!(nft::count(&diff, "rule", "remove"), 1, "{diff}");
         diff.apply(&conn).await?;
         assert_eq!(keys(&conn).await?, ["k"]);
         let again = config.diff(&conn).await?;
@@ -324,7 +324,11 @@ async fn an_exclusive_chain_removes_foreign_rules() -> nlink::Result<()> {
             .await?;
 
         let diff = config.diff(&conn).await?;
-        assert_eq!(diff.rules_to_delete.len(), 1, "the foreign rule goes: {diff}");
+        assert_eq!(
+            nft::count(&diff, "rule", "remove"),
+            1,
+            "the foreign rule goes: {diff}"
+        );
         diff.apply(&conn).await?;
         assert_eq!(keys(&conn).await?, ["k"]);
         Ok(())

@@ -47,14 +47,11 @@ All notable changes to this project will be documented in this file.
   parse and could delete the default route on a typo.
 
 - **A rule the diff deletes, replaces or moves says what the kernel has**
-  (#708). `NftablesDiff::rules_to_delete` is a `Vec<RuleDelete>` and
-  `rules_to_replace` a `Vec<RuleReplace>`; both were tuples. Each names the
-  table, family, chain and handle as before, and adds `current`, the
-  kernel's rule as `nft -s list` prints it. A delete also has the rule's
-  `key`, and `RuleMove` gains the same `current`. A delete used to print its
-  handle and nothing else, so a log of the diff could not say what a
-  reconcile removed. A rule someone added by hand went, and the log said
-  `handle=6`. Now it reads:
+  (#708). Its line in the diff ends with the kernel's rule as `nft -s list`
+  prints it, and so does its `from.nft` in `changes` (below). A delete used
+  to print its handle and nothing else, so a log of the diff could not say
+  what a reconcile removed. A rule someone added by hand went, and the log
+  said `handle=6`. Now it reads:
 
   ```text
   - rule Inet f/input (handle=6): udp dport 5353 counter accept comment "by hand"
@@ -100,7 +97,7 @@ All notable changes to this project will be documented in this file.
     `Chain` and `DeclaredChainBuilder`) are deprecated and still work.
     `Hook::Ingress` and `Hook::Egress` are numbered by the family, so
     `NetdevIngress`, `InetIngress` and `NetdevEgress` are deprecated too.
-  - **Breaks:** a declared chain's JSON in a diff is `"kind": "regular"` or
+  - **Breaks:** a chain in a diff's JSON has `"kind": "regular"` or
     `"kind": {"base": {"type", "hook", "devices", "priority", "policy"}}`,
     not flat `hook`/`priority`/`chain-type`/`devices` fields.
   - **Behaviour:** the diff compares every base chain's type and priority.
@@ -119,8 +116,9 @@ All notable changes to this project will be documented in this file.
   do changes of type, hook, priority, policy and devices, and what the
   deprecated setters write. The lane's module list gains `nft_chain_nat`.
 
-- **The diff says its changes as typed values: `Change<T>`** (#708, (b)).
-  `NftablesDiff::changes` is a `Vec<NftChange>`, one entry per table,
+- **`NftablesDiff` is its changes, as typed values: `Change<T>`** (#708,
+  (b)). The diff is three fields: `changes`, `blocked` (below) and
+  `generation`. `changes` is a `Vec<NftChange>`, one entry per table,
   chain, rule, set, batch of elements, object or flowtable the diff
   changes. Each entry is a `Change<T>`:
   - `Add(T)` or `Remove(T)`;
@@ -146,10 +144,20 @@ All notable changes to this project will be documented in this file.
     `elements()`, `objects()` and `flowtables()` list the top-level
     changes of each kind, `NftChange::flatten()` walks a cascade, and
     `refusal()` is the error `apply` would fail with.
-  - **JSON:** each change is `{"type": "chain", "op": "recreate", "from",
-    "to", "reason", "cascade"}`.
-  - **Still there:** the per-kind lists `apply` sends are unchanged
-    alongside it.
+  - **JSON:** the diff is `{"blocked", "changes", "generation"}`, and each
+    change is `{"type": "chain", "op": "recreate", "from", "to", "reason",
+    "cascade"}`. A rule's placement is `"append"`, `{"before": n}` or
+    `{"after": n}`.
+  - **Breaks:** the 23 per-kind lists (`tables_to_add` …
+    `objects_to_delete`) are private: they are the batch `apply` sends.
+    So are `ChainRecreate`, `FlowtableUpdate`, `MoveReason`, `RuleAdd`,
+    `RuleMove` and `SetElementsChange`. The deprecated `summary()` is
+    gone; `Display` replaces it. The migration guide maps each list to its
+    change.
+  - **Behaviour:** `change_count()` counts the top-level changes and the
+    refusing `blocked` entries, so a recreate counts once with its cascade.
+    `Display` prints a recreate as one `-/+` line with its cascade indented
+    under it, and the `!` lines of `blocked` last.
 
   **What the planner now records:** why it recreates each set, object or
   flowtable (`key Ipv4Addr -> Mark`, `priority 0 -> 10`), and which
@@ -171,7 +179,7 @@ All notable changes to this project will be documented in this file.
     - `tables_refused`, now `Blocked::TableFlags`;
     - `ChainRecreate::blocked_by` and `is_refused`, now
       `Blocked::ChainRecreate`, which carries the rules nlink did not write
-      as `NftRule`s. A refused chain is no longer in `chains_to_recreate`.
+      as `NftRule`s.
     - `kept_in_use`, now `Blocked::InUse`, with the rules that use the
       item. `KeptInUse` is `NftItem`, tagged by `type` in JSON.
   - **`Blocked::refuses()`** is true for `TableFlags`, `TableRecreate`,

@@ -13,7 +13,7 @@ use nlink::netlink::{Connection, Nftables};
 use crate::common::converge::assert_transition;
 use crate::common::counters::rule_packets;
 use crate::common::traffic::{lo_up, send_udp};
-use crate::common::{TestNamespace, with_timeout};
+use crate::common::{TestNamespace, nft, with_timeout};
 
 /// `ip t` with an output chain counting UDP whose `field` is in `set`.
 async fn counting_chain(
@@ -161,9 +161,13 @@ async fn declared_ranges_converge_and_change_one_at_a_time() -> nlink::Result<()
 
         let second = declared(vec![prefix(10, 0, 0, 24), prefix(10, 0, 3, 24), single]);
         let diff = second.diff(&conn).await?;
-        assert_eq!(diff.set_elements_to_remove.len(), 1, "{diff}");
-        assert_eq!(diff.set_elements_to_remove[0].elements.len(), 1, "{diff}");
-        assert_eq!(diff.set_elements_to_add[0].elements.len(), 1, "{diff}");
+        assert_eq!(nft::elements(&diff, "remove").len(), 1, "{diff}");
+        assert_eq!(
+            nft::elements(&diff, "remove")[0].elements.len(),
+            1,
+            "{diff}"
+        );
+        assert_eq!(nft::elements(&diff, "add")[0].elements.len(), 1, "{diff}");
         diff.apply(&conn).await?;
         let again = second.diff(&conn).await?;
         assert!(again.is_empty(), "second diff must be empty: {again}");

@@ -14,9 +14,9 @@
 //!   3. Apply atomically (single NFNL_MSG_BATCH_BEGIN…END commit).
 //!   4. Re-compute the diff (now empty — idempotent reapply).
 //!   5. Mutate one rule's body (keep its handle_key) AND add a third
-//!      IP to the set; the diff is a single `rules_to_replace` op
-//!      plus a single `set_elements_to_add` op (element-level diff —
-//!      only the new key is added, not the whole set).
+//!      IP to the set; the diff is one rule update in place plus one
+//!      element add (element-level diff — only the new key is added,
+//!      not the whole set).
 //!   6. Tear down with `del_table`.
 //!
 //! Each keyed rule round-trips its key through `NFTA_RULE_USERDATA`
@@ -25,7 +25,7 @@
 
 use std::net::Ipv4Addr;
 
-use nlink::netlink::nftables::config::NftablesConfig;
+use nlink::netlink::nftables::config::{Change, NftablesConfig};
 use nlink::netlink::nftables::types::{
     BaseChain, Family, FilterHook, Policy, Priority, SetKeyType,
 };
@@ -94,18 +94,28 @@ async fn main() -> nlink::Result<()> {
     });
     let mut_diff = updated.diff(&conn).await?;
     println!("after port change + new set element:\n{}", mut_diff);
+    let replaced = mut_diff
+        .rules()
+        .filter(|c| matches!(c, Change::Update { to, .. } if to.placement.is_none()))
+        .count();
     assert_eq!(
-        mut_diff.rules_to_replace.len(),
-        1,
+        replaced, 1,
         "expected exactly one in-place replace for the changed rule",
     );
+    let added: Vec<_> = mut_diff
+        .elements()
+        .filter_map(|c| match c {
+            Change::Add(e) => Some(e),
+            _ => None,
+        })
+        .collect();
     assert_eq!(
-        mut_diff.set_elements_to_add.len(),
+        added.len(),
         1,
-        "expected exactly one set_elements_to_add op (only the new key)",
+        "expected exactly one element add (only the new key)",
     );
     assert_eq!(
-        mut_diff.set_elements_to_add[0].elements.len(),
+        added[0].elements.len(),
         1,
         "element diff should add just the single new key, not the whole set",
     );

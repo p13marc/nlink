@@ -180,7 +180,7 @@ async fn a_table_holding_foreign_rules_is_not_recreated() -> nlink::Result<()> {
         panic!("one refused table recreate: {diff}");
     };
     assert_eq!((table.as_str(), rules.len()), ("t", 1), "{diff}");
-    assert!(diff.tables_to_recreate.is_empty(), "{diff}");
+    assert_eq!(diff.change_count(), 1, "the refusal is all it says: {diff}");
     let err = diff.apply(&conn).await.expect_err("refused");
     assert!(err.is_not_supported(), "{err}");
     assert!(nft(&ns, "list table ip t")?.contains("tcp dport 22 accept"));
