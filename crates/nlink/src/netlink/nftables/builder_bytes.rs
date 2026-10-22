@@ -43,18 +43,42 @@ fn cases() -> Vec<(&'static str, Rule)> {
         ("saddr_v4_40", r().match_saddr_v4(v4("10.0.0.1"), 40)),
         ("daddr_v4_16", r().match_daddr_v4(v4("192.168.7.1"), 16)),
         ("saddr_v4_not_8", r().match_saddr_v4_not(v4("10.0.0.0"), 8)),
-        ("daddr_v4_not_12", r().match_daddr_v4_not(v4("10.16.0.0"), 12)),
-        ("daddr_v4_not_32", r().match_daddr_v4_not(v4("10.16.0.3"), 32)),
+        (
+            "daddr_v4_not_12",
+            r().match_daddr_v4_not(v4("10.16.0.0"), 12),
+        ),
+        (
+            "daddr_v4_not_32",
+            r().match_daddr_v4_not(v4("10.16.0.3"), 32),
+        ),
         ("saddr_v4_0", r().match_saddr_v4(v4("10.0.0.0"), 0)),
         ("saddr_v6_32", r().match_saddr_v6(v6("2001:db8::"), 32)),
         ("daddr_v6_128", r().match_daddr_v6(v6("::1"), 128)),
         ("saddr_v6_not_8", r().match_saddr_v6_not(v6("fd00::"), 8)),
-        ("daddr_v6_not_128", r().match_daddr_v6_not(v6("fd00::1"), 128)),
-        ("saddr_any_v4", r().match_saddr(IpAddr::V4(v4("10.0.0.2")), 32)),
-        ("saddr_any_v6", r().match_saddr(IpAddr::V6(v6("fd00::2")), 64)),
-        ("saddr_not_any_v6", r().match_saddr_not(IpAddr::V6(v6("fd00::2")), 64)),
-        ("daddr_any_v4", r().match_daddr(IpAddr::V4(v4("10.1.0.0")), 16)),
-        ("daddr_not_any_v4", r().match_daddr_not(IpAddr::V4(v4("10.1.0.0")), 16)),
+        (
+            "daddr_v6_not_128",
+            r().match_daddr_v6_not(v6("fd00::1"), 128),
+        ),
+        (
+            "saddr_any_v4",
+            r().match_saddr(IpAddr::V4(v4("10.0.0.2")), 32),
+        ),
+        (
+            "saddr_any_v6",
+            r().match_saddr(IpAddr::V6(v6("fd00::2")), 64),
+        ),
+        (
+            "saddr_not_any_v6",
+            r().match_saddr_not(IpAddr::V6(v6("fd00::2")), 64),
+        ),
+        (
+            "daddr_any_v4",
+            r().match_daddr(IpAddr::V4(v4("10.1.0.0")), 16),
+        ),
+        (
+            "daddr_not_any_v4",
+            r().match_daddr_not(IpAddr::V4(v4("10.1.0.0")), 16),
+        ),
         ("iif", r().match_iif("eth0")),
         ("iif_not", r().match_iif_not("lo")),
         ("iif_prefix", r().match_iif_prefix("veth")),
@@ -63,10 +87,14 @@ fn cases() -> Vec<(&'static str, Rule)> {
         ("oif_prefix", r().match_oif_prefix("wg")),
         ("iif_15", r().match_iif("abcdefghijklmno")),
         ("iif_too_long", r().match_iif("abcdefghijklmnop")),
-        ("oif_prefix_too_long", r().match_oif_prefix("abcdefghijklmnop")),
+        (
+            "oif_prefix_too_long",
+            r().match_oif_prefix("abcdefghijklmnop"),
+        ),
         (
             "ct_state",
-            r().match_ct_state(CtState::ESTABLISHED | CtState::RELATED).accept(),
+            r().match_ct_state(CtState::ESTABLISHED | CtState::RELATED)
+                .accept(),
         ),
         ("ct_state_new", r().match_ct_state(CtState::NEW)),
         ("ct_status", r().match_ct_status(CtStatus::DST_NAT)),
@@ -91,9 +119,13 @@ fn cases() -> Vec<(&'static str, Rule)> {
         ),
         (
             "ct_port",
-            r().match_l4proto(6).match_ct_port(CtDirection::Reply, false, 80),
+            r().match_l4proto(6)
+                .match_ct_port(CtDirection::Reply, false, 80),
         ),
-        ("ct_sport", r().match_ct_port(CtDirection::Original, true, 53)),
+        (
+            "ct_sport",
+            r().match_ct_port(CtDirection::Original, true, 53),
+        ),
         ("ct_label", r().match_ct_label(3)),
         ("ct_label_127", r().match_ct_label(127)),
         ("ct_label_128", r().match_ct_label(128)),
@@ -126,9 +158,15 @@ fn cases() -> Vec<(&'static str, Rule)> {
             "range_not_port",
             r().match_range_not(PacketField::UdpSport, 1u16, 1023u16),
         ),
-        ("range_mark", r().match_range(PacketField::Mark, 0x10u32, 0x20u32)),
+        (
+            "range_mark",
+            r().match_range(PacketField::Mark, 0x10u32, 0x20u32),
+        ),
         ("range_iif", r().match_range(PacketField::Iif, 1u32, 4u32)),
-        ("range_l4proto", r().match_range(PacketField::L4Proto, 6u8, 17u8)),
+        (
+            "range_l4proto",
+            r().match_range(PacketField::L4Proto, 6u8, 17u8),
+        ),
         (
             "range_addr",
             r().match_range(
@@ -165,17 +203,29 @@ fn cases() -> Vec<(&'static str, Rule)> {
                 IpAddr::V6(v6("::9")),
             ),
         ),
-        ("range_port_as_u32", r().match_range(PacketField::TcpDport, 1u32, 5u32)),
+        (
+            "range_port_as_u32",
+            r().match_range(PacketField::TcpDport, 1u32, 5u32),
+        ),
         ("saddr_in_set", r().match_saddr_in_set("s4")),
         ("daddr_in_set", r().match_daddr_in_set("s4")),
-        ("not_in_set", r().match_not_in_set(PacketField::Ip4Saddr, "s4")),
+        (
+            "not_in_set",
+            r().match_not_in_set(PacketField::Ip4Saddr, "s4"),
+        ),
         ("in_set_port", r().match_in_set(PacketField::TcpDport, "sp")),
         ("in_set_v6", r().match_in_set(PacketField::Ip6Daddr, "s6")),
         ("in_set_mark", r().match_in_set(PacketField::Mark, "sm")),
         ("in_set_iif", r().match_in_set(PacketField::Iif, "si")),
         ("in_set_oif", r().match_in_set(PacketField::Oif, "si")),
-        ("in_set_l4proto", r().match_in_set(PacketField::L4Proto, "sl")),
-        ("in_interval_set_mark", r().match_in_interval_set(PacketField::Mark, "sm")),
+        (
+            "in_set_l4proto",
+            r().match_in_set(PacketField::L4Proto, "sl"),
+        ),
+        (
+            "in_interval_set_mark",
+            r().match_in_interval_set(PacketField::Mark, "sm"),
+        ),
         (
             "not_in_interval_set_mark",
             r().match_not_in_interval_set(PacketField::Mark, "sm"),
@@ -199,7 +249,11 @@ fn cases() -> Vec<(&'static str, Rule)> {
         (
             "concat_v6_mark",
             r().match_concat_in_set(
-                &[PacketField::Ip6Saddr, PacketField::Mark, PacketField::UdpDport],
+                &[
+                    PacketField::Ip6Saddr,
+                    PacketField::Mark,
+                    PacketField::UdpDport,
+                ],
                 "sc6",
             ),
         ),
@@ -226,7 +280,10 @@ fn cases() -> Vec<(&'static str, Rule)> {
             r().vmap_concat(&[PacketField::Ip4Saddr, PacketField::TcpDport], "vmc"),
         ),
         ("vmap_v6", r().vmap(PacketField::Ip6Saddr, "vm6")),
-        ("mark_from_map", r().set_mark_from_map(PacketField::Ip4Saddr, "mm")),
+        (
+            "mark_from_map",
+            r().set_mark_from_map(PacketField::Ip4Saddr, "mm"),
+        ),
         (
             "priority_from_map",
             r().set_priority_from_map(PacketField::UdpDport, "pm"),
@@ -238,24 +295,39 @@ fn cases() -> Vec<(&'static str, Rule)> {
         ("limit_named", r().limit_named("l1")),
         ("set_secmark", r().set_secmark("sec")),
         ("set_ct_helper", r().set_ct_helper("ftp")),
-        ("objref_from_map", r().objref_from_map(PacketField::Ip4Saddr, "om")),
-        ("objref_from_map_v6", r().objref_from_map(PacketField::Ip6Daddr, "om6")),
+        (
+            "objref_from_map",
+            r().objref_from_map(PacketField::Ip4Saddr, "om"),
+        ),
+        (
+            "objref_from_map_v6",
+            r().objref_from_map(PacketField::Ip6Daddr, "om6"),
+        ),
         ("quota_until", r().quota_until(100 * 1024 * 1024)),
         ("quota_over", r().quota_over(1000)),
         ("limit", r().limit(10, LimitUnit::Minute)),
-        ("limit_bytes", r().limit_bytes(Bytes::kib(1), LimitUnit::Second)),
+        (
+            "limit_bytes",
+            r().limit_bytes(Bytes::kib(1), LimitUnit::Second),
+        ),
         ("log", r().log(None)),
         ("log_prefix", r().log(Some("p: "))),
         (
             "log_expr",
             r().expr(LogExpr::new().group(2).snaplen(64).level(LogLevel::Debug)),
         ),
-        ("fib_missing", r().match_fib_missing(FibFlags::SADDR | FibFlags::IIF)),
+        (
+            "fib_missing",
+            r().match_fib_missing(FibFlags::SADDR | FibFlags::IIF),
+        ),
         (
             "fib_missing_daddr",
             r().match_fib_missing(FibFlags::DADDR | FibFlags::OIF | FibFlags::MARK),
         ),
-        ("fib_type", r().match_fib_type(FibFlags::DADDR, RouteType::Local)),
+        (
+            "fib_type",
+            r().match_fib_type(FibFlags::DADDR, RouteType::Local),
+        ),
         (
             "fib_type_saddr",
             r().match_fib_type(FibFlags::SADDR | FibFlags::IIF, RouteType::Unicast),
@@ -316,13 +388,22 @@ fn cases() -> Vec<(&'static str, Rule)> {
             })
             .set_ct_from(CtKey::Mark),
         ),
-        ("socket_transparent", r().match_socket(SocketMatch::Transparent(true))),
-        ("socket_wildcard", r().match_socket(SocketMatch::Wildcard(false))),
+        (
+            "socket_transparent",
+            r().match_socket(SocketMatch::Transparent(true)),
+        ),
+        (
+            "socket_wildcard",
+            r().match_socket(SocketMatch::Wildcard(false)),
+        ),
         ("socket_mark", r().match_socket(SocketMatch::Mark(7))),
         ("osf", r().match_osf("Linux", OsfTtl::Loose, false)),
         ("osf_version", r().match_osf("Linux", OsfTtl::Skip, true)),
         ("osf_exact", r().match_osf("Windows", OsfTtl::Exact, false)),
-        ("osf_too_long", r().match_osf("abcdefghijklmnop", OsfTtl::Exact, false)),
+        (
+            "osf_too_long",
+            r().match_osf("abcdefghijklmnop", OsfTtl::Exact, false),
+        ),
         ("reject", r().reject()),
         ("reject_tcp_reset", r().reject_tcp_reset()),
         (
@@ -334,22 +415,41 @@ fn cases() -> Vec<(&'static str, Rule)> {
             r().match_udp_dport(22).reject_tcp_reset(),
         ),
         ("reject_icmpx", r().reject_icmpx(IcmpxCode::AdminProhibited)),
-        ("reject_icmpx_no_route", r().reject_icmpx(IcmpxCode::NoRoute)),
+        (
+            "reject_icmpx_no_route",
+            r().reject_icmpx(IcmpxCode::NoRoute),
+        ),
         ("reject_icmp", r().reject_icmp(1)),
         ("reject_icmpv6", r().reject_icmpv6(3)),
-        ("reject_with_icmp", r().reject_with(NFT_REJECT_ICMP_UNREACH, 3)),
+        (
+            "reject_with_icmp",
+            r().reject_with(NFT_REJECT_ICMP_UNREACH, 3),
+        ),
         ("reject_with_rst", r().reject_with(NFT_REJECT_TCP_RST, 0)),
-        ("reject_with_icmpx_9", r().reject_with(NFT_REJECT_ICMPX_UNREACH, 9)),
-        ("add_to_set", r().add_to_set(PacketField::Ip4Saddr, "s4", None)),
+        (
+            "reject_with_icmpx_9",
+            r().reject_with(NFT_REJECT_ICMPX_UNREACH, 9),
+        ),
+        (
+            "add_to_set",
+            r().add_to_set(PacketField::Ip4Saddr, "s4", None),
+        ),
         (
             "update_in_set",
             r().update_in_set(PacketField::Ip4Saddr, "s4", Some(Duration::from_secs(30))),
         ),
         (
             "add_to_set_port",
-            r().add_to_set(PacketField::TcpDport, "sp", Some(Duration::from_millis(1500))),
+            r().add_to_set(
+                PacketField::TcpDport,
+                "sp",
+                Some(Duration::from_millis(1500)),
+            ),
         ),
-        ("delete_from_set", r().delete_from_set(PacketField::Ip4Saddr, "s4")),
+        (
+            "delete_from_set",
+            r().delete_from_set(PacketField::Ip4Saddr, "s4"),
+        ),
         (
             "dynset_counter",
             r().dynset(
@@ -370,11 +470,23 @@ fn cases() -> Vec<(&'static str, Rule)> {
         ("header_ip_dscp_63", r().set_header(HeaderWrite::IpDscp(63))),
         ("header_ip_dscp_64", r().set_header(HeaderWrite::IpDscp(64))),
         ("header_ip_ttl", r().set_header(HeaderWrite::IpTtl(64))),
-        ("header_ip_saddr", r().set_header(HeaderWrite::IpSaddr(v4("10.0.0.9")))),
-        ("header_ip_daddr", r().set_header(HeaderWrite::IpDaddr(v4("10.0.0.8")))),
+        (
+            "header_ip_saddr",
+            r().set_header(HeaderWrite::IpSaddr(v4("10.0.0.9"))),
+        ),
+        (
+            "header_ip_daddr",
+            r().set_header(HeaderWrite::IpDaddr(v4("10.0.0.8"))),
+        ),
         ("header_ip6_dscp", r().set_header(HeaderWrite::Ip6Dscp(18))),
-        ("header_ip6_dscp_99", r().set_header(HeaderWrite::Ip6Dscp(99))),
-        ("header_ip6_hoplimit", r().set_header(HeaderWrite::Ip6HopLimit(9))),
+        (
+            "header_ip6_dscp_99",
+            r().set_header(HeaderWrite::Ip6Dscp(99)),
+        ),
+        (
+            "header_ip6_hoplimit",
+            r().set_header(HeaderWrite::Ip6HopLimit(9)),
+        ),
         (
             "header_ip6_saddr",
             r().set_header(HeaderWrite::Ip6Saddr(v6("2001:db8::2"))),
@@ -384,15 +496,27 @@ fn cases() -> Vec<(&'static str, Rule)> {
             r().set_header(HeaderWrite::Ip6Daddr(v6("2001:db8::1"))),
         ),
         ("header_tcp_sport", r().set_header(HeaderWrite::TcpSport(1))),
-        ("header_tcp_dport", r().set_header(HeaderWrite::TcpDport(8080))),
-        ("header_udp_sport", r().set_header(HeaderWrite::UdpSport(53))),
-        ("header_udp_dport", r().set_header(HeaderWrite::UdpDport(54))),
+        (
+            "header_tcp_dport",
+            r().set_header(HeaderWrite::TcpDport(8080)),
+        ),
+        (
+            "header_udp_sport",
+            r().set_header(HeaderWrite::UdpSport(53)),
+        ),
+        (
+            "header_udp_dport",
+            r().set_header(HeaderWrite::UdpDport(54)),
+        ),
         ("jump", r().jump(c2())),
         ("goto", r().goto(c2())),
         ("try_jump", r().try_jump("c3").unwrap()),
         ("try_goto", r().try_goto("c3").unwrap()),
         ("verdict_return", r().expr(Expr::Verdict(Verdict::Return))),
-        ("comment", r().match_tcp_dport(22).counter().accept().comment("ssh")),
+        (
+            "comment",
+            r().match_tcp_dport(22).counter().accept().comment("ssh"),
+        ),
         ("comment_only", r().comment("nothing else")),
         ("snat", r().snat(v4("1.2.3.4"), None)),
         ("snat_port", r().snat(v4("1.2.3.4"), Some(80))),
@@ -421,7 +545,10 @@ fn cases() -> Vec<(&'static str, Rule)> {
             r().nat(NatStatement::dnat(v6("fd00::1")).port(80).fully_random()),
         ),
         ("nat_redirect", r().nat(NatStatement::redirect().port(53))),
-        ("nat_snat_to_port", r().nat(NatStatement::snat_to_port(Family::Ip, 9))),
+        (
+            "nat_snat_to_port",
+            r().nat(NatStatement::snat_to_port(Family::Ip, 9)),
+        ),
         (
             "nat_dnat_netmap",
             r().nat(
@@ -455,7 +582,10 @@ fn cases() -> Vec<(&'static str, Rule)> {
             r().tproxy(Family::Ip6, Some(IpAddr::V4(v4("1.2.3.4"))), None),
         ),
         ("tproxy_bridge", r().tproxy(Family::Bridge, None, Some(80))),
-        ("dup_to_v4_dev", r().dup_to(IpAddr::V4(v4("10.0.0.2")), Some(2))),
+        (
+            "dup_to_v4_dev",
+            r().dup_to(IpAddr::V4(v4("10.0.0.2")), Some(2)),
+        ),
         ("dup_to_v6", r().dup_to(IpAddr::V6(v6("fd00::2")), None)),
         ("dup_to_device", r().dup_to_device(3)),
         ("fwd_to", r().fwd_to(3)),
@@ -463,7 +593,8 @@ fn cases() -> Vec<(&'static str, Rule)> {
         ("fwd_ip_to_v6", r().fwd_ip_to(IpAddr::V6(v6("fd00::3")), 4)),
         (
             "queue",
-            r().expr(QueueExpr::range(3, 4).flags(QueueFlags::FANOUT)).match_tcp_dport(1),
+            r().expr(QueueExpr::range(3, 4).flags(QueueFlags::FANOUT))
+                .match_tcp_dport(1),
         ),
         ("expr_counter", r().match_tcp_dport(1).expr(Expr::Counter)),
         (
@@ -519,7 +650,10 @@ fn cases() -> Vec<(&'static str, Rule)> {
         ),
     ];
     // The few that differ by the table's family alone.
-    cases.push(("tproxy_inet_v4", r().tproxy(Family::Inet, Some(IpAddr::V4(v4("1.2.3.4"))), None)));
+    cases.push((
+        "tproxy_inet_v4",
+        r().tproxy(Family::Inet, Some(IpAddr::V4(v4("1.2.3.4"))), None),
+    ));
     cases
 }
 
@@ -537,8 +671,7 @@ fn fnv(bytes: &[u8]) -> u64 {
 
 /// What `rule` sends in its family's table, or why it is refused.
 fn lowered(rule: &Rule) -> std::result::Result<Vec<Expr>, String> {
-    rule.check().map_err(|e| e.to_string())?;
-    Ok(super::expr::exprs_for_family(&rule.exprs, rule.family).into_owned())
+    rule.lowered().map_err(|e| e.to_string())
 }
 
 fn encoded(exprs: &[Expr], form: WireForm) -> Vec<u8> {
@@ -570,7 +703,10 @@ fn record() -> String {
 #[test]
 #[cfg(target_endian = "little")]
 fn every_builder_method_sends_what_it_sent() {
-    const PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/netlink/nftables/builder_bytes.txt");
+    const PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/netlink/nftables/builder_bytes.txt"
+    );
     let now = record();
     if std::env::var_os("NLINK_RECORD_BUILDER_BYTES").is_some() {
         std::fs::write(PATH, &now).unwrap();

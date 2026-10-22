@@ -3528,15 +3528,15 @@ mod decode_tests {
 
         let rule = Rule::new("t", "c").reject();
         assert!(
-            matches!(rule.exprs.as_slice(), [Expr::Reject { .. }]),
+            matches!(rule.exprs().as_slice(), [Expr::Reject { .. }]),
             "Rule::reject() pushed {:?}, not a Reject expression",
-            rule.exprs,
+            rule.exprs(),
         );
 
         // And drop() still black-holes, which is a legitimate thing to want.
         let rule = Rule::new("t", "c").drop();
         assert!(matches!(
-            rule.exprs.as_slice(),
+            rule.exprs().as_slice(),
             [Expr::Verdict(Verdict::Drop)]
         ));
     }
@@ -3698,7 +3698,7 @@ mod decode_tests {
             .redirect(Some(3128))
             .masquerade()
             .flow_offload("ft");
-        let decoded: Vec<_> = parse_expressions(&encode(&rule.exprs))
+        let decoded: Vec<_> = parse_expressions(&encode(&rule.exprs()))
             .into_iter()
             .filter(|e| !matches!(e, RuleExpr::Immediate { .. }))
             .collect();
@@ -3743,8 +3743,8 @@ mod decode_tests {
 
         use super::super::types::{NatStatement, Rule};
         let decode = |rule: Rule| {
-            assert_eq!(rule.error, None);
-            parse_expressions(&encode(&rule.exprs))
+            rule.check().unwrap();
+            parse_expressions(&encode(&rule.exprs()))
         };
         let (a, b) = (Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 9));
         let exprs = decode(Rule::new("t", "c").nat(NatStatement::snat(a).to(b).ports(40000, 40010).fully_random()));
@@ -3790,7 +3790,7 @@ mod decode_tests {
 
         use super::super::types::{NatStatement, Rule};
         let a = Ipv4Addr::new(192, 0, 2, 1);
-        let same = |new: Rule, old: Rule| assert_eq!(encode(&new.exprs), encode(&old.exprs));
+        let same = |new: Rule, old: Rule| assert_eq!(encode(&new.exprs()), encode(&old.exprs()));
         same(Rule::new("t", "c").nat(NatStatement::snat(a).port(4000)), Rule::new("t", "c").snat(a, Some(4000)));
         same(Rule::new("t", "c").nat(NatStatement::dnat(a)), Rule::new("t", "c").dnat(a, None));
         same(Rule::new("t", "c").nat(NatStatement::redirect().port(3128)), Rule::new("t", "c").redirect(Some(3128)));
@@ -3815,7 +3815,7 @@ mod decode_tests {
             (NatStatement::snat_to_port(Family::Ip, 1).netmap(), "netmap needs an address range"),
         ] {
             let rule = Rule::new("t", "c").nat(nat);
-            let error = rule.error.unwrap_or_default();
+            let error = rule.spec().lower_items().err().unwrap_or_default();
             assert!(error.starts_with("nat: ") && error.contains(want), "{error:?} lacks {want:?}");
         }
     }
@@ -3829,7 +3829,7 @@ mod decode_tests {
             .limit_bytes(crate::Bytes::new(500), LimitUnit::Minute)
             .reject_icmpx(IcmpxCode::HostUnreachable);
         assert_eq!(
-            parse_expressions(&encode(&rule.exprs)),
+            parse_expressions(&encode(&rule.exprs())),
             vec![
                 RuleExpr::Limit(LimitExpr::bytes(crate::Bytes::kib(10), LimitUnit::Second).burst(2048).over()),
                 RuleExpr::Limit(LimitExpr::bytes(crate::Bytes::new(500), LimitUnit::Minute)),
@@ -3849,8 +3849,8 @@ mod decode_tests {
     fn ranges_encode_as_nft_does() {
         use super::super::types::{PacketField, RangeOp, Rule};
         let rule = Rule::new("t", "c").match_range(PacketField::TcpDport, 1000u16, 2000u16);
-        assert_eq!(rule.error, None);
-        let exprs = parse_expressions(&encode(&rule.exprs));
+        rule.check().unwrap();
+        let exprs = parse_expressions(&encode(&rule.exprs()));
         assert!(matches!(&exprs[..2], [RuleExpr::Meta { key: MetaKey::L4Proto, .. }, RuleExpr::Cmp { .. }]), "{exprs:?}");
         assert_eq!(
             exprs.last(),
@@ -3858,7 +3858,7 @@ mod decode_tests {
         );
 
         let rule = Rule::new("t", "c").match_range_not(PacketField::Mark, 0x10u32, 0x20u32);
-        let exprs = parse_expressions(&encode(&rule.exprs));
+        let exprs = parse_expressions(&encode(&rule.exprs()));
         assert!(matches!(exprs[1], RuleExpr::Byteorder { op: ByteorderOp::Hton, len: 4, size: 4, .. }), "{exprs:?}");
         assert_eq!(
             exprs[2],
@@ -3877,7 +3877,7 @@ mod decode_tests {
                 "cannot hold",
             ),
         ] {
-            let error = rule.error.unwrap_or_default();
+            let error = rule.spec().lower_items().err().unwrap_or_default();
             assert!(error.starts_with("range: ") && error.contains(want), "{error:?}");
         }
     }
@@ -4355,7 +4355,7 @@ mod decode_tests {
     fn rule_set_mark_loads_then_sets() {
         let rule = Rule::new("t", "c").set_mark(0x10);
         assert_eq!(
-            parse_expressions(&encode(&rule.exprs)),
+            parse_expressions(&encode(&rule.exprs())),
             vec![
                 RuleExpr::Immediate {
                     dreg: Register::R0,
@@ -4372,7 +4372,7 @@ mod decode_tests {
     #[test]
     fn rule_clamp_tcp_mss_is_the_nft_statement() {
         let rule = Rule::new("t", "c").clamp_tcp_mss(1360);
-        let decoded = parse_expressions(&encode(&rule.exprs));
+        let decoded = parse_expressions(&encode(&rule.exprs()));
         // `nft add rule ... tcp option maxseg size set 1360` (nftables
         // tests/py/any/tcpopt.t.payload): an immediate and the exthdr
         // write, nothing else — behind nlink's `meta l4proto tcp` guard.
@@ -4410,7 +4410,7 @@ mod decode_tests {
     fn rule_match_tcp_flags_masks_the_flags_byte() {
         let rule =
             Rule::new("t", "c").match_tcp_flags(TcpFlags::SYN, TcpFlags::SYN | TcpFlags::RST);
-        let decoded = parse_expressions(&encode(&rule.exprs));
+        let decoded = parse_expressions(&encode(&rule.exprs()));
         assert_eq!(
             decoded[2],
             RuleExpr::Payload {
@@ -4698,7 +4698,7 @@ mod decode_tests {
             Rule::new("t", "c").match_saddr_in_set("s"),
             Rule::new("t", "c").match_daddr_in_set("s"),
         ] {
-            let decoded = parse_expressions(&encode(&rule.exprs));
+            let decoded = parse_expressions(&encode(&rule.exprs()));
             assert_eq!(
                 decoded[..2],
                 [
@@ -4839,7 +4839,7 @@ mod decode_tests {
     fn set_mark_masked_keeps_the_bits_outside_the_mask() {
         let rule = Rule::new("t", "c").set_mark_masked(0x1234, 0xff);
         assert_eq!(
-            parse_expressions(&encode(&rule.exprs)),
+            parse_expressions(&encode(&rule.exprs())),
             [
                 RuleExpr::Meta {
                     dreg: Register::R0,
@@ -4864,7 +4864,7 @@ mod decode_tests {
     #[test]
     fn match_mark_masked_compares_only_the_masked_bits() {
         let rule = Rule::new("t", "c").match_mark_masked(0x1234, 0xff);
-        let decoded = parse_expressions(&encode(&rule.exprs));
+        let decoded = parse_expressions(&encode(&rule.exprs()));
         assert_eq!(
             decoded[1..],
             [
@@ -4888,7 +4888,7 @@ mod decode_tests {
     fn set_priority_writes_the_classid() {
         let rule = Rule::new("t", "c").set_priority(crate::TcHandle::new(1, 0x10));
         assert_eq!(
-            parse_expressions(&encode(&rule.exprs)),
+            parse_expressions(&encode(&rule.exprs())),
             [
                 // `meta priority set 1:10` is `immediate reg 1 0x00010010`.
                 RuleExpr::Immediate {
@@ -4908,7 +4908,7 @@ mod decode_tests {
         // CONNMARK --save-mark: `ct mark set mark`.
         let save = Rule::new("t", "c").save_mark_to_ct();
         assert_eq!(
-            parse_expressions(&encode(&save.exprs)),
+            parse_expressions(&encode(&save.exprs())),
             [
                 RuleExpr::Meta {
                     dreg: Register::R0,
@@ -4923,7 +4923,7 @@ mod decode_tests {
         // CONNMARK --restore-mark: `meta mark set ct mark`.
         let restore = Rule::new("t", "c").restore_mark_from_ct();
         assert_eq!(
-            parse_expressions(&encode(&restore.exprs)),
+            parse_expressions(&encode(&restore.exprs())),
             [
                 RuleExpr::Ct {
                     dreg: Register::R0,
@@ -4937,7 +4937,7 @@ mod decode_tests {
         );
         let set = Rule::new("t", "c").set_ct_mark(7).match_ct_mark(7);
         assert_eq!(
-            parse_expressions(&encode(&set.exprs)),
+            parse_expressions(&encode(&set.exprs())),
             [
                 RuleExpr::Immediate {
                     dreg: Register::R0,
@@ -4966,7 +4966,7 @@ mod decode_tests {
         // tests/py/inet/rt.t.payload): rt load tcpmss, byteorder
         // hton(reg, 2, 2), exthdr write — behind the l4proto guard.
         let rule = Rule::new("t", "c").clamp_tcp_mss_to_pmtu();
-        let decoded = parse_expressions(&encode(&rule.exprs));
+        let decoded = parse_expressions(&encode(&rule.exprs()));
         assert_eq!(
             decoded[2..],
             [
@@ -5019,7 +5019,7 @@ mod decode_tests {
             .expr(LogExpr::new().group(3))
             .expr(MasqExpr::new());
         assert!(matches!(
-            rule.exprs.as_slice(),
+            rule.exprs().as_slice(),
             [Expr::Log(LogExpr { group: Some(3), .. }), Expr::Masquerade(_)]
         ));
     }
@@ -5030,7 +5030,7 @@ mod decode_tests {
     fn match_in_set_loads_the_field_behind_its_guard() {
         let rule = Rule::new("t", "c").match_in_set(PacketField::Ip6Daddr, "s6");
         assert_eq!(
-            parse_expressions(&encode(&rule.exprs)),
+            parse_expressions(&encode(&rule.exprs())),
             [
                 RuleExpr::Meta {
                     dreg: Register::R0,
@@ -5056,7 +5056,7 @@ mod decode_tests {
             ]
         );
         let ports = Rule::new("t", "c").match_not_in_set(PacketField::UdpDport, "p");
-        let decoded = parse_expressions(&encode(&ports.exprs));
+        let decoded = parse_expressions(&encode(&ports.exprs()));
         assert_eq!(
             decoded[2],
             RuleExpr::Payload {
@@ -5134,7 +5134,7 @@ mod decode_tests {
     #[test]
     fn a_tcp_reset_is_guarded_once() {
         let l4 = |r: &Rule| {
-            r.exprs
+            r.exprs()
                 .iter()
                 .filter(|e| {
                     matches!(
@@ -5150,13 +5150,13 @@ mod decode_tests {
         let bare = Rule::new("t", "c").reject_tcp_reset();
         assert_eq!(l4(&bare), 1);
         assert!(
-            matches!(bare.exprs.last(), Some(Expr::Reject { reject_type, .. }) if *reject_type == NFT_REJECT_TCP_RST)
+            matches!(bare.exprs().last(), Some(Expr::Reject { reject_type, .. }) if *reject_type == NFT_REJECT_TCP_RST)
         );
         let after_port = Rule::new("t", "c").match_tcp_dport(22).reject_tcp_reset();
         assert_eq!(l4(&after_port), 1);
         let icmp = Rule::new("t", "c").reject_icmp(3);
         assert!(matches!(
-            icmp.exprs.as_slice(),
+            icmp.exprs().as_slice(),
             [
                 Expr::Meta {
                     key: MetaKey::NfProto,

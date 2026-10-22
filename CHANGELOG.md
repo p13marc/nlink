@@ -119,6 +119,59 @@ All notable changes to this project will be documented in this file.
   do changes of type, hook, priority, policy and devices, and what the
   deprecated setters write. The lane's module list gains `nft_chain_nat`.
 
+- **A rule is a `RuleSpec`, and lowering it is the only encoder** (#708,
+  its (c)). A `RuleSpec` is a rule body as values, in order, with a
+  comment. Each item is one of four kinds:
+  - a `Match { field, op, value }`;
+  - a `Stmt`: a counter, a log, NAT, a mark set, and so on;
+  - a `Verdict`;
+  - a raw `Expr`, for what the model has no item for.
+
+  `RuleSpec::lower(family)` turns a spec into the expressions the kernel
+  takes, writing the protocol guards as that family needs them. Every
+  `Rule` method now appends an item, and a rule is lowered when it is
+  sent, so the builder and the model cannot drift apart.
+  - **Any field with any operator.** A `Match` takes any operator nft has,
+    and any value that fits the field, including combinations no builder
+    method writes. `Match::ne(Field::TcpDport, Value::range(1000u16,
+    2000u16))` is `tcp dport != 1000-2000`, and `Match::new(Field::Mark,
+    MatchOp::Gt, 0x10u32)` is `meta mark > 0x10`. Before an ordered
+    compare, a host-order field (a mark, a conntrack mark or zone) is put
+    in network order, as nft does. On a flag set (`ct state`, `ct status`,
+    `ct label`, `tcp flags`), `Eq` is nft's implicit "any of these" and
+    `Ne` is nft's `!=`.
+  - **Rules from data, refused before they exist.**
+    `DeclaredTableBuilder::push_rule(chain, spec)` and `push_rule_keyed`
+    declare a rule with no closure. `try_rule` and `try_rule_keyed` take a
+    closure that returns `Result<Rule>`; its error becomes the rule's
+    error, and `validate()` reports it. `Rule::from_spec`, `Rule::spec`,
+    `Rule::into_spec` and `Rule::then` complete the set. These are the
+    three nlink-lab asked for in #527: port ranges and `!=` on interfaces
+    without hand-built expressions, and no `.expect()` inside a rule
+    closure.
+  - **Validation moves into lowering.** What the builder refused, it still
+    refuses, with the same messages. A spec's value that does not fit its
+    field is refused too: `tcp dport: 70000 does not fit in 16 bits`.
+  - **Breaks:** `DeclaredRule::exprs()` returns a `Vec<Expr>`: the
+    expressions the rule sends, its spec lowered for the table's family
+    with the guards nft writes. It used to return a slice of what the
+    builder had pushed. It is empty for a rule that does not lower.
+    `DeclaredRule::spec()` returns the body.
+
+  `builder_bytes.txt` records what 222 builder calls send in four
+  families, as request and echo bytes, and the errors they fail with. It
+  was recorded before the switch and is unchanged after it, so a rule an
+  older nlink installed still diffs empty. In `nftables_spec`, nft is the
+  reference encoder: about 50 specs per family are installed both through
+  nft's text and as specs, and the kernel must dump each pair alike. Rules
+  declared as data converge. Two nft habits stay out of that comparison:
+  - nft shortens a /8, /16 or /24 prefix to a load of its bytes, where
+    nlink masks the whole address, as the builder always has. Both list
+    alike.
+  - nft 1.0.6, the CI lane's version, writes an `==` range on a conntrack
+    or meta field as two compares where 1.1 writes `range eq`, as nlink
+    does. The test reads 1.0's form as 1.1's.
+
 ### Fixed
 
 - **An ingress chain in an ip or ip6 table passed `validate()`** (#708).

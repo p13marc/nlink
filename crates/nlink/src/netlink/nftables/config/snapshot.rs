@@ -177,7 +177,7 @@ impl RulesetSnapshot {
             }
             for rule in super::rules::effective_rules(table.rules()) {
                 let key = rule.handle_key().map(str::to_string);
-                let comment = rule.body().comment.clone();
+                let comment = rule.body().comment_ref().map(str::to_string);
                 snapshot.rules.push(RuleInfo {
                     table: name.clone(),
                     chain: rule.chain().to_string(),

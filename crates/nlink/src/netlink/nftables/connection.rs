@@ -491,7 +491,7 @@ impl Connection<Nftables> {
     /// ```
     #[tracing::instrument(level = "debug", skip_all, fields(method = "add_rule"))]
     pub async fn add_rule(&self, rule: Rule) -> Result<()> {
-        rule.check()?;
+        let exprs = rule.lowered()?;
         // NLM_F_APPEND is not optional. nf_tables_newrule() appends to the
         // chain tail only when it is set; without it the kernel *prepends*, so
         // rules land in reverse declaration order. nftables is first-match-wins,
@@ -510,16 +510,13 @@ impl Connection<Nftables> {
             builder.append_attr_u64_be(NFTA_RULE_POSITION, pos);
         }
 
-        if !rule.exprs.is_empty() {
-            write_expressions(
-                &mut builder,
-                &super::expr::exprs_for_family(&rule.exprs, rule.family),
-            );
+        if !exprs.is_empty() {
+            write_expressions(&mut builder, &exprs);
         }
 
         // Key and comment → NFTA_RULE_USERDATA TLV.
         if let Some(udata) =
-            super::userdata::encode_rule_userdata(rule.key.as_deref(), rule.comment.as_deref())?
+            super::userdata::encode_rule_userdata(rule.key.as_deref(), rule.comment_ref())?
         {
             builder.append_attr(NFTA_RULE_USERDATA, &udata);
         }
@@ -2340,10 +2337,13 @@ impl Transaction {
     }
 
     fn push_newrule(mut self, rule: Rule, flags: u16, position: Option<u64>) -> Self {
-        if let Err(e) = rule.check() {
-            self.defer(e);
-            return self;
-        }
+        let exprs = match rule.lowered() {
+            Ok(exprs) => exprs,
+            Err(e) => {
+                self.defer(e);
+                return self;
+            }
+        };
         let mut builder = MessageBuilder::new(nft_msg_type(NFT_MSG_NEWRULE), flags);
         let nfgenmsg = NfGenMsg::new(rule.family);
         builder.append(&nfgenmsg);
@@ -2354,15 +2354,12 @@ impl Transaction {
             builder.append_attr_u64_be(NFTA_RULE_POSITION, pos);
         }
 
-        if !rule.exprs.is_empty() {
-            write_expressions(
-                &mut builder,
-                &super::expr::exprs_for_family(&rule.exprs, rule.family),
-            );
+        if !exprs.is_empty() {
+            write_expressions(&mut builder, &exprs);
         }
 
         // Comment → NFTA_RULE_USERDATA TLV (Plan 157b v2).
-        match super::userdata::encode_rule_userdata(rule.key.as_deref(), rule.comment.as_deref()) {
+        match super::userdata::encode_rule_userdata(rule.key.as_deref(), rule.comment_ref()) {
             Ok(Some(udata)) => builder.append_attr(NFTA_RULE_USERDATA, &udata),
             Ok(None) => {}
             Err(e) => {
@@ -2384,10 +2381,13 @@ impl Transaction {
     ///
     /// Plan 157b v2.
     pub fn replace_rule(mut self, rule: Rule, handle: u64) -> Self {
-        if let Err(e) = rule.check() {
-            self.defer(e);
-            return self;
-        }
+        let exprs = match rule.lowered() {
+            Ok(exprs) => exprs,
+            Err(e) => {
+                self.defer(e);
+                return self;
+            }
+        };
         let mut builder = MessageBuilder::new(
             nft_msg_type(NFT_MSG_NEWRULE),
             NLM_F_REQUEST | NLM_F_REPLACE,
@@ -2398,14 +2398,11 @@ impl Transaction {
         builder.append_attr_str(NFTA_RULE_CHAIN, &rule.chain);
         builder.append_attr_u64_be(NFTA_RULE_HANDLE, handle);
 
-        if !rule.exprs.is_empty() {
-            write_expressions(
-                &mut builder,
-                &super::expr::exprs_for_family(&rule.exprs, rule.family),
-            );
+        if !exprs.is_empty() {
+            write_expressions(&mut builder, &exprs);
         }
 
-        match super::userdata::encode_rule_userdata(rule.key.as_deref(), rule.comment.as_deref()) {
+        match super::userdata::encode_rule_userdata(rule.key.as_deref(), rule.comment_ref()) {
             Ok(Some(udata)) => builder.append_attr(NFTA_RULE_USERDATA, &udata),
             Ok(None) => {}
             Err(e) => {

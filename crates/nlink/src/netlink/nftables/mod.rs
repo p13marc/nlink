@@ -42,6 +42,7 @@ pub(crate) mod interval;
 pub(crate) mod lift;
 pub mod object;
 pub mod resync;
+pub mod spec;
 pub mod types;
 pub(crate) mod userdata;
 
@@ -50,6 +51,7 @@ pub use connection::{RawMessage, Transaction};
 pub use events::{GenInfo, NftablesEvent, NftablesGroup, SetElementsEvent, NFNLGRP_NFTABLES};
 pub use resync::{nftables_snapshot, BorrowedResyncStream, OwnedResyncStream};
 pub use expr::*;
+pub use spec::*;
 pub use object::{CtHelperObject, Object, ObjectConfig, ObjectInfo, ObjectState, ObjectType};
 pub use types::*;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};

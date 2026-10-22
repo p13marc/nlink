@@ -7,6 +7,7 @@ use super::super::{
         BaseChain, ChainKind, ChainType, Family, Hook, Policy, Priority, Rule, Set, SetDataType,
         SetElement, SetFlags, SetKeyType, SetPolicy,
     },
+    spec::RuleSpec,
     object::{Object, ObjectConfig},
 };
 
@@ -278,19 +279,12 @@ impl DeclaredTableBuilder {
     /// [`Rule`] builder identical to the imperative API. The
     /// rule's table is set to this table; the rule's chain is set
     /// from the `chain` argument.
-    pub fn rule<F>(mut self, chain: impl AsRef<str>, f: F) -> Self
+    pub fn rule<F>(self, chain: impl AsRef<str>, f: F) -> Self
     where
         F: FnOnce(Rule) -> Rule,
     {
-        let rule = Rule::new(&self.name, chain.as_ref()).family(self.family);
-        self.rules.push(DeclaredRule {
-            table: self.name.clone(),
-            chain: chain.as_ref().to_string(),
-            family: self.family,
-            handle_key: None,
-            body: f(rule),
-        });
-        self
+        let rule = f(self.new_rule(chain.as_ref()));
+        self.declare(chain.as_ref(), None, rule)
     }
 
     /// Declare a rule with an explicit `handle_key` for diff
@@ -299,22 +293,114 @@ impl DeclaredTableBuilder {
     /// declared with [`rule`](Self::rule) gets a key derived from its
     /// chain, body and comment (#389): it converges too, but a change to
     /// its body is a delete and an add.
-    pub fn rule_keyed<F>(
-        mut self,
-        chain: impl AsRef<str>,
-        key: impl Into<String>,
-        f: F,
-    ) -> Self
+    pub fn rule_keyed<F>(self, chain: impl AsRef<str>, key: impl Into<String>, f: F) -> Self
     where
         F: FnOnce(Rule) -> Rule,
     {
-        let rule = Rule::new(&self.name, chain.as_ref()).family(self.family);
+        let rule = f(self.new_rule(chain.as_ref()));
+        self.declare(chain.as_ref(), Some(key.into()), rule)
+    }
+
+    /// [`rule`](Self::rule), for a rule built from parts that can fail
+    /// (#708): an address parsed from a file, a chain name. An error from
+    /// the closure is the rule's: [`validate`](NftablesConfig::validate)
+    /// reports it, and the diff refuses the config with it.
+    ///
+    /// ```
+    /// use nlink::netlink::nftables::Family;
+    /// use nlink::netlink::nftables::config::NftablesConfig;
+    ///
+    /// let cfg = NftablesConfig::new().table("t", Family::Inet, |t| {
+    ///     t.chain("input", |c| c).try_rule("input", |r| Ok(r.try_jump("")?))
+    /// });
+    /// assert!(cfg.validate().is_err());
+    /// ```
+    pub fn try_rule<F>(self, chain: impl AsRef<str>, f: F) -> Self
+    where
+        F: FnOnce(Rule) -> crate::netlink::error::Result<Rule>,
+    {
+        let rule = self.try_build(chain.as_ref(), f);
+        self.declare(chain.as_ref(), None, rule)
+    }
+
+    /// [`rule_keyed`](Self::rule_keyed), for a rule built from parts that
+    /// can fail: see [`try_rule`](Self::try_rule).
+    pub fn try_rule_keyed<F>(self, chain: impl AsRef<str>, key: impl Into<String>, f: F) -> Self
+    where
+        F: FnOnce(Rule) -> crate::netlink::error::Result<Rule>,
+    {
+        let rule = self.try_build(chain.as_ref(), f);
+        self.declare(chain.as_ref(), Some(key.into()), rule)
+    }
+
+    /// Declare a rule of `spec` in the named chain (#708): a rule built as
+    /// data, with no closure. Its key is derived, as [`rule`](Self::rule)'s
+    /// is.
+    ///
+    /// ```
+    /// use nlink::netlink::nftables::config::NftablesConfig;
+    /// use nlink::netlink::nftables::{Family, Field, Match, RuleSpec, Value, Verdict};
+    ///
+    /// let ssh = RuleSpec::new()
+    ///     .then(Match::eq(Field::TcpDport, 22u16))
+    ///     .then(Verdict::Accept);
+    /// let cfg = NftablesConfig::new().table("t", Family::Inet, |t| {
+    ///     t.chain("input", |c| c).push_rule("input", ssh)
+    /// });
+    /// assert_eq!(cfg.tables()[0].rules().len(), 1);
+    /// ```
+    pub fn push_rule(self, chain: impl AsRef<str>, spec: RuleSpec) -> Self {
+        let rule = self.rule_of(chain.as_ref(), spec);
+        self.declare(chain.as_ref(), None, rule)
+    }
+
+    /// [`push_rule`](Self::push_rule) with an explicit `handle_key`, as
+    /// [`rule_keyed`](Self::rule_keyed).
+    pub fn push_rule_keyed(
+        self,
+        chain: impl AsRef<str>,
+        key: impl Into<String>,
+        spec: RuleSpec,
+    ) -> Self {
+        let rule = self.rule_of(chain.as_ref(), spec);
+        self.declare(chain.as_ref(), Some(key.into()), rule)
+    }
+
+    fn new_rule(&self, chain: &str) -> Rule {
+        self.rule_of(chain, RuleSpec::new())
+    }
+
+    fn rule_of(&self, chain: &str, spec: RuleSpec) -> Rule {
+        Rule::from_spec(&self.name, chain, spec).family(self.family)
+    }
+
+    /// The rule `f` builds, or an empty one that fails with its error.
+    fn try_build<F>(&self, chain: &str, f: F) -> Rule
+    where
+        F: FnOnce(Rule) -> crate::netlink::error::Result<Rule>,
+    {
+        f(self.new_rule(chain)).unwrap_or_else(|e| {
+            let why = match e.detail() {
+                crate::netlink::error::ErrorDetail::InvalidMessage(why)
+                    if e.context().is_empty() =>
+                {
+                    why.clone()
+                }
+                _ => e.to_string(),
+            };
+            let mut rule = self.new_rule(chain);
+            rule.error = Some(why);
+            rule
+        })
+    }
+
+    fn declare(mut self, chain: &str, handle_key: Option<String>, body: Rule) -> Self {
         self.rules.push(DeclaredRule {
             table: self.name.clone(),
-            chain: chain.as_ref().to_string(),
+            chain: chain.to_string(),
             family: self.family,
-            handle_key: Some(key.into()),
-            body: f(rule),
+            handle_key,
+            body,
         });
         self
     }
@@ -1023,10 +1109,15 @@ impl DeclaredRule {
     pub fn body(&self) -> &Rule {
         &self.body
     }
-    /// Borrow the rule's typed expression list. Used by the diff
-    /// path for byte-comparison of two rules' expression payloads.
-    pub fn exprs(&self) -> &[Expr] {
-        &self.body.exprs
+    /// The rule's body (#708).
+    pub fn spec(&self) -> &crate::netlink::nftables::RuleSpec {
+        self.body.spec()
+    }
+    /// The expressions the rule sends in its table: its spec, lowered for
+    /// the table's family. Empty when it does not lower, which `validate()`
+    /// reports.
+    pub fn exprs(&self) -> Vec<Expr> {
+        self.body.lowered().unwrap_or_default()
     }
 }
 
