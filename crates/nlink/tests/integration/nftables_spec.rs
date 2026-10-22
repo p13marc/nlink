@@ -378,6 +378,25 @@ async fn a_spec_is_the_rule_nft_writes() -> nlink::Result<()> {
                 (_, None) => {}
                 (None, _) => wrong.push(format!("{family} {text}: nft installed nothing")),
             }
+            // The rule nft wrote lifts back to the spec (#708), or where nft
+            // 1.0 wrote it otherwise, the rule nlink wrote does.
+            let rule = |rules: &[nlink::netlink::nftables::types::RuleInfo]| {
+                rules.iter().find(|r| r.chain == chain).cloned()
+            };
+            if let (Some(theirs), Some(ours)) = (rule(&theirs), rule(&ours)) {
+                let lifted = if theirs.expression_bytes == ours.expression_bytes {
+                    theirs.spec()
+                } else {
+                    ours.spec()
+                };
+                if lifted.items() != spec.items() {
+                    wrong.push(format!(
+                        "{family} {text}: lifts to {:?}\n  not {:?}",
+                        lifted.items(),
+                        spec.items()
+                    ));
+                }
+            }
         }
     }
     assert!(

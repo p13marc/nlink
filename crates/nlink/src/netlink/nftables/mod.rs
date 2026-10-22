@@ -40,6 +40,7 @@ pub mod events;
 pub mod expr;
 pub(crate) mod interval;
 pub(crate) mod lift;
+pub(crate) mod spec_lift;
 pub mod object;
 pub mod resync;
 pub mod spec;

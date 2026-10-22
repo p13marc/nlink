@@ -336,6 +336,32 @@ All notable changes to this project will be documented in this file.
   compile failures. clippy's `future_not_send` lint cannot catch #879's
   shape: it checks modulo lifetimes, and on 0.32.0 it never fired in
   `reconcile.rs`.
+- **A kernel rule reads back as a `RuleSpec`** (#708, (c)'s lift).
+  `RuleInfo::spec()` and `RuleSpec::lift(exprs, family)` are the inverse
+  of lowering. Each expression becomes the item that writes it: a match,
+  with its guards, or a statement, with the immediates that feed it. The
+  comment is the human one, not nlink's key. What nlink has no item for
+  stays a raw `Expr`.
+  - **The guarantee:** lowering a lift gives the kernel's rule back, as the
+    diff compares rules. An item is taken only if its expressions, after
+    what came before, are exactly the kernel's. A last check over the whole
+    rule falls back to raw expressions if an item disagrees with its
+    context.
+  - **New items:** the model gains `Field::NfProto`, `Field::Protocol`,
+    `Stmt::Queue` and `Stmt::Synproxy`.
+
+  The tests:
+  - **Builder corpus:** each of the 222 builder calls, in four families,
+    lifts to typed items that lower to what it sent, and lifting again
+    changes nothing.
+  - **nft corpus:** each of the 200 rules nft installs is lifted, the table
+    is flushed, and nlink installs the lifts. The kernel must dump every
+    rule byte for byte as before. 161 of them lift fully typed under nft
+    1.1.3 and 156 under 1.0.6; the rest are fields nlink does not name.
+  - **`nftables_spec`:** each case nft installs lifts to exactly its spec.
+  - **Broken input:** a rule cut short, or random bytes, lifts without a
+    panic.
+
 - **A rule prints as `nft list` prints it** (#708, the read half of its
   rule model). The kernel keeps a rule as register-level expressions; until
   now nlink could decode them, but not say what the rule matched.
