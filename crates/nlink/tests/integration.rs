@@ -196,6 +196,11 @@ mod nftables_lift;
 #[path = "integration/nftables_chain_kinds.rs"]
 mod nftables_chain_kinds;
 
+// #708 (c): a rule built as a `RuleSpec` is the rule nft writes for its
+// text, and rules declared as data converge.
+#[path = "integration/nftables_spec.rs"]
+mod nftables_spec;
+
 // Every rule shape nlink writes must reconcile to an empty diff: the kernel
 // echoes some attributes whether or not they were sent, and drops others.
 #[path = "integration/nftables_echo.rs"]

@@ -3,7 +3,8 @@
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use super::expr::Expr;
+use super::expr::{Expr, SocketKey};
+use super::spec::{Field, Item, Match, Reject, RuleSpec, Stmt, Value};
 use crate::netlink::error::{Error, Result};
 use crate::netlink::tc_handle::TcHandle;
 
@@ -1047,7 +1048,7 @@ impl std::ops::BitOrAssign for CtState {
 /// The 16 label bytes with only `bit` set, laid out as the kernel's
 /// `unsigned long` bitmap is on this host — which is what `ct label`
 /// reads and `ct label set` ORs in. `None` past bit 127.
-fn ct_label_mask(bit: u8) -> Option<Vec<u8>> {
+pub(crate) fn ct_label_mask(bit: u8) -> Option<Vec<u8>> {
     const WORD: usize = usize::BITS as usize;
     let bit = usize::from(bit);
     if bit >= 128 {
@@ -1453,10 +1454,8 @@ pub(crate) const NFPROTO_IPV6: u8 = 10;
 
 /// `meta l4proto` values, used as the guard prepended by the
 /// transport-layer matchers.
-const IPPROTO_ICMP: u8 = 1;
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
-const IPPROTO_ICMPV6: u8 = 58;
 
 /// TCP header flags — the flags byte at offset 13 of the TCP header, for
 /// [`Rule::match_tcp_flags`].
@@ -2253,7 +2252,7 @@ impl NatStatement {
 
     /// What the kernel would refuse, and the family a snat or dnat
     /// rewrites.
-    fn check(&self) -> std::result::Result<Family, String> {
+    pub(crate) fn check(&self) -> std::result::Result<Family, String> {
         let kind = match self.kind {
             NatKind::Snat => "snat",
             NatKind::Dnat => "dnat",
@@ -2672,81 +2671,111 @@ impl ChainInfo {
 // Rule builder
 // =============================================================================
 
+/// `addr/prefix` as a match takes it: a prefix as long as the address, or
+/// longer, is the address, as the builder always took it.
+fn prefixed(addr: std::net::IpAddr, prefix: u8) -> Value {
+    let width = if addr.is_ipv4() { 32 } else { 128 };
+    if prefix >= width {
+        Value::Addr(addr)
+    } else {
+        Value::Prefix(addr, prefix)
+    }
+}
+
 /// Rule configuration builder.
 ///
-/// The builder automatically generates nftables expression sequences
-/// from high-level match/action methods.
+/// A [`RuleSpec`] with the table, chain and family it goes in (#708). Each
+/// match and action method appends an [`Item`] to the spec, and
+/// [`then`](Self::then) appends any other; the spec is lowered to the
+/// kernel's expressions when the rule is sent, and what cannot be lowered
+/// makes adding the rule fail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use = "builders do nothing unless used"]
 pub struct Rule {
     pub(crate) table: String,
     pub(crate) chain: String,
     pub(crate) family: Family,
-    pub(crate) exprs: Vec<super::expr::Expr>,
+    pub(crate) spec: RuleSpec,
     pub(crate) position: Option<u64>,
-    pub(crate) comment: Option<String>,
     /// The declarative identity (`nlink:<key>`), set by `NftablesDiff::apply`
     /// from the declared rule's key. Imperative rules have none.
     pub(crate) key: Option<String>,
-    /// The first thing a builder method could not encode — an interface
-    /// name too long to match anything. Adding the rule fails with it
-    /// (#484).
+    /// Why the rule could not be built, from a fallible
+    /// [`try_rule`](super::config::DeclaredTableBuilder::try_rule) closure.
+    /// Adding the rule fails with it.
     pub(crate) error: Option<String>,
 }
 
 impl Rule {
     /// Create a new rule builder.
     pub fn new(table: &str, chain: &str) -> Self {
+        Self::from_spec(table, chain, RuleSpec::new())
+    }
+
+    /// A rule of `spec` in `chain` of `table` (#708). The family is `Inet`
+    /// until [`family`](Self::family) sets it.
+    pub fn from_spec(table: &str, chain: &str, spec: RuleSpec) -> Self {
         Self {
             table: table.to_string(),
             chain: chain.to_string(),
             family: Family::Inet,
-            exprs: Vec::new(),
+            spec,
             position: None,
-            comment: None,
             key: None,
             error: None,
         }
     }
 
-    /// What a builder method could not encode, if anything.
-    pub(crate) fn check(&self) -> Result<()> {
-        match &self.error {
-            Some(e) => Err(Error::invalid_message(format!(
-                "{}/{}: {e}",
-                self.table, self.chain
-            ))),
-            None => Ok(()),
-        }
+    /// The rule's body.
+    pub fn spec(&self) -> &RuleSpec {
+        &self.spec
     }
 
-    /// Match `meta iifname`/`oifname` against `name`: the whole name, or
-    /// with `prefix` only its first bytes (nft's `"eth*"`), with `op`.
-    fn match_ifname(mut self, key: MetaKey, name: &str, op: CmpOp, prefix: bool) -> Self {
-        use super::expr::Expr;
-        // IFNAMSIZ is 16 with the NUL. A longer name was cut to 15 bytes,
-        // which no interface has, so the rule matched nothing (#484).
-        if name.len() > 15 {
-            self.error.get_or_insert(format!(
-                "interface name `{name}` is longer than 15 bytes; no interface has it"
-            ));
-        }
-        self.exprs.push(Expr::Meta {
-            dreg: Register::R0,
-            key,
-        });
-        let mut data = name.as_bytes().to_vec();
-        if !prefix {
-            // The whole name: NUL-terminated and padded to IFNAMSIZ.
-            data.push(0);
-            data.resize(16, 0);
-        }
-        self.exprs.push(Expr::Cmp {
-            sreg: Register::R0,
-            op,
-            data,
-        });
+    /// The rule's body, without its table, chain and family.
+    pub fn into_spec(self) -> RuleSpec {
+        self.spec
+    }
+
+    /// Append an item (#708): a [`Match`], a [`Stmt`], a [`Verdict`] or an
+    /// [`Expr`]. What the other methods do, for any match the builder has
+    /// no method for:
+    ///
+    /// ```
+    /// use nlink::netlink::nftables::{Field, Match, Rule, Value};
+    ///
+    /// let rule = Rule::new("t", "c")
+    ///     .then(Match::ne(Field::TcpDport, Value::range(1000u16, 2000u16)))
+    ///     .accept();
+    /// assert_eq!(rule.nft_syntax().as_deref(), Some("tcp dport != 1000-2000 accept"));
+    /// ```
+    pub fn then(mut self, item: impl Into<Item>) -> Self {
+        self.spec.push(item);
         self
+    }
+
+    /// Why the rule cannot be sent, if anything.
+    pub(crate) fn check(&self) -> Result<()> {
+        self.lowered().map(drop)
+    }
+
+    /// The expressions the rule sends in its family's table, or why it
+    /// cannot be sent.
+    pub(crate) fn lowered(&self) -> Result<Vec<Expr>> {
+        let exprs = match &self.error {
+            Some(why) => Err(why.clone()),
+            None => self.spec.lower_items(),
+        };
+        let exprs = exprs.map_err(|why| {
+            Error::invalid_message(format!("{}/{}: {why}", self.table, self.chain))
+        })?;
+        Ok(super::expr::exprs_for_family(&exprs, self.family).into_owned())
+    }
+
+    /// The items' expressions as the builder wrote them, before the
+    /// family's guards.
+    #[cfg(test)]
+    pub(crate) fn exprs(&self) -> Vec<Expr> {
+        self.spec.lower_items().expect("the rule lowers")
     }
 
     /// Set the address family.
@@ -2776,13 +2805,13 @@ impl Rule {
     /// those 127 bytes; installing a longer one is an error, not a silent
     /// drop.
     pub fn comment(mut self, comment: &str) -> Self {
-        self.comment = Some(comment.to_string());
+        self.spec.comment = Some(comment.to_string());
         self
     }
 
     /// Borrow the rule's comment, if any.
     pub fn comment_ref(&self) -> Option<&str> {
-        self.comment.as_deref()
+        self.spec.comment_ref()
     }
 
     /// The rule as `nft list ruleset` will print it once installed, in its
@@ -2800,10 +2829,7 @@ impl Rule {
     /// );
     /// ```
     pub fn nft_syntax(&self) -> Option<String> {
-        let bytes = super::config::lower_to_expression_bytes(self);
-        let exprs = super::expr::parse_expressions(&bytes);
-        let body = super::lift::lift(&exprs, self.family)?;
-        Some(super::expr::with_comment(body, self.comment.as_deref()))
+        self.spec.nft_syntax(self.family)
     }
 
     /// [`nft_syntax`](Self::nft_syntax) as `nft -s list ruleset`
@@ -2823,136 +2849,29 @@ impl Rule {
     /// );
     /// ```
     pub fn nft_syntax_stateless(&self) -> Option<String> {
-        let bytes = super::config::lower_to_expression_bytes(self);
-        let exprs = super::expr::parse_expressions(&bytes);
-        let body = super::lift::lift_stateless(&exprs, self.family)?;
-        Some(super::expr::with_comment(body, self.comment.as_deref()))
+        self.spec.nft_syntax_stateless(self.family)
     }
 
     /// Match TCP destination port.
     ///
     /// Generates: meta(L4PROTO) + cmp(==TCP) + payload(dport) + cmp(==port)
-    pub fn match_tcp_dport(mut self, port: u16) -> Self {
-        use super::expr::Expr;
-        self.push_meta_eq(MetaKey::L4Proto, IPPROTO_TCP);
-        self.exprs.push(Expr::Payload {
-            dreg: Register::R0,
-            base: PayloadBase::Transport,
-            offset: 2,
-            len: 2,
-        });
-        self.exprs.push(Expr::Cmp {
-            sreg: Register::R0,
-            op: CmpOp::Eq,
-            data: port.to_be_bytes().to_vec(),
-        });
-        self
+    pub fn match_tcp_dport(self, port: u16) -> Self {
+        self.then(Match::eq(Field::TcpDport, port))
     }
 
     /// Match UDP destination port.
-    pub fn match_udp_dport(mut self, port: u16) -> Self {
-        use super::expr::Expr;
-        self.push_meta_eq(MetaKey::L4Proto, IPPROTO_UDP);
-        self.exprs.push(Expr::Payload {
-            dreg: Register::R0,
-            base: PayloadBase::Transport,
-            offset: 2,
-            len: 2,
-        });
-        self.exprs.push(Expr::Cmp {
-            sreg: Register::R0,
-            op: CmpOp::Eq,
-            data: port.to_be_bytes().to_vec(),
-        });
-        self
+    pub fn match_udp_dport(self, port: u16) -> Self {
+        self.then(Match::eq(Field::UdpDport, port))
     }
 
-    /// Emit `Payload(Network) [+ Bitwise mask] + Cmp(op)` for an
-    /// address match. Used by the v4/v6 `match_{s,d}addr*` helpers.
-    /// When `prefix >= full_prefix` the bitwise mask is skipped
-    /// (exact-match fast path); otherwise a network mask is applied
-    /// to the loaded bytes and compared against the masked address.
-    fn push_addr_match(
-        &mut self,
-        octets: &[u8],
-        offset: u32,
-        prefix: u8,
-        full_prefix: u8,
-        op: CmpOp,
-    ) {
-        let len = octets.len() as u32;
-        self.exprs.push(Expr::Payload {
-            dreg: Register::R0,
-            base: PayloadBase::Network,
-            offset,
-            len,
-        });
-        if prefix >= full_prefix {
-            self.exprs.push(Expr::Cmp {
-                sreg: Register::R0,
-                op,
-                data: octets.to_vec(),
-            });
-            return;
-        }
-        let mask = prefix_to_mask(octets.len(), prefix);
-        let masked: Vec<u8> = octets.iter().zip(&mask).map(|(a, m)| a & m).collect();
-        self.exprs.push(Expr::Bitwise {
-            sreg: Register::R0,
-            dreg: Register::R0,
-            len,
-            mask,
-            xor: vec![0; octets.len()],
-        });
-        self.exprs.push(Expr::Cmp {
-            sreg: Register::R0,
-            op,
-            data: masked,
-        });
-    }
-
-    /// Push `meta <key> == <value>` (a 1-byte metadata load + Eq compare
-    /// in `R0`) — the shared shape of the nfproto/l4proto matcher guards.
     /// Hand the packet to a local socket (#703): `tproxy [ip|ip6] to
     /// [<addr>][:<port>]`. The socket is the one listening at `addr`
     /// (or the packet's destination) and `port` (or the packet's), and
     /// must have `IP_TRANSPARENT`; the packet keeps its destination.
     /// `family` is the table's address family — `Ip`, `Ip6`, or `Inet` for
     /// either (then without an address); an address must be of it.
-    pub fn tproxy(mut self, family: Family, addr: Option<std::net::IpAddr>, port: Option<u16>) -> Self {
-        let nfproto = match (family, addr) {
-            (Family::Ip, None | Some(std::net::IpAddr::V4(_))) => NFPROTO_IPV4,
-            (Family::Ip6, None | Some(std::net::IpAddr::V6(_))) => NFPROTO_IPV6,
-            (Family::Inet, None) => 0,
-            (Family::Inet, Some(std::net::IpAddr::V4(_))) => NFPROTO_IPV4,
-            (Family::Inet, Some(std::net::IpAddr::V6(_))) => NFPROTO_IPV6,
-            (family, addr) => {
-                self.error.get_or_insert(format!(
-                    "tproxy: {addr:?} in a {family:?} table (an address of the table's family, \
-                     in an ip, ip6 or inet table)"
-                ));
-                return self;
-            }
-        };
-        let mut next = [Register::R0, Register::R1].into_iter();
-        let mut load = |data: Vec<u8>| {
-            let r = next.next().expect("two at most");
-            self.exprs.push(Expr::Immediate { dreg: r, data });
-            r
-        };
-        let sreg_addr = addr.map(|a| {
-            load(match a {
-                std::net::IpAddr::V4(a) => a.octets().to_vec(),
-                std::net::IpAddr::V6(a) => a.octets().to_vec(),
-            })
-        });
-        let sreg_port = port.map(|p| load(p.to_be_bytes().to_vec()));
-        self.exprs.push(Expr::Tproxy {
-            family: nfproto,
-            sreg_addr,
-            sreg_port,
-        });
-        self
+    pub fn tproxy(self, family: Family, addr: Option<std::net::IpAddr>, port: Option<u16>) -> Self {
+        self.then(Stmt::Tproxy { family, addr, port })
     }
 
     /// Match the operating system a TCP SYN's fingerprint names (#703):
@@ -2961,48 +2880,20 @@ impl Rule {
     /// prerouting, input or forward chain. Without fingerprints loaded
     /// (`nfnl_osf -f pf.os`) every SYN is `unknown`. A name over 15 bytes
     /// is refused.
-    pub fn match_osf(mut self, name: &str, ttl: super::expr::OsfTtl, version: bool) -> Self {
-        use super::expr::Expr;
-        if name.len() >= super::NFT_OSF_MAXGENRELEN {
-            self.error.get_or_insert(format!(
-                "osf name `{name}` is longer than {} bytes",
-                super::NFT_OSF_MAXGENRELEN - 1
-            ));
-        }
-        self.exprs.push(Expr::Osf {
-            dreg: Register::R0,
-            ttl,
-            version,
-        });
-        let mut data = name.as_bytes().to_vec();
-        data.resize(super::NFT_OSF_MAXGENRELEN, 0);
-        self.exprs.push(Expr::Cmp {
-            sreg: Register::R0,
-            op: CmpOp::Eq,
-            data,
-        });
-        self
+    pub fn match_osf(self, name: &str, ttl: super::expr::OsfTtl, version: bool) -> Self {
+        self.then(Match::eq(Field::Osf { ttl, version }, name))
     }
 
     /// Match the packet's local socket (#703): `socket transparent 1`,
     /// `socket wildcard 0`, `socket mark 7`. A packet with no local
     /// socket does not match.
-    pub fn match_socket(mut self, m: SocketMatch) -> Self {
-        let (key, data) = match m {
-            SocketMatch::Transparent(on) => (super::expr::SocketKey::Transparent, vec![u8::from(on)]),
-            SocketMatch::Wildcard(on) => (super::expr::SocketKey::Wildcard, vec![u8::from(on)]),
-            SocketMatch::Mark(mark) => (super::expr::SocketKey::Mark, mark.to_ne_bytes().to_vec()),
+    pub fn match_socket(self, m: SocketMatch) -> Self {
+        let (key, value) = match m {
+            SocketMatch::Transparent(on) => (SocketKey::Transparent, Value::Bool(on)),
+            SocketMatch::Wildcard(on) => (SocketKey::Wildcard, Value::Bool(on)),
+            SocketMatch::Mark(mark) => (SocketKey::Mark, Value::from(mark)),
         };
-        self.exprs.push(Expr::Socket {
-            dreg: Register::R0,
-            key,
-        });
-        self.exprs.push(Expr::Cmp {
-            sreg: Register::R0,
-            op: CmpOp::Eq,
-            data,
-        });
-        self
+        self.then(Match::eq(Field::Socket(key), value))
     }
 
     /// Compute a value into the first register (#703) — a `numgen`, a
@@ -3020,146 +2911,56 @@ impl Rule {
     ///     .set_meta_from(MetaKey::Mark);
     /// # let _ = r;
     /// ```
-    pub fn generate(mut self, generated: Generated) -> Self {
-        let dreg = Register::R0;
-        let expr = match generated {
-            Generated::Numgen {
-                kind,
-                modulus,
-                offset,
-            } => Expr::Numgen {
-                dreg,
-                kind,
-                modulus,
-                offset,
-            },
-            Generated::Jhash {
-                fields,
-                modulus,
-                seed,
-                offset,
-            } => {
-                // Each field in a 32-bit word of its own, from R0.
-                self.push_concat_load(&fields);
-                Expr::Hash {
-                    dreg,
-                    kind: super::expr::HashKind::Jenkins,
-                    sreg: Some(Register::R0),
-                    len: 4 * u32::try_from(fields.len()).unwrap_or(u32::MAX),
-                    modulus,
-                    seed,
-                    offset,
-                }
-            }
-            Generated::Symhash { modulus, offset } => Expr::Hash {
-                dreg,
-                kind: super::expr::HashKind::Sym,
-                sreg: None,
-                len: 0,
-                modulus,
-                seed: None,
-                offset,
-            },
-        };
-        self.exprs.push(expr);
-        self
+    pub fn generate(self, generated: Generated) -> Self {
+        self.then(Stmt::Generate(generated))
     }
 
     /// Write the first register into packet metadata: `meta <key> set`
     /// what [`generate`](Self::generate) computed.
-    pub fn set_meta_from(mut self, key: MetaKey) -> Self {
-        self.exprs.push(Expr::MetaSet {
-            key,
-            sreg: Register::R0,
-        });
-        self
+    pub fn set_meta_from(self, key: MetaKey) -> Self {
+        self.then(Stmt::SetMetaFrom(key))
     }
 
     /// Write the first register into the conntrack entry: `ct <key> set`
     /// what [`generate`](Self::generate) computed.
-    pub fn set_ct_from(mut self, key: CtKey) -> Self {
-        self.exprs.push(Expr::CtSet {
-            key,
-            sreg: Register::R0,
-        });
-        self
+    pub fn set_ct_from(self, key: CtKey) -> Self {
+        self.then(Stmt::SetCtFrom(key))
     }
 
     /// Send a copy of the packet (#703): `dup to <addr> [device <dev>]` in
     /// an `ip`/`ip6` chain, routed to `addr` as its gateway, out of the
     /// device with ifindex `dev` when one is given. The copy leaves as it
     /// is; the original goes on.
-    pub fn dup_to(mut self, addr: std::net::IpAddr, dev: Option<u32>) -> Self {
-        let octets = match addr {
-            std::net::IpAddr::V4(a) => a.octets().to_vec(),
-            std::net::IpAddr::V6(a) => a.octets().to_vec(),
-        };
-        self.exprs.push(Expr::Immediate {
-            dreg: Register::R0,
-            data: octets,
-        });
-        if let Some(dev) = dev {
-            self.exprs.push(Expr::Immediate {
-                dreg: Register::R1,
-                data: dev.to_ne_bytes().to_vec(),
-            });
-        }
-        self.exprs.push(Expr::Dup {
-            sreg_addr: Some(Register::R0),
-            sreg_dev: dev.map(|_| Register::R1),
-        });
-        self
+    pub fn dup_to(self, addr: std::net::IpAddr, dev: Option<u32>) -> Self {
+        self.then(Stmt::Dup {
+            addr: Some(addr),
+            dev,
+        })
     }
 
     /// Send a copy of the packet out of the device with ifindex `dev`
     /// (#703): `dup to <dev>`, in a `netdev` chain.
-    pub fn dup_to_device(mut self, dev: u32) -> Self {
-        self.exprs.push(Expr::Immediate {
-            dreg: Register::R0,
-            data: dev.to_ne_bytes().to_vec(),
-        });
-        self.exprs.push(Expr::Dup {
-            sreg_addr: None,
-            sreg_dev: Some(Register::R0),
-        });
-        self
+    pub fn dup_to_device(self, dev: u32) -> Self {
+        self.then(Stmt::Dup {
+            addr: None,
+            dev: Some(dev),
+        })
     }
 
     /// Send the packet out of the device with ifindex `dev` (#703): `fwd
     /// to <dev>`, in a `netdev` chain. The packet is gone from this path.
-    pub fn fwd_to(mut self, dev: u32) -> Self {
-        self.exprs.push(Expr::Immediate {
-            dreg: Register::R0,
-            data: dev.to_ne_bytes().to_vec(),
-        });
-        self.exprs.push(Expr::Fwd {
-            sreg_dev: Register::R0,
-            sreg_addr: None,
-        });
-        self
+    pub fn fwd_to(self, dev: u32) -> Self {
+        self.then(Stmt::Fwd { dev, addr: None })
     }
 
     /// Send the packet out of the device with ifindex `dev` to the next hop
     /// `addr`, resolving its link-layer address (#703): `fwd ip to <addr>
     /// device <dev>`, in a `netdev` chain.
-    pub fn fwd_ip_to(mut self, addr: std::net::IpAddr, dev: u32) -> Self {
-        let (octets, family) = match addr {
-            std::net::IpAddr::V4(a) => (a.octets().to_vec(), NFPROTO_IPV4),
-            std::net::IpAddr::V6(a) => (a.octets().to_vec(), NFPROTO_IPV6),
-        };
-        self.exprs.push(Expr::Immediate {
-            dreg: Register::R0,
-            data: dev.to_ne_bytes().to_vec(),
-        });
-        self.exprs.push(Expr::Immediate {
-            dreg: Register::R1,
-            data: octets,
-        });
-        self.exprs.push(Expr::Fwd {
-            sreg_dev: Register::R0,
-            sreg_addr: Some((Register::R1, family)),
-        });
-        self
+    pub fn fwd_ip_to(self, addr: std::net::IpAddr, dev: u32) -> Self {
+        self.then(Stmt::Fwd {
+            dev,
+            addr: Some(addr),
+        })
     }
 
     /// Write a header field (#703): `ip dscp set cs1`, `tcp dport set
@@ -3169,157 +2970,34 @@ impl Rule {
     /// fields, TCP's for a port, and a transport checksum's pseudo-header
     /// for an address. A field narrower than the 16 bits a checksum update
     /// takes (DSCP, TTL) is read, masked and written back whole.
-    pub fn set_header(mut self, write: HeaderWrite) -> Self {
-        use HeaderWrite as W;
-        use PayloadBase::{Network, Transport};
-        let (base, offset, len, csum, csum_offset, pseudo) = match write {
-            W::IpDscp(_) => (Network, 0, 2, PayloadCsum::Inet, 10, false),
-            W::IpTtl(_) => (Network, 8, 2, PayloadCsum::Inet, 10, false),
-            W::IpSaddr(_) => (Network, 12, 4, PayloadCsum::Inet, 10, true),
-            W::IpDaddr(_) => (Network, 16, 4, PayloadCsum::Inet, 10, true),
-            W::Ip6Dscp(_) => (Network, 0, 2, PayloadCsum::None, 0, false),
-            W::Ip6HopLimit(_) => (Network, 7, 1, PayloadCsum::None, 0, false),
-            W::Ip6Saddr(_) => (Network, 8, 16, PayloadCsum::None, 0, true),
-            W::Ip6Daddr(_) => (Network, 24, 16, PayloadCsum::None, 0, true),
-            W::TcpSport(_) => (Transport, 0, 2, PayloadCsum::Inet, 16, false),
-            W::TcpDport(_) => (Transport, 2, 2, PayloadCsum::Inet, 16, false),
-            W::UdpSport(_) => (Transport, 0, 2, PayloadCsum::None, 0, true),
-            W::UdpDport(_) => (Transport, 2, 2, PayloadCsum::None, 0, true),
-        };
-        match write {
-            W::IpDscp(_) | W::IpTtl(_) | W::IpSaddr(_) | W::IpDaddr(_) => {
-                self.push_meta_eq(MetaKey::NfProto, NFPROTO_IPV4)
-            }
-            W::Ip6Dscp(_) | W::Ip6HopLimit(_) | W::Ip6Saddr(_) | W::Ip6Daddr(_) => {
-                self.push_meta_eq(MetaKey::NfProto, NFPROTO_IPV6)
-            }
-            W::TcpSport(_) | W::TcpDport(_) => self.push_meta_eq(MetaKey::L4Proto, IPPROTO_TCP),
-            W::UdpSport(_) | W::UdpDport(_) => self.push_meta_eq(MetaKey::L4Proto, IPPROTO_UDP),
-        }
-        // Read-modify-write: the 16 bits around the field, what keeps them
-        // as `mask`, the field's new bits as `xor`.
-        let mut masked = |mask: [u8; 2], xor: [u8; 2]| {
-            self.exprs.push(Expr::Payload {
-                dreg: Register::R0,
-                base,
-                offset,
-                len,
-            });
-            self.exprs.push(Expr::Bitwise {
-                sreg: Register::R0,
-                dreg: Register::R0,
-                len,
-                mask: mask.to_vec(),
-                xor: xor.to_vec(),
-            });
-        };
-        let immediate = |data: Vec<u8>| {
-            Some(Expr::Immediate {
-                dreg: Register::R0,
-                data,
-            })
-        };
-        let dscp = |d: u8| (d <= 63).then_some(d);
-        let load = match write {
-            W::IpDscp(d) | W::Ip6Dscp(d) if dscp(d).is_none() => {
-                self.error.get_or_insert(format!("set_header: DSCP {d} is past 63"));
-                return self;
-            }
-            // DSCP is the top six bits of the TOS byte; ECN stays.
-            W::IpDscp(d) => {
-                masked([0xff, 0x03], [0, d << 2]);
-                None
-            }
-            W::IpTtl(t) => {
-                masked([0x00, 0xff], [t, 0]);
-                None
-            }
-            // The traffic class straddles the first two bytes, after the
-            // version: its DSCP is bits 4..10, its ECN 10..12.
-            W::Ip6Dscp(d) => {
-                masked([0xf0, 0x3f], [d >> 2, (d & 3) << 6]);
-                None
-            }
-            W::Ip6HopLimit(h) => immediate(vec![h]),
-            W::IpSaddr(a) | W::IpDaddr(a) => immediate(a.octets().to_vec()),
-            W::Ip6Saddr(a) | W::Ip6Daddr(a) => immediate(a.octets().to_vec()),
-            W::TcpSport(p) | W::TcpDport(p) | W::UdpSport(p) | W::UdpDport(p) => {
-                immediate(p.to_be_bytes().to_vec())
-            }
-        };
-        self.exprs.extend(load);
-        self.exprs.push(Expr::PayloadSet {
-            sreg: Register::R0,
-            base,
-            offset,
-            len,
-            csum,
-            csum_offset,
-            l4_pseudo_header: pseudo,
-        });
-        self
-    }
-
-    fn push_meta_eq(&mut self, key: MetaKey, value: u8) {
-        self.exprs.push(Expr::Meta {
-            dreg: Register::R0,
-            key,
-        });
-        self.exprs.push(Expr::Cmp {
-            sreg: Register::R0,
-            op: CmpOp::Eq,
-            data: vec![value],
-        });
-    }
-
-    /// Prepend the `meta nfproto == ip{v4,v6}` L3 guard `nft` inserts
-    /// before every `ip`/`ip6 saddr/daddr` match. Without it the address
-    /// load is ambiguous in an `inet` chain, and the declarative diff
-    /// phantom-diffs (the kernel stores the guard; nlink must too).
-    fn push_nfproto_ipv6(&mut self) {
-        self.push_meta_eq(MetaKey::NfProto, NFPROTO_IPV6);
-    }
-
-    fn push_nfproto_ipv4(&mut self) {
-        self.push_meta_eq(MetaKey::NfProto, NFPROTO_IPV4);
+    pub fn set_header(self, write: HeaderWrite) -> Self {
+        self.then(Stmt::SetHeader(write))
     }
 
     /// Match source IPv4 address with prefix length. Operates on the
     /// IP header (`PayloadBase::Network`), so use only on chains that
     /// see IPv4 traffic (`ip`/`inet`/`netdev` family).
-    pub fn match_saddr_v4(mut self, addr: Ipv4Addr, prefix: u8) -> Self {
-        // Source IP at offset 12 in the IPv4 header.
-        self.push_nfproto_ipv4();
-        self.push_addr_match(&addr.octets(), 12, prefix, 32, CmpOp::Eq);
-        self
+    pub fn match_saddr_v4(self, addr: Ipv4Addr, prefix: u8) -> Self {
+        self.then(Match::eq(Field::Ip4Saddr, prefixed(addr.into(), prefix)))
     }
 
     /// Match source IPv6 address with prefix length. Operates on the
     /// IP header, so use only on chains that see IPv6 traffic
     /// (`ip6`/`inet`/`netdev` family).
-    pub fn match_saddr_v6(mut self, addr: Ipv6Addr, prefix: u8) -> Self {
-        // Source IP at offset 8 in the IPv6 header.
-        self.push_nfproto_ipv6();
-        self.push_addr_match(&addr.octets(), 8, prefix, 128, CmpOp::Eq);
-        self
+    pub fn match_saddr_v6(self, addr: Ipv6Addr, prefix: u8) -> Self {
+        self.then(Match::eq(Field::Ip6Saddr, prefixed(addr.into(), prefix)))
     }
 
     /// Match destination IPv4 address with prefix length. Operates on
     /// the IP header, so use only on chains that see IPv4 traffic.
-    pub fn match_daddr_v4(mut self, addr: Ipv4Addr, prefix: u8) -> Self {
-        // Destination IP at offset 16 in the IPv4 header.
-        self.push_nfproto_ipv4();
-        self.push_addr_match(&addr.octets(), 16, prefix, 32, CmpOp::Eq);
-        self
+    pub fn match_daddr_v4(self, addr: Ipv4Addr, prefix: u8) -> Self {
+        self.then(Match::eq(Field::Ip4Daddr, prefixed(addr.into(), prefix)))
     }
 
     /// Match destination IPv6 address with prefix length. Operates on
     /// the IP header, so use only on chains that see IPv6 traffic.
-    pub fn match_daddr_v6(mut self, addr: Ipv6Addr, prefix: u8) -> Self {
-        // Destination IP at offset 24 in the IPv6 header.
-        self.push_nfproto_ipv6();
-        self.push_addr_match(&addr.octets(), 24, prefix, 128, CmpOp::Eq);
-        self
+    pub fn match_daddr_v6(self, addr: Ipv6Addr, prefix: u8) -> Self {
+        self.then(Match::eq(Field::Ip6Daddr, prefixed(addr.into(), prefix)))
     }
 
     /// Match input interface by name.
@@ -3327,71 +3005,56 @@ impl Rule {
     /// A name longer than 15 bytes makes adding the rule fail: the kernel's
     /// limit is 15 plus the NUL.
     pub fn match_iif(self, name: &str) -> Self {
-        self.match_ifname(MetaKey::IifName, name, CmpOp::Eq, false)
+        self.then(Match::eq(Field::Iifname, name))
     }
 
     /// Match packets that did not come in on `name` (`iifname != name`).
     pub fn match_iif_not(self, name: &str) -> Self {
-        self.match_ifname(MetaKey::IifName, name, CmpOp::Neq, false)
+        self.then(Match::ne(Field::Iifname, name))
     }
 
     /// Match an input interface whose name starts with `prefix`
     /// (`iifname "prefix*"`).
     pub fn match_iif_prefix(self, prefix: &str) -> Self {
-        self.match_ifname(MetaKey::IifName, prefix, CmpOp::Eq, true)
+        self.then(Match::eq(
+            Field::Iifname,
+            Value::NamePrefix(prefix.to_string()),
+        ))
     }
 
     /// Match output interface by name. A name longer than 15 bytes makes
     /// adding the rule fail.
     pub fn match_oif(self, name: &str) -> Self {
-        self.match_ifname(MetaKey::OifName, name, CmpOp::Eq, false)
+        self.then(Match::eq(Field::Oifname, name))
     }
 
     /// Match packets that do not go out on `name` (`oifname != name`).
     pub fn match_oif_not(self, name: &str) -> Self {
-        self.match_ifname(MetaKey::OifName, name, CmpOp::Neq, false)
+        self.then(Match::ne(Field::Oifname, name))
     }
 
     /// Match an output interface whose name starts with `prefix`
     /// (`oifname "prefix*"`).
     pub fn match_oif_prefix(self, prefix: &str) -> Self {
-        self.match_ifname(MetaKey::OifName, prefix, CmpOp::Eq, true)
+        self.then(Match::eq(
+            Field::Oifname,
+            Value::NamePrefix(prefix.to_string()),
+        ))
     }
 
     /// Match connection tracking state.
-    pub fn match_ct_state(mut self, state: CtState) -> Self {
-        use super::expr::Expr;
-        self.exprs.push(Expr::Ct {
-            dreg: Register::R0,
-            key: CtKey::State,
-        });
-        // Bitwise AND with state mask
-        self.exprs.push(Expr::Bitwise {
-            sreg: Register::R0,
-            dreg: Register::R0,
-            len: 4,
-            mask: state.bits().to_ne_bytes().to_vec(),
-            xor: vec![0; 4],
-        });
-        // Compare != 0
-        self.exprs.push(Expr::Cmp {
-            sreg: Register::R0,
-            op: CmpOp::Neq,
-            data: vec![0; 4],
-        });
-        self
+    pub fn match_ct_state(self, state: CtState) -> Self {
+        self.then(Match::eq(Field::CtState, state))
     }
 
     /// Accept the packet.
-    pub fn accept(mut self) -> Self {
-        self.exprs.push(super::expr::Expr::Verdict(Verdict::Accept));
-        self
+    pub fn accept(self) -> Self {
+        self.then(Verdict::Accept)
     }
 
     /// Drop the packet.
-    pub fn drop(mut self) -> Self {
-        self.exprs.push(super::expr::Expr::Verdict(Verdict::Drop));
-        self
+    pub fn drop(self) -> Self {
+        self.then(Verdict::Drop)
     }
 
     /// Jump to another chain.
@@ -3399,10 +3062,8 @@ impl Rule {
     /// Pre-validated form — pass a constructed [`ChainName`] when you
     /// already hold one. For the `&str` form that validates the name
     /// at construction, see [`Self::try_jump`].
-    pub fn jump(mut self, chain: ChainName) -> Self {
-        self.exprs
-            .push(super::expr::Expr::Verdict(Verdict::JumpTo(chain)));
-        self
+    pub fn jump(self, chain: ChainName) -> Self {
+        self.then(Verdict::JumpTo(chain))
     }
 
     /// Jump to another chain, validating the name at construction.
@@ -3415,11 +3076,8 @@ impl Rule {
     /// (Renamed from the 0.20.1 infallible `jump(&str)` shim in 0.21.
     /// The deprecated `Verdict::Jump(String)` fallback path is gone;
     /// the kernel-name contract is enforced at construction.)
-    pub fn try_jump(mut self, chain: &str) -> Result<Self> {
-        let name = ChainName::new(chain)?;
-        self.exprs
-            .push(super::expr::Expr::Verdict(Verdict::JumpTo(name)));
-        Ok(self)
+    pub fn try_jump(self, chain: &str) -> Result<Self> {
+        Ok(self.jump(ChainName::new(chain)?))
     }
 
     /// Goto another chain (no return).
@@ -3427,102 +3085,58 @@ impl Rule {
     /// Pre-validated form — pass a constructed [`ChainName`]. For
     /// the `&str` form that validates at construction, see
     /// [`Self::try_goto`].
-    pub fn goto(mut self, chain: ChainName) -> Self {
-        self.exprs
-            .push(super::expr::Expr::Verdict(Verdict::GotoTo(chain)));
-        self
+    pub fn goto(self, chain: ChainName) -> Self {
+        self.then(Verdict::GotoTo(chain))
     }
 
     /// Goto another chain (no return), validating the name at
     /// construction. Returns `Err` if the name violates the kernel
     /// chain-name contract.
-    pub fn try_goto(mut self, chain: &str) -> Result<Self> {
-        let name = ChainName::new(chain)?;
-        self.exprs
-            .push(super::expr::Expr::Verdict(Verdict::GotoTo(name)));
-        Ok(self)
+    pub fn try_goto(self, chain: &str) -> Result<Self> {
+        Ok(self.goto(ChainName::new(chain)?))
     }
 
     /// Add a packet/byte counter.
-    pub fn counter(mut self) -> Self {
-        self.exprs.push(super::expr::Expr::Counter);
-        self
+    pub fn counter(self) -> Self {
+        self.then(Stmt::Counter)
     }
 
     /// Rate limit: `limit rate <rate>/<unit>` (burst 5). For a burst or
     /// `over`, push a [`LimitExpr`](super::expr::LimitExpr) with
     /// [`expr`](Self::expr).
-    pub fn limit(mut self, rate: u64, unit: LimitUnit) -> Self {
-        self.exprs
-            .push(super::expr::LimitExpr::packets(rate, unit).into());
-        self
+    pub fn limit(self, rate: u64, unit: LimitUnit) -> Self {
+        self.then(Stmt::Limit(super::expr::LimitExpr::packets(rate, unit)))
     }
 
     /// Byte-rate limit: `limit rate <rate> bytes/<unit>`, no burst (#528).
     /// For a burst or `over`, push a
     /// [`LimitExpr::bytes`](super::expr::LimitExpr::bytes) with
     /// [`expr`](Self::expr).
-    pub fn limit_bytes(mut self, rate: crate::Bytes, unit: LimitUnit) -> Self {
-        self.exprs.push(super::expr::LimitExpr::bytes(rate, unit).into());
-        self
+    pub fn limit_bytes(self, rate: crate::Bytes, unit: LimitUnit) -> Self {
+        self.then(Stmt::Limit(super::expr::LimitExpr::bytes(rate, unit)))
     }
 
     /// Masquerade (source NAT using outgoing interface address).
-    pub fn masquerade(mut self) -> Self {
-        self.exprs.push(super::expr::MasqExpr::new().into());
-        self
-    }
-
-    /// Push a NAT expression preceded by the register loads it references.
-    ///
-    /// `addr_bytes` is the wire-form destination address (4 bytes for v4, 16
-    /// for v6); it is loaded into `R0`. `addr` is the matching [`NatAddr`]
-    /// recorded on the expr — any variant other than [`NatAddr::None`] makes
-    /// the encoder emit `NFTA_NAT_REG_ADDR_MIN` referencing that load. The
-    /// optional port is loaded into `R1`. Keeping the `R0` load and the
-    /// `NatAddr` in one place is what upholds the [`NatAddr`] invariant that a
-    /// register-in-use variant always has a real `R0` load preceding it.
-    fn push_nat(
-        &mut self,
-        nat_type: NatType,
-        family: Family,
-        addr_bytes: Vec<u8>,
-        addr: NatAddr,
-        port: Option<u16>,
-    ) {
-        use super::expr::Expr;
-        debug_assert!(
-            addr.reg_in_use(),
-            "push_nat always loads R0; addr must be a register-in-use variant"
-        );
-        self.exprs.push(Expr::Immediate {
-            dreg: Register::R0,
-            data: addr_bytes,
-        });
-        if let Some(p) = port {
-            self.exprs.push(Expr::Immediate {
-                dreg: Register::R1,
-                data: p.to_be_bytes().to_vec(),
-            });
-        }
-        self.exprs.push(Expr::Nat(NatExpr {
-            nat_type,
-            family,
-            addr,
-            port,
-        }));
+    pub fn masquerade(self) -> Self {
+        self.then(Stmt::Masquerade)
     }
 
     /// Source NAT to an address (and optional port).
-    pub fn snat(mut self, addr: Ipv4Addr, port: Option<u16>) -> Self {
-        self.push_nat(NatType::Snat, Family::Ip, addr.octets().to_vec(), NatAddr::V4(addr), port);
-        self
+    pub fn snat(self, addr: Ipv4Addr, port: Option<u16>) -> Self {
+        self.then(Stmt::NatTo {
+            nat_type: NatType::Snat,
+            addr: addr.into(),
+            port,
+        })
     }
 
     /// Destination NAT to an address (and optional port).
-    pub fn dnat(mut self, addr: Ipv4Addr, port: Option<u16>) -> Self {
-        self.push_nat(NatType::Dnat, Family::Ip, addr.octets().to_vec(), NatAddr::V4(addr), port);
-        self
+    pub fn dnat(self, addr: Ipv4Addr, port: Option<u16>) -> Self {
+        self.then(Stmt::NatTo {
+            nat_type: NatType::Dnat,
+            addr: addr.into(),
+            port,
+        })
     }
 
     /// Source NAT to an IPv6 address (and optional port).
@@ -3531,9 +3145,12 @@ impl Rule {
     /// the address family, so this emits `Family::Ip6` (not the chain's
     /// `Family::Inet`). The 16-byte address is loaded into `R0`; the optional
     /// port into `R1`.
-    pub fn snat_v6(mut self, addr: Ipv6Addr, port: Option<u16>) -> Self {
-        self.push_nat(NatType::Snat, Family::Ip6, addr.octets().to_vec(), NatAddr::Reg, port);
-        self
+    pub fn snat_v6(self, addr: Ipv6Addr, port: Option<u16>) -> Self {
+        self.then(Stmt::NatTo {
+            nat_type: NatType::Snat,
+            addr: addr.into(),
+            port,
+        })
     }
 
     /// Destination NAT to an IPv6 address (and optional port).
@@ -3542,69 +3159,25 @@ impl Rule {
     /// the address family, so this emits `Family::Ip6` (not the chain's
     /// `Family::Inet`). The 16-byte address is loaded into `R0`; the optional
     /// port into `R1`.
-    pub fn dnat_v6(mut self, addr: Ipv6Addr, port: Option<u16>) -> Self {
-        self.push_nat(NatType::Dnat, Family::Ip6, addr.octets().to_vec(), NatAddr::Reg, port);
-        self
+    pub fn dnat_v6(self, addr: Ipv6Addr, port: Option<u16>) -> Self {
+        self.then(Stmt::NatTo {
+            nat_type: NatType::Dnat,
+            addr: addr.into(),
+            port,
+        })
     }
 
     /// A NAT statement with ranges and flags (#528): see [`NatStatement`].
     /// The address range is loaded into `R0` (and `R1`, for a range), the
     /// port range into the next registers, then the statement names them.
     /// A statement the kernel would refuse makes adding the rule fail.
-    pub fn nat(mut self, nat: NatStatement) -> Self {
-        use super::expr::Expr;
-        let family = match nat.check() {
-            Ok(family) => family,
-            Err(e) => {
-                self.error.get_or_insert(e);
-                return self;
-            }
-        };
-        let mut free = [Register::R0, Register::R1, Register::R2, Register::R3].into_iter();
-        let mut load = |exprs: &mut Vec<Expr>, lo: Vec<u8>, hi: Vec<u8>| {
-            let first = free.next().expect("four registers hold two ranges");
-            let last = if hi == lo {
-                first
-            } else {
-                free.next().expect("four registers hold two ranges")
-            };
-            exprs.push(Expr::Immediate { dreg: first, data: lo });
-            if last != first {
-                exprs.push(Expr::Immediate { dreg: last, data: hi });
-            }
-            (first, last)
-        };
-        let octets = |a: std::net::IpAddr| match a {
-            std::net::IpAddr::V4(v4) => v4.octets().to_vec(),
-            std::net::IpAddr::V6(v6) => v6.octets().to_vec(),
-        };
-        let addr = nat
-            .addr
-            .map(|(lo, hi)| load(&mut self.exprs, octets(lo), octets(hi)));
-        let proto = nat.ports.map(|(lo, hi)| {
-            load(&mut self.exprs, lo.to_be_bytes().to_vec(), hi.to_be_bytes().to_vec())
-        });
-        self.exprs.push(Expr::NatRegs(NatRegs {
-            kind: nat.kind,
-            family,
-            addr,
-            proto,
-            flags: nat.flags,
-        }));
-        self
+    pub fn nat(self, nat: NatStatement) -> Self {
+        self.then(Stmt::Nat(nat))
     }
 
     /// Redirect to a local port (DNAT to localhost).
-    pub fn redirect(mut self, port: Option<u16>) -> Self {
-        use super::expr::Expr;
-        if let Some(p) = port {
-            self.exprs.push(Expr::Immediate {
-                dreg: Register::R0,
-                data: p.to_be_bytes().to_vec(),
-            });
-        }
-        self.exprs.push(Expr::Redirect(super::expr::RedirExpr { port }));
-        self
+    pub fn redirect(self, port: Option<u16>) -> Self {
+        self.then(Stmt::Redirect(port))
     }
 
     /// Log packet with optional prefix. For an `nflog` group, push a
@@ -3616,13 +3189,12 @@ impl Rule {
     /// group has no such limit. And the logger is the `nf_log_syslog` module:
     /// where it cannot be loaded, the rule — and the whole batch with it —
     /// fails with `ENOENT`.
-    pub fn log(mut self, prefix: Option<&str>) -> Self {
+    pub fn log(self, prefix: Option<&str>) -> Self {
         let mut log = super::expr::LogExpr::new();
         if let Some(prefix) = prefix {
             log = log.prefix(prefix);
         }
-        self.exprs.push(log.into());
-        self
+        self.then(Stmt::Log(log))
     }
 
     /// Match source IPv4 address against a named set (`ip saddr @set`).
@@ -3644,11 +3216,8 @@ impl Rule {
     /// Match `field` against a named set: `<field> @<set>` — `ip6 saddr @s`,
     /// `tcp dport @ports`, `meta mark @marks`, … The set's key type must be
     /// `field.key_type()`.
-    pub fn match_in_set(mut self, field: PacketField, set: &str) -> Self {
-        self.push_field_load(field);
-        self.exprs
-            .push(super::expr::LookupExpr::new(set, Register::R0).into());
-        self
+    pub fn match_in_set(self, field: PacketField, set: &str) -> Self {
+        self.then(Match::eq(field, Value::set(set)))
     }
 
     /// Match `field` in an interval set ([`Set::interval`], #703): what
@@ -3657,51 +3226,21 @@ impl Rule {
     /// in network order first, as nft does, because an interval set stores
     /// those keys that way so their ranges compare as numbers. For any other
     /// field it is `match_in_set`.
-    pub fn match_in_interval_set(mut self, field: PacketField, set: &str) -> Self {
-        self.push_interval_key(field);
-        self.exprs
-            .push(super::expr::LookupExpr::new(set, Register::R0).into());
-        self
+    pub fn match_in_interval_set(self, field: PacketField, set: &str) -> Self {
+        self.then(Match::eq(field, Value::IntervalSet(set.to_string())))
     }
 
     /// [`match_in_interval_set`](Self::match_in_interval_set), inverted:
     /// `<field> != @<set>`.
-    pub fn match_not_in_interval_set(mut self, field: PacketField, set: &str) -> Self {
-        self.push_interval_key(field);
-        self.exprs.push(
-            super::expr::LookupExpr::new(set, Register::R0)
-                .invert()
-                .into(),
-        );
-        self
-    }
-
-    /// Load `field` into `R0` as an interval set keeps it.
-    fn push_interval_key(&mut self, field: PacketField) {
-        use super::expr::Expr;
-        self.push_field_load(field);
-        if field.key_type().is_host_order() {
-            self.exprs.push(Expr::Byteorder {
-                sreg: Register::R0,
-                dreg: Register::R0,
-                op: ByteorderOp::Hton,
-                len: field.len(),
-                size: field.len(),
-            });
-        }
+    pub fn match_not_in_interval_set(self, field: PacketField, set: &str) -> Self {
+        self.then(Match::ne(field, Value::IntervalSet(set.to_string())))
     }
 
     /// Match `field` when it is *not* in a named set: `<field> != @<set>` —
     /// iptables `-m set ! --match-set`. Packets that fail the field's
     /// protocol guard (an IPv6 packet, for an IPv4 field) do not match.
-    pub fn match_not_in_set(mut self, field: PacketField, set: &str) -> Self {
-        self.push_field_load(field);
-        self.exprs.push(
-            super::expr::LookupExpr::new(set, Register::R0)
-                .invert()
-                .into(),
-        );
-        self
+    pub fn match_not_in_set(self, field: PacketField, set: &str) -> Self {
+        self.then(Match::ne(field, Value::set(set)))
     }
 
     /// Match a concatenation of fields against a set of concatenated keys:
@@ -3714,48 +3253,45 @@ impl Rule {
     /// loaded into the 32-bit word after the previous one, as `nft` lays a
     /// concatenation out. The data area holds 16 words (64 bytes — four
     /// IPv6 addresses); a longer concatenation is refused by the kernel.
-    pub fn match_concat_in_set(mut self, fields: &[PacketField], set: &str) -> Self {
-        self.push_concat_load(fields);
-        self.exprs
-            .push(super::expr::LookupExpr::new(set, Register::R0).into());
-        self
+    pub fn match_concat_in_set(self, fields: &[PacketField], set: &str) -> Self {
+        self.then(Match::eq(Field::Concat(fields.to_vec()), Value::set(set)))
     }
 
     /// Match a concatenation of fields when it is *not* in a set:
     /// `ip saddr . tcp dport != @s`.
-    pub fn match_concat_not_in_set(mut self, fields: &[PacketField], set: &str) -> Self {
-        self.push_concat_load(fields);
-        self.exprs.push(
-            super::expr::LookupExpr::new(set, Register::R0)
-                .invert()
-                .into(),
-        );
-        self
+    pub fn match_concat_not_in_set(self, fields: &[PacketField], set: &str) -> Self {
+        self.then(Match::ne(Field::Concat(fields.to_vec()), Value::set(set)))
     }
 
     /// `<field> vmap @<map>`: the verdict the map holds for `field` decides
     /// the packet — accept, drop, or jump to a chain ([`Set::vmap`]). A
     /// packet whose field is not in the map goes on to the next rule.
-    pub fn vmap(mut self, field: PacketField, map: &str) -> Self {
-        self.push_field_load(field);
-        self.push_map_lookup(map, Register::Verdict);
-        self
+    pub fn vmap(self, field: PacketField, map: &str) -> Self {
+        self.then(Stmt::Vmap {
+            key: field.into(),
+            map: map.to_string(),
+        })
     }
 
     /// `<field> . <field> vmap @<map>`: [`vmap`](Self::vmap) on a
     /// concatenation, laid out as [`match_concat_in_set`](Self::match_concat_in_set)
     /// does.
-    pub fn vmap_concat(mut self, fields: &[PacketField], map: &str) -> Self {
-        self.push_concat_load(fields);
-        self.push_map_lookup(map, Register::Verdict);
-        self
+    pub fn vmap_concat(self, fields: &[PacketField], map: &str) -> Self {
+        self.then(Stmt::Vmap {
+            key: Field::Concat(fields.to_vec()),
+            map: map.to_string(),
+        })
     }
 
     /// `meta mark set <field> map @<map>`: set the packet mark to the value
     /// the map holds for `field` — a map of [`SetKeyType::Mark`] values. A
     /// packet whose field is not in the map stops at this rule, unmarked.
     pub fn set_mark_from_map(self, field: PacketField, map: &str) -> Self {
-        self.set_meta_from_map(MetaKey::Mark, field, map)
+        self.then(Stmt::SetMetaFromMap {
+            key: MetaKey::Mark,
+            field,
+            map: map.to_string(),
+        })
     }
 
     /// `meta priority set <field> map @<map>`: the TC class the map holds
@@ -3763,32 +3299,22 @@ impl Rule {
     /// ([`SetElement::classid`]). HTB sends the packet straight to that
     /// class, as with [`set_priority`](Self::set_priority).
     pub fn set_priority_from_map(self, field: PacketField, map: &str) -> Self {
-        self.set_meta_from_map(MetaKey::Priority, field, map)
-    }
-
-    fn set_meta_from_map(mut self, key: MetaKey, field: PacketField, map: &str) -> Self {
-        self.push_field_load(field);
-        self.push_map_lookup(map, Register::R0);
-        self.exprs.push(Expr::MetaSet {
-            key,
-            sreg: Register::R0,
-        });
-        self
+        self.then(Stmt::SetMetaFromMap {
+            key: MetaKey::Priority,
+            field,
+            map: map.to_string(),
+        })
     }
 
     /// Count with, or check against, the named object of `object_type` —
     /// `counter name "web"`, `quota name "q"`, `limit name "l"`. Created
     /// with [`Connection::add_object`](crate::netlink::Connection::add_object)
     /// or declared on the table.
-    pub fn objref(mut self, object_type: super::object::ObjectType, name: &str) -> Self {
-        self.exprs.push(
-            super::expr::ObjrefExpr::Named {
-                object_type,
-                name: name.to_string(),
-            }
-            .into(),
-        );
-        self
+    pub fn objref(self, object_type: super::object::ObjectType, name: &str) -> Self {
+        self.then(Stmt::Objref {
+            object_type,
+            name: name.to_string(),
+        })
     }
 
     /// `counter name "<name>"`: count into a named counter, shared by every
@@ -3827,39 +3353,23 @@ impl Rule {
     /// limits): use the object the object map holds for `field` — one
     /// counter per address, ipset's per-element `counters`. A packet whose
     /// field is not in the map stops at this rule.
-    pub fn objref_from_map(mut self, field: PacketField, map: &str) -> Self {
-        self.push_field_load(field);
-        self.exprs.push(
-            super::expr::ObjrefExpr::Map {
-                sreg: Register::R0,
-                map: map.to_string(),
-            }
-            .into(),
-        );
-        self
+    pub fn objref_from_map(self, field: PacketField, map: &str) -> Self {
+        self.then(Stmt::ObjrefFromMap {
+            field,
+            map: map.to_string(),
+        })
     }
 
     /// `quota until <bytes> bytes`: match until the rule has passed `bytes`
     /// bytes. The quota is the rule's own; share one with
     /// [`quota_named`](Self::quota_named).
-    pub fn quota_until(mut self, bytes: u64) -> Self {
-        self.exprs.push(super::expr::QuotaExpr::new(bytes).into());
-        self
+    pub fn quota_until(self, bytes: u64) -> Self {
+        self.then(Stmt::Quota(super::expr::QuotaExpr::new(bytes)))
     }
 
     /// `quota over <bytes> bytes`: match once the rule has passed `bytes`.
-    pub fn quota_over(mut self, bytes: u64) -> Self {
-        self.exprs.push(super::expr::QuotaExpr::new(bytes).over().into());
-        self
-    }
-
-    /// Look the key in `R0` up in `map`, loading what it maps to into `dreg`.
-    fn push_map_lookup(&mut self, map: &str, dreg: Register) {
-        self.exprs.push(
-            super::expr::LookupExpr::new(map, Register::R0)
-                .dreg(dreg)
-                .into(),
-        );
+    pub fn quota_over(self, bytes: u64) -> Self {
+        self.then(Stmt::Quota(super::expr::QuotaExpr::new(bytes).over()))
     }
 
     /// Add `field` to a set from the packet path: `add @<set> { <field>
@@ -3907,63 +3417,22 @@ impl Rule {
     ///     .statement(LimitExpr::packets(10, LimitUnit::Second).over());
     /// let rule = Rule::new("filter", "input").dynset(PacketField::Ip4Saddr, flood).drop();
     /// ```
-    pub fn dynset(mut self, field: PacketField, mut dynset: super::expr::DynsetExpr) -> Self {
-        self.push_field_load(field);
-        dynset.sreg_key = Register::R0;
-        self.exprs.push(dynset.into());
-        self
+    pub fn dynset(self, field: PacketField, dynset: super::expr::DynsetExpr) -> Self {
+        self.then(Stmt::Dynset { field, dynset })
     }
 
     fn push_dynset(
-        mut self,
+        self,
         op: super::expr::DynsetOp,
         field: PacketField,
         set: &str,
         timeout: Option<std::time::Duration>,
     ) -> Self {
-        self.push_field_load(field);
         let mut dynset = super::expr::DynsetExpr::new(op, set, Register::R0);
         if let Some(timeout) = timeout {
             dynset = dynset.timeout(timeout);
         }
-        self.exprs.push(dynset.into());
-        self
-    }
-
-    /// Load `field` into `R0` behind the protocol guard `nft` emits for it.
-    pub(crate) fn push_field_load(&mut self, field: PacketField) {
-        self.push_field_guard(field);
-        self.exprs.push(field.load(Register::R0));
-    }
-
-    /// Load `fields` into consecutive 32-bit words from `R0`, behind their
-    /// guards — each distinct guard once, all before the first load, since
-    /// a guard compares in `R0` too.
-    fn push_concat_load(&mut self, fields: &[PacketField]) {
-        let mut guarded = Vec::new();
-        for field in fields {
-            let guard = field.guard();
-            if guard.is_some() && !guarded.contains(&guard) {
-                guarded.push(guard);
-                self.push_field_guard(*field);
-            }
-        }
-        let mut word = 0;
-        for field in fields {
-            // Past the last word, ask for the last one: the kernel then
-            // refuses the load as out of range rather than nlink building a
-            // rule that matches something else.
-            let dreg = Register::word(word).unwrap_or(Register::Reg32_15);
-            self.exprs.push(field.load(dreg));
-            word += field.len().div_ceil(4) as usize;
-        }
-    }
-
-    /// The protocol guard `nft` puts in front of `field`.
-    fn push_field_guard(&mut self, field: PacketField) {
-        if let Some((key, value)) = field.guard() {
-            self.push_meta_eq(key, value);
-        }
+        self.then(Stmt::Dynset { field, dynset })
     }
 
     /// Match layer-4 protocol (e.g., TCP=6, UDP=17, ICMP=1).
@@ -3980,9 +3449,8 @@ impl Rule {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn match_l4proto(mut self, proto: u8) -> Self {
-        self.push_meta_eq(MetaKey::L4Proto, proto);
-        self
+    pub fn match_l4proto(self, proto: u8) -> Self {
+        self.then(Match::eq(Field::L4Proto, proto))
     }
 
     /// Match `field` within `first..=last`, both included, as `nft`'s
@@ -3998,7 +3466,7 @@ impl Rule {
         first: impl Into<RangeValue>,
         last: impl Into<RangeValue>,
     ) -> Self {
-        self.push_range(field, first.into(), last.into(), RangeOp::Eq)
+        self.then(Match::eq(field, Value::range(first, last)))
     }
 
     /// Match `field` outside `first..=last`: `tcp dport != 1000-2000`.
@@ -4008,43 +3476,7 @@ impl Rule {
         first: impl Into<RangeValue>,
         last: impl Into<RangeValue>,
     ) -> Self {
-        self.push_range(field, first.into(), last.into(), RangeOp::Neq)
-    }
-
-    fn push_range(mut self, field: PacketField, first: RangeValue, last: RangeValue, op: RangeOp) -> Self {
-        use super::expr::Expr;
-        let (Some(from), Some(to)) = (field.range_bytes(first), field.range_bytes(last)) else {
-            self.error.get_or_insert(format!(
-                "range: {field:?} cannot hold {first:?}..{last:?}"
-            ));
-            return self;
-        };
-        if from > to {
-            self.error.get_or_insert(format!(
-                "range: {field:?} {first:?}..{last:?} runs backwards"
-            ));
-            return self;
-        }
-        if let Some((key, value)) = field.guard() {
-            self.push_meta_eq(key, value);
-        }
-        self.exprs.push(field.load(Register::R0));
-        if field.key_type().is_host_order() {
-            self.exprs.push(Expr::Byteorder {
-                sreg: Register::R0,
-                dreg: Register::R0,
-                op: ByteorderOp::Hton,
-                len: field.len(),
-                size: field.len(),
-            });
-        }
-        self.exprs.push(Expr::Range {
-            sreg: Register::R0,
-            op,
-            from,
-            to,
-        });
-        self
+        self.then(Match::ne(field, Value::range(first, last)))
     }
 
     /// Match the source address in `addr/prefix`, IPv4 or IPv6 (#528).
@@ -4081,381 +3513,214 @@ impl Rule {
 
     /// Match a connection with any of `status`'s bits: `ct status dnat`
     /// (#528).
-    pub fn match_ct_status(mut self, status: CtStatus) -> Self {
-        use super::expr::Expr;
-        self.exprs.push(Expr::Ct { dreg: Register::R0, key: CtKey::Status });
-        self.exprs.push(Expr::Bitwise {
-            sreg: Register::R0,
-            dreg: Register::R0,
-            len: 4,
-            mask: status.bits().to_ne_bytes().to_vec(),
-            xor: vec![0; 4],
-        });
-        self.exprs.push(Expr::Cmp { sreg: Register::R0, op: CmpOp::Neq, data: vec![0; 4] });
-        self
+    pub fn match_ct_status(self, status: CtStatus) -> Self {
+        self.then(Match::eq(Field::CtStatus, status))
     }
 
     /// Match the packet's direction in its connection: `ct direction
     /// reply`.
-    pub fn match_ct_direction(mut self, direction: CtDirection) -> Self {
-        use super::expr::Expr;
-        self.exprs.push(Expr::Ct { dreg: Register::R0, key: CtKey::Direction });
-        self.exprs.push(Expr::Cmp { sreg: Register::R0, op: CmpOp::Eq, data: vec![direction as u8] });
-        self
+    pub fn match_ct_direction(self, direction: CtDirection) -> Self {
+        self.then(Match::eq(Field::CtDirection, direction))
     }
 
     /// Match the connection's zone: `ct zone <zone>`.
-    pub fn match_ct_zone(mut self, zone: u16) -> Self {
-        use super::expr::Expr;
-        self.exprs.push(Expr::Ct { dreg: Register::R0, key: CtKey::Zone });
-        self.exprs.push(Expr::Cmp { sreg: Register::R0, op: CmpOp::Eq, data: zone.to_ne_bytes().to_vec() });
-        self
+    pub fn match_ct_zone(self, zone: u16) -> Self {
+        self.then(Match::eq(Field::CtZone, zone))
     }
 
     /// Put the packet's connection in `zone`: `ct zone set <zone>`. In a
     /// chain at the `raw` priority, before conntrack sees the packet.
-    pub fn set_ct_zone(mut self, zone: u16) -> Self {
-        use super::expr::Expr;
-        self.exprs.push(Expr::Immediate { dreg: Register::R0, data: zone.to_ne_bytes().to_vec() });
-        self.exprs.push(Expr::CtSet { key: CtKey::Zone, sreg: Register::R0 });
-        self
+    pub fn set_ct_zone(self, zone: u16) -> Self {
+        self.then(Stmt::SetCtZone(zone))
     }
 
     /// Match an address of the connection's `direction` tuple: `ct
     /// original ip saddr 10.0.0.1` is
     /// `match_ct_addr(CtDirection::Original, true, addr)`; `source: false`
     /// is the destination.
-    pub fn match_ct_addr(mut self, direction: CtDirection, source: bool, addr: std::net::IpAddr) -> Self {
-        use super::expr::Expr;
-        let (key, data) = match (addr, source) {
-            (std::net::IpAddr::V4(a), true) => (CtKey::SrcIp, a.octets().to_vec()),
-            (std::net::IpAddr::V4(a), false) => (CtKey::DstIp, a.octets().to_vec()),
-            (std::net::IpAddr::V6(a), true) => (CtKey::SrcIp6, a.octets().to_vec()),
-            (std::net::IpAddr::V6(a), false) => (CtKey::DstIp6, a.octets().to_vec()),
+    pub fn match_ct_addr(
+        self,
+        direction: CtDirection,
+        source: bool,
+        addr: std::net::IpAddr,
+    ) -> Self {
+        let field = if source {
+            Field::CtSaddr(direction)
+        } else {
+            Field::CtDaddr(direction)
         };
-        self.exprs.push(Expr::CtDirectional { dreg: Register::R0, key, direction });
-        self.exprs.push(Expr::Cmp { sreg: Register::R0, op: CmpOp::Eq, data });
-        self
+        self.then(Match::eq(field, addr))
     }
 
     /// Match a port of the connection's `direction` tuple: `ct reply
     /// proto-src 53` is `match_ct_port(CtDirection::Reply, true, 53)`.
-    pub fn match_ct_port(mut self, direction: CtDirection, source: bool, port: u16) -> Self {
-        use super::expr::Expr;
-        let key = if source { CtKey::ProtoSrc } else { CtKey::ProtoDst };
-        self.exprs.push(Expr::CtDirectional { dreg: Register::R0, key, direction });
-        self.exprs.push(Expr::Cmp { sreg: Register::R0, op: CmpOp::Eq, data: port.to_be_bytes().to_vec() });
-        self
+    pub fn match_ct_port(self, direction: CtDirection, source: bool, port: u16) -> Self {
+        let field = if source {
+            Field::CtSport(direction)
+        } else {
+            Field::CtDport(direction)
+        };
+        self.then(Match::eq(field, port))
     }
 
     /// Match a connection carrying label `bit` (0..=127): `ct label <bit>`.
-    pub fn match_ct_label(mut self, bit: u8) -> Self {
-        use super::expr::Expr;
-        let Some(mask) = ct_label_mask(bit) else {
-            self.error.get_or_insert(format!("ct label: bit {bit} is past 127"));
-            return self;
-        };
-        self.exprs.push(Expr::Ct { dreg: Register::R0, key: CtKey::Labels });
-        self.exprs.push(Expr::Bitwise {
-            sreg: Register::R0,
-            dreg: Register::R0,
-            len: 16,
-            mask,
-            xor: vec![0; 16],
-        });
-        self.exprs.push(Expr::Cmp { sreg: Register::R0, op: CmpOp::Neq, data: vec![0; 16] });
-        self
+    pub fn match_ct_label(self, bit: u8) -> Self {
+        self.then(Match::eq(Field::CtLabel, bit))
     }
 
     /// Give the connection label `bit` (0..=127), keeping the others: `ct
     /// label set <bit>`.
-    pub fn set_ct_label(mut self, bit: u8) -> Self {
-        use super::expr::Expr;
-        let Some(mask) = ct_label_mask(bit) else {
-            self.error.get_or_insert(format!("ct label: bit {bit} is past 127"));
-            return self;
-        };
-        self.exprs.push(Expr::Immediate { dreg: Register::R0, data: mask });
-        self.exprs.push(Expr::CtSet { key: CtKey::Labels, sreg: Register::R0 });
-        self
+    pub fn set_ct_label(self, bit: u8) -> Self {
+        self.then(Stmt::SetCtLabel(bit))
     }
 
     /// Match while the rule has seen at most `count` connections: `ct
     /// count <count>` (needs `nft_connlimit`).
-    pub fn match_ct_count(mut self, count: u32) -> Self {
-        self.exprs.push(super::expr::Expr::Connlimit { count, over: false });
-        self
+    pub fn match_ct_count(self, count: u32) -> Self {
+        self.then(Stmt::CtCount { count, over: false })
     }
 
     /// Match once the rule has seen more than `count` connections: `ct
     /// count over <count>`.
-    pub fn match_ct_count_over(mut self, count: u32) -> Self {
-        self.exprs.push(super::expr::Expr::Connlimit { count, over: true });
-        self
+    pub fn match_ct_count_over(self, count: u32) -> Self {
+        self.then(Stmt::CtCount { count, over: true })
     }
 
     /// Match the packet type: `meta pkttype broadcast` (#528).
-    pub fn match_pkttype(mut self, pkttype: PktType) -> Self {
-        self.push_meta_eq(MetaKey::PktType, pkttype as u8);
-        self
+    pub fn match_pkttype(self, pkttype: PktType) -> Self {
+        self.then(Match::eq(Field::PktType, pkttype))
     }
 
     /// Match any packet type but `pkttype`: `meta pkttype != broadcast`.
-    pub fn match_pkttype_not(mut self, pkttype: PktType) -> Self {
-        use super::expr::Expr;
-        self.exprs.push(Expr::Meta { dreg: Register::R0, key: MetaKey::PktType });
-        self.exprs.push(Expr::Cmp { sreg: Register::R0, op: CmpOp::Neq, data: vec![pkttype as u8] });
-        self
+    pub fn match_pkttype_not(self, pkttype: PktType) -> Self {
+        self.then(Match::ne(Field::PktType, pkttype))
     }
 
     /// Match a packet the routing table has no route for, as `flags`
     /// looks it up (#528): `fib saddr . iif oif missing` is
     /// `match_fib_missing(FibFlags::SADDR | FibFlags::IIF)` — the
     /// reverse-path check against spoofed sources.
-    pub fn match_fib_missing(mut self, flags: FibFlags) -> Self {
-        use super::expr::Expr;
-        self.exprs.push(Expr::Fib {
-            dreg: Register::R0,
-            result: FibResult::Oif,
-            flags: flags | FibFlags::PRESENT,
-        });
-        // The kernel stores the answer as a u32 0 or 1, and nft compares
-        // all four bytes: one would read the wrong end on a big-endian host.
-        self.exprs.push(Expr::Cmp { sreg: Register::R0, op: CmpOp::Eq, data: vec![0; 4] });
-        self
+    pub fn match_fib_missing(self, flags: FibFlags) -> Self {
+        self.then(Match::eq(
+            Field::Fib {
+                flags,
+                result: FibResult::Oif,
+            },
+            false,
+        ))
     }
 
     /// Match a packet whose address, as `flags` looks it up, is of
     /// `addr_type`: `fib daddr type local` is
     /// `match_fib_type(FibFlags::DADDR, RouteType::Local)`.
     pub fn match_fib_type(
-        mut self,
+        self,
         flags: FibFlags,
         addr_type: crate::netlink::types::route::RouteType,
     ) -> Self {
-        use super::expr::Expr;
-        self.exprs.push(Expr::Fib { dreg: Register::R0, result: FibResult::AddrType, flags });
-        self.exprs.push(Expr::Cmp {
-            sreg: Register::R0,
-            op: CmpOp::Eq,
-            data: (addr_type as u32).to_ne_bytes().to_vec(),
-        });
-        self
+        self.then(Match::eq(
+            Field::Fib {
+                flags,
+                result: FibResult::AddrType,
+            },
+            addr_type,
+        ))
     }
 
     /// `notrack` (#528): leave the packet out of connection tracking. In
     /// a chain at the `raw` priority on `prerouting` or `output`, before
     /// conntrack sees it; `ct state untracked` then matches it.
-    pub fn notrack(mut self) -> Self {
-        self.exprs.push(super::expr::Expr::Notrack);
-        self
+    pub fn notrack(self) -> Self {
+        self.then(Stmt::Notrack)
     }
 
     /// Match a TCP source port other than `port`: `tcp sport != <port>`.
     pub fn match_tcp_sport_not(self, port: u16) -> Self {
-        self.push_field_neq(PacketField::TcpSport, port.to_be_bytes().to_vec())
+        self.then(Match::ne(Field::TcpSport, port))
     }
 
     /// Match a UDP source port other than `port`: `udp sport != <port>`.
     pub fn match_udp_sport_not(self, port: u16) -> Self {
-        self.push_field_neq(PacketField::UdpSport, port.to_be_bytes().to_vec())
+        self.then(Match::ne(Field::UdpSport, port))
     }
 
     /// Match a mark other than `mark`: `meta mark != <mark>`.
     pub fn match_mark_not(self, mark: u32) -> Self {
-        self.push_field_neq(PacketField::Mark, mark.to_ne_bytes().to_vec())
+        self.then(Match::ne(Field::Mark, mark))
     }
 
     /// Match a layer-4 protocol other than `proto`: `meta l4proto != <proto>`.
     pub fn match_l4proto_not(self, proto: u8) -> Self {
-        self.push_field_neq(PacketField::L4Proto, vec![proto])
-    }
-
-    /// `field != data`, behind the field's guard.
-    fn push_field_neq(mut self, field: PacketField, data: Vec<u8>) -> Self {
-        use super::expr::Expr;
-        if let Some((key, value)) = field.guard() {
-            self.push_meta_eq(key, value);
-        }
-        self.exprs.push(field.load(Register::R0));
-        self.exprs.push(Expr::Cmp {
-            sreg: Register::R0,
-            op: CmpOp::Neq,
-            data,
-        });
-        self
+        self.then(Match::ne(Field::L4Proto, proto))
     }
 
     /// Match TCP source port.
-    pub fn match_tcp_sport(mut self, port: u16) -> Self {
-        use super::expr::Expr;
-        self.push_meta_eq(MetaKey::L4Proto, IPPROTO_TCP);
-        self.exprs.push(Expr::Payload {
-            dreg: Register::R0,
-            base: PayloadBase::Transport,
-            offset: 0, // source port is at offset 0
-            len: 2,
-        });
-        self.exprs.push(Expr::Cmp {
-            sreg: Register::R0,
-            op: CmpOp::Eq,
-            data: port.to_be_bytes().to_vec(),
-        });
-        self
+    pub fn match_tcp_sport(self, port: u16) -> Self {
+        self.then(Match::eq(Field::TcpSport, port))
     }
 
     /// Match UDP source port.
-    pub fn match_udp_sport(mut self, port: u16) -> Self {
-        use super::expr::Expr;
-        self.push_meta_eq(MetaKey::L4Proto, IPPROTO_UDP);
-        self.exprs.push(Expr::Payload {
-            dreg: Register::R0,
-            base: PayloadBase::Transport,
-            offset: 0,
-            len: 2,
-        });
-        self.exprs.push(Expr::Cmp {
-            sreg: Register::R0,
-            op: CmpOp::Eq,
-            data: port.to_be_bytes().to_vec(),
-        });
-        self
+    pub fn match_udp_sport(self, port: u16) -> Self {
+        self.then(Match::eq(Field::UdpSport, port))
     }
 
     /// Match ICMP type (IPv4).
     ///
     /// Common types: echo-reply=0, echo-request=8, dest-unreachable=3,
     /// time-exceeded=11, redirect=5.
-    pub fn match_icmp_type(mut self, icmp_type: u8) -> Self {
-        use super::expr::Expr;
-        // ICMP is IPv4-only; in an `inet` chain `nft` prepends the
-        // `meta nfproto ipv4` guard, same as the v4 address matchers.
-        self.push_nfproto_ipv4();
-        self.push_meta_eq(MetaKey::L4Proto, IPPROTO_ICMP);
-        // Load ICMP type (first byte of transport header)
-        self.exprs.push(Expr::Payload {
-            dreg: Register::R0,
-            base: PayloadBase::Transport,
-            offset: 0,
-            len: 1,
-        });
-        self.exprs.push(Expr::Cmp {
-            sreg: Register::R0,
-            op: CmpOp::Eq,
-            data: vec![icmp_type],
-        });
-        self
+    pub fn match_icmp_type(self, icmp_type: u8) -> Self {
+        self.then(Match::eq(Field::IcmpType, icmp_type))
     }
 
     /// Match ICMPv6 type.
     ///
     /// Common types: echo-request=128, echo-reply=129, neighbor-solicitation=135,
     /// neighbor-advertisement=136, router-solicitation=133, router-advertisement=134.
-    pub fn match_icmpv6_type(mut self, icmp_type: u8) -> Self {
-        use super::expr::Expr;
-        // ICMPv6 is IPv6-only; in an `inet` chain `nft` prepends the
-        // `meta nfproto ipv6` guard, same as the v6 address matchers.
-        self.push_nfproto_ipv6();
-        self.push_meta_eq(MetaKey::L4Proto, IPPROTO_ICMPV6);
-        self.exprs.push(Expr::Payload {
-            dreg: Register::R0,
-            base: PayloadBase::Transport,
-            offset: 0,
-            len: 1,
-        });
-        self.exprs.push(Expr::Cmp {
-            sreg: Register::R0,
-            op: CmpOp::Eq,
-            data: vec![icmp_type],
-        });
-        self
+    pub fn match_icmpv6_type(self, icmp_type: u8) -> Self {
+        self.then(Match::eq(Field::Icmp6Type, icmp_type))
     }
 
     /// Match source IPv4 address not in the given address/prefix.
     /// For prefixes shorter than 32, "not equal" means "outside the
     /// subnet" — the load is masked before comparison.
-    pub fn match_saddr_v4_not(mut self, addr: Ipv4Addr, prefix: u8) -> Self {
-        self.push_nfproto_ipv4();
-        self.push_addr_match(&addr.octets(), 12, prefix, 32, CmpOp::Neq);
-        self
+    pub fn match_saddr_v4_not(self, addr: Ipv4Addr, prefix: u8) -> Self {
+        self.then(Match::ne(Field::Ip4Saddr, prefixed(addr.into(), prefix)))
     }
 
     /// Match source IPv6 address not in the given address/prefix.
     /// For prefixes shorter than 128, "not equal" means "outside the
     /// subnet" — the load is masked before comparison.
-    pub fn match_saddr_v6_not(mut self, addr: Ipv6Addr, prefix: u8) -> Self {
-        self.push_nfproto_ipv6();
-        self.push_addr_match(&addr.octets(), 8, prefix, 128, CmpOp::Neq);
-        self
+    pub fn match_saddr_v6_not(self, addr: Ipv6Addr, prefix: u8) -> Self {
+        self.then(Match::ne(Field::Ip6Saddr, prefixed(addr.into(), prefix)))
     }
 
     /// Match destination IPv4 address not in the given address/prefix.
     /// For prefixes shorter than 32, "not equal" means "outside the
     /// subnet" — the load is masked before comparison.
-    pub fn match_daddr_v4_not(mut self, addr: Ipv4Addr, prefix: u8) -> Self {
-        self.push_nfproto_ipv4();
-        self.push_addr_match(&addr.octets(), 16, prefix, 32, CmpOp::Neq);
-        self
+    pub fn match_daddr_v4_not(self, addr: Ipv4Addr, prefix: u8) -> Self {
+        self.then(Match::ne(Field::Ip4Daddr, prefixed(addr.into(), prefix)))
     }
 
     /// Match destination IPv6 address not in the given address/prefix.
     /// For prefixes shorter than 128, "not equal" means "outside the
     /// subnet" — the load is masked before comparison.
-    pub fn match_daddr_v6_not(mut self, addr: Ipv6Addr, prefix: u8) -> Self {
-        self.push_nfproto_ipv6();
-        self.push_addr_match(&addr.octets(), 24, prefix, 128, CmpOp::Neq);
-        self
+    pub fn match_daddr_v6_not(self, addr: Ipv6Addr, prefix: u8) -> Self {
+        self.then(Match::ne(Field::Ip6Daddr, prefixed(addr.into(), prefix)))
     }
 
     /// Match TCP destination port not equal to the given port.
-    pub fn match_tcp_dport_not(mut self, port: u16) -> Self {
-        use super::expr::Expr;
-        self.push_meta_eq(MetaKey::L4Proto, IPPROTO_TCP);
-        self.exprs.push(Expr::Payload {
-            dreg: Register::R0,
-            base: PayloadBase::Transport,
-            offset: 2,
-            len: 2,
-        });
-        self.exprs.push(Expr::Cmp {
-            sreg: Register::R0,
-            op: CmpOp::Neq,
-            data: port.to_be_bytes().to_vec(),
-        });
-        self
+    pub fn match_tcp_dport_not(self, port: u16) -> Self {
+        self.then(Match::ne(Field::TcpDport, port))
     }
 
     /// Match UDP destination port not equal to the given port.
-    pub fn match_udp_dport_not(mut self, port: u16) -> Self {
-        use super::expr::Expr;
-        self.push_meta_eq(MetaKey::L4Proto, IPPROTO_UDP);
-        self.exprs.push(Expr::Payload {
-            dreg: Register::R0,
-            base: PayloadBase::Transport,
-            offset: 2,
-            len: 2,
-        });
-        self.exprs.push(Expr::Cmp {
-            sreg: Register::R0,
-            op: CmpOp::Neq,
-            data: port.to_be_bytes().to_vec(),
-        });
-        self
+    pub fn match_udp_dport_not(self, port: u16) -> Self {
+        self.then(Match::ne(Field::UdpDport, port))
     }
 
     /// Match packet mark (nfmark/fwmark).
-    pub fn match_mark(mut self, mark: u32) -> Self {
-        use super::expr::Expr;
-        self.exprs.push(Expr::Meta {
-            dreg: Register::R0,
-            key: MetaKey::Mark,
-        });
-        self.exprs.push(Expr::Cmp {
-            sreg: Register::R0,
-            op: CmpOp::Eq,
-            data: mark.to_ne_bytes().to_vec(),
-        });
-        self
+    pub fn match_mark(self, mark: u32) -> Self {
+        self.then(Match::eq(Field::Mark, mark))
     }
 
     /// Set the packet mark (nfmark/fwmark): `meta mark set <mark>`.
@@ -4466,17 +3731,8 @@ impl Rule {
     /// This replaces all 32 bits. On a host where other software uses its
     /// own mark bits (kube-proxy, CNI plugins, VPN policy routing), use
     /// [`set_mark_masked`](Self::set_mark_masked).
-    pub fn set_mark(mut self, mark: u32) -> Self {
-        use super::expr::Expr;
-        self.exprs.push(Expr::Immediate {
-            dreg: Register::R0,
-            data: mark.to_ne_bytes().to_vec(),
-        });
-        self.exprs.push(Expr::MetaSet {
-            key: MetaKey::Mark,
-            sreg: Register::R0,
-        });
-        self
+    pub fn set_mark(self, mark: u32) -> Self {
+        self.then(Stmt::SetMark(mark))
     }
 
     /// Set only the mark bits under `mask` to `value`, keeping the rest:
@@ -4486,48 +3742,21 @@ impl Rule {
     /// Bits of `value` outside `mask` are ignored. Pairs with
     /// [`match_mark_masked`](Self::match_mark_masked) and a `tc` `fw`
     /// filter's mask.
-    pub fn set_mark_masked(mut self, value: u32, mask: u32) -> Self {
-        self.exprs.push(Expr::Meta {
-            dreg: Register::R0,
-            key: MetaKey::Mark,
-        });
-        // (mark & !mask) ^ (value & mask): the masked bits are zero after
-        // the AND, so the XOR sets them.
-        self.exprs.push(Expr::Bitwise {
-            sreg: Register::R0,
-            dreg: Register::R0,
-            len: 4,
-            mask: (!mask).to_ne_bytes().to_vec(),
-            xor: (value & mask).to_ne_bytes().to_vec(),
-        });
-        self.exprs.push(Expr::MetaSet {
-            key: MetaKey::Mark,
-            sreg: Register::R0,
-        });
-        self
+    pub fn set_mark_masked(self, value: u32, mask: u32) -> Self {
+        self.then(Stmt::SetMarkMasked { value, mask })
     }
 
     /// Match the mark bits under `mask`: `meta mark and <mask> == <value>`.
     ///
     /// Bits of `value` outside `mask` are ignored.
-    pub fn match_mark_masked(mut self, value: u32, mask: u32) -> Self {
-        self.exprs.push(Expr::Meta {
-            dreg: Register::R0,
-            key: MetaKey::Mark,
-        });
-        self.exprs.push(Expr::Bitwise {
-            sreg: Register::R0,
-            dreg: Register::R0,
-            len: 4,
-            mask: mask.to_ne_bytes().to_vec(),
-            xor: vec![0; 4],
-        });
-        self.exprs.push(Expr::Cmp {
-            sreg: Register::R0,
-            op: CmpOp::Eq,
-            data: (value & mask).to_ne_bytes().to_vec(),
-        });
-        self
+    pub fn match_mark_masked(self, value: u32, mask: u32) -> Self {
+        self.then(Match::eq(
+            Field::Mark,
+            Value::Masked {
+                value: value.into(),
+                mask: mask.into(),
+            },
+        ))
     }
 
     /// Set the packet's TC priority to a class: `meta priority set
@@ -4545,16 +3774,8 @@ impl Rule {
     /// forwarded IPv4 traffic the kernel overwrites `skb->priority` from
     /// the TOS before the `forward` hook (`net.ipv4.ip_forward_update_priority`,
     /// on by default), so a value set in `prerouting` is lost.
-    pub fn set_priority(mut self, class: TcHandle) -> Self {
-        self.exprs.push(Expr::Immediate {
-            dreg: Register::R0,
-            data: u32::from(class).to_ne_bytes().to_vec(),
-        });
-        self.exprs.push(Expr::MetaSet {
-            key: MetaKey::Priority,
-            sreg: Register::R0,
-        });
-        self
+    pub fn set_priority(self, class: TcHandle) -> Self {
+        self.then(Stmt::SetPriority(class))
     }
 
     /// Set the connection's mark: `ct mark set <mark>`.
@@ -4563,58 +3784,25 @@ impl Rule {
     /// one rule can classify a whole connection: set it once, then copy it
     /// onto every packet with [`restore_mark_from_ct`](Self::restore_mark_from_ct).
     /// Needs the `nft_ct` module.
-    pub fn set_ct_mark(mut self, mark: u32) -> Self {
-        self.exprs.push(Expr::Immediate {
-            dreg: Register::R0,
-            data: mark.to_ne_bytes().to_vec(),
-        });
-        self.exprs.push(Expr::CtSet {
-            key: CtKey::Mark,
-            sreg: Register::R0,
-        });
-        self
+    pub fn set_ct_mark(self, mark: u32) -> Self {
+        self.then(Stmt::SetCtMark(mark))
     }
 
     /// Match the connection's mark: `ct mark <mark>`.
-    pub fn match_ct_mark(mut self, mark: u32) -> Self {
-        self.exprs.push(Expr::Ct {
-            dreg: Register::R0,
-            key: CtKey::Mark,
-        });
-        self.exprs.push(Expr::Cmp {
-            sreg: Register::R0,
-            op: CmpOp::Eq,
-            data: mark.to_ne_bytes().to_vec(),
-        });
-        self
+    pub fn match_ct_mark(self, mark: u32) -> Self {
+        self.then(Match::eq(Field::CtMark, mark))
     }
 
     /// Copy the packet mark to the connection: `ct mark set mark` —
     /// iptables `CONNMARK --save-mark`.
-    pub fn save_mark_to_ct(mut self) -> Self {
-        self.exprs.push(Expr::Meta {
-            dreg: Register::R0,
-            key: MetaKey::Mark,
-        });
-        self.exprs.push(Expr::CtSet {
-            key: CtKey::Mark,
-            sreg: Register::R0,
-        });
-        self
+    pub fn save_mark_to_ct(self) -> Self {
+        self.then(Stmt::SaveMarkToCt)
     }
 
     /// Copy the connection mark to the packet: `meta mark set ct mark` —
     /// iptables `CONNMARK --restore-mark`.
-    pub fn restore_mark_from_ct(mut self) -> Self {
-        self.exprs.push(Expr::Ct {
-            dreg: Register::R0,
-            key: CtKey::Mark,
-        });
-        self.exprs.push(Expr::MetaSet {
-            key: MetaKey::Mark,
-            sreg: Register::R0,
-        });
-        self
+    pub fn restore_mark_from_ct(self) -> Self {
+        self.then(Stmt::RestoreMarkFromCt)
     }
 
     /// Match TCP header flags: `tcp flags & <mask> == <flags>`.
@@ -4622,29 +3810,14 @@ impl Rule {
     /// A connection opening (`tcp flags syn / syn,rst`) is
     /// `match_tcp_flags(TcpFlags::SYN, TcpFlags::SYN | TcpFlags::RST)`.
     /// Bits of `flags` outside `mask` are ignored.
-    pub fn match_tcp_flags(mut self, flags: TcpFlags, mask: TcpFlags) -> Self {
-        use super::expr::Expr;
-        self.push_meta_eq(MetaKey::L4Proto, IPPROTO_TCP);
-        // Flags byte at offset 13 of the TCP header.
-        self.exprs.push(Expr::Payload {
-            dreg: Register::R0,
-            base: PayloadBase::Transport,
-            offset: 13,
-            len: 1,
-        });
-        self.exprs.push(Expr::Bitwise {
-            sreg: Register::R0,
-            dreg: Register::R0,
-            len: 1,
-            mask: vec![mask.bits()],
-            xor: vec![0],
-        });
-        self.exprs.push(Expr::Cmp {
-            sreg: Register::R0,
-            op: CmpOp::Eq,
-            data: vec![flags.bits() & mask.bits()],
-        });
-        self
+    pub fn match_tcp_flags(self, flags: TcpFlags, mask: TcpFlags) -> Self {
+        self.then(Match::eq(
+            Field::TcpFlags,
+            Value::Masked {
+                value: flags.bits().into(),
+                mask: mask.bits().into(),
+            },
+        ))
     }
 
     /// Clamp the TCP MSS option to `mss`: `tcp option maxseg size set <mss>`.
@@ -4662,15 +3835,8 @@ impl Rule {
     /// a non-TCP packet the write ends rule evaluation. Usually combined
     /// with a SYN match ([`match_tcp_flags`](Self::match_tcp_flags)) in a
     /// `forward` or `postrouting` chain.
-    pub fn clamp_tcp_mss(mut self, mss: u16) -> Self {
-        use super::expr::Expr;
-        self.push_meta_eq(MetaKey::L4Proto, IPPROTO_TCP);
-        self.exprs.push(Expr::Immediate {
-            dreg: Register::R0,
-            data: mss.to_be_bytes().to_vec(),
-        });
-        self.push_tcp_mss_write();
-        self
+    pub fn clamp_tcp_mss(self, mss: u16) -> Self {
+        self.then(Stmt::ClampTcpMss(mss))
     }
 
     /// Clamp the TCP MSS option to what the path allows: `tcp option
@@ -4686,36 +3852,8 @@ impl Rule {
     /// path MSS only in the `forward`, `output` and `postrouting` hooks —
     /// anywhere else the rule is rejected. Usually combined with a SYN
     /// match in `forward`, where a tunnel or PPPoE uplink narrows the path.
-    pub fn clamp_tcp_mss_to_pmtu(mut self) -> Self {
-        self.push_meta_eq(MetaKey::L4Proto, IPPROTO_TCP);
-        self.exprs.push(Expr::Rt {
-            dreg: Register::R0,
-            key: RtKey::TcpMss,
-        });
-        // `rt tcpmss` stores a host-order u16; the option wants it in
-        // network order.
-        self.exprs.push(Expr::Byteorder {
-            sreg: Register::R0,
-            dreg: Register::R0,
-            op: ByteorderOp::Hton,
-            len: 2,
-            size: 2,
-        });
-        self.push_tcp_mss_write();
-        self
-    }
-
-    /// Push the `exthdr` write of the TCP MSS option from `R0`: the 2-byte
-    /// value at offset 2 of the option (kind, length, value), network
-    /// byte order.
-    fn push_tcp_mss_write(&mut self) {
-        self.exprs.push(Expr::ExthdrSet {
-            sreg: Register::R0,
-            op: ExthdrOp::TcpOpt,
-            exthdr_type: TCPOPT_MAXSEG,
-            offset: 2,
-            len: 2,
-        });
+    pub fn clamp_tcp_mss_to_pmtu(self) -> Self {
+        self.then(Stmt::ClampTcpMssToPmtu)
     }
 
     /// Reject the packet: send an ICMP port-unreachable, then drop.
@@ -4738,17 +3876,14 @@ impl Rule {
     /// reject semantics and the code delivered a silent drop, so clients hung
     /// until timeout (#205).
     pub fn reject(self) -> Self {
-        self.reject_with(
-            super::NFT_REJECT_ICMPX_UNREACH,
-            super::NFT_REJECT_ICMPX_PORT_UNREACH,
-        )
+        self.then(Stmt::Reject(Reject::Icmpx(IcmpxCode::PortUnreachable)))
     }
 
     /// Reject with a TCP reset, behind a `meta l4proto tcp` guard as `nft`
     /// writes it: without one, every non-TCP packet the rule matched would be
     /// dropped silently, since there is nothing to reset (#480).
     pub fn reject_tcp_reset(self) -> Self {
-        self.reject_with(super::NFT_REJECT_TCP_RST, 0)
+        self.then(Stmt::Reject(Reject::TcpReset))
     }
 
     /// Reject with an ICMP (IPv4) unreachable of `code` (3 is port
@@ -4757,9 +3892,8 @@ impl Rule {
     /// the code to IPv6 packets, as an ICMPv6 code it does not mean (#480).
     /// For `inet`, `ip` and `ip6` tables; in `bridge` and `netdev` the
     /// nfproto is the hook's, and the guard never matches.
-    pub fn reject_icmp(mut self, code: u8) -> Self {
-        self.push_nfproto_ipv4();
-        self.reject_with(super::NFT_REJECT_ICMP_UNREACH, code)
+    pub fn reject_icmp(self, code: u8) -> Self {
+        self.then(Stmt::Reject(Reject::Icmp(code)))
     }
 
     /// Reject with a family-independent unreachable (#528) — `nft`'s
@@ -4768,15 +3902,14 @@ impl Rule {
     /// `reject_icmpx(IcmpxCode::PortUnreachable)`. For `inet`, `bridge` and
     /// `netdev` tables.
     pub fn reject_icmpx(self, code: IcmpxCode) -> Self {
-        self.reject_with(super::NFT_REJECT_ICMPX_UNREACH, code as u8)
+        self.then(Stmt::Reject(Reject::Icmpx(code)))
     }
 
     /// Reject with an ICMPv6 unreachable of `code` (4 is port
     /// unreachable), behind a `meta nfproto ipv6` guard — `nft`'s `reject
     /// with icmpv6 type …`. See [`reject_icmp`](Self::reject_icmp).
-    pub fn reject_icmpv6(mut self, code: u8) -> Self {
-        self.push_nfproto_ipv6();
-        self.reject_with(super::NFT_REJECT_ICMP_UNREACH, code)
+    pub fn reject_icmpv6(self, code: u8) -> Self {
+        self.then(Stmt::Reject(Reject::Icmpv6(code)))
     }
 
     /// Reject the packet with an explicit reject type and ICMP code.
@@ -4794,31 +3927,11 @@ impl Rule {
     /// `inet` chain it sends the code to IPv4 and IPv6 packets alike, so
     /// prefer [`reject_icmp`](Self::reject_icmp) /
     /// [`reject_icmpv6`](Self::reject_icmpv6) there.
-    pub fn reject_with(mut self, reject_type: u32, icmp_code: u8) -> Self {
-        let tcp_guarded = self.exprs.windows(2).any(|w| {
-            matches!(
-                w,
-                [
-                    super::expr::Expr::Meta {
-                        key: MetaKey::L4Proto,
-                        ..
-                    },
-                    super::expr::Expr::Cmp {
-                        op: CmpOp::Eq,
-                        data,
-                        ..
-                    },
-                ] if data.as_slice() == [IPPROTO_TCP]
-            )
-        });
-        if reject_type == super::NFT_REJECT_TCP_RST && !tcp_guarded {
-            self.push_meta_eq(MetaKey::L4Proto, IPPROTO_TCP);
-        }
-        self.exprs.push(super::expr::Expr::Reject {
+    pub fn reject_with(self, reject_type: u32, icmp_code: u8) -> Self {
+        self.then(Stmt::Reject(Reject::With {
             reject_type,
-            icmp_code,
-        });
-        self
+            code: icmp_code,
+        }))
     }
 
     /// Offload the matched flow to the named flowtable: `flow add @<name>`.
@@ -4828,24 +3941,21 @@ impl Rule {
     /// flowtable must live in the rule's table (see
     /// [`Flowtable`]); usually preceded by
     /// `match_ct_state(CtState::ESTABLISHED)`.
-    pub fn flow_offload(mut self, flowtable: &str) -> Self {
-        self.exprs.push(super::expr::Expr::FlowOffload {
-            flowtable: flowtable.to_string(),
-        });
-        self
+    pub fn flow_offload(self, flowtable: &str) -> Self {
+        self.then(Stmt::FlowOffload(flowtable.to_string()))
     }
 
     /// Append one expression: a payload struct such as
     /// [`LookupExpr`](super::expr::LookupExpr) or
     /// [`LimitExpr`](super::expr::LimitExpr), or any [`Expr`].
-    pub fn expr(mut self, expr: impl Into<Expr>) -> Self {
-        self.exprs.push(expr.into());
-        self
+    pub fn expr(self, expr: impl Into<Expr>) -> Self {
+        self.then(Item::Expr(expr.into()))
     }
 
-    /// Use raw expressions (advanced).
+    /// Replace the rule's items with raw expressions (advanced): each is
+    /// sent as it is, behind the family's guards.
     pub fn expressions(mut self, exprs: Vec<super::expr::Expr>) -> Self {
-        self.exprs = exprs;
+        self.spec.items = exprs.into_iter().map(Item::Expr).collect();
         self
     }
 }
@@ -5055,7 +4165,7 @@ pub enum PacketField {
 impl PacketField {
     /// The `meta` comparison `nft` guards this field with: `meta nfproto`
     /// for an address, `meta l4proto` for a port.
-    fn guard(self) -> Option<(MetaKey, u8)> {
+    pub(crate) fn guard(self) -> Option<(MetaKey, u8)> {
         match self {
             Self::Ip4Saddr | Self::Ip4Daddr => Some((MetaKey::NfProto, NFPROTO_IPV4)),
             Self::Ip6Saddr | Self::Ip6Daddr => Some((MetaKey::NfProto, NFPROTO_IPV6)),
@@ -5066,7 +4176,7 @@ impl PacketField {
     }
 
     /// The expression loading this field into `dreg`.
-    fn load(self, dreg: Register) -> Expr {
+    pub(crate) fn load(self, dreg: Register) -> Expr {
         let payload = |base, offset, len| Expr::Payload {
             dreg,
             base,
@@ -5090,7 +4200,7 @@ impl PacketField {
 
     /// `value` as this field holds it in a register, in network byte
     /// order; `None` when it is not of the field's kind.
-    fn range_bytes(self, value: RangeValue) -> Option<Vec<u8>> {
+    pub(crate) fn range_bytes(self, value: RangeValue) -> Option<Vec<u8>> {
         use std::net::IpAddr;
         match (self, value) {
             (Self::Ip4Saddr | Self::Ip4Daddr, RangeValue::Addr(IpAddr::V4(a))) => {
@@ -6012,7 +5122,7 @@ fn prefix_range(addr: &[u8], prefix: u8) -> Result<(Vec<u8>, Vec<u8>)> {
 
 /// Convert a prefix length to a network mask of `width` bytes.
 /// `prefix` is clamped to `width * 8`.
-fn prefix_to_mask(width: usize, prefix: u8) -> Vec<u8> {
+pub(crate) fn prefix_to_mask(width: usize, prefix: u8) -> Vec<u8> {
     let prefix = (prefix as usize).min(width * 8);
     let full_bytes = prefix / 8;
     let remainder = prefix % 8;
@@ -6140,12 +5250,12 @@ mod tests {
     fn map_lookups_load_into_the_verdict_or_a_data_register() {
         use super::super::expr::LookupExpr;
         let vmap = Rule::new("t", "c").vmap(PacketField::TcpDport, "vm");
-        let last = format!("{:?}", vmap.exprs.last().unwrap());
+        let last = format!("{:?}", vmap.exprs().last().unwrap());
         let want = LookupExpr::new("vm", Register::R0).dreg(Register::Verdict);
         assert_eq!(last, format!("{:?}", Expr::from(want)));
 
         let mark = Rule::new("t", "c").set_mark_from_map(PacketField::Ip4Saddr, "m");
-        let tail: Vec<String> = mark.exprs[mark.exprs.len() - 2..]
+        let tail: Vec<String> = mark.exprs()[mark.exprs().len() - 2..]
             .iter()
             .map(|e| format!("{e:?}"))
             .collect();
@@ -6194,7 +5304,7 @@ mod tests {
         want.push(load(Register::Reg32_05, PayloadBase::Transport, 0, 2));
         want.push(LookupExpr::new("s", Register::R0).into());
         // `Expr` has no `PartialEq`; its `Debug` form names every field.
-        assert_eq!(format!("{:?}", rule.exprs), format!("{want:?}"));
+        assert_eq!(format!("{:?}", rule.exprs()), format!("{want:?}"));
     }
 
     // -------- SetKeyType wire contract (#207) --------
@@ -6276,8 +5386,8 @@ mod tests {
 
     // -------- end SetKeyType wire contract --------
 
-    fn find_nat_expr(rule: &Rule) -> Option<&NatExpr> {
-        rule.exprs.iter().find_map(|e| match e {
+    fn find_nat_expr(rule: &Rule) -> Option<NatExpr> {
+        rule.exprs().into_iter().find_map(|e| match e {
             super::super::expr::Expr::Nat(n) => Some(n),
             _ => None,
         })
@@ -6334,8 +5444,8 @@ mod tests {
 
         // The 16-byte target address is loaded into R0 immediately before the
         // NAT expr (after the match exprs).
-        let imm_r0: Vec<&Vec<u8>> = rule
-            .exprs
+        let exprs = rule.exprs();
+        let imm_r0: Vec<&Vec<u8>> = exprs
             .iter()
             .filter_map(|e| match e {
                 super::super::expr::Expr::Immediate {
@@ -6368,7 +5478,7 @@ mod tests {
         assert_eq!(nat.addr, NatAddr::Reg);
         assert_eq!(nat.port, Some(8080));
         // Port loaded into R1.
-        let imm_r1 = rule.exprs.iter().any(|e| {
+        let imm_r1 = rule.exprs().iter().any(|e| {
             matches!(
                 e,
                 super::super::expr::Expr::Immediate {
@@ -6387,7 +5497,7 @@ mod tests {
             .family(Family::Ip6)
             .snat_v6(target, None);
 
-        let imm_r0 = rule.exprs.iter().any(|e| {
+        let imm_r0 = rule.exprs().iter().any(|e| {
             matches!(
                 e,
                 super::super::expr::Expr::Immediate {
@@ -6412,7 +5522,7 @@ mod tests {
     use super::super::expr::Expr;
 
     fn payload_exprs(rule: &Rule) -> Vec<(PayloadBase, u32, u32)> {
-        rule.exprs
+        rule.exprs()
             .iter()
             .filter_map(|e| match e {
                 Expr::Payload {
@@ -6426,7 +5536,7 @@ mod tests {
     /// `Cmp` exprs with the leading nfproto guard stripped by position,
     /// so address-match assertions see only the address comparison.
     fn cmp_exprs(rule: &Rule) -> Vec<(CmpOp, Vec<u8>)> {
-        strip_nfproto_guard(&rule.exprs)
+        strip_nfproto_guard(&rule.exprs())
             .iter()
             .filter_map(|e| match e {
                 Expr::Cmp { op, data, .. } => Some((*op, data.clone())),
@@ -6452,7 +5562,7 @@ mod tests {
     /// index 0, its Eq Cmp at index 1).
     fn has_nfproto_guard(rule: &Rule, proto: u8) -> bool {
         matches!(
-            rule.exprs.as_slice(),
+            rule.exprs().as_slice(),
             [
                 Expr::Meta { key: MetaKey::NfProto, .. },
                 Expr::Cmp { op: CmpOp::Eq, data, .. },
@@ -6462,7 +5572,7 @@ mod tests {
     }
 
     fn bitwise_exprs(rule: &Rule) -> Vec<Vec<u8>> {
-        rule.exprs
+        rule.exprs()
             .iter()
             .filter_map(|e| match e {
                 Expr::Bitwise { mask, .. } => Some(mask.clone()),
@@ -6564,12 +5674,12 @@ mod tests {
             assert!(
                 has_nfproto_guard(&rule, proto),
                 "matcher must open with meta nfproto == {proto}: {:?}",
-                rule.exprs,
+                rule.exprs(),
             );
             assert!(
-                matches!(rule.exprs.get(2), Some(Expr::Payload { .. })),
+                matches!(rule.exprs().get(2), Some(Expr::Payload { .. })),
                 "address payload must immediately follow the 2-expr guard: {:?}",
-                rule.exprs,
+                rule.exprs(),
             );
         }
     }
@@ -6583,13 +5693,13 @@ mod tests {
         assert!(
             has_nfproto_guard(&v4, NFPROTO_IPV4),
             "match_icmp_type must open with meta nfproto == ipv4: {:?}",
-            v4.exprs,
+            v4.exprs(),
         );
         let v6 = Rule::new("f", "input").match_icmpv6_type(128);
         assert!(
             has_nfproto_guard(&v6, NFPROTO_IPV6),
             "match_icmpv6_type must open with meta nfproto == ipv6: {:?}",
-            v6.exprs,
+            v6.exprs(),
         );
     }
 
@@ -6606,7 +5716,7 @@ mod tests {
             .match_tcp_dport(22)
             .match_tcp_sport(1);
         let guards = |family| -> Vec<(MetaKey, Vec<u8>)> {
-            let exprs = exprs_for_family(&rule.exprs, family);
+            let exprs = exprs_for_family(&rule.exprs(), family).into_owned();
             exprs
                 .windows(2)
                 .filter_map(|w| match (&w[0], &w[1]) {
@@ -6633,7 +5743,7 @@ mod tests {
         // An ip6 field in an ip table keeps its guard: the rule can never
         // match, and says so.
         let v6 = Rule::new("f", "c").match_saddr_v6("2001:db8::1".parse().unwrap(), 64);
-        let lowered = exprs_for_family(&v6.exprs, Family::Ip);
+        let lowered = exprs_for_family(&v6.exprs(), Family::Ip).into_owned();
         assert!(matches!(lowered.first(), Some(Expr::Meta { key: MetaKey::NfProto, .. })));
     }
 
@@ -6706,8 +5816,8 @@ mod header_write_tests {
 
     fn exprs(w: HeaderWrite) -> Vec<Expr> {
         let r = Rule::new("t", "c").set_header(w);
-        assert!(r.error.is_none(), "{:?}", r.error);
-        r.exprs
+        r.check().unwrap();
+        r.exprs()
     }
 
     #[test]
@@ -6781,13 +5891,18 @@ mod header_write_tests {
         );
 
         let r = Rule::new("t", "c").set_header(HeaderWrite::IpDscp(64));
-        assert_eq!(r.error.as_deref(), Some("set_header: DSCP 64 is past 63"));
+        assert_eq!(
+            r.spec().lower_items().err().as_deref(),
+            Some("set_header: DSCP 64 is past 63")
+        );
     }
 
     #[test]
     fn a_payload_write_reads_back() {
         use crate::netlink::{builder::MessageBuilder, nftables::expr};
-        let exprs = Rule::new("t", "c").set_header(HeaderWrite::IpSaddr("10.0.0.9".parse().unwrap())).exprs;
+        let exprs = Rule::new("t", "c")
+            .set_header(HeaderWrite::IpSaddr("10.0.0.9".parse().unwrap()))
+            .exprs();
         let mut b = MessageBuilder::new(0, 0);
         expr::write_expressions(&mut b, &exprs);
         let back = expr::parse_expressions(&b.as_bytes()[20..]);

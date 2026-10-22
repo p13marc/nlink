@@ -401,32 +401,72 @@ imperative, single-transaction path.) See `bins/nft/src/main.rs`
 ### From your own crate
 
 The nft rule body is a low-level expression VM (`Vec<Expr>` with
-raw byte payloads), so it is *not* serde-deserializable — a
-human-facing ruleset is always lowered into `Rule` through the
-builders (that's what `parse_ruleset` does). To load from
-TOML/YAML/JSON, define your own schema and map it onto the
-builder:
+raw byte payloads), so it is *not* serde-deserializable. Map your own
+schema onto a `RuleSpec` (#708): a rule's matches, statements and verdict
+as values. Any field takes any operator nft has, and any value that fits
+it. `push_rule_keyed` declares a spec. Build the specs first, so a value
+that does not parse fails with `?`, before the config exists:
 
 ```rust,no_run
 # use nlink::NftablesConfig;
-# use nlink::netlink::nftables::Family;
-// In your crate, wrap a serde schema that lowers into NftablesConfig.
+use std::net::IpAddr;
+
+use nlink::netlink::nftables::{
+    BaseChain, Family, Field, FilterHook, Match, Priority, RuleSpec, Value, Verdict,
+};
+
 #[derive(serde::Deserialize)]
-struct FirewallConfig {
-    table_name: String,
-    // ... your own schema fields ...
+struct Allow {
+    name: String,
+    /// `"tcp"` or `"udp"`.
+    proto: String,
+    ports: (u16, u16),
+    from: Option<(IpAddr, u8)>,
 }
 
-impl FirewallConfig {
-    fn into_nftables(self) -> NftablesConfig {
-        NftablesConfig::new().table(
-            &self.table_name,
-            Family::Inet,
-            |t| t, // ... map your schema onto the builder, then return it
-        )
+fn spec(allow: &Allow) -> nlink::Result<RuleSpec> {
+    let port = match allow.proto.as_str() {
+        "tcp" => Field::TcpDport,
+        "udp" => Field::UdpDport,
+        other => {
+            return Err(nlink::Error::invalid_message(format!(
+                "{}: no protocol {other}",
+                allow.name
+            )));
+        }
+    };
+    let (first, last) = allow.ports;
+    let mut spec = RuleSpec::new().then(Match::eq(port, Value::range(first, last)));
+    if let Some((addr, prefix)) = allow.from {
+        let field = if addr.is_ipv4() { Field::Ip4Saddr } else { Field::Ip6Saddr };
+        spec = spec.then(Match::eq(field, Value::Prefix(addr, prefix)));
     }
+    Ok(spec.then(Verdict::Accept).comment(allow.name.as_str()))
+}
+
+fn firewall(allows: &[Allow]) -> nlink::Result<NftablesConfig> {
+    let specs = allows
+        .iter()
+        .map(|a| Ok((a.name.clone(), spec(a)?)))
+        .collect::<nlink::Result<Vec<_>>>()?;
+    let cfg = NftablesConfig::new().table("filter", Family::Inet, |mut t| {
+        t = t.chain("input", |c| c.base(BaseChain::filter(FilterHook::Input, Priority::Filter)));
+        for (name, spec) in specs {
+            t = t.push_rule_keyed("input", name, spec);
+        }
+        t
+    });
+    // A value that does not fit its field (a port past 65535, a /33) fails
+    // here, with the rule's table and chain.
+    cfg.validate()?;
+    Ok(cfg)
 }
 ```
+
+When the rule is easier to write with the `Rule` builder's methods,
+`try_rule_keyed` takes a closure that returns `Result<Rule>`. Its error
+becomes the rule's error, and `validate()` reports it. Each builder method
+appends one of the spec's items, and `Rule::then` appends any other.
 
 (The *interface*-side `NetworkConfig` is different: with the
 `serde` feature it deserializes directly — its fields are typed

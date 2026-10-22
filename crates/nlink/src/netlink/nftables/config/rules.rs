@@ -39,7 +39,7 @@ pub(crate) fn effective_rules(rules: &[DeclaredRule]) -> Vec<DeclaredRule> {
                 &super::diff::lower_to_expression_bytes(&rule.body),
                 rule.body.family,
             );
-            let base = derived_key(&rule.chain, &body, rule.body.comment.as_deref());
+            let base = derived_key(&rule.chain, &body, rule.body.comment_ref());
             let n = seen.entry((rule.chain.clone(), base.clone())).or_insert(0);
             let key = if *n == 0 {
                 base
@@ -280,7 +280,7 @@ impl super::types::NftablesConfig {
             for rule in effective_rules(table.rules()) {
                 crate::netlink::nftables::userdata::encode_rule_userdata(
                     rule.handle_key(),
-                    rule.body.comment.as_deref(),
+                    rule.body.comment_ref(),
                 )
                 .map_err(|e| {
                     Error::invalid_message(format!("{}/{}: {e}", table.name(), rule.chain()))
@@ -306,7 +306,7 @@ fn check_interval_lookups(table: &super::types::DeclaredTable) -> Result<()> {
     use crate::netlink::nftables::types::{ByteorderOp, swaps_range_keys};
     use crate::netlink::nftables::Expr;
     for rule in table.rules() {
-        let exprs = &rule.body.exprs;
+        let exprs = rule.exprs()?;
         for (i, expr) in exprs.iter().enumerate() {
             let Expr::Lookup(lookup) = expr else { continue };
             let Some(set) = table.sets().iter().find(|s| s.name() == lookup.set) else {
@@ -662,9 +662,16 @@ mod tests {
             ]
         };
         let lowered = Rule::new("t", "c").match_tcp_dport(22).match_tcp_sport(1);
-        let lowered = crate::netlink::nftables::expr::exprs_for_family(&lowered.exprs, Family::Ip);
+        let lowered =
+            crate::netlink::nftables::expr::exprs_for_family(&lowered.exprs(), Family::Ip)
+                .into_owned();
         let mut old: Vec<Expr> = guard(MetaKey::NfProto, 2).to_vec();
-        old.extend(Rule::new("t", "c").match_tcp_dport(22).match_tcp_sport(1).exprs);
+        old.extend(
+            Rule::new("t", "c")
+                .match_tcp_dport(22)
+                .match_tcp_sport(1)
+                .exprs(),
+        );
         assert_eq!(
             canonical_body(&bytes(&old), Family::Ip),
             canonical_body(&bytes(&lowered), Family::Ip),

@@ -218,9 +218,17 @@ fn emit_tlv(out: &mut Vec<u8>, ty: u16, payload: &[u8]) {
 /// shape the kernel returns in `NFTA_RULE_EXPRESSIONS` (the
 /// nested elem-list inner bytes, *not* including the outer
 /// attribute header). Used by the diff to byte-compare declared
-/// vs kernel rule bodies. Plan 157b v2.
+/// vs kernel rule bodies. Plan 157b v2. A rule that does not lower is
+/// empty; `validate()` refuses it before any diff.
 pub(crate) fn lower_to_expression_bytes(rule: &super::super::types::Rule) -> Vec<u8> {
-    if rule.exprs.is_empty() {
+    rule.lowered()
+        .map(|exprs| expression_bytes(&exprs))
+        .unwrap_or_default()
+}
+
+/// `exprs` as the kernel echoes them in `NFTA_RULE_EXPRESSIONS`.
+pub(crate) fn expression_bytes(exprs: &[super::super::Expr]) -> Vec<u8> {
+    if exprs.is_empty() {
         return Vec::new();
     }
     // Scratch builder: write the NFTA_RULE_EXPRESSIONS attribute,
@@ -228,11 +236,7 @@ pub(crate) fn lower_to_expression_bytes(rule: &super::super::types::Rule) -> Vec
     // to get just the inner elem list (matches what the kernel
     // emits as the `NFTA_RULE_EXPRESSIONS` payload).
     let mut b = MessageBuilder::new(0, 0);
-    super::super::expr::write_expressions_as(
-        &mut b,
-        &super::super::expr::exprs_for_family(&rule.exprs, rule.family),
-        super::super::expr::WireForm::Echo,
-    );
+    super::super::expr::write_expressions_as(&mut b, exprs, super::super::expr::WireForm::Echo);
     let raw = b.finish();
     // NlMsgHdr is 16 bytes, attribute header is 4 bytes.
     if raw.len() <= 20 {
@@ -1368,7 +1372,7 @@ fn rule_matches(declared: &DeclaredRule, kernel: &RuleInfo) -> bool {
         .userdata_raw
         .as_deref()
         .and_then(super::super::userdata::human_comment_of);
-    declared.body.comment == kernel_comment
+    declared.body.comment_ref() == kernel_comment.as_deref()
 }
 
 /// The elements to add to and remove from an existing set. In
@@ -2704,8 +2708,7 @@ mod tests {
         use super::super::super::{NFTA_NAT_FLAGS, NFTA_NAT_REG_ADDR_MAX, NFTA_NAT_REG_PROTO_MAX};
         use super::super::super::expr::Expr;
         use super::super::super::types::{Family, NatExpr, Rule};
-        let mut rule = Rule::new("n", "post");
-        rule.exprs.push(Expr::Nat(NatExpr::snat(Family::Ip)));
+        let rule = Rule::new("n", "post").expr(Expr::Nat(NatExpr::snat(Family::Ip)));
         let body = lower_to_expression_bytes(&rule);
         assert!(
             !expr_has_attr(&body, "nat", NFTA_NAT_FLAGS),
