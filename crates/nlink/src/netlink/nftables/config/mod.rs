@@ -53,6 +53,7 @@
 //! `docs/recipes/nftables-sets-maps.md`.
 
 mod apply;
+mod change;
 mod diff;
 mod rules;
 mod snapshot;
@@ -60,6 +61,7 @@ mod types;
 
 pub(crate) use diff::expression_bytes;
 pub(crate) use rules::{canonical_body, canonical_elements};
+pub use change::{NftChain, NftElements, NftFlowtable, NftObject, NftRule, NftSet, NftTable};
 pub use snapshot::RulesetSnapshot;
 
 // The one reconcile vocabulary every layer shares (#532).

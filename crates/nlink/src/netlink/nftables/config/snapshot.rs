@@ -169,8 +169,24 @@ impl RulesetSnapshot {
                     managed: true,
                 });
             }
+            // nft_dynset_init gives a set a dynset writes to, and that
+            // has no size, a size of 65535.
+            let written: Vec<String> = table
+                .rules()
+                .iter()
+                .filter_map(|rule| rule.body().lowered().ok())
+                .flatten()
+                .filter_map(|e| match e {
+                    super::super::Expr::Dynset(dynset) => Some(dynset.set),
+                    _ => None,
+                })
+                .collect();
             for set in table.sets() {
-                snapshot.sets.push(set_info(set, &name, family, next()));
+                let mut info = set_info(set, &name, family, next());
+                if info.size.is_none() && written.iter().any(|s| s == set.name()) {
+                    info.size = Some(65535);
+                }
+                snapshot.sets.push(info);
                 snapshot
                     .elements
                     .insert((family, name.clone(), set.name().to_string()), set.wire_elements());
