@@ -1165,7 +1165,7 @@ pub(crate) fn exprs_for_family(exprs: &[Expr], family: Family) -> std::borrow::C
 /// The protocol guard a pair of expressions is: a `meta nfproto` or `meta
 /// l4proto` load and an equality with one byte, the shape the builders
 /// put in front of an address or a port.
-fn guard_at(exprs: &[Expr], i: usize) -> Option<(Register, MetaKey, u8)> {
+pub(crate) fn guard_at(exprs: &[Expr], i: usize) -> Option<(Register, MetaKey, u8)> {
     match (exprs.get(i)?, exprs.get(i + 1)?) {
         (
             Expr::Meta { dreg, key: key @ (MetaKey::NfProto | MetaKey::L4Proto) },
@@ -2451,6 +2451,268 @@ pub enum RuleExpr {
     },
 }
 
+impl RuleExpr {
+    /// The expression as nlink would send it again (#708): the typed lift's
+    /// fallback for what it has no item for. Live state is dropped (a
+    /// counter's packets, a quota's consumption), as the diff's canonical
+    /// form drops it; an expression nlink does not decode goes back as the
+    /// raw attributes it came as.
+    pub(crate) fn to_expr(&self) -> Expr {
+        let nat = |kind, family, addr, proto, flags| {
+            Expr::NatRegs(NatRegs {
+                kind,
+                family,
+                addr,
+                proto,
+                flags,
+            })
+        };
+        match self.clone() {
+            Self::Counter { .. } => Expr::Counter,
+            Self::Verdict(v) => Expr::Verdict(v),
+            Self::Meta { dreg, key } => Expr::Meta { dreg, key },
+            Self::MetaSet { key, sreg } => Expr::MetaSet { key, sreg },
+            Self::Exthdr {
+                dreg,
+                op,
+                exthdr_type,
+                offset,
+                len,
+            } => Expr::Exthdr {
+                dreg,
+                op,
+                exthdr_type,
+                offset,
+                len,
+            },
+            Self::ExthdrSet {
+                sreg,
+                op,
+                exthdr_type,
+                offset,
+                len,
+            } => Expr::ExthdrSet {
+                sreg,
+                op,
+                exthdr_type,
+                offset,
+                len,
+            },
+            Self::Cmp { sreg, op, data } => Expr::Cmp { sreg, op, data },
+            Self::Immediate { dreg, data } => Expr::Immediate { dreg, data },
+            Self::Payload {
+                dreg,
+                base,
+                offset,
+                len,
+            } => Expr::Payload {
+                dreg,
+                base,
+                offset,
+                len,
+            },
+            Self::PayloadSet {
+                sreg,
+                base,
+                offset,
+                len,
+                csum,
+                csum_offset,
+                l4_pseudo_header,
+            } => Expr::PayloadSet {
+                sreg,
+                base,
+                offset,
+                len,
+                csum,
+                csum_offset,
+                l4_pseudo_header,
+            },
+            Self::Ct { dreg, key } => Expr::Ct { dreg, key },
+            Self::CtSet { key, sreg } => Expr::CtSet { key, sreg },
+            Self::Rt { dreg, key } => Expr::Rt { dreg, key },
+            Self::Byteorder {
+                sreg,
+                dreg,
+                op,
+                len,
+                size,
+            } => Expr::Byteorder {
+                sreg,
+                dreg,
+                op,
+                len,
+                size,
+            },
+            Self::Bitwise {
+                sreg,
+                dreg,
+                len,
+                mask,
+                xor,
+            } => Expr::Bitwise {
+                sreg,
+                dreg,
+                len,
+                mask,
+                xor,
+            },
+            Self::Lookup {
+                set,
+                sreg,
+                dreg,
+                invert,
+            } => Expr::Lookup(LookupExpr {
+                set,
+                sreg,
+                dreg,
+                invert,
+            }),
+            Self::Quota { bytes, over, .. } => Expr::Quota(QuotaExpr { bytes, over }),
+            Self::Objref(o) => Expr::Objref(o),
+            Self::Dynset {
+                set,
+                op,
+                sreg_key,
+                sreg_data,
+                timeout,
+                invert,
+                statements,
+            } => {
+                let decoded: Option<Vec<ElementStatement>> = statements
+                    .iter()
+                    .map(ElementStatement::from_rule_expr)
+                    .collect();
+                // `parse_dynset` keeps a dynset whose statements do not all
+                // decode as `Unknown`, so this is always `Some`.
+                match decoded {
+                    Some(statements) => Expr::Dynset(DynsetExpr {
+                        set,
+                        op,
+                        sreg_key,
+                        sreg_data,
+                        timeout,
+                        invert,
+                        statements,
+                    }),
+                    None => Expr::Raw(RawExpr::without_data("dynset")),
+                }
+            }
+            Self::CtDirectional {
+                dreg,
+                key,
+                direction,
+            } => Expr::CtDirectional {
+                dreg,
+                key,
+                direction,
+            },
+            Self::Connlimit { count, over } => Expr::Connlimit { count, over },
+            Self::Fib {
+                dreg,
+                result,
+                flags,
+            } => Expr::Fib {
+                dreg,
+                result,
+                flags,
+            },
+            Self::Notrack => Expr::Notrack,
+            Self::Range { sreg, op, from, to } => Expr::Range { sreg, op, from, to },
+            Self::Limit(l) => Expr::Limit(l),
+            Self::Log(l) => Expr::Log(l),
+            Self::Queue(q) => Expr::Queue(q),
+            Self::Tproxy {
+                family,
+                sreg_addr,
+                sreg_port,
+            } => Expr::Tproxy {
+                family,
+                sreg_addr,
+                sreg_port,
+            },
+            Self::Socket { dreg, key } => Expr::Socket { dreg, key },
+            Self::Synproxy(s) => Expr::Synproxy(s),
+            Self::Osf { dreg, ttl, version } => Expr::Osf { dreg, ttl, version },
+            Self::Numgen {
+                dreg,
+                kind,
+                modulus,
+                offset,
+            } => Expr::Numgen {
+                dreg,
+                kind,
+                modulus,
+                offset,
+            },
+            Self::Hash {
+                dreg,
+                kind,
+                sreg,
+                len,
+                modulus,
+                seed,
+                offset,
+            } => Expr::Hash {
+                dreg,
+                kind,
+                sreg,
+                len,
+                modulus,
+                seed,
+                offset,
+            },
+            Self::Dup {
+                sreg_addr,
+                sreg_dev,
+            } => Expr::Dup {
+                sreg_addr,
+                sreg_dev,
+            },
+            Self::Fwd {
+                sreg_dev,
+                sreg_addr,
+            } => Expr::Fwd {
+                sreg_dev,
+                sreg_addr,
+            },
+            Self::Reject {
+                reject_type,
+                icmp_code,
+            } => Expr::Reject {
+                reject_type,
+                icmp_code: icmp_code.unwrap_or(0),
+            },
+            // The family is a snat's or a dnat's; a masquerade and a
+            // redirect take the table's.
+            Self::Masq { proto, flags } => {
+                nat(NatKind::Masquerade, Family::Inet, None, proto, flags)
+            }
+            Self::Nat {
+                nat_type,
+                family,
+                addr,
+                proto,
+                flags,
+            } => {
+                let kind = match nat_type {
+                    NatType::Snat => NatKind::Snat,
+                    NatType::Dnat => NatKind::Dnat,
+                };
+                nat(kind, family, addr, proto, flags)
+            }
+            Self::Redir { proto, flags } => {
+                nat(NatKind::Redirect, Family::Inet, None, proto, flags)
+            }
+            Self::FlowOffload { flowtable } => Expr::FlowOffload { flowtable },
+            Self::Unknown { name, data } if data.is_empty() => {
+                Expr::Raw(RawExpr::without_data(name))
+            }
+            Self::Unknown { name, data } => Expr::Raw(RawExpr::new(name, data)),
+        }
+    }
+}
+
 /// Decode the inner payload of `NFTA_RULE_EXPRESSIONS` (a list of
 /// `NFTA_LIST_ELEM`) into typed expressions.
 ///
@@ -3183,9 +3445,12 @@ fn parse_dynset(data: &[u8]) -> Option<RuleExpr> {
             _ => {}
         }
     }
-    // Never half-decode: a statement nlink cannot read keeps the whole
-    // dynset raw.
-    if statements.iter().any(|s| matches!(s, RuleExpr::Unknown { .. })) {
+    // Never half-decode: a statement nlink cannot read, or one no set
+    // element carries, keeps the whole dynset raw.
+    if statements
+        .iter()
+        .any(|s| ElementStatement::from_rule_expr(s).is_none())
+    {
         return None;
     }
     Some(RuleExpr::Dynset {
@@ -3289,6 +3554,25 @@ impl super::types::RuleInfo {
     /// byte-wise, not through this decoder).
     pub fn expressions(&self) -> Vec<RuleExpr> {
         parse_expressions(&self.expression_bytes)
+    }
+
+    /// The rule as a [`RuleSpec`] (#708): its expressions
+    /// lifted to the matches, statements and verdict that write them, and
+    /// its comment, without nlink's key. What nlink has no item for stays a
+    /// raw [`Expr`]. Lowering the spec in the rule's family gives this rule's
+    /// expressions back, as the declarative diff compares them.
+    pub fn spec(&self) -> super::RuleSpec {
+        let items = super::spec_lift::lift(
+            &self.expressions(),
+            Some(&self.expression_bytes),
+            self.family,
+        );
+        let mut spec: super::RuleSpec = items.into_iter().collect();
+        spec.comment = self
+            .userdata_raw
+            .as_deref()
+            .and_then(super::userdata::human_comment_of);
+        spec
     }
 
     /// The rule as `nft list ruleset` prints it: `tcp dport 22 counter

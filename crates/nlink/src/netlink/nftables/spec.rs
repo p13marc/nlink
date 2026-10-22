@@ -36,7 +36,7 @@ use std::net::IpAddr;
 
 use super::expr::{
     DynsetExpr, Expr, HashKind, LimitExpr, LogExpr, LookupExpr, MasqExpr, ObjrefExpr, OsfTtl,
-    QuotaExpr, RedirExpr, SocketKey,
+    QueueExpr, QuotaExpr, RedirExpr, SocketKey, SynproxyExpr,
 };
 use super::object::ObjectType;
 use super::types::{
@@ -129,6 +129,35 @@ impl RuleSpec {
             lowering.item(item)?;
         }
         Ok(lowering.out)
+    }
+
+    /// A rule's expressions as a spec (#708): the typed inverse of
+    /// [`lower`](Self::lower). Each expression becomes the item that writes
+    /// it, a match or a statement with its guards and immediates, and what
+    /// no item writes stays an [`Item::Expr`]. Lowering the result in the
+    /// same `family` gives the rule back, as the declarative diff compares
+    /// rules.
+    ///
+    /// [`RuleInfo::spec`](super::RuleInfo::spec) lifts a dumped rule with
+    /// its comment.
+    ///
+    /// ```no_run
+    /// # async fn run(conn: &nlink::Connection<nlink::Nftables>) -> nlink::Result<()> {
+    /// use nlink::netlink::nftables::{Family, Field, Item, Match, RuleSpec, Verdict};
+    ///
+    /// for rule in conn.list_rules("filter", Family::Inet).await? {
+    ///     let spec = RuleSpec::lift(&rule.expressions(), rule.family);
+    ///     if spec.items() == [Item::from(Match::eq(Field::TcpDport, 22u16)), Verdict::Accept.into()] {
+    ///         println!("handle {} accepts ssh", rule.handle);
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn lift(exprs: &[super::RuleExpr], family: Family) -> Self {
+        super::spec_lift::lift(exprs, None, family)
+            .into_iter()
+            .collect()
     }
 
     /// The rule as `nft list ruleset` prints it in a `family` table, or
@@ -338,6 +367,13 @@ pub enum Field {
     Icmp6Type,
     /// `meta l4proto`: an IP protocol number.
     L4Proto,
+    /// `meta nfproto`: the packet's L3 protocol, `2` for IPv4, `10` for
+    /// IPv6. It is the guard nft writes before an address field, and is
+    /// written as one: once, not in an ip or ip6 table, where it is always
+    /// true, and as `meta protocol` in a bridge or netdev table.
+    NfProto,
+    /// `meta protocol`: the ethertype, `0x0800` for IPv4.
+    Protocol,
     /// `meta mark`.
     Mark,
     /// `meta iif`: an interface index, resolved in the rule's namespace.
@@ -484,6 +520,8 @@ impl Field {
             Self::Iifname => meta(MetaKey::IifName),
             Self::Oifname => meta(MetaKey::OifName),
             Self::PktType => meta(MetaKey::PktType),
+            Self::NfProto => meta(MetaKey::NfProto),
+            Self::Protocol => meta(MetaKey::Protocol),
             Self::CtState => ct(CtKey::State),
             Self::CtStatus => ct(CtKey::Status),
             Self::CtDirection => ct(CtKey::Direction),
@@ -538,8 +576,10 @@ impl Field {
             | Self::UdpSport
             | Self::UdpDport
             | Self::CtSport(_)
-            | Self::CtDport(_) => fits(16).map(|()| (n as u16).to_be_bytes().to_vec()),
+            | Self::CtDport(_)
+            | Self::Protocol => fits(16).map(|()| (n as u16).to_be_bytes().to_vec()),
             Self::L4Proto
+            | Self::NfProto
             | Self::IcmpType
             | Self::Icmp6Type
             | Self::TcpFlags
@@ -560,6 +600,25 @@ impl Field {
             _ => return None,
         };
         Some(bytes)
+    }
+
+    /// The integer `data` is as the field holds it: what [`int`](Self::int)
+    /// encodes, decoded.
+    pub(crate) fn int_value(&self, data: &[u8]) -> Option<u64> {
+        // Every integer field holds 0, so its encoding gives the width.
+        let n = match (self.int(0)?.ok()?.len(), data.len()) {
+            (1, 1) => u64::from(data[0]),
+            (2, 2) => {
+                let raw = [data[0], data[1]];
+                match self {
+                    Self::CtZone => u64::from(u16::from_ne_bytes(raw)),
+                    _ => u64::from(u16::from_be_bytes(raw)),
+                }
+            }
+            (4, 4) => u64::from(u32::from_ne_bytes([data[0], data[1], data[2], data[3]])),
+            _ => return None,
+        };
+        (self.int(n)?.ok()?.as_slice() == data).then_some(n)
     }
 
     /// Whether the kernel keeps the field in host byte order, so a range
@@ -625,6 +684,8 @@ impl fmt::Display for Field {
             Self::IcmpType => f.write_str("icmp type"),
             Self::Icmp6Type => f.write_str("icmpv6 type"),
             Self::L4Proto => f.write_str("meta l4proto"),
+            Self::NfProto => f.write_str("meta nfproto"),
+            Self::Protocol => f.write_str("meta protocol"),
             Self::Mark => f.write_str("meta mark"),
             Self::Iif => f.write_str("meta iif"),
             Self::Oif => f.write_str("meta oif"),
@@ -948,6 +1009,10 @@ pub enum Stmt {
     Reject(Reject),
     /// `flow add @<flowtable>`.
     FlowOffload(String),
+    /// `queue …`: hand the packet to userspace, see [`QueueExpr`].
+    Queue(QueueExpr),
+    /// `synproxy …`: answer a SYN with a cookie, see [`SynproxyExpr`].
+    Synproxy(SynproxyExpr),
 }
 
 /// How a [`Stmt::Reject`] answers (#708).
@@ -1518,6 +1583,8 @@ impl Lowering {
             Stmt::FlowOffload(flowtable) => self.out.push(Expr::FlowOffload {
                 flowtable: flowtable.clone(),
             }),
+            Stmt::Queue(queue) => self.out.push(Expr::Queue(queue.clone())),
+            Stmt::Synproxy(synproxy) => self.out.push(Expr::Synproxy(synproxy.clone())),
         }
         Ok(())
     }

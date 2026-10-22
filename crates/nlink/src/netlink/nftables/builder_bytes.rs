@@ -726,3 +726,112 @@ fn every_builder_method_sends_what_it_sent() {
         changed.join("\n")
     );
 }
+
+/// Every builder rule lifts back to typed items that lower to what it sent
+/// (#708). A rule built without raw expressions lifts with none, and lifting
+/// what a lift lowers to gives the same items.
+#[test]
+fn every_builder_rule_lifts_to_what_it_sent() {
+    use super::spec::Item;
+    let mut wrong = Vec::new();
+    for (name, rule) in cases() {
+        let raw_in = rule
+            .spec()
+            .items()
+            .iter()
+            .any(|i| matches!(i, Item::Expr(_)));
+        for family in FAMILIES {
+            let rule = rule.clone().family(family);
+            let Ok(exprs) = rule.lowered() else { continue };
+            let bytes = super::config::expression_bytes(&exprs);
+            let decoded = super::expr::parse_expressions(&bytes);
+            let items = super::spec_lift::lift(&decoded, Some(&bytes), family);
+            let spec: RuleSpec = items.iter().cloned().collect();
+            let again = spec
+                .lower(family)
+                .map(|e| super::config::expression_bytes(&e));
+            let same = again.as_ref().is_ok_and(|again| {
+                super::config::canonical_body(again, family)
+                    == super::config::canonical_body(&bytes, family)
+            });
+            if !same {
+                wrong.push(format!("{name} {family}: does not lower back: {items:?}"));
+                continue;
+            }
+            if !raw_in && items.iter().any(|i| matches!(i, Item::Expr(_))) {
+                wrong.push(format!("{name} {family}: raw items: {items:?}"));
+            }
+            let again = again.unwrap();
+            let relifted = super::spec_lift::lift(
+                &super::expr::parse_expressions(&again),
+                Some(&again),
+                family,
+            );
+            if relifted != items {
+                wrong.push(format!(
+                    "{name} {family}: lifts again to\n    {relifted:?}\n  not {items:?}"
+                ));
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} lifts are wrong:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
+}
+
+/// A rule cut short anywhere, or bytes that are no rule at all, lift
+/// without a panic, to items that lower (#708).
+#[test]
+fn a_broken_rule_lifts_without_a_panic() {
+    let lift = |bytes: &[u8], family| {
+        let decoded = super::expr::parse_expressions(bytes);
+        let items = super::spec_lift::lift(&decoded, Some(bytes), family);
+        let _ = items.into_iter().collect::<RuleSpec>().lower(family);
+    };
+    for (_, rule) in cases() {
+        for family in FAMILIES {
+            let Ok(exprs) = rule.clone().family(family).lowered() else { continue };
+            let bytes = super::config::expression_bytes(&exprs);
+            for cut in (0..bytes.len()).step_by(4) {
+                lift(&bytes[..cut], family);
+            }
+        }
+    }
+    // A rule too long to type is read back as it is, and a concatenation of
+    // many ports does not try every choice of protocol.
+    let long: Vec<Expr> = vec![Expr::Counter; 300];
+    let bytes = super::config::expression_bytes(&long);
+    let items = super::spec_lift::lift(
+        &super::expr::parse_expressions(&bytes),
+        Some(&bytes),
+        Family::Inet,
+    );
+    assert_eq!(items.len(), 300);
+    let ports = vec![PacketField::TcpDport; 16];
+    let rule = Rule::new("t", "c").match_concat_in_set(&ports, "s");
+    let bytes = super::config::expression_bytes(&rule.lowered().unwrap());
+    // At most 64 choices of fields are tried, whatever the loads.
+    let items = super::spec_lift::lift(&super::expr::parse_expressions(&bytes), Some(&bytes), Family::Inet);
+    assert!(!items.is_empty());
+    // xorshift64: the same garbage on every run.
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for _ in 0..4000 {
+        let len = (next() % 160) as usize;
+        let mut bytes: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+        // Mostly well-framed elements, so the decoders are reached.
+        if len >= 8 && next() % 2 == 0 {
+            let n = (len as u16).to_ne_bytes();
+            bytes[..4].copy_from_slice(&[n[0], n[1], 1, 0x80]);
+        }
+        lift(&bytes, FAMILIES[(next() % 4) as usize]);
+    }
+}

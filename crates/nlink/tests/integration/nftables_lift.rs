@@ -479,6 +479,136 @@ async fn nft_syntax_prints_what_nft_lists() -> nlink::Result<()> {
     Ok(())
 }
 
+/// #708: every rule nft installs lifts to a `RuleSpec` that installs as
+/// the same rule. nft writes the corpus; each rule is read back, lifted, the
+/// table's rules are flushed, and nlink adds each lifted spec again; the
+/// kernel must dump every rule as it did. A rule with an anonymous set is
+/// left out: its set goes with it. Most rules lift to typed items; the rest
+/// keep raw expressions, which lower as they are.
+#[tokio::test]
+async fn a_lifted_rule_installs_as_itself() -> nlink::Result<()> {
+    nlink::require_root!();
+    nlink::require_modules!(
+        "nf_tables",
+        "nft_ct",
+        "nft_nat",
+        "nft_masq",
+        "nft_redir",
+        "nft_log",
+        "nft_limit",
+        "nft_quota",
+        "nft_connlimit",
+        "nft_reject_inet",
+        "nft_reject_ipv4",
+        "nft_reject_ipv6",
+        "nft_fib_inet",
+        "nft_flow_offload",
+        "nft_queue",
+        "nft_numgen",
+        "nft_hash",
+        "nft_socket",
+        "nft_osf",
+        "nft_tproxy",
+        "nft_synproxy",
+        "nft_dup_ipv4",
+        "nf_conntrack_ftp"
+    );
+    use nlink::netlink::nftables::{Expr, Item, RuleSpec};
+
+    let ns = TestNamespace::new("nft-lift-spec")?;
+    install(&ns, "inet", INET)?;
+    install(&ns, "ip", IP)?;
+    let nft = ns.connection_for::<Nftables>()?;
+    let anonymous = |spec: &RuleSpec| {
+        spec.items().iter().any(|i| {
+            matches!(i, Item::Expr(Expr::Lookup(l)) if l.set.starts_with("__"))
+                || matches!(i, Item::Match(m) if matches!(&m.value, nlink::netlink::nftables::Value::Set(s) if s.starts_with("__")))
+        })
+    };
+    let (mut rules, mut typed) = (0, 0);
+    let mut wrong = Vec::new();
+    for family in [
+        Family::Inet,
+        Family::Ip,
+        Family::Ip6,
+        Family::Bridge,
+        Family::Netdev,
+    ] {
+        let before: Vec<_> = nft
+            .list_rules("t", family)
+            .await?
+            .into_iter()
+            .map(|r| (r.chain.clone(), r.spec(), r))
+            .filter(|(_, spec, _)| !anonymous(spec))
+            .collect();
+        ns.exec("nft", &["flush", "table", family.name(), "t"])?;
+        for (chain, spec, info) in &before {
+            rules += 1;
+            if spec.items().iter().all(|i| !matches!(i, Item::Expr(_))) {
+                typed += 1;
+            } else if std::env::var_os("NLINK_SHOW_RAW").is_some() {
+                let raw: Vec<_> = spec
+                    .items()
+                    .iter()
+                    .filter(|i| matches!(i, Item::Expr(_)))
+                    .collect();
+                eprintln!("RAW {family} {chain}: {:?}\n    {raw:?}", info.nft_syntax());
+            }
+            let rule = Rule::from_spec("t", chain, spec.clone()).family(family);
+            if let Err(e) = nft.add_rule(rule).await {
+                wrong.push(format!(
+                    "{family} {chain}: {e}
+   rule: {:?}
+   spec: {spec:?}",
+                    info.nft_syntax()
+                ));
+            }
+        }
+        let after = nft.list_rules("t", family).await?;
+        for chain in before
+            .iter()
+            .map(|(c, _, _)| c.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            let was: Vec<_> = before
+                .iter()
+                .filter(|(c, _, _)| c == chain)
+                .map(|(_, _, r)| r)
+                .collect();
+            let now: Vec<_> = after.iter().filter(|r| r.chain == chain).collect();
+            for (was, now) in was.iter().zip(&now) {
+                if was.expression_bytes != now.expression_bytes {
+                    wrong.push(format!(
+                        "{family} {chain}: {:?}
+    was {:?}
+    now {:?}",
+                        was.nft_syntax(),
+                        was.expressions(),
+                        now.expressions()
+                    ));
+                }
+            }
+        }
+    }
+    eprintln!("{typed} of {rules} rules lift to typed items");
+    // 161 under nft 1.1.3, 156 under 1.0.6, which writes ranges otherwise.
+    // The rest are fields nlink has no `Field` for (`ip ttl`, `meta
+    // length`, `ether saddr`) and forms nft writes and nlink does not (a
+    // prefix as a shorter load, `ip protocol` as an ip table's
+    // dependency). NLINK_SHOW_RAW=1 lists them.
+    assert!(
+        typed >= 156,
+        "only {typed} of {rules} rules lift to typed items"
+    );
+    assert!(
+        wrong.is_empty(),
+        "{} lifted rules do not install as they were:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
+    Ok(())
+}
+
 /// One rule from each builder method, per family.
 fn nlink_rules() -> Vec<(Family, &'static str, Rule)> {
     let v4 = |s: &str| s.parse::<Ipv4Addr>().unwrap();
