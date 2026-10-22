@@ -118,7 +118,7 @@ impl NftablesDiff {
         // table flags the kernel does not change on a live table (#479), a
         // recreate that would delete rules nlink did not write (#478), a set
         // or object one of those rules uses (#708).
-        if let Some(refusal) = self.blocked.iter().find_map(|b| b.refusal()) {
+        if let Some(refusal) = self.refusal() {
             return Err(refusal);
         }
         let total = self.change_count();

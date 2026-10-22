@@ -2187,23 +2187,136 @@ async fn gap_deltas_report_a_table_deleted_during_an_overflow() -> nlink::Result
 /// however the rules happen to be numbered.
 fn diff_shape(d: &nlink::netlink::nftables::config::NftablesDiff) -> Vec<String> {
     let mut shape = Vec::new();
-    shape.extend(d.tables_to_add.iter().map(|t| format!("+table {}", t.name())));
-    shape.extend(d.tables_to_delete.iter().map(|(f, n)| format!("-table {f} {n}")));
-    shape.extend(d.chains_to_add.iter().map(|(t, _, c)| format!("+chain {t} {}", c.name())));
-    shape.extend(d.chains_to_modify.iter().map(|(t, _, c)| format!("~chain {t} {}", c.name())));
-    shape.extend(d.chains_to_delete.iter().map(|(t, _, c)| format!("-chain {t} {c}")));
-    shape.extend(d.rules_to_add.iter().map(|a| format!("+rule {:?}", a.rule.handle_key())));
-    shape.extend(d.rules_to_delete.iter().map(|r| format!("-rule {} {}", r.table, r.chain)));
-    shape.extend(d.rules_to_replace.iter().map(|r| format!("~rule {:?}", r.rule.handle_key())));
-    shape.extend(d.rules_to_move.iter().map(|m| format!(">rule {:?}", m.rule.handle_key())));
-    shape.extend(d.sets_to_add.iter().map(|(t, _, s)| format!("+set {t} {}", s.name())));
-    shape.extend(d.sets_to_delete.iter().map(|(t, _, s)| format!("-set {t} {s}")));
-    shape.extend(d.sets_to_update.iter().map(|(t, _, s)| format!("~set {t} {}", s.name())));
-    shape.extend(d.set_elements_to_add.iter().map(|c| format!("+{} elements {}", c.elements.len(), c.set.name())));
-    shape.extend(d.set_elements_to_remove.iter().map(|c| format!("-{} elements {}", c.elements.len(), c.set.name())));
-    shape.extend(d.objects_to_add.iter().map(|(t, _, o)| format!("+object {t} {}", o.name())));
-    shape.extend(d.objects_to_update.iter().map(|(t, _, o)| format!("~object {t} {}", o.name())));
-    shape.extend(d.objects_to_delete.iter().map(|(t, _, o, _)| format!("-object {t} {o}")));
+    shape.extend(
+        d.tables_to_add
+            .iter()
+            .map(|t| format!("+table {}", t.name())),
+    );
+    shape.extend(
+        d.tables_to_delete
+            .iter()
+            .map(|(f, n)| format!("-table {f} {n}")),
+    );
+    shape.extend(
+        d.chains_to_add
+            .iter()
+            .map(|(t, _, c)| format!("+chain {t} {}", c.name())),
+    );
+    shape.extend(
+        d.chains_to_modify
+            .iter()
+            .map(|(t, _, c)| format!("~chain {t} {}", c.name())),
+    );
+    shape.extend(
+        d.chains_to_delete
+            .iter()
+            .map(|(t, _, c)| format!("-chain {t} {c}")),
+    );
+    shape.extend(
+        d.rules_to_add
+            .iter()
+            .map(|a| format!("+rule {:?}", a.rule.handle_key())),
+    );
+    shape.extend(
+        d.rules_to_delete
+            .iter()
+            .map(|r| format!("-rule {} {}", r.table, r.chain)),
+    );
+    shape.extend(
+        d.rules_to_replace
+            .iter()
+            .map(|r| format!("~rule {:?}", r.rule.handle_key())),
+    );
+    shape.extend(
+        d.rules_to_move
+            .iter()
+            .map(|m| format!(">rule {:?}", m.rule.handle_key())),
+    );
+    shape.extend(
+        d.sets_to_add
+            .iter()
+            .map(|(t, _, s)| format!("+set {t} {}", s.name())),
+    );
+    shape.extend(
+        d.sets_to_delete
+            .iter()
+            .map(|(t, _, s)| format!("-set {t} {s}")),
+    );
+    shape.extend(
+        d.sets_to_update
+            .iter()
+            .map(|(t, _, s)| format!("~set {t} {}", s.name())),
+    );
+    shape.extend(
+        d.set_elements_to_add
+            .iter()
+            .map(|c| format!("+{} elements {}", c.elements.len(), c.set.name())),
+    );
+    shape.extend(
+        d.set_elements_to_remove
+            .iter()
+            .map(|c| format!("-{} elements {}", c.elements.len(), c.set.name())),
+    );
+    shape.extend(
+        d.objects_to_add
+            .iter()
+            .map(|(t, _, o)| format!("+object {t} {}", o.name())),
+    );
+    shape.extend(
+        d.objects_to_update
+            .iter()
+            .map(|(t, _, o)| format!("~object {t} {}", o.name())),
+    );
+    shape.extend(
+        d.objects_to_delete
+            .iter()
+            .map(|(t, _, o, _)| format!("-object {t} {o}")),
+    );
+    // #708: the typed changes too, from and to, where nothing but a
+    // handle is the kernel's own.
+    use nlink::netlink::nftables::config::{Change, NftChange};
+    for change in d.changes.iter().flat_map(NftChange::flatten) {
+        let line = match change {
+            NftChange::Rule(c) => {
+                let erase = |r: Option<&nlink::netlink::nftables::config::NftRule>| {
+                    r.map(|r| {
+                        let mut r = r.clone();
+                        r.handle = None;
+                        format!(
+                            "{:?} {:?} {:?} {:?}",
+                            r.key,
+                            r.placement.is_some(),
+                            r.spec,
+                            r.nft
+                        )
+                    })
+                };
+                format!(
+                    "{} rule {:?} -> {:?}",
+                    change.op(),
+                    erase(c.from()),
+                    erase(c.to())
+                )
+            }
+            NftChange::Set(Change::Recreate {
+                from,
+                to,
+                reason,
+                cascade,
+            }) => format!(
+                "recreate set {from:?} -> {to:?} ({reason}) with {}",
+                cascade.len()
+            ),
+            other => {
+                let mut text = format!("{other:?}");
+                if let NftChange::Elements(_) = other {
+                    text = format!("{} elements", other.op());
+                }
+                text
+            }
+        };
+        shape.push(line);
+    }
     shape.sort();
     shape
 }

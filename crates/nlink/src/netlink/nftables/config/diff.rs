@@ -7,7 +7,10 @@ use super::super::object::{ObjectConfig, ObjectType};
 use super::super::types::{
     ChainInfo, Family, RuleInfo, Set, SetElement, SetFlags, SetInfo, Verdict,
 };
-use super::change::{Blocked, NftItem, NftRule};
+use super::change::{
+    Blocked, Change, NftChain, NftChange, NftElements, NftFlowtable, NftItem, NftObject, NftRule,
+    NftSet, NftTable,
+};
 use super::types::{
     DeclaredChain, DeclaredFlowtable, DeclaredObject, DeclaredRule, DeclaredSet, DeclaredTable,
     NftablesConfig, SetElementMode,
@@ -612,11 +615,33 @@ pub struct NftablesDiff {
     /// error is the first that refuses, in the order the diff found them;
     /// the diff's `Display` says every one.
     pub blocked: Vec<Blocked>,
+    /// The diff as typed changes (#708): each table, chain, rule, set,
+    /// element batch, object and flowtable it adds, removes, updates or
+    /// recreates, with what the kernel holds and what it will hold. A
+    /// recreate carries what goes with it. The same changes as the lists
+    /// above, which are what [`apply`](Self::apply) sends.
+    pub changes: Vec<NftChange>,
     /// The ruleset generation the diff was taken at, if it was taken from
     /// the kernel: [`apply`](Self::apply) commits only if the ruleset is
     /// still there, and is otherwise refused with `ERESTART`
     /// ([`Error::is_restart`](crate::Error::is_restart)) (#482).
     pub generation: Option<u32>,
+    /// What the planner records for the typed changes and keeps nowhere
+    /// else (#708).
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) provenance: Provenance,
+}
+
+/// What the planner records for the typed changes and keeps nowhere else
+/// (#708).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Provenance {
+    /// Sets, objects and flowtables deleted and created again, and why.
+    pub(crate) recreated: Vec<(NftItem, String)>,
+    /// Object-map elements taken out and put back only because the object
+    /// they hold is recreated: the set, the object's name, the element.
+    pub(crate) forced: Vec<(NftItem, String, SetElement)>,
 }
 
 impl NftablesDiff {
@@ -633,6 +658,72 @@ impl NftablesDiff {
     #[cfg(feature = "schemars")]
     pub fn json_schema_value() -> schemars::Schema {
         crate::netlink::config::draft07_output_schema::<Self>()
+    }
+
+    /// The table changes, top level only (#708).
+    pub fn tables(&self) -> impl Iterator<Item = &Change<NftTable>> {
+        self.changes.iter().filter_map(|c| match c {
+            NftChange::Table(c) => Some(c),
+            _ => None,
+        })
+    }
+
+    /// The chain changes, top level only: a recreated table's are in its
+    /// cascade.
+    pub fn chains(&self) -> impl Iterator<Item = &Change<NftChain>> {
+        self.changes.iter().filter_map(|c| match c {
+            NftChange::Chain(c) => Some(c),
+            _ => None,
+        })
+    }
+
+    /// The rule changes, top level only: those a recreate moves are in its
+    /// cascade.
+    pub fn rules(&self) -> impl Iterator<Item = &Change<NftRule>> {
+        self.changes.iter().filter_map(|c| match c {
+            NftChange::Rule(c) => Some(c),
+            _ => None,
+        })
+    }
+
+    /// The set changes, top level only.
+    pub fn sets(&self) -> impl Iterator<Item = &Change<NftSet>> {
+        self.changes.iter().filter_map(|c| match c {
+            NftChange::Set(c) => Some(c),
+            _ => None,
+        })
+    }
+
+    /// The element changes, top level only: a recreated set's are in its
+    /// cascade.
+    pub fn elements(&self) -> impl Iterator<Item = &Change<NftElements>> {
+        self.changes.iter().filter_map(|c| match c {
+            NftChange::Elements(c) => Some(c),
+            _ => None,
+        })
+    }
+
+    /// The object changes, top level only.
+    pub fn objects(&self) -> impl Iterator<Item = &Change<NftObject>> {
+        self.changes.iter().filter_map(|c| match c {
+            NftChange::Object(c) => Some(c),
+            _ => None,
+        })
+    }
+
+    /// The flowtable changes, top level only.
+    pub fn flowtables(&self) -> impl Iterator<Item = &Change<NftFlowtable>> {
+        self.changes.iter().filter_map(|c| match c {
+            NftChange::Flowtable(c) => Some(c),
+            _ => None,
+        })
+    }
+
+    /// The error [`apply`](Self::apply) would fail with before it writes
+    /// anything: the first entry of [`blocked`](Self::blocked) that
+    /// refuses.
+    pub fn refusal(&self) -> Option<crate::netlink::error::Error> {
+        self.blocked.iter().find_map(Blocked::refusal)
     }
 
     /// `true` if declared state already matches kernel state.
@@ -1017,23 +1108,59 @@ enum ChainChange {
 /// there is no "update" — so drift means delete and recreate, which
 /// also discards its elements. They are re-added from the declaration
 /// in the same transaction.
+#[cfg(test)]
 fn set_has_drifted(declared: &DeclaredSet, current: &SetInfo) -> bool {
-    declared.key_type().type_id() != current.key_type
+    !set_drift(declared, current).is_empty()
+}
+
+/// What of a set's shape differs from the declaration: why it is recreated
+/// (#708).
+fn set_drift(declared: &DeclaredSet, current: &SetInfo) -> Vec<String> {
+    use super::super::types::SetKeyType;
+    let mut why = Vec::new();
+    if declared.key_type().type_id() != current.key_type
         || declared.key_type().len() != current.key_len
-        || declared.wire_flags() != current.flags
-        || declared.data_type().and_then(|d| d.type_id()) != current.data_type
-        || declared.data_type().and_then(|d| match d {
-            super::super::SetDataType::Object(object_type) => Some(*object_type as u32),
-            _ => None,
-        }) != current.object_type
-        // The kernel sizes a verdict itself; only a value's length is ours.
-        || declared
-            .data_type()
-            .and_then(|d| d.len())
-            .is_some_and(|len| current.data_len != Some(len))
-        // Neither changes in place (#703).
-        || declared.policy().is_some_and(|policy| policy != current.policy)
-        || !statements_match(declared.statements(), &current.statements)
+    {
+        why.push(format!(
+            "key {:?} -> {:?}",
+            SetKeyType::from_kernel(current.key_type, current.key_len),
+            declared.key_type()
+        ));
+    }
+    if declared.wire_flags() != current.flags {
+        why.push(format!(
+            "flags {:?} -> {:?}",
+            current.flags,
+            declared.wire_flags()
+        ));
+    }
+    let object_type = declared.data_type().and_then(|d| match d {
+        super::super::SetDataType::Object(object_type) => Some(*object_type as u32),
+        _ => None,
+    });
+    // The kernel sizes a verdict itself; only a value's length is ours.
+    let data_len = declared.data_type().and_then(|d| d.len());
+    if declared.data_type().and_then(|d| d.type_id()) != current.data_type
+        || object_type != current.object_type
+        || data_len.is_some_and(|len| current.data_len != Some(len))
+    {
+        why.push(format!("data -> {:?}", declared.data_type()));
+    }
+    // Neither changes in place (#703).
+    if declared
+        .policy()
+        .is_some_and(|policy| policy != current.policy)
+    {
+        why.push(format!(
+            "policy {:?} -> {:?}",
+            current.policy,
+            declared.policy()
+        ));
+    }
+    if !statements_match(declared.statements(), &current.statements) {
+        why.push("element statements".into());
+    }
+    why
 }
 
 /// Whether a set's statements are the declared ones, as the kernel keeps
@@ -1049,7 +1176,7 @@ fn statements_match(declared: &[ElementStatement], current: &[RuleExpr]) -> bool
 /// Does `rule` reference the set `set`? A plain lookup decodes typed; an
 /// inverted or map lookup, and a `dynset`, stay `Unknown` but carry the set
 /// name as their first attribute (`NFTA_LOOKUP_SET`, `NFTA_DYNSET_SET_NAME`).
-fn references_set(rule: &RuleInfo, set: &str) -> bool {
+pub(super) fn references_set(rule: &RuleInfo, set: &str) -> bool {
     use crate::netlink::attr::{AttrIter, get};
     rule.expressions().iter().any(|e| match e {
         RuleExpr::Lookup { set: s, .. } | RuleExpr::Dynset { set: s, .. } => s == set,
@@ -1065,7 +1192,7 @@ fn references_set(rule: &RuleInfo, set: &str) -> bool {
 }
 
 /// Does `rule` use the named object `name` of `object_type`?
-fn references_object(rule: &RuleInfo, name: &str, object_type: ObjectType) -> bool {
+pub(super) fn references_object(rule: &RuleInfo, name: &str, object_type: ObjectType) -> bool {
     use super::super::expr::ObjrefExpr;
     rule.expressions().iter().any(|e| {
         matches!(
@@ -1314,14 +1441,14 @@ fn keep_what_staying_rules_use(
 }
 
 /// Does `rule` offload to the flowtable `name`?
-fn references_flowtable(rule: &RuleInfo, name: &str) -> bool {
+pub(super) fn references_flowtable(rule: &RuleInfo, name: &str) -> bool {
     rule.expressions()
         .iter()
         .any(|e| matches!(e, RuleExpr::FlowOffload { flowtable } if flowtable == name))
 }
 
 /// Does `rule` jump or go to `chain`?
-fn references_chain(rule: &RuleInfo, chain: &str) -> bool {
+pub(super) fn references_chain(rule: &RuleInfo, chain: &str) -> bool {
     rule.expressions().iter().any(|e| {
         matches!(
             e,
@@ -1970,6 +2097,29 @@ impl NftablesConfig {
                         if f.priority() != current.priority
                             || (f.flags() ^ current.flags) & offload != 0
                         {
+                            let mut why = Vec::new();
+                            if f.priority() != current.priority {
+                                why.push(format!(
+                                    "priority {} -> {}",
+                                    current.priority,
+                                    f.priority()
+                                ));
+                            }
+                            if (f.flags() ^ current.flags) & offload != 0 {
+                                why.push(format!(
+                                    "hardware offload {} -> {}",
+                                    current.flags & offload != 0,
+                                    f.flags() & offload != 0
+                                ));
+                            }
+                            diff.provenance.recreated.push((
+                                NftItem::Flowtable {
+                                    table: declared.name().to_string(),
+                                    family: declared.family(),
+                                    name: f.name().to_string(),
+                                },
+                                why.join(", "),
+                            ));
                             diff.flowtables_to_delete.push((
                                 declared.family(),
                                 declared.name().to_string(),
@@ -2028,6 +2178,15 @@ impl NftablesConfig {
                     Some(ObjectChange::Nothing) => {}
                     Some(ObjectChange::Update) => push(&mut diff.objects_to_update),
                     Some(ObjectChange::Recreate) => {
+                        diff.provenance.recreated.push((
+                            NftItem::Object {
+                                table: declared.name().to_string(),
+                                family: declared.family(),
+                                name: o.name().to_string(),
+                                object_type: ty,
+                            },
+                            format!("a {ty:?} object does not change in place"),
+                        ));
                         diff.objects_to_delete.push((
                             declared.name().to_string(),
                             declared.family(),
@@ -2092,12 +2251,23 @@ impl NftablesConfig {
             let mut recreated: HashSet<&str> = HashSet::new();
             for s in declared.sets() {
                 let current_set = current_sets.iter().find(|c| c.name == s.name());
+                let mut drift = current_set.map(|c| set_drift(s, c)).unwrap_or_default();
                 if let Some(current) = current_set
-                    && (set_has_drifted(s, current)
-                        || (options.recreate_on_comment_change
-                            && current.comment.as_deref() != s.comment.as_deref()))
+                    && options.recreate_on_comment_change
+                    && current.comment.as_deref() != s.comment.as_deref()
                 {
+                    drift.push(format!("comment {:?} -> {:?}", current.comment, s.comment));
+                }
+                if current_set.is_some() && !drift.is_empty() {
                     recreated.insert(s.name());
+                    diff.provenance.recreated.push((
+                        NftItem::Set {
+                            table: declared.name().to_string(),
+                            family: declared.family(),
+                            name: s.name().to_string(),
+                        },
+                        drift.join(", "),
+                    ));
                     // Recreate: delete first, then add with the
                     // declared shape and all of its elements.
                     diff.sets_to_delete.push((
@@ -2161,6 +2331,14 @@ impl NftablesConfig {
                         && !(to_add.is_empty() && to_remove.is_empty())
                     {
                         recreated.insert(s.name());
+                        diff.provenance.recreated.push((
+                            NftItem::Set {
+                                table: declared.name().to_string(),
+                                family: declared.family(),
+                                name: s.name().to_string(),
+                            },
+                            "elements of a constant set change".into(),
+                        ));
                         diff.sets_to_delete.push((
                             declared.name().to_string(),
                             declared.family(),
@@ -2182,6 +2360,19 @@ impl NftablesConfig {
                     // Elements that hold a recreated object let go of it
                     // first and come back after it.
                     for held in current_elems.iter().filter(|e| holds_recreated(e)) {
+                        if let Some(super::super::types::SetElementData::Object(object)) =
+                            held.data()
+                        {
+                            diff.provenance.forced.push((
+                                NftItem::Set {
+                                    table: declared.name().to_string(),
+                                    family: declared.family(),
+                                    name: s.name().to_string(),
+                                },
+                                object.clone(),
+                                held.clone(),
+                            ));
+                        }
                         let same = |e: &SetElement| e.identity() == held.identity();
                         if !to_remove.iter().any(same) {
                             to_remove.push(held.clone());
@@ -2444,6 +2635,7 @@ impl NftablesConfig {
             }
         }
 
+        diff.changes = super::change::build(&diff, snapshot, self);
         Ok(diff)
     }
 }

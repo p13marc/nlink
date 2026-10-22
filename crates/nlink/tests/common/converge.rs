@@ -74,7 +74,14 @@ impl Declarative for NftablesConfig {
             .diff_with_options(conn, &options)
             .await
             .map_err(|e| format!("diff: {e}"))?;
-        diff.apply(conn).await.map_err(|e| e.to_string())
+        let applied = diff.apply(conn).await.map_err(|e| e.to_string())?;
+        // #708: what each change said the kernel would hold, it holds.
+        let after = self
+            .snapshot(conn)
+            .await
+            .map_err(|e| format!("snapshot: {e}"))?;
+        changes_hold(&diff, &after)?;
+        Ok(applied)
     }
 
     async fn pending(&self, conn: &Self::Conn, purge: bool) -> Result<Option<String>, String> {
@@ -84,6 +91,157 @@ impl Declarative for NftablesConfig {
             .await
             .map_err(|e| e.to_string())?;
         Ok((!diff.is_empty()).then(|| diff.to_string()))
+    }
+}
+
+/// Whether every change of `diff` holds in `after`, the ruleset its apply
+/// left: each `to` is what the kernel reads back, each removed item is
+/// gone (#708). Handles are where the kernel put them, a placement where
+/// the rule went; a timeout is compared in 20 ms steps.
+fn changes_hold(
+    diff: &nlink::netlink::nftables::config::NftablesDiff,
+    after: &nlink::netlink::nftables::config::RulesetSnapshot,
+) -> Result<(), String> {
+    use nlink::netlink::nftables::config::{
+        Change, NftChain, NftChange, NftFlowtable, NftObject, NftRule, NftSet, NftTable,
+    };
+    let step = |d: Option<std::time::Duration>| d.map(|d| d.as_millis() - d.as_millis() % 20);
+    let set_view = |mut s: NftSet| {
+        let timers = (step(s.timeout), step(s.gc_interval));
+        s.timeout = None;
+        s.gc_interval = None;
+        (s, timers)
+    };
+    let rule_view = |mut r: NftRule| {
+        r.handle = None;
+        r.placement = None;
+        r
+    };
+    let mut wrong = Vec::new();
+    for change in diff.changes.iter().flat_map(NftChange::flatten) {
+        let (held, gone) = match change {
+            NftChange::Table(c) => {
+                let read = |t: &NftTable| {
+                    after
+                        .tables
+                        .iter()
+                        .find(|k| k.family == t.family && k.name == t.name)
+                        .map(NftTable::from_kernel)
+                };
+                (
+                    c.to().map(|t| read(t).as_ref() == Some(t)),
+                    matches!(c, Change::Remove(t) if read(t).is_some()),
+                )
+            }
+            NftChange::Chain(c) => {
+                let read = |t: &NftChain| {
+                    after
+                        .chains
+                        .iter()
+                        .find(|k| k.family == t.family && k.table == t.table && k.name == t.name)
+                        .map(NftChain::from_kernel)
+                };
+                (
+                    c.to().map(|t| read(t).as_ref() == Some(t)),
+                    matches!(c, Change::Remove(t) if read(t).is_some()),
+                )
+            }
+            NftChange::Rule(c) => {
+                let read = |t: &NftRule| {
+                    after
+                        .rules
+                        .iter()
+                        .find(|k| {
+                            k.family == t.family
+                                && k.table == t.table
+                                && k.chain == t.chain
+                                && k.key == t.key
+                                && (t.key.is_some() || Some(k.handle) == t.handle.map(|h| h.0))
+                        })
+                        .map(|k| rule_view(NftRule::from_kernel(k)))
+                };
+                (
+                    c.to().map(|t| read(t) == Some(rule_view(t.clone()))),
+                    matches!(c, Change::Remove(t) if t.key.is_some() && read(t).is_some()),
+                )
+            }
+            NftChange::Set(c) => {
+                let read = |t: &NftSet| {
+                    after
+                        .sets
+                        .iter()
+                        .find(|k| k.family == t.family && k.table == t.table && k.name == t.name)
+                        .map(|k| set_view(NftSet::from_kernel(k)))
+                };
+                (
+                    c.to().map(|t| read(t) == Some(set_view(t.clone()))),
+                    matches!(c, Change::Remove(t) if read(t).is_some()),
+                )
+            }
+            NftChange::Elements(c) => {
+                let present = |t: &nlink::netlink::nftables::config::NftElements, e: &nlink::netlink::nftables::SetElement| {
+                    after
+                        .elements
+                        .get(&(t.family, t.table.clone(), t.set.clone()))
+                        .is_some_and(|all| {
+                            all.iter().any(|k| {
+                                k.key() == e.key()
+                                    && k.key_end().filter(|end| *end != k.key())
+                                        == e.key_end().filter(|end| *end != e.key())
+                                    && k.data() == e.data()
+                            })
+                        })
+                };
+                match c {
+                    Change::Add(t) => (Some(t.elements.iter().all(|e| present(t, e))), false),
+                    // A removed element can be added back by the same diff.
+                    _ => (None, false),
+                }
+            }
+            NftChange::Object(c) => {
+                let read = |t: &NftObject| {
+                    after
+                        .objects
+                        .iter()
+                        .find(|k| k.family == t.family && k.table == t.table && k.name == t.name)
+                        .and_then(NftObject::from_kernel)
+                };
+                (
+                    c.to().map(|t| read(t).as_ref() == Some(t)),
+                    matches!(c, Change::Remove(t) if read(t).is_some()),
+                )
+            }
+            NftChange::Flowtable(c) => {
+                let read = |t: &NftFlowtable| {
+                    after
+                        .flowtables
+                        .iter()
+                        .find(|k| k.family == t.family && k.table == t.table && k.name == t.name)
+                        .map(NftFlowtable::from_kernel)
+                };
+                (
+                    c.to().map(|t| read(t).as_ref() == Some(t)),
+                    matches!(c, Change::Remove(t) if read(t).is_some()),
+                )
+            }
+            other => {
+                wrong.push(format!("a change the check does not know: {other:?}"));
+                continue;
+            }
+        };
+        if held == Some(false) {
+            wrong.push(format!(
+                "not what the kernel holds after the apply: {change:#?}"
+            ));
+        }
+        if gone {
+            wrong.push(format!("still there after the apply: {change:#?}"));
+        }
+    }
+    if wrong.is_empty() {
+        Ok(())
+    } else {
+        Err(wrong.join("\n"))
     }
 }
 
