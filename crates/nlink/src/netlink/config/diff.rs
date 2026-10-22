@@ -4388,34 +4388,7 @@ mod tests {
         );
         assert_eq!(
             keys(crate::netlink::nftables::config::NftablesDiff::json_schema_value()),
-            [
-                "blocked",
-                "chains-to-add",
-                "chains-to-delete",
-                "chains-to-modify",
-                "chains-to-recreate",
-                "changes",
-                "flowtables-to-add",
-                "flowtables-to-delete",
-                "flowtables-to-update",
-                "generation",
-                "objects-to-add",
-                "objects-to-delete",
-                "objects-to-update",
-                "rules-to-add",
-                "rules-to-delete",
-                "rules-to-move",
-                "rules-to-replace",
-                "set-elements-to-add",
-                "set-elements-to-remove",
-                "sets-to-add",
-                "sets-to-delete",
-                "sets-to-update",
-                "tables-to-add",
-                "tables-to-delete",
-                "tables-to-modify",
-                "tables-to-recreate",
-            ]
+            ["blocked", "changes", "generation"]
         );
     }
 

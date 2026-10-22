@@ -58,9 +58,8 @@ let conn = Connection::<Nftables>::new()?;
 
 // 1. Compute the diff against current kernel state.
 let diff = cfg.diff(&conn).await?;
-// 0.19: NftablesDiff implements Display directly; .summary() was
-// deprecated in Plan 188 §2.6 in favor of the Display impl.
-tracing::info!("{}", diff);
+// One line per change.
+tracing::info!("{diff}");
 
 // 2. Apply atomically — single NFNL_MSG_BATCH_BEGIN ... BATCH_END
 //    commit. Kernel either accepts the whole batch or rolls back.
@@ -70,8 +69,8 @@ tracing::info!(changes = applied, "ruleset converged");
 # }
 ```
 
-The `summary()` output gives a human-readable change list — wire
-it to `tracing::info!` so operators see what's about to happen:
+`Display` gives a human-readable change list — wire it to
+`tracing::info!` so operators see what's about to happen:
 
 ```text
 NftablesDiff: 3 changes:
@@ -79,6 +78,68 @@ NftablesDiff: 3 changes:
   + chain Inet filter/input
   + chain Inet filter/output
 ```
+
+## What the diff says
+
+`diff.changes` is the diff: one `NftChange` for each table, chain, rule,
+set, batch of elements, object or flowtable it touches (#708). Each is a
+`Change<T>`:
+
+- `Add(to)` and `Remove(from)`;
+- `Update { from, to }`, made in place;
+- `Recreate { from, to, reason, cascade }`, deleted and added again. The
+  `cascade` is what goes with it and is listed nowhere else: a set's
+  elements and the rules that use it, a chain's rules, an object's or a
+  flowtable's rules, a table's contents.
+
+`from` is what the kernel holds, read back (`NftSet::from_kernel`, …), and
+`to` what it holds after the apply, read back the same way: the next
+diff's `from` is this one's `to`. A rule's `from.handle` says where it is
+and `to.placement` where it goes, so an `Update` without a placement is a
+replace in place and one with a placement a move.
+
+```text
+NftablesDiff: 1 change:
+  -/+ set Inet filter/allowed (recreate: key Ipv4Addr -> Ipv6Addr)
+    + 2 elements Inet filter/allowed
+    ~ rule Inet filter/input (handle=4 key=allowed, re-added: its set is recreated): ip saddr @allowed accept -> ip6 saddr @allowed accept
+```
+
+`diff.blocked` is what the diff cannot do. An entry that `refuses()` fails
+the apply before it writes anything: a table flag the kernel will not
+change on a live table, or a recreate that would delete or trip over rules
+nlink did not write. The others are kept and said: a set a foreign rule
+uses, an object of a type nlink does not model.
+
+```rust,no_run
+# use nlink::{Connection, Nftables};
+# use nlink::netlink::nftables::config::{Change, NftablesConfig};
+# async fn run(cfg: NftablesConfig, conn: &Connection<Nftables>) -> nlink::Result<()> {
+let diff = cfg.diff(conn).await?;
+for set in diff.sets() {
+    if let Change::Recreate { from, to, reason, cascade } = set {
+        println!(
+            "{} is recreated ({reason}): {:?} -> {:?}, {} changes with it",
+            to.name,
+            from.key_type,
+            to.key_type,
+            cascade.len()
+        );
+    }
+}
+if let Some(refused) = diff.refusal() {
+    tracing::warn!("the apply would fail: {refused}");
+}
+# Ok(())
+# }
+```
+
+`change_count()` counts a recreate once, its cascade with it, and each
+`blocked` entry that refuses. With the `serde` feature the diff's JSON is
+`{"blocked": [..], "changes": [..], "generation": N}`. Each change names
+its `"type"` (`table`, `chain`, `rule`, `set`, `elements`, `object`,
+`flowtable`) and its `"op"` (`add`, `remove`, `update`, `recreate`), and
+each blocked entry its `"kind"`.
 
 ## Idempotent re-apply
 
@@ -224,7 +285,7 @@ and the undeclared ones removed:
 
 ```rust,no_run
 # use nlink::{Connection, Nftables};
-# use nlink::netlink::nftables::config::NftablesConfig;
+# use nlink::netlink::nftables::config::{Change, NftablesConfig};
 # use nlink::netlink::nftables::types::{Family, SetKeyType};
 # use std::net::Ipv4Addr;
 # async fn run(conn: &Connection<Nftables>) -> nlink::Result<()> {
@@ -237,8 +298,16 @@ let cfg = NftablesConfig::new().table("filter", Family::Inet, |t| {
 });
 
 let diff = cfg.diff(conn).await?;
-// diff.sets_to_add / sets_to_delete — set create/delete by name.
-// diff.set_elements_to_add / set_elements_to_remove — per-key diff.
+// A set is added, removed, updated or recreated by name; its elements
+// change key by key.
+for set in diff.sets() {
+    println!("{} set {}", set.op(), set.to().or(set.from()).unwrap().name);
+}
+for batch in diff.elements() {
+    if let Change::Add(e) | Change::Remove(e) = batch {
+        println!("{} {} elements of {}", batch.op(), e.elements.len(), e.set);
+    }
+}
 diff.apply(conn).await?;
 # Ok(())
 # }
@@ -351,8 +420,8 @@ added by hand:
 ~ rule Inet filter/input (handle=5 key=ntp): udp dport 123 accept -> udp dport 1123 accept
 ```
 
-The same text is in each change's fields (`RuleDelete::current`,
-`RuleReplace::current`, `RuleMove::current`) and in the diff's JSON. It is
+The same text is each side's `NftRule::nft`, what the kernel has in
+`from` and what it will have in `to`, and is in the diff's JSON. It is
 stateless, as `nft -s` prints it, so a counter does not make two logs of
 the same change differ. The rules in the kernel print the same way through
 `RuleInfo::nft_syntax`, with their counts, or `nft_syntax_stateless`. Both

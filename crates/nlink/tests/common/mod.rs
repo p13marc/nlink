@@ -7,6 +7,7 @@
 pub mod converge;
 pub mod counters;
 pub mod events;
+pub mod nft;
 pub mod topo;
 pub mod traffic;
 

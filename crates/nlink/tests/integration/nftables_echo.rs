@@ -15,7 +15,7 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use nlink::netlink::nftables::config::NftablesConfig;
+use nlink::netlink::nftables::config::{Change, NftablesConfig};
 use nlink::netlink::nftables::types::{
     BaseChain, ChainName, CtState, Family, FilterHook, LimitUnit, NatHook, Priority, SetKeyType,
     TcpFlags,
@@ -817,23 +817,35 @@ async fn a_changed_comment_is_applied_by_recreating_with_the_option() -> nlink::
         assert!(chain.diff(&conn).await?.is_empty());
 
         let diff = chain.diff_with_options(&conn, &on).await?;
-        assert_eq!(diff.chains_to_recreate.len(), 1, "{diff}");
-        // The chain, and its rule put back.
-        assert_eq!(diff.change_count(), 2, "{diff}");
+        // The chain, and its rule put back with it.
+        let chains: Vec<_> = diff.chains().collect();
+        let [Change::Recreate { cascade, .. }] = chains[..] else {
+            panic!("one chain recreate: {diff}");
+        };
+        assert_eq!(cascade.len(), 1, "{diff}");
+        assert_eq!(diff.change_count(), 1, "{diff}");
         diff.apply(&conn).await?;
         let again = chain.diff_with_options(&conn, &on).await?;
         assert!(again.is_empty(), "second diff must be empty: {again}");
 
         let set = cfg("t1", "c2", "s2");
         let diff = set.diff_with_options(&conn, &on).await?;
-        assert_eq!(diff.sets_to_delete.len(), 1, "{diff}");
+        assert_eq!(
+            diff.sets().filter(|c| c.op() == "recreate").count(),
+            1,
+            "{diff}"
+        );
         diff.apply(&conn).await?;
         let again = set.diff_with_options(&conn, &on).await?;
         assert!(again.is_empty(), "second diff must be empty: {again}");
 
         let table = cfg("t2", "c2", "s2");
         let diff = table.diff_with_options(&conn, &on).await?;
-        assert_eq!(diff.tables_to_recreate.len(), 1, "{diff}");
+        assert_eq!(
+            diff.tables().filter(|c| c.op() == "recreate").count(),
+            1,
+            "{diff}"
+        );
         diff.apply(&conn).await?;
         let again = table.diff_with_options(&conn, &on).await?;
         assert!(again.is_empty(), "second diff must be empty: {again}");

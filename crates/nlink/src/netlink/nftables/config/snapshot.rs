@@ -325,7 +325,7 @@ mod tests {
     use std::net::Ipv4Addr;
 
     use super::*;
-    use crate::netlink::nftables::config::NftDiffOptions;
+    use crate::netlink::nftables::config::{Change, NftChange, NftDiffOptions};
     use crate::netlink::nftables::expr::{LimitExpr, QuotaExpr};
     use crate::netlink::nftables::types::{
         BaseChain, ChainName, FilterHook, LimitUnit, NatHook, Policy, Priority, SetKeyType, Verdict,
@@ -396,26 +396,46 @@ mod tests {
     #[test]
     fn diff_against_says_what_a_change_would_do() {
         let options = NftDiffOptions::default();
-        let diff = lab(2222, false).diff_against(&lab(22, true), &options).unwrap();
-        assert_eq!(diff.rules_to_replace.len(), 1, "{diff}");
-        let replace = &diff.rules_to_replace[0];
-        assert_eq!(replace.rule.handle_key(), Some("ssh"));
-        assert_eq!(replace.current.as_deref(), Some("tcp dport 22 accept"));
+        let diff = lab(2222, false)
+            .diff_against(&lab(22, true), &options)
+            .unwrap();
+        let rules: Vec<_> = diff.rules().collect();
+        let [Change::Update { from, to }] = rules[..] else {
+            panic!("one rule update: {diff}");
+        };
+        assert_eq!(to.key.as_deref(), Some("ssh"));
+        assert_eq!(from.nft.as_deref(), Some("tcp dport 22 accept"));
+        assert_eq!(to.nft.as_deref(), Some("tcp dport 2222 accept"));
         assert!(
             diff.to_string().contains(&format!(
                 "~ rule Inet f/input (handle={} key=ssh): tcp dport 22 accept -> tcp dport 2222 accept",
-                replace.handle.0
+                from.handle.unwrap().0
             )),
             "{diff}"
         );
-        assert_eq!(diff.sets_to_delete, [("f".to_string(), Family::Inet, "hosts".to_string())]);
+        let sets: Vec<_> = diff.sets().collect();
+        assert!(
+            matches!(sets[..], [Change::Remove(s)] if s.table == "f" && s.name == "hosts"),
+            "{diff}"
+        );
         assert_eq!(diff.change_count(), 2, "{diff}");
         assert_eq!(diff.generation, None, "an offline diff has no generation to hold");
 
         // And back.
-        let back = lab(22, true).diff_against(&lab(2222, false), &options).unwrap();
-        assert_eq!(back.sets_to_add.len(), 1, "{back}");
-        assert_eq!(back.rules_to_replace.len(), 1, "{back}");
+        let back = lab(22, true)
+            .diff_against(&lab(2222, false), &options)
+            .unwrap();
+        assert!(
+            matches!(back.sets().collect::<Vec<_>>()[..], [Change::Add(_)]),
+            "{back}"
+        );
+        assert!(
+            matches!(
+                back.rules().collect::<Vec<_>>()[..],
+                [Change::Update { .. }]
+            ),
+            "{back}"
+        );
     }
 
     /// #527: in a shared table the diff deletes only the undeclared chains,
@@ -471,37 +491,39 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn a_rule_in_the_diff_json_is_its_nft_text() {
+        let rules = |json: &serde_json::Value, op: &str| -> Vec<serde_json::Value> {
+            json["changes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|c| c["type"] == "rule" && c["op"] == op)
+                .cloned()
+                .collect()
+        };
         let diff = lab(22, true)
             .diff_against(&NftablesConfig::new(), &NftDiffOptions::default())
             .unwrap();
         let json = serde_json::to_value(&diff).unwrap();
-        let rules: Vec<_> = json["rules-to-add"]
-            .as_array()
-            .unwrap()
+        let added: Vec<_> = rules(&json, "add")
             .iter()
-            .map(|add| {
-                (
-                    add["rule"]["handle-key"].clone(),
-                    add["rule"]["nft"].clone(),
-                )
-            })
+            .map(|add| (add["key"].clone(), add["nft"].clone()))
             .collect();
         assert!(
-            rules.contains(&("ssh".into(), "tcp dport 22 accept".into())),
-            "{rules:?}"
+            added.contains(&("ssh".into(), "tcp dport 22 accept".into())),
+            "{added:?}"
         );
         assert!(
-            rules.contains(&("masq".into(), "masquerade".into())),
-            "{rules:?}"
+            added.contains(&("masq".into(), "masquerade".into())),
+            "{added:?}"
         );
         assert!(
-            rules
+            added
                 .iter()
                 .any(|(_, nft)| nft == "ip saddr @nets counter accept"),
-            "a counter is printed as nft -s prints it: {rules:?}"
+            "a counter is printed as nft -s prints it: {added:?}"
         );
 
-        // A delete and a replace carry what the kernel has.
+        // A delete and a replace say what the kernel has.
         let was = NftablesConfig::new().table("f", Family::Inet, |t| {
             t.chain("input", |c| c)
                 .rule_keyed("input", "dns", |r| r.match_udp_dport(53).counter().accept())
@@ -513,94 +535,110 @@ mod tests {
         });
         let diff = now.diff_against(&was, &NftDiffOptions::default()).unwrap();
         let json = serde_json::to_value(&diff).unwrap();
-        let delete = &json["rules-to-delete"][0];
+        let delete = &rules(&json, "remove")[0];
         assert_eq!(delete["key"], "dns", "{json:#}");
-        assert_eq!(delete["current"], "udp dport 53 counter accept", "{json:#}");
-        let replace = &json["rules-to-replace"][0];
-        assert_eq!(replace["current"], "tcp dport 22 accept", "{json:#}");
-        assert_eq!(replace["rule"]["nft"], "tcp dport 2222 accept", "{json:#}");
+        assert_eq!(delete["nft"], "udp dport 53 counter accept", "{json:#}");
+        let replace = &rules(&json, "update")[0];
+        assert_eq!(replace["from"]["nft"], "tcp dport 22 accept", "{json:#}");
+        assert_eq!(replace["to"]["nft"], "tcp dport 2222 accept", "{json:#}");
     }
 
-    /// #876 — an `NftablesDiff` with every field filled in validates
-    /// against the schema it publishes. The adds come from a real offline
-    /// diff; the rest reuse what it declared.
+    /// The other ops of `added`'s kind, each recreate taking `cascade`.
+    #[cfg(feature = "schemars")]
+    fn other_ops(added: &NftChange, cascade: Vec<NftChange>) -> Vec<NftChange> {
+        macro_rules! ops {
+            ($kind:ident, $x:expr) => {{
+                let x = $x;
+                vec![
+                    NftChange::$kind(Change::Remove(x.clone())),
+                    NftChange::$kind(Change::Update {
+                        from: x.clone(),
+                        to: x.clone(),
+                    }),
+                    NftChange::$kind(Change::Recreate {
+                        from: x.clone(),
+                        to: x.clone(),
+                        reason: "key Ipv4Addr -> Ipv6Addr".into(),
+                        cascade,
+                    }),
+                ]
+            }};
+        }
+        match added {
+            NftChange::Table(Change::Add(x)) => ops!(Table, x),
+            NftChange::Chain(Change::Add(x)) => ops!(Chain, x),
+            NftChange::Rule(Change::Add(x)) => ops!(Rule, x),
+            NftChange::Set(Change::Add(x)) => ops!(Set, x),
+            NftChange::Elements(Change::Add(x)) => ops!(Elements, x),
+            NftChange::Object(Change::Add(x)) => ops!(Object, x),
+            NftChange::Flowtable(Change::Add(x)) => ops!(Flowtable, x),
+            other => panic!("not an add: {other:?}"),
+        }
+    }
+
+    /// #876 — an `NftablesDiff` with every kind of change and every
+    /// blocked entry validates against the schema it publishes, and its
+    /// JSON names each by the tags pinned here. The adds come from a real
+    /// offline diff; the other ops reuse what they add.
     #[cfg(feature = "schemars")]
     #[test]
     fn diff_json_matches_its_schema() {
+        use std::collections::BTreeSet;
+
         use crate::netlink::config::schema_check;
-        use crate::netlink::nftables::ObjectType;
         use crate::netlink::nftables::config::{
-            Blocked, ChainRecreate, FlowtableUpdate, MoveReason, NftItem, NftRule, NftablesDiff,
-            RuleDelete, RuleHandle, RuleMove, RulePlacement, RuleReplace,
+            Blocked, NftItem, NftRule, NftablesDiff, RuleHandle, RulePlacement,
         };
 
+        const KINDS: [&str; 7] = [
+            "table",
+            "chain",
+            "rule",
+            "set",
+            "elements",
+            "object",
+            "flowtable",
+        ];
         let cfg = lab(22, true).table("ft", Family::Inet, |t| {
             t.flowtable("ft", |f| f.device("eth0").hw_offload(true))
         });
         let mut diff = cfg
             .diff_against(&NftablesConfig::new(), &NftDiffOptions::default())
             .unwrap();
-        let (table, family) = ("f".to_string(), Family::Inet);
-        let chain = diff.chains_to_add[0].2.clone();
-        let rule = diff.rules_to_add[0].rule.clone();
-        let flowtable = diff.flowtables_to_add[0].clone();
+        let Some(NftChange::Rule(Change::Add(rule))) =
+            diff.changes.iter().find(|c| c.kind() == "rule")
+        else {
+            panic!("the diff adds no rule: {diff}");
+        };
+        let mut from = rule.clone();
+        from.handle = Some(RuleHandle(6));
+        let mut to = rule.clone();
+        to.placement = Some(RulePlacement::After(RuleHandle(5)));
+        let moved = NftChange::Rule(Change::Update { from, to });
+        let mut every = Vec::new();
+        for kind in KINDS {
+            let added = diff
+                .changes
+                .iter()
+                .find(|c| c.kind() == kind)
+                .unwrap_or_else(|| panic!("the diff adds no {kind}: {diff}"));
+            every.extend(other_ops(added, vec![moved.clone()]));
+        }
+        // A recreate in a recreate.
+        let chain = every
+            .iter()
+            .find(|c| c.kind() == "chain" && c.op() == "recreate")
+            .cloned()
+            .unwrap();
+        if let Some(NftChange::Table(Change::Recreate { cascade, .. })) = every
+            .iter_mut()
+            .find(|c| c.kind() == "table" && c.op() == "recreate")
+        {
+            cascade.push(chain);
+        }
+        diff.changes.extend(every);
 
-        diff.tables_to_modify.push((family, table.clone(), 1));
-        diff.tables_to_delete.push((Family::Ip, "gone".into()));
-        diff.tables_to_recreate
-            .push((Family::Ip, "n".into(), "PERSIST toggled".into()));
-        diff.chains_to_modify.push(diff.chains_to_add[0].clone());
-        diff.chains_to_delete
-            .push((table.clone(), family, "gone".into()));
-        diff.chains_to_recreate.push(ChainRecreate {
-            table: table.clone(),
-            family,
-            chain,
-            reason: "hook changed".into(),
-        });
-        diff.rules_to_delete.push(RuleDelete {
-            table: table.clone(),
-            family,
-            chain: "input".into(),
-            handle: RuleHandle(4),
-            key: Some("old".into()),
-            current: Some("udp dport 53 accept".into()),
-        });
-        diff.rules_to_replace.push(RuleReplace {
-            table: table.clone(),
-            family,
-            chain: "input".into(),
-            handle: RuleHandle(5),
-            current: Some("tcp dport 23 accept".into()),
-            rule: rule.clone(),
-        });
-        diff.rules_to_move.push(RuleMove {
-            table: table.clone(),
-            family,
-            chain: "input".into(),
-            from: RuleHandle(6),
-            placement: RulePlacement::After(RuleHandle(5)),
-            rule,
-            current: Some("tcp dport 22 accept".into()),
-            reason: MoveReason::Reorder,
-            seq: 0,
-        });
-        diff.rules_to_add[0].placement = RulePlacement::Before(RuleHandle(4));
-        diff.flowtables_to_delete
-            .push((family, table.clone(), "gone".into()));
-        diff.flowtables_to_update.push(FlowtableUpdate {
-            flowtable,
-            add_devs: vec!["eth1".into()],
-            remove_devs: vec!["eth2".into()],
-        });
-        diff.sets_to_delete
-            .push((table.clone(), family, "gone".into()));
-        diff.sets_to_update.push(diff.sets_to_add[0].clone());
-        diff.set_elements_to_remove
-            .push(diff.set_elements_to_add[0].clone());
-        diff.objects_to_update.push(diff.objects_to_add[0].clone());
-        diff.objects_to_delete
-            .push((table.clone(), family, "gone".into(), ObjectType::Counter));
+        let (table, family) = ("f".to_string(), Family::Inet);
         let foreign = NftRule {
             family,
             table: table.clone(),
@@ -658,6 +696,49 @@ mod tests {
             NftablesDiff::json_schema_value(),
         );
         schema_check::assert_matches_schema(&diff, NftablesDiff::json_schema_value());
+
+        fn pairs(changes: &serde_json::Value, out: &mut BTreeSet<(String, String)>) {
+            for c in changes.as_array().unwrap() {
+                out.insert((
+                    c["type"].as_str().unwrap().to_string(),
+                    c["op"].as_str().unwrap().to_string(),
+                ));
+                if let Some(cascade) = c.get("cascade") {
+                    pairs(cascade, out);
+                }
+            }
+        }
+        let json = serde_json::to_value(&diff).unwrap();
+        let mut seen = BTreeSet::new();
+        pairs(&json["changes"], &mut seen);
+        let pinned: BTreeSet<(String, String)> = KINDS
+            .iter()
+            .flat_map(|kind| {
+                ["add", "remove", "update", "recreate"].map(|op| (kind.to_string(), op.to_string()))
+            })
+            .collect();
+        assert_eq!(seen, pinned, "{json:#}");
+        let blocked: Vec<&str> = json["blocked"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            blocked,
+            [
+                "table-flags",
+                "table-recreate",
+                "chain-recreate",
+                "bound",
+                "in-use",
+                "unmodelled-object"
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(&moved).unwrap()["to"]["placement"],
+            serde_json::json!({ "after": 5 })
+        );
     }
 
     /// A snapshot that did not read a set's elements makes the diff fail,

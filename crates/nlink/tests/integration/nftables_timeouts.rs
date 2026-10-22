@@ -6,7 +6,7 @@
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use nlink::netlink::nftables::config::NftablesConfig;
+use nlink::netlink::nftables::config::{Change, NftablesConfig};
 use nlink::netlink::nftables::types::{
     BaseChain, Chain, Family, FilterHook, LimitUnit, PacketField, Priority, Register, Rule, Set,
     SetElement, SetKeyType,
@@ -19,7 +19,7 @@ use nlink::netlink::{Connection, Nftables};
 use crate::common::converge::assert_transition;
 use crate::common::counters::rule_packets;
 use crate::common::traffic::{lo_up, send_udp};
-use crate::common::{TestNamespace, with_timeout};
+use crate::common::{TestNamespace, nft, with_timeout};
 
 /// `ip t` with an output chain, `set`, and `rule` in the chain.
 async fn chain_with(conn: &Connection<Nftables>, set: &Set, rule: Rule) -> nlink::Result<()> {
@@ -198,8 +198,8 @@ async fn a_declared_dynamic_set_keeps_what_the_packet_path_put_there() -> nlink:
         let handle = conn.list_rules("t", Family::Ip).await?[0].handle;
         let longer = declared(Duration::from_secs(7200), Duration::from_millis(1001));
         let diff = longer.diff(&conn).await?;
-        assert_eq!(diff.sets_to_update.len(), 1, "{diff}");
-        assert!(diff.sets_to_delete.is_empty(), "{diff}");
+        let sets: Vec<_> = diff.sets().collect();
+        assert!(matches!(sets[..], [Change::Update { .. }]), "{diff}");
         diff.apply(&conn).await?;
         let info = conn.list_sets_in("t", Family::Ip).await?.remove(0);
         assert_eq!(info.timeout, Some(Duration::from_secs(7200)));
@@ -242,7 +242,7 @@ async fn a_resize_keeps_the_timers_it_does_not_declare() -> nlink::Result<()> {
             })
         });
         let diff = cfg.diff(&conn).await?;
-        assert_eq!(diff.sets_to_update.len(), 1, "{diff}");
+        assert_eq!(nft::count(&diff, "set", "update"), 1, "{diff}");
         diff.apply(&conn).await?;
 
         let info = conn.list_sets_in("t", Family::Ip).await?.remove(0);
@@ -287,7 +287,7 @@ async fn an_element_that_expires_before_the_apply_does_not_fail_it() -> nlink::R
             &["add", "element", "ip", "t", "s", "{ 10.0.0.9 timeout 1s }"],
         )?;
         let diff = cfg.diff(&conn).await?;
-        assert_eq!(diff.set_elements_to_remove.len(), 1, "{diff}");
+        assert_eq!(nft::elements(&diff, "remove").len(), 1, "{diff}");
         tokio::time::sleep(Duration::from_millis(1500)).await;
         diff.apply(&conn).await?;
         assert!(cfg.diff(&conn).await?.is_empty());

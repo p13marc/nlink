@@ -10,7 +10,7 @@ use nlink::netlink::nftables::types::{
 use nlink::netlink::{Connection, Nftables};
 
 use crate::common::traffic::{lo_up, send_udp};
-use crate::common::{TestNamespace, with_timeout};
+use crate::common::{TestNamespace, nft, with_timeout};
 
 /// `ip t` with an output chain and `set` holding `elements`.
 async fn output_chain(conn: &Connection<Nftables>, set: &Set, elements: &[SetElement]) -> nlink::Result<()> {
@@ -182,10 +182,14 @@ async fn declared_concatenations_converge_and_change_one_element_at_a_time() -> 
 
         let second = declared(vec![net_ports(0, (80, 90)), net_ports(2, (53, 53))]);
         let diff = second.diff(&conn).await?;
-        assert_eq!(diff.set_elements_to_remove.len(), 1, "{diff}");
-        assert_eq!(diff.set_elements_to_remove[0].elements.len(), 1, "{diff}");
-        assert_eq!(diff.set_elements_to_add[0].elements.len(), 1, "{diff}");
-        assert!(diff.rules_to_replace.is_empty(), "{diff}");
+        assert_eq!(nft::elements(&diff, "remove").len(), 1, "{diff}");
+        assert_eq!(
+            nft::elements(&diff, "remove")[0].elements.len(),
+            1,
+            "{diff}"
+        );
+        assert_eq!(nft::elements(&diff, "add")[0].elements.len(), 1, "{diff}");
+        assert!(nft::replaced(&diff).is_empty(), "{diff}");
         diff.apply(&conn).await?;
         let again = second.diff(&conn).await?;
         assert!(again.is_empty(), "second diff must be empty: {again}");

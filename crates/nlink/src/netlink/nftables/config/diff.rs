@@ -259,6 +259,7 @@ pub struct RuleHandle(pub u64);
 /// (first match wins), so the diff says exactly where each rule lands.
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RulePlacement {
@@ -275,7 +276,7 @@ pub enum RulePlacement {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct RuleAdd {
+pub(crate) struct RuleAdd {
     /// The rule.
     pub rule: DeclaredRule,
     /// Where it goes.
@@ -292,7 +293,7 @@ pub struct RuleAdd {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum MoveReason {
+pub(crate) enum MoveReason {
     /// It references a set this diff deletes and recreates; the kernel
     /// refuses to delete a set a rule is bound to (`EBUSY`).
     BoundToRecreatedSet,
@@ -316,7 +317,7 @@ pub enum MoveReason {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct RuleMove {
+pub(crate) struct RuleMove {
     /// Owning table.
     pub table: String,
     /// Owning family.
@@ -345,7 +346,7 @@ pub struct RuleMove {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct RuleDelete {
+pub(crate) struct RuleDelete {
     /// Owning table.
     pub table: String,
     /// Owning family.
@@ -382,7 +383,7 @@ impl RuleDelete {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct RuleReplace {
+pub(crate) struct RuleReplace {
     /// Owning table.
     pub table: String,
     /// Owning family.
@@ -408,35 +409,13 @@ pub struct RuleReplace {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct FlowtableUpdate {
+pub(crate) struct FlowtableUpdate {
     /// The flowtable as declared.
     pub flowtable: DeclaredFlowtable,
     /// Devices to add to it.
     pub add_devs: Vec<String>,
     /// Devices to take off it.
     pub remove_devs: Vec<String>,
-}
-
-impl std::fmt::Display for FlowtableUpdate {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let ft = &self.flowtable;
-        write!(
-            f,
-            "~ flowtable {:?} {}/{} (",
-            ft.family(),
-            ft.table(),
-            ft.name()
-        )?;
-        let mut parts = Vec::new();
-        if !self.add_devs.is_empty() {
-            parts.push(format!("+devices {}", self.add_devs.join(",")));
-        }
-        if !self.remove_devs.is_empty() {
-            parts.push(format!("-devices {}", self.remove_devs.join(",")));
-        }
-        parts.push(format!("flags={:#x}", ft.flags()));
-        write!(f, "{})", parts.join(" "))
-    }
 }
 
 /// A chain the diff deletes and creates again, with its declared rules put
@@ -452,7 +431,7 @@ impl std::fmt::Display for FlowtableUpdate {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct ChainRecreate {
+pub(crate) struct ChainRecreate {
     /// Owning table.
     pub table: String,
     /// Owning family.
@@ -482,19 +461,21 @@ impl std::fmt::Display for ChainRecreate {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct SetElementsChange {
+pub(crate) struct SetElementsChange {
     /// The set.
     pub set: Set,
     /// The elements.
     pub elements: Vec<SetElement>,
 }
 
-/// The result of comparing a declared [`NftablesConfig`] against
-/// the kernel's current state. Apply via
-/// [`Self::apply`](super::NftablesDiff::apply).
+/// The result of comparing a declared [`NftablesConfig`] against the
+/// kernel's current state (#708): its [`changes`](Self::changes), each with
+/// what the kernel holds and what it will hold, and what it cannot or will
+/// not do, [`blocked`](Self::blocked). Apply with
+/// [`apply`](Self::apply).
 ///
-/// `is_empty()` returns true when declared and current already
-/// agree (idempotent reapply).
+/// `is_empty()` returns true when declared and current already agree
+/// (idempotent reapply).
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
@@ -503,7 +484,9 @@ pub struct SetElementsChange {
 #[must_use = "Diffs do nothing unless passed to `.apply()` or stringified via `Display`"]
 pub struct NftablesDiff {
     /// Tables to create.
-    pub tables_to_add: Vec<DeclaredTable>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) tables_to_add: Vec<DeclaredTable>,
     /// Tables whose flags drifted — `(family, name, declared_flags)`. Applied
     /// as `NFT_MSG_NEWTABLE`, which the kernel treats as an update.
     ///
@@ -515,16 +498,24 @@ pub struct NftablesDiff {
     /// `DeclaredTable::flags` (`.persist(true)`, `NFT_TABLE_F_DORMANT`) used to
     /// be applied only on create, so toggling a flag on an existing table
     /// produced an empty diff and a no-op apply (#208).
-    pub tables_to_modify: Vec<(Family, String, u32)>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) tables_to_modify: Vec<(Family, String, u32)>,
     /// Tables to delete (family, name).
-    pub tables_to_delete: Vec<(Family, String)>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) tables_to_delete: Vec<(Family, String)>,
     /// Tables deleted and created again, with everything declared in them —
     /// `(family, name, why)`: a changed comment, with
     /// [`NftDiffOptions::recreate_on_comment_change`] (#703). Each is also
     /// in [`Self::tables_to_add`].
-    pub tables_to_recreate: Vec<(Family, String, String)>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) tables_to_recreate: Vec<(Family, String, String)>,
     /// Chains to create — (owning table, owning family, chain).
-    pub chains_to_add: Vec<(String, Family, DeclaredChain)>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) chains_to_add: Vec<(String, Family, DeclaredChain)>,
     /// Chains whose policy drifted — (owning table, owning family, chain).
     /// Applied as `NFT_MSG_NEWCHAIN`, which the kernel treats as an update
     /// for an existing chain. What an update cannot change is in
@@ -536,19 +527,29 @@ pub struct NftablesDiff {
     /// five back. So flipping a declared firewall from `policy(Accept)` to
     /// `policy(Drop)` produced an empty diff and a no-op apply — the operator
     /// believed the box was default-deny while it stayed default-allow (#200).
-    pub chains_to_modify: Vec<(String, Family, DeclaredChain)>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) chains_to_modify: Vec<(String, Family, DeclaredChain)>,
     /// Chains to delete — (table, family, name).
-    pub chains_to_delete: Vec<(String, Family, String)>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) chains_to_delete: Vec<(String, Family, String)>,
     /// Chains to delete and create again, with their declared rules, in
     /// [`Self::rules_to_move`] and [`Self::rules_to_add`] (#478). One that
     /// holds rules nlink did not write is not here but in
     /// [`Self::blocked`], and makes the apply fail.
-    pub chains_to_recreate: Vec<ChainRecreate>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) chains_to_recreate: Vec<ChainRecreate>,
     /// Rules to add, each with its placement in the chain.
-    pub rules_to_add: Vec<RuleAdd>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) rules_to_add: Vec<RuleAdd>,
     /// Rules to delete, each with what the kernel has: its key, and the
     /// rule as `nft -s list` prints it.
-    pub rules_to_delete: Vec<RuleDelete>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) rules_to_delete: Vec<RuleDelete>,
     /// Rules to replace in place, each with what the kernel has now and the
     /// declared rule that takes its place. Applied as `NFT_MSG_NEWRULE |
     /// NLM_F_REPLACE | NFTA_RULE_HANDLE`: the kernel swaps the rule body at
@@ -557,7 +558,9 @@ pub struct NftablesDiff {
     /// Populated by [`NftablesConfig::diff`] when a declared
     /// keyed rule matches a kernel rule by `NFTA_RULE_USERDATA`
     /// comment but the expression bytes differ. Plan 157b v2.
-    pub rules_to_replace: Vec<RuleReplace>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) rules_to_replace: Vec<RuleReplace>,
     /// Declared rules to delete and put back in place.
     ///
     /// Rules installed out of declared order move to their place. And a set
@@ -567,20 +570,32 @@ pub struct NftablesDiff {
     /// referencing it is deleted ahead of it and re-added after the new
     /// one, immediately before the next rule in the chain that survives, so
     /// chain order — which is policy — is unchanged.
-    pub rules_to_move: Vec<RuleMove>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) rules_to_move: Vec<RuleMove>,
     /// Flowtables to add.
-    pub flowtables_to_add: Vec<DeclaredFlowtable>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) flowtables_to_add: Vec<DeclaredFlowtable>,
     /// Flowtables to delete — (family, table, name). A flowtable also in
     /// [`Self::flowtables_to_add`] is recreated, its rules moved out of the
     /// way first.
-    pub flowtables_to_delete: Vec<(Family, String, String)>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) flowtables_to_delete: Vec<(Family, String, String)>,
     /// Flowtables whose devices or counter flag changed, updated in place
     /// (#479).
-    pub flowtables_to_update: Vec<FlowtableUpdate>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) flowtables_to_update: Vec<FlowtableUpdate>,
     /// Sets to create — (owning table, owning family, set).
-    pub sets_to_add: Vec<(String, Family, DeclaredSet)>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) sets_to_add: Vec<(String, Family, DeclaredSet)>,
     /// Sets to delete — (table, family, name).
-    pub sets_to_delete: Vec<(String, Family, String)>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) sets_to_delete: Vec<(String, Family, String)>,
     /// Sets whose declared size, timeout or GC interval differs from the
     /// kernel's — (owning table, owning family, set). Applied in place
     /// (`NFT_MSG_NEWSET` without `NLM_F_EXCL`, kernel 6.5+), keeping the
@@ -591,21 +606,33 @@ pub struct NftablesDiff {
     /// batch. An update overwrites the timeout and GC interval with what it
     /// carries, so the set here carries the kernel's where the declaration
     /// has none.
-    pub sets_to_update: Vec<(String, Family, DeclaredSet)>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) sets_to_update: Vec<(String, Family, DeclaredSet)>,
     /// Set elements to add: the declared elements not yet in the kernel
     /// set.
-    pub set_elements_to_add: Vec<SetElementsChange>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) set_elements_to_add: Vec<SetElementsChange>,
     /// Set elements to remove: the kernel elements not declared (full
     /// element reconcile).
-    pub set_elements_to_remove: Vec<SetElementsChange>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) set_elements_to_remove: Vec<SetElementsChange>,
     /// Stateful objects to create — (owning table, owning family, object).
     /// A changed limit is here and in `objects_to_delete`.
-    pub objects_to_add: Vec<(String, Family, DeclaredObject)>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) objects_to_add: Vec<(String, Family, DeclaredObject)>,
     /// Quotas whose size or `over` changed — updated in place, keeping
     /// what they have used.
-    pub objects_to_update: Vec<(String, Family, DeclaredObject)>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) objects_to_update: Vec<(String, Family, DeclaredObject)>,
     /// Stateful objects to delete — (table, family, name, type).
-    pub objects_to_delete: Vec<(String, Family, String, ObjectType)>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub(crate) objects_to_delete: Vec<(String, Family, String, ObjectType)>,
     /// What the diff cannot do, or leaves alone so as not to break what it
     /// does not own (#708): table flags the kernel will not change, a
     /// recreate that would delete rules nlink did not write, an item one of
@@ -615,11 +642,12 @@ pub struct NftablesDiff {
     /// error is the first that refuses, in the order the diff found them;
     /// the diff's `Display` says every one.
     pub blocked: Vec<Blocked>,
-    /// The diff as typed changes (#708): each table, chain, rule, set,
-    /// element batch, object and flowtable it adds, removes, updates or
-    /// recreates, with what the kernel holds and what it will hold. A
-    /// recreate carries what goes with it. The same changes as the lists
-    /// above, which are what [`apply`](Self::apply) sends.
+    /// The diff (#708): each table, chain, rule, set, element batch,
+    /// object and flowtable it adds, removes, updates or recreates, with
+    /// what the kernel holds and what it will hold. A recreate carries what
+    /// goes with it. [`apply`](Self::apply) sends a batch plan kept
+    /// private; every debug build checks that these changes are that plan,
+    /// each entry once.
     pub changes: Vec<NftChange>,
     /// The ruleset generation the diff was taken at, if it was taken from
     /// the kernel: [`apply`](Self::apply) commits only if the ruleset is
@@ -726,12 +754,17 @@ impl NftablesDiff {
         self.blocked.iter().find_map(Blocked::refusal)
     }
 
-    /// `true` if declared state already matches kernel state.
+    /// `true` if declared state already matches kernel state: no change,
+    /// and nothing that refuses.
     pub fn is_empty(&self) -> bool {
+        self.change_count() == 0
+    }
+
+    /// Whether the batch plan [`apply`](Self::apply) sends is empty.
+    pub(crate) fn plan_is_empty(&self) -> bool {
         self.tables_to_add.is_empty()
             && self.tables_to_modify.is_empty()
             && self.tables_to_delete.is_empty()
-            && !self.blocked.iter().any(Blocked::refuses)
             && self.tables_to_recreate.is_empty()
             && self.chains_to_add.is_empty()
             && self.chains_to_modify.is_empty()
@@ -754,263 +787,36 @@ impl NftablesDiff {
             && self.objects_to_delete.is_empty()
     }
 
-    /// Total number of changes (sum of all add/delete counts).
+    /// How many changes the diff makes, counting a recreate once with its
+    /// cascade, and each entry of [`blocked`](Self::blocked) that refuses.
     pub fn change_count(&self) -> usize {
-        self.tables_to_add.len()
-            + self.tables_to_modify.len()
-            + self.tables_to_delete.len()
-            + self.blocked.iter().filter(|b| b.refuses()).count()
-            + self.tables_to_recreate.len()
-            + self.chains_to_add.len()
-            + self.chains_to_modify.len()
-            + self.chains_to_delete.len()
-            + self.chains_to_recreate.len()
-            + self.rules_to_add.len()
-            + self.rules_to_delete.len()
-            + self.rules_to_replace.len()
-            + self.rules_to_move.len()
-            + self.flowtables_to_add.len()
-            + self.flowtables_to_delete.len()
-            + self.flowtables_to_update.len()
-            + self.sets_to_add.len()
-            + self.sets_to_delete.len()
-            + self.sets_to_update.len()
-            + self.set_elements_to_add.len()
-            + self.set_elements_to_remove.len()
-            + self.objects_to_add.len()
-            + self.objects_to_update.len()
-            + self.objects_to_delete.len()
-    }
-
-    /// Render a one-line-per-change human summary. Useful for
-    /// `tracing::info!` or CLI output.
-    ///
-    /// Equivalent to `format!("{self}")` — Plan 183 (0.18) made
-    /// the [`std::fmt::Display`] impl share the same renderer.
-    /// Prefer the `Display` form (`diff.to_string()` /
-    /// `format!("{diff}")`) for new code.
-    #[deprecated(
-        since = "0.19.0",
-        note = "use `Display` via `format!(\"{}\")` or `diff.to_string()` instead — Plan 188 §2.6"
-    )]
-    pub fn summary(&self) -> String {
-        let mut lines = Vec::new();
-        for t in &self.tables_to_add {
-            lines.push(format!("+ table {:?} {}", t.family(), t.name()));
-        }
-        for (fam, name, flags) in &self.tables_to_modify {
-            lines.push(format!("~ table {fam:?} {name} (flags={flags:#x})"));
-        }
-        for (fam, name) in &self.tables_to_delete {
-            lines.push(format!("- table {fam:?} {name}"));
-        }
-        for refused in self.blocked.iter().filter(|b| b.refuses()) {
-            lines.push(format!("! {refused}"));
-        }
-        for (fam, name, why) in &self.tables_to_recreate {
-            lines.push(format!("~ table {fam:?} {name} (recreate: {why})"));
-        }
-        for (tbl, fam, c) in &self.chains_to_add {
-            lines.push(format!("+ chain {fam:?} {tbl}/{}", c.name()));
-        }
-        for (tbl, fam, c) in &self.chains_to_modify {
-            lines.push(format!(
-                "~ chain {fam:?} {tbl}/{} (policy={:?} hook={:?} priority={:?} type={:?} \
-                 devices={:?})",
-                c.name(),
-                c.policy(),
-                c.hook(),
-                c.priority(),
-                c.chain_type(),
-                c.devices(),
-            ));
-        }
-        for (tbl, fam, name) in &self.chains_to_delete {
-            lines.push(format!("- chain {fam:?} {tbl}/{name}"));
-        }
-        for recreate in &self.chains_to_recreate {
-            lines.push(recreate.to_string());
-        }
-        for add in &self.rules_to_add {
-            let r = &add.rule;
-            let key = r.handle_key().unwrap_or("<anonymous>");
-            lines.push(format!(
-                "+ rule {:?} {}/{} [{}]{}{}",
-                r.family(),
-                r.table(),
-                r.chain(),
-                key,
-                placement_suffix(add.placement),
-                body_suffix(r),
-            ));
-        }
-        for d in &self.rules_to_delete {
-            let key = d
-                .key
-                .as_deref()
-                .map(|k| format!(" [{k}]"))
-                .unwrap_or_default();
-            let body = d
-                .current
-                .as_deref()
-                .map(|b| format!(": {b}"))
-                .unwrap_or_default();
-            lines.push(format!(
-                "- rule {:?} {}/{}{key} (handle={}){body}",
-                d.family, d.table, d.chain, d.handle.0,
-            ));
-        }
-        for r in &self.rules_to_replace {
-            let key = r.rule.handle_key().unwrap_or("<anonymous>");
-            lines.push(format!(
-                "~ rule {:?} {}/{} (handle={} key={key}){}",
-                r.family,
-                r.table,
-                r.chain,
-                r.handle.0,
-                change_suffix(r.current.as_deref(), &r.rule),
-            ));
-        }
-        for m in &self.rules_to_move {
-            let key = m.rule.handle_key().unwrap_or("<anonymous>");
-            let why = match m.reason {
-                MoveReason::BoundToRecreatedSet => "its set is recreated",
-                MoveReason::BoundToRecreatedObject => "its object is recreated",
-                MoveReason::BoundToRecreatedFlowtable => "its flowtable is recreated",
-                MoveReason::Reorder => "out of declared order",
-                MoveReason::ChainRecreated => "its chain is recreated",
-            };
-            lines.push(format!(
-                "~ rule {:?} {}/{} (handle={} key={key}, re-added: {why}){}{}",
-                m.family,
-                m.table,
-                m.chain,
-                m.from.0,
-                placement_suffix(m.placement),
-                change_suffix(m.current.as_deref(), &m.rule),
-            ));
-        }
-        for f in &self.flowtables_to_add {
-            lines.push(format!(
-                "+ flowtable {:?} {}/{}",
-                f.family(),
-                f.table(),
-                f.name()
-            ));
-        }
-        for (fam, tbl, name) in &self.flowtables_to_delete {
-            lines.push(format!("- flowtable {fam:?} {tbl}/{name}"));
-        }
-        for update in &self.flowtables_to_update {
-            lines.push(update.to_string());
-        }
-        for (tbl, fam, s) in &self.sets_to_add {
-            lines.push(format!(
-                "+ set {fam:?} {tbl}/{} ({} element{})",
-                s.name(),
-                s.elements().len(),
-                if s.elements().len() == 1 { "" } else { "s" },
-            ));
-        }
-        for (tbl, fam, name) in &self.sets_to_delete {
-            lines.push(format!("- set {fam:?} {tbl}/{name}"));
-        }
-        for (tbl, fam, o) in &self.objects_to_add {
-            lines.push(format!("+ object {fam:?} {tbl}/{} {:?}", o.name(), o.config()));
-        }
-        for (tbl, fam, o) in &self.objects_to_update {
-            lines.push(format!("~ object {fam:?} {tbl}/{} {:?}", o.name(), o.config()));
-        }
-        for (tbl, fam, name, ty) in &self.objects_to_delete {
-            lines.push(format!("- object {fam:?} {tbl}/{name} ({ty:?})"));
-        }
-        for (tbl, fam, s) in &self.sets_to_update {
-            let mut what = format!(
-                "size={}",
-                s.size().map_or_else(|| "-".to_string(), |n| n.to_string())
-            );
-            if let Some(t) = s.timeout() {
-                what.push_str(&format!(", timeout={t:?}"));
-            }
-            if let Some(gc) = s.gc_interval() {
-                what.push_str(&format!(", gc-interval={gc:?}"));
-            }
-            lines.push(format!("~ set {fam:?} {tbl}/{} ({what})", s.name()));
-        }
-        for c in &self.set_elements_to_add {
-            lines.push(format!(
-                "+ {} element{} {:?} {}/{}",
-                c.elements.len(),
-                if c.elements.len() == 1 { "" } else { "s" },
-                c.set.family,
-                c.set.table(),
-                c.set.name(),
-            ));
-        }
-        for c in &self.set_elements_to_remove {
-            lines.push(format!(
-                "- {} element{} {:?} {}/{}",
-                c.elements.len(),
-                if c.elements.len() == 1 { "" } else { "s" },
-                c.set.family,
-                c.set.table(),
-                c.set.name(),
-            ));
-        }
-        let mut out = if lines.is_empty() {
-            "NftablesDiff: no changes".to_string()
-        } else {
-            format!(
-                "NftablesDiff: {} change{}:\n  {}",
-                lines.len(),
-                if lines.len() == 1 { "" } else { "s" },
-                lines.join("\n  ")
-            )
-        };
-        for kept in self.blocked.iter().filter(|b| !b.refuses()) {
-            out.push_str(&format!("\n  ! {kept}"));
-        }
-        out
+        self.changes.len() + self.blocked.iter().filter(|b| b.refuses()).count()
     }
 }
 
-/// `Display` mirrors [`NftablesDiff::summary`] so callers can
-/// `println!("{diff}")` directly. Plan 183.
+/// One line per change, a recreate's cascade indented under it, then what
+/// is [`blocked`](NftablesDiff::blocked) as `!` lines.
 impl std::fmt::Display for NftablesDiff {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Plan 188 §2.6 — `summary()` is deprecated in 0.19 in
-        // favor of this Display impl. Internal delegation is
-        // allowed; users are on the Display path.
-        #[allow(deprecated)]
-        f.write_str(&self.summary())
-    }
-}
-
-/// `: <the rule as nft -s prints it>`, when nlink can print it (#708).
-fn body_suffix(rule: &DeclaredRule) -> String {
-    rule.body()
-        .nft_syntax_stateless()
-        .map(|body| format!(": {body}"))
-        .unwrap_or_default()
-}
-
-/// `: <what the kernel has> -> <what is declared>` for a rule the diff
-/// writes over, or just the declared rule when the two print the same.
-fn change_suffix(current: Option<&str>, rule: &DeclaredRule) -> String {
-    match (current, rule.body().nft_syntax_stateless()) {
-        (Some(now), Some(to)) if now != to => format!(": {now} -> {to}"),
-        (_, Some(to)) => format!(": {to}"),
-        (Some(now), None) => format!(" (now: {now})"),
-        (None, None) => String::new(),
-    }
-}
-
-/// ` (before handle=N)` / ` (after handle=N)` for a positioned rule.
-fn placement_suffix(placement: RulePlacement) -> String {
-    match placement {
-        RulePlacement::Append => String::new(),
-        RulePlacement::Before(h) => format!(" (before handle={})", h.0),
-        RulePlacement::After(h) => format!(" (after handle={})", h.0),
+        let count = self.change_count();
+        if count == 0 {
+            f.write_str("NftablesDiff: no changes")?;
+        } else {
+            write!(
+                f,
+                "NftablesDiff: {count} change{}:",
+                if count == 1 { "" } else { "s" }
+            )?;
+        }
+        let mut lines = Vec::new();
+        for change in &self.changes {
+            super::change::lines(change, None, 0, &mut lines);
+        }
+        lines.extend(self.blocked.iter().map(|b| format!("! {b}")));
+        for line in lines {
+            write!(f, "\n  {line}")?;
+        }
+        Ok(())
     }
 }
 
@@ -2635,7 +2441,6 @@ impl NftablesConfig {
 }
 
 #[cfg(test)]
-#[allow(deprecated)] // Plan 188 §2.6 — test the deprecated `summary()` shape during its window
 mod tests {
     use super::*;
     use crate::netlink::nftables::{SetFlags, SetKeyType};
@@ -2644,6 +2449,7 @@ mod tests {
     /// A policy change is an update; a hook, priority or type change, or a
     /// base chain declared as a regular one, is a recreate (#478).
     #[test]
+    #[allow(deprecated)] // the chain builder's own policy and priority are still read
     fn chain_changes_the_kernel_cannot_update_are_recreates() {
         let chain_change_ = |d: &DeclaredChain, c: &ChainInfo| chain_change(d, c, false);
         use crate::netlink::nftables::{BaseChain, ChainType, FilterHook, Hook, Policy, Priority};
@@ -2717,46 +2523,45 @@ mod tests {
         let d = NftablesDiff::default();
         assert!(d.is_empty());
         assert_eq!(d.change_count(), 0);
-        assert_eq!(d.summary(), "NftablesDiff: no changes");
+        assert_eq!(d.to_string(), "NftablesDiff: no changes");
+    }
+
+    /// Whether there is anything to send is the plan's to say, so that a
+    /// change the typed view left out still goes (#708).
+    #[test]
+    fn the_plan_says_whether_there_is_anything_to_send() {
+        assert!(NftablesDiff::default().plan_is_empty());
+        let mut d = NftablesDiff::default();
+        d.tables_to_delete.push((Family::Ip, "t".into()));
+        assert!(!d.plan_is_empty());
+        assert!(d.is_empty(), "the typed view has nothing: {d}");
     }
 
     #[test]
-    fn summary_renders_change_lines() {
+    fn display_renders_change_lines() {
         use super::super::super::types::{BaseChain, Family, FilterHook, Policy, Priority};
-        use super::super::types::DeclaredChain;
-        // Manually populate a diff to test the rendering — the
-        // async diff() needs a live socket.
-        let mut d = NftablesDiff::default();
-        d.tables_to_delete
-            .push((Family::Inet, "legacy".to_string()));
-        let cfg = NftablesConfig::new().table("filter", Family::Inet, |t| {
+        let was = NftablesConfig::new().table("legacy", Family::Inet, |t| t);
+        let now = NftablesConfig::new().table("filter", Family::Inet, |t| {
             t.chain("input", |c| {
                 c.base(BaseChain::filter(FilterHook::Input, Priority::Filter).policy(Policy::Drop))
             })
         });
-        d.tables_to_add.push(cfg.tables()[0].clone());
-        assert_eq!(d.change_count(), 2);
-        let s = d.summary();
-        assert!(s.contains("+ table"));
-        assert!(s.contains("- table"));
-        assert!(s.contains("2 changes"));
-        let _ = DeclaredChain::name; // silence unused-import on the DeclaredChain pub path
+        let purge = NftDiffOptions::default().purge_tables(true);
+        let d = now.diff_against(&was, &purge).unwrap();
+        assert_eq!(
+            d.to_string(),
+            "NftablesDiff: 3 changes:\n  + table Inet filter\n  - table Inet legacy\n  \
+             + chain Inet filter/input"
+        );
+        assert_eq!(d.change_count(), 3);
     }
 
     #[test]
     fn change_count_sums_all_kinds() {
-        let mut d = NftablesDiff::default();
-        d.tables_to_add
-            .push(NftablesConfig::new().tables().first().cloned().unwrap_or_else(
-                || NftablesConfig::new().table(
-                    "x",
-                    super::super::super::types::Family::Inet,
-                    |t| t,
-                ).tables()[0].clone(),
-            ));
-        d.tables_to_delete
-            .push((super::super::super::types::Family::Inet, "y".to_string()));
-        assert_eq!(d.change_count(), 2);
+        let table = |name| NftablesConfig::new().table(name, Family::Inet, |t| t);
+        let purge = NftDiffOptions::default().purge_tables(true);
+        let d = table("x").diff_against(&table("y"), &purge).unwrap();
+        assert_eq!(d.change_count(), 2, "{d}");
     }
 
     // ---- Plan 198 — declarative sets + element diff ----
@@ -2782,33 +2587,28 @@ mod tests {
     #[test]
     fn set_and_element_collections_count_and_render() {
         use super::super::super::types::{SetElement, SetKeyType};
-        let cfg = NftablesConfig::new().table("filter", Family::Inet, |t| {
-            t.set("s", |s| s.key_type(SetKeyType::InetService))
+        let was = NftablesConfig::new().table("filter", Family::Inet, |t| {
+            t.set("stale", |s| s.key_type(SetKeyType::InetService))
+                .set("kept", |s| {
+                    s.key_type(SetKeyType::InetService)
+                        .element(SetElement::port(81))
+                        .element(SetElement::port(82))
+                })
         });
-        let declared = cfg.tables()[0].sets()[0].clone();
-
-        let mut d = NftablesDiff::default();
-        d.sets_to_add
-            .push(("filter".to_string(), Family::Inet, declared));
-        d.sets_to_delete
-            .push(("filter".to_string(), Family::Inet, "stale".to_string()));
-        let set = d.sets_to_add[0].2.to_set("filter", Family::Inet);
-        d.set_elements_to_add.push(SetElementsChange {
-            set: set.clone(),
-            elements: vec![SetElement::port(80)],
+        let now = NftablesConfig::new().table("filter", Family::Inet, |t| {
+            t.set("s", |s| {
+                s.key_type(SetKeyType::InetService)
+                    .element(SetElement::port(80))
+            })
+            .set("kept", |s| s.key_type(SetKeyType::InetService))
         });
-        d.set_elements_to_remove.push(SetElementsChange {
-            set,
-            elements: vec![SetElement::port(81), SetElement::port(82)],
-        });
-
+        let d = now.diff_against(&was, &NftDiffOptions::default()).unwrap();
         assert!(!d.is_empty());
-        assert_eq!(d.change_count(), 4);
-        let s = d.summary();
-        assert!(s.contains("+ set"), "summary: {s}");
-        assert!(s.contains("- set"), "summary: {s}");
-        assert!(s.contains("+ 1 element"), "summary: {s}");
-        assert!(s.contains("- 2 elements"), "summary: {s}");
+        assert_eq!(
+            d.to_string(),
+            "NftablesDiff: 4 changes:\n  + set Inet filter/s\n  + 1 element Inet filter/s\n  \
+             - set Inet filter/stale\n  - 2 elements Inet filter/kept"
+        );
     }
 
     // ---- Plan 157b v2 — per-rule USERDATA-keyed identity ----
@@ -2950,48 +2750,37 @@ mod tests {
     }
 
     #[test]
-    fn summary_renders_rules_to_replace() {
-        use super::super::super::types::{Family, Rule};
-        use super::super::types::DeclaredRule;
-        let mut d = NftablesDiff::default();
-        let rule = Rule::new("filter", "input").match_tcp_dport(22).accept();
-        let declared = DeclaredRule {
-            table: "filter".to_string(),
-            chain: "input".to_string(),
-            family: Family::Inet,
-            handle_key: Some("ssh".to_string()),
-            body: rule,
+    fn display_renders_a_replace_and_a_delete() {
+        use super::super::super::types::Family;
+        let was = NftablesConfig::new().table("filter", Family::Inet, |t| {
+            t.chain("input", |c| c)
+                .rule_keyed("input", "ssh", |r| r.match_tcp_dport(23).counter().accept())
+                .rule_keyed("input", "dns", |r| r.match_udp_dport(53).accept())
+        });
+        let now = NftablesConfig::new().table("filter", Family::Inet, |t| {
+            t.chain("input", |c| c)
+                .rule_keyed("input", "ssh", |r| r.match_tcp_dport(22).accept())
+        });
+        let d = now.diff_against(&was, &NftDiffOptions::default()).unwrap();
+        let handle = |key: &str| {
+            d.rules()
+                .find_map(|c| c.from().filter(|r| r.key.as_deref() == Some(key)))
+                .and_then(|r| r.handle)
+                .unwrap()
+                .0
         };
-        d.rules_to_replace.push(RuleReplace {
-            table: "filter".to_string(),
-            family: Family::Inet,
-            chain: "input".to_string(),
-            handle: RuleHandle(42),
-            current: Some("tcp dport 23 counter accept".to_string()),
-            rule: declared,
-        });
-        d.rules_to_delete.push(RuleDelete {
-            table: "filter".to_string(),
-            family: Family::Inet,
-            chain: "input".to_string(),
-            handle: RuleHandle(7),
-            key: None,
-            current: Some("udp dport 53 accept".to_string()),
-        });
-        let s = d.summary();
-        assert!(
-            s.contains(
-                "~ rule Inet filter/input (handle=42 key=ssh): \
-                 tcp dport 23 counter accept -> tcp dport 22 accept"
+        assert_eq!(
+            d.to_string(),
+            format!(
+                "NftablesDiff: 2 changes:\n  - rule Inet filter/input [dns] (handle={}): udp dport \
+                 53 accept\n  ~ rule Inet filter/input (handle={} key=ssh): tcp dport 23 counter \
+                 accept -> tcp dport 22 accept",
+                handle("dns"),
+                handle("ssh"),
             ),
-            "a replace says what the kernel has and what replaces it: {s}"
-        );
-        assert!(
-            s.contains("- rule Inet filter/input (handle=7): udp dport 53 accept"),
-            "a delete says what it removes: {s}"
+            "a replace says what the kernel has and what replaces it; a delete what it removes"
         );
         assert_eq!(d.change_count(), 2);
-        assert!(!d.is_empty());
     }
 
     // ---- Plan 178 — TLV normalizer + register canonicalization ----
@@ -3160,15 +2949,33 @@ mod tests {
 
     // ---- Plan 183 — Display for NftablesDiff ----
 
+    /// A recreate's cascade is indented under it (#708).
     #[test]
-    fn display_matches_summary() {
-        let diff = NftablesDiff::default();
-        assert_eq!(format!("{diff}"), diff.summary());
-
-        use super::super::super::types::Family;
-        let mut d = NftablesDiff::default();
-        d.tables_to_delete.push((Family::Inet, "foo".to_string()));
-        assert_eq!(format!("{d}"), d.summary());
+    fn display_indents_a_recreates_cascade() {
+        use super::super::super::types::{BaseChain, Family, FilterHook, Priority};
+        let with = |hook| {
+            NftablesConfig::new().table("t", Family::Ip, move |t| {
+                t.chain("c", move |c| {
+                    c.base(BaseChain::filter(hook, Priority::Filter))
+                })
+                .rule_keyed("c", "ssh", |r| r.match_tcp_dport(22).accept())
+            })
+        };
+        let d = with(FilterHook::Output)
+            .diff_against(&with(FilterHook::Input), &NftDiffOptions::default())
+            .unwrap();
+        let [NftChange::Rule(moved)] = d.chains().next().unwrap().cascade() else {
+            panic!("the recreate moves its rule: {d}");
+        };
+        let from = moved.from().unwrap().handle.unwrap().0;
+        assert_eq!(
+            d.to_string(),
+            format!(
+                "NftablesDiff: 1 change:\n  -/+ chain Ip t/c (recreate: hook 1 -> 3)\n    \
+                 ~ rule Ip t/c (handle={from} key=ssh, re-added: its chain is recreated): tcp dport \
+                 22 accept"
+            )
+        );
     }
 
     // ====================================================================
@@ -3452,13 +3259,20 @@ mod tests {
 
     #[test]
     fn a_resize_renders_and_counts() {
-        let mut d = NftablesDiff::default();
-        let mut s = declared_set(SetKeyType::Ipv4Addr, 0);
-        s.size = Some(4096);
-        d.sets_to_update.push(("t".to_string(), Family::Ip, s));
+        let sized = |n| {
+            NftablesConfig::new().table("t", Family::Ip, move |t| {
+                t.set("s", move |s| s.key_type(SetKeyType::Ipv4Addr).size(n))
+            })
+        };
+        let d = sized(4096)
+            .diff_against(&sized(1024), &NftDiffOptions::default())
+            .unwrap();
         assert!(!d.is_empty());
         assert_eq!(d.change_count(), 1);
-        assert!(d.to_string().contains("~ set Ip t/s (size=4096)"), "{d}");
+        assert_eq!(
+            d.to_string(),
+            "NftablesDiff: 1 change:\n  ~ set Ip t/s (size=4096)"
+        );
     }
 
     #[test]

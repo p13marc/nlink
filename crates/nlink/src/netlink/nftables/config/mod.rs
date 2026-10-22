@@ -32,7 +32,7 @@
 //!
 //! let conn = Connection::<Nftables>::new()?;
 //! let diff = cfg.diff(&conn).await?;
-//! println!("{}", diff.summary());
+//! println!("{diff}");
 //! diff.apply(&conn).await?;
 //! # Ok(())
 //! # }
@@ -69,13 +69,11 @@ pub use snapshot::RulesetSnapshot;
 
 // The one reconcile vocabulary every layer shares (#532).
 pub use crate::netlink::reconcile::{ReconcileOptions, ReconcileReport};
-pub use diff::{
-    ChainRecreate, FlowtableUpdate, MoveReason, NftDiffOptions, NftablesDiff, RuleAdd, RuleDelete,
-    RuleHandle, RuleMove, RulePlacement, RuleReplace, SetElementsChange,
-};
-// DeclaredSet/DeclaredSetBuilder are the type of the *public* field
-// `NftablesDiff::sets_to_add`, so leaving them unexported made that field
-// unnameable — a caller could not destructure or construct it (#210).
+pub use diff::{NftDiffOptions, NftablesDiff, RuleHandle, RulePlacement};
+pub(crate) use diff::{MoveReason, RuleMove, SetElementsChange};
+// The Declared* types are what `NftablesConfig::tables()` hands back, so
+// leaving them unexported made them unnameable — a caller could not
+// destructure or construct one (#210, when one was a diff field's type).
 // The *Builder types are the same story from the other direction: the
 // declarative DSL hands one to every closure the caller writes
 // (`cfg.table("t", Inet, |t| t.chain("c", |c| ...))`), so they are already

@@ -104,7 +104,8 @@ impl NftablesDiff {
     /// rejects the whole batch (kernel rolls back; no
     /// intermediate state observable).
     ///
-    /// The exception is [`sets_to_update`](Self::sets_to_update): a
+    /// The exception is a set updated in place, a
+    /// [`Change::Update`](super::Change::Update) in [`sets`](Self::sets): a
     /// resized set has to take its new size before elements are added to
     /// it, so those updates commit first, in a batch of their own. If the
     /// main batch is then refused, the sets keep their new size and
@@ -121,10 +122,13 @@ impl NftablesDiff {
         if let Some(refusal) = self.refusal() {
             return Err(refusal);
         }
-        let total = self.change_count();
-        if total == 0 {
+        // What is sent is the plan; the changes say it, and a build that
+        // missed one logs it (#708). So the plan says whether there is
+        // anything to send.
+        if self.plan_is_empty() {
             return Ok(0);
         }
+        let total = self.change_count();
 
         // 0. In-place set updates (size, timeout, GC interval), in a batch
         //    of their own committed first. The kernel checks an element add

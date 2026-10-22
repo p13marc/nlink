@@ -12,7 +12,7 @@ use nlink::netlink::nftables::types::{
 use nlink::netlink::{Connection, Nftables};
 
 use crate::common::traffic::{lo_up, send_udp};
-use crate::common::{TestNamespace, with_timeout};
+use crate::common::{TestNamespace, nft, with_timeout};
 
 fn ip(last: u8) -> Ipv4Addr {
     Ipv4Addr::new(127, 0, 0, last)
@@ -192,25 +192,28 @@ async fn declared_maps_converge_and_replace_an_element_whose_data_changed() -> n
         // .4 now jumps to c2 instead of .2; port 1000-1999 accepts.
         let second = declared(ip(4), Verdict::Accept);
         let diff = second.diff(&conn).await?;
-        let changed = |c: &[nlink::netlink::nftables::config::SetElementsChange]| {
-            let mut n: Vec<(String, usize)> = c
+        let changed = |op| {
+            let mut n: Vec<(String, usize)> = nft::elements(&diff, op)
                 .iter()
-                .map(|c| (c.set.name().to_string(), c.elements.len()))
+                .map(|c| (c.set.clone(), c.elements.len()))
                 .collect();
             n.sort();
             n
         };
         assert_eq!(
-            changed(&diff.set_elements_to_remove),
+            changed("remove"),
             [("ports".to_string(), 1), ("vm".to_string(), 1)],
             "{diff}"
         );
         assert_eq!(
-            changed(&diff.set_elements_to_add),
+            changed("add"),
             [("ports".to_string(), 1), ("vm".to_string(), 1)],
             "{diff}"
         );
-        assert!(diff.rules_to_replace.is_empty() && diff.sets_to_delete.is_empty(), "{diff}");
+        assert!(
+            nft::replaced(&diff).is_empty() && diff.sets().next().is_none(),
+            "{diff}"
+        );
         diff.apply(&conn).await?;
         let again = second.diff(&conn).await?;
         assert!(again.is_empty(), "second diff must be empty: {again}");

@@ -11,7 +11,7 @@
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use nlink::netlink::nftables::config::NftablesConfig;
+use nlink::netlink::nftables::config::{Change, NftablesConfig};
 use nlink::netlink::nftables::types::{
     BaseChain, Chain, ExthdrOp, Family, FilterHook, MetaKey, NatHook, Priority, Rule, Set,
     SetElement, SetFlags, SetKeyType, TCPOPT_MAXSEG, TcpFlags,
@@ -27,7 +27,7 @@ use nlink::{Rate, TcHandle};
 
 use crate::common::counters::{class_stats, rule_packets};
 use crate::common::traffic::{lo_up, send_tcp_syns, send_udp};
-use crate::common::{TestNamespace, with_timeout};
+use crate::common::{TestNamespace, nft, with_timeout};
 
 async fn add_mangle_chain(conn: &Connection<Nftables>, hook: FilterHook) -> nlink::Result<()> {
     conn.add_table("t", Family::Ip).await?;
@@ -684,9 +684,9 @@ async fn declared_set_resize_is_in_place_and_admits_new_elements() -> nlink::Res
 
         let grown = throttle_cfg(4, &addrs(4));
         let diff = grown.diff(&conn).await?;
-        assert_eq!(diff.sets_to_update.len(), 1, "{diff}");
+        let sets: Vec<_> = diff.sets().collect();
         assert!(
-            diff.sets_to_delete.is_empty() && diff.sets_to_add.is_empty(),
+            matches!(sets[..], [Change::Update { .. }]),
             "a size change must not recreate the set: {diff}"
         );
         diff.apply(&conn).await?;
@@ -756,9 +756,13 @@ async fn recreating_a_set_a_rule_references_converges() -> nlink::Result<()> {
         // in-place replace has to become a re-insert too.
         let constant = cfg(SetFlags::CONSTANT, 2);
         let diff = constant.diff(&conn).await?;
-        assert_eq!(diff.sets_to_delete.len(), 1, "flags drift recreates: {diff}");
-        assert_eq!(diff.rules_to_move.len(), 4, "{diff}");
-        assert!(diff.rules_to_replace.is_empty(), "{diff}");
+        assert_eq!(
+            nft::count(&diff, "set", "recreate"),
+            1,
+            "flags drift recreates: {diff}"
+        );
+        assert_eq!(nft::moved(&diff).len(), 4, "{diff}");
+        assert!(nft::replaced(&diff).is_empty(), "{diff}");
         diff.apply(&conn).await?;
 
         let sets = conn.list_sets_in("t", Family::Ip).await?;
