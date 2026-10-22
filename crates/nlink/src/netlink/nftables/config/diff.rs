@@ -646,8 +646,8 @@ pub struct NftablesDiff {
     /// object and flowtable it adds, removes, updates or recreates, with
     /// what the kernel holds and what it will hold. A recreate carries what
     /// goes with it. [`apply`](Self::apply) sends a batch plan kept
-    /// private; every debug build checks that these changes are that plan,
-    /// each entry once.
+    /// private. Every build checks that these changes are that plan, each
+    /// entry once: a debug build panics on a miss, a release build logs it.
     pub changes: Vec<NftChange>,
     /// The ruleset generation the diff was taken at, if it was taken from
     /// the kernel: [`apply`](Self::apply) commits only if the ruleset is
@@ -754,10 +754,12 @@ impl NftablesDiff {
         self.blocked.iter().find_map(Blocked::refusal)
     }
 
-    /// `true` if declared state already matches kernel state: no change,
-    /// and nothing that refuses.
+    /// `true` if declared state already matches kernel state: nothing for
+    /// [`apply`](Self::apply) to send, and nothing that refuses. It asks
+    /// the plan `apply` sends, so it agrees with `apply` even if the typed
+    /// changes missed something, which every build checks for.
     pub fn is_empty(&self) -> bool {
-        self.change_count() == 0
+        self.plan_is_empty() && !self.blocked.iter().any(Blocked::refuses)
     }
 
     /// Whether the batch plan [`apply`](Self::apply) sends is empty.
@@ -2534,7 +2536,8 @@ mod tests {
         let mut d = NftablesDiff::default();
         d.tables_to_delete.push((Family::Ip, "t".into()));
         assert!(!d.plan_is_empty());
-        assert!(d.is_empty(), "the typed view has nothing: {d}");
+        assert_eq!(d.change_count(), 0, "the typed view has nothing: {d}");
+        assert!(!d.is_empty(), "and the diff still has something to send");
     }
 
     #[test]

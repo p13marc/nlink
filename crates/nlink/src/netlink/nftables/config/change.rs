@@ -792,11 +792,11 @@ impl NftChange {
 }
 
 /// The lines a change prints as, its cascade's indented under it (#708).
-/// `parent` is the kind of the recreate a cascade belongs to: it says why a
-/// rule in it is moved.
+/// `parent` is the recreate a cascade belongs to: it says why a rule in it
+/// is moved.
 pub(crate) fn lines(
     change: &NftChange,
-    parent: Option<&str>,
+    parent: Option<&NftChange>,
     indent: usize,
     out: &mut Vec<String>,
 ) {
@@ -843,7 +843,7 @@ pub(crate) fn lines(
             let placement = |p: Option<RulePlacement>| match p {
                 Some(RulePlacement::Before(h)) => format!(" (before handle={})", h.0),
                 Some(RulePlacement::After(h)) => format!(" (after handle={})", h.0),
-                _ => String::new(),
+                Some(RulePlacement::Append) | None => String::new(),
             };
             let body = |from: Option<&str>, to: Option<&str>| match (from, to) {
                 (Some(now), Some(to)) if now != to => format!(": {now} -> {to}"),
@@ -888,12 +888,15 @@ pub(crate) fn lines(
                 }
                 Change::Update { from, to } | Change::Recreate { from, to, .. } => {
                     let why = match parent {
-                        Some("chain") => "its chain is recreated",
-                        Some("set") => "its set is recreated",
-                        Some("object") => "its object is recreated",
-                        Some("flowtable") => "its flowtable is recreated",
-                        Some("table") => "its table is recreated",
-                        _ => "out of declared order",
+                        Some(NftChange::Chain(_)) => "its chain is recreated",
+                        Some(NftChange::Set(_)) => "its set is recreated",
+                        Some(NftChange::Object(_)) => "its object is recreated",
+                        Some(NftChange::Flowtable(_)) => "its flowtable is recreated",
+                        Some(NftChange::Table(_)) => "its table is recreated",
+                        // A rule or an element batch carries no cascade.
+                        Some(NftChange::Rule(_) | NftChange::Elements(_)) | None => {
+                            "out of declared order"
+                        }
                     };
                     format!(
                         "~ rule {} (handle={} key={}, re-added: {why}){}{}",
@@ -994,7 +997,7 @@ pub(crate) fn lines(
     };
     out.push(format!("{pad}{line}"));
     for c in change.cascade() {
-        lines(c, Some(change.kind()), indent + 2, out);
+        lines(c, Some(change), indent + 2, out);
     }
 }
 

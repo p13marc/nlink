@@ -128,7 +128,8 @@ impl NftablesDiff {
         if self.plan_is_empty() {
             return Ok(0);
         }
-        let total = self.change_count();
+        // Something is sent, so at least one change is.
+        let total = self.change_count().max(1);
 
         // 0. In-place set updates (size, timeout, GC interval), in a batch
         //    of their own committed first. The kernel checks an element add
