@@ -7,6 +7,7 @@ use super::super::object::{ObjectConfig, ObjectType};
 use super::super::types::{
     ChainInfo, Family, RuleInfo, Set, SetElement, SetFlags, SetInfo, Verdict,
 };
+use super::change::{Blocked, NftItem, NftRule};
 use super::types::{
     DeclaredChain, DeclaredFlowtable, DeclaredObject, DeclaredRule, DeclaredSet, DeclaredTable,
     NftablesConfig, SetElementMode,
@@ -457,41 +458,18 @@ pub struct ChainRecreate {
     pub chain: DeclaredChain,
     /// What changed: `hook input -> forward`, `priority 0 -> -10`, …
     pub reason: String,
-    /// Rules in the chain that nlink did not write, which it could not put
-    /// back. Non-empty means the apply refuses, with
-    /// [`ErrorDetail::NotSupported`](crate::ErrorDetail::NotSupported), rather than
-    /// delete them. An [`exclusive`](super::DeclaredChainBuilder::exclusive)
-    /// chain deletes them instead.
-    pub blocked_by: Vec<String>,
-}
-
-impl ChainRecreate {
-    /// True when the apply will refuse this recreate (see
-    /// [`blocked_by`](Self::blocked_by)).
-    pub fn is_refused(&self) -> bool {
-        !self.blocked_by.is_empty()
-    }
 }
 
 impl std::fmt::Display for ChainRecreate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "-/+ chain {:?} {}/{} (recreate",
+            "-/+ chain {:?} {}/{} (recreate: {})",
             self.family,
             self.table,
-            self.chain.name()
-        )?;
-        if self.blocked_by.is_empty() {
-            write!(f, ": {})", self.reason)
-        } else {
-            write!(
-                f,
-                " refused: {}; it would delete rules nlink did not write: {})",
-                self.reason,
-                self.blocked_by.join(", ")
-            )
-        }
+            self.chain.name(),
+            self.reason
+        )
     }
 }
 
@@ -508,87 +486,6 @@ pub struct SetElementsChange {
     pub elements: Vec<SetElement>,
 }
 
-/// An undeclared chain, set, flowtable or object in a managed table that
-/// [`NftablesDiff`] leaves in place, because a rule that stays — one nlink
-/// does not manage — still uses it.
-///
-/// The kernel refuses to delete what a rule uses (`EBUSY`), and one refused
-/// message fails the whole batch, so deleting it would fail every apply until
-/// someone removed the rule by hand (#459).
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum KeptInUse {
-    /// A chain a kept rule jumps or goes to.
-    Chain {
-        /// Owning table.
-        table: String,
-        /// Owning family.
-        family: Family,
-        /// Chain name.
-        name: String,
-    },
-    /// A named set or map a kept rule looks up or updates.
-    Set {
-        /// Owning table.
-        table: String,
-        /// Owning family.
-        family: Family,
-        /// Set name.
-        name: String,
-    },
-    /// A flowtable a kept rule offloads to (`flow add @ft`).
-    Flowtable {
-        /// Owning table.
-        table: String,
-        /// Owning family.
-        family: Family,
-        /// Flowtable name.
-        name: String,
-    },
-    /// A named object a kept rule references.
-    Object {
-        /// Owning table.
-        table: String,
-        /// Owning family.
-        family: Family,
-        /// Object name.
-        name: String,
-        /// Object type.
-        object_type: ObjectType,
-    },
-}
-
-impl std::fmt::Display for KeptInUse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (kind, table, family, name) = match self {
-            Self::Chain {
-                table,
-                family,
-                name,
-            } => ("chain", table, family, name),
-            Self::Set {
-                table,
-                family,
-                name,
-            } => ("set", table, family, name),
-            Self::Flowtable {
-                table,
-                family,
-                name,
-            } => ("flowtable", table, family, name),
-            Self::Object {
-                table,
-                family,
-                name,
-                object_type,
-            } => return write!(f, "object {family:?} {table}/{name} ({object_type:?})"),
-        };
-        write!(f, "{kind} {family:?} {table}/{name}")
-    }
-}
 
 /// The result of comparing a declared [`NftablesConfig`] against
 /// the kernel's current state. Apply via
@@ -619,12 +516,6 @@ pub struct NftablesDiff {
     pub tables_to_modify: Vec<(Family, String, u32)>,
     /// Tables to delete (family, name).
     pub tables_to_delete: Vec<(Family, String)>,
-    /// Table flag changes the kernel refuses on a live table — `(family,
-    /// name, why)`. Only `NFT_TABLE_F_DORMANT` can change; turning persist
-    /// or owner on or off needs the table deleted with everything in it,
-    /// which the diff will not do. The apply fails on the first, with
-    /// [`ErrorDetail::NotSupported`](crate::ErrorDetail::NotSupported) (#479).
-    pub tables_refused: Vec<(Family, String, String)>,
     /// Tables deleted and created again, with everything declared in them —
     /// `(family, name, why)`: a changed comment, with
     /// [`NftDiffOptions::recreate_on_comment_change`] (#703). Each is also
@@ -647,8 +538,9 @@ pub struct NftablesDiff {
     /// Chains to delete — (table, family, name).
     pub chains_to_delete: Vec<(String, Family, String)>,
     /// Chains to delete and create again, with their declared rules, in
-    /// [`Self::rules_to_move`] and [`Self::rules_to_add`] (#478). A refused
-    /// one ([`ChainRecreate::is_refused`]) makes the apply fail instead.
+    /// [`Self::rules_to_move`] and [`Self::rules_to_add`] (#478). One that
+    /// holds rules nlink did not write is not here but in
+    /// [`Self::blocked`], and makes the apply fail.
     pub chains_to_recreate: Vec<ChainRecreate>,
     /// Rules to add, each with its placement in the chain.
     pub rules_to_add: Vec<RuleAdd>,
@@ -712,12 +604,13 @@ pub struct NftablesDiff {
     pub objects_to_update: Vec<(String, Family, DeclaredObject)>,
     /// Stateful objects to delete — (table, family, name, type).
     pub objects_to_delete: Vec<(String, Family, String, ObjectType)>,
-    /// Undeclared chains, sets, flowtables and objects the diff does **not** delete,
-    /// because a rule that stays still uses them — see [`KeptInUse`]. Not a
-    /// change: [`is_empty`](Self::is_empty) and
-    /// [`change_count`](Self::change_count) ignore it, and nothing in it is
-    /// sent to the kernel.
-    pub kept_in_use: Vec<KeptInUse>,
+    /// What the diff cannot do, or leaves alone so as not to break what it
+    /// does not own (#708): table flags the kernel will not change, a
+    /// recreate that would delete rules nlink did not write, an item one of
+    /// those rules uses. One that [`refuses`](Blocked::refuses) makes the
+    /// apply fail before it writes anything, and counts as a change; the
+    /// others are not changes, and nothing in them is sent.
+    pub blocked: Vec<Blocked>,
     /// The ruleset generation the diff was taken at, if it was taken from
     /// the kernel: [`apply`](Self::apply) commits only if the ruleset is
     /// still there, and is otherwise refused with `ERESTART`
@@ -746,7 +639,7 @@ impl NftablesDiff {
         self.tables_to_add.is_empty()
             && self.tables_to_modify.is_empty()
             && self.tables_to_delete.is_empty()
-            && self.tables_refused.is_empty()
+            && !self.blocked.iter().any(Blocked::refuses)
             && self.tables_to_recreate.is_empty()
             && self.chains_to_add.is_empty()
             && self.chains_to_modify.is_empty()
@@ -774,7 +667,7 @@ impl NftablesDiff {
         self.tables_to_add.len()
             + self.tables_to_modify.len()
             + self.tables_to_delete.len()
-            + self.tables_refused.len()
+            + self.blocked.iter().filter(|b| b.refuses()).count()
             + self.tables_to_recreate.len()
             + self.chains_to_add.len()
             + self.chains_to_modify.len()
@@ -819,8 +712,8 @@ impl NftablesDiff {
         for (fam, name) in &self.tables_to_delete {
             lines.push(format!("- table {fam:?} {name}"));
         }
-        for (fam, name, why) in &self.tables_refused {
-            lines.push(format!("! table {fam:?} {name} (refused: {why})"));
+        for refused in self.blocked.iter().filter(|b| b.refuses()) {
+            lines.push(format!("! {refused}"));
         }
         for (fam, name, why) in &self.tables_to_recreate {
             lines.push(format!("~ table {fam:?} {name} (recreate: {why})"));
@@ -982,10 +875,8 @@ impl NftablesDiff {
                 lines.join("\n  ")
             )
         };
-        for kept in &self.kept_in_use {
-            out.push_str(&format!(
-                "\n  ! {kept} kept: a rule nlink does not manage uses it"
-            ));
+        for kept in self.blocked.iter().filter(|b| !b.refuses()) {
+            out.push_str(&format!("\n  ! {kept}"));
         }
         out
     }
@@ -1184,12 +1075,17 @@ fn references_object(rule: &RuleInfo, name: &str, object_type: ObjectType) -> bo
     })
 }
 
-/// Move the undeclared chains, sets, flowtables and objects of `declared`'s table that a
-/// staying rule uses from the diff's delete lists to `kept_in_use`.
+/// Move the undeclared chains, sets, flowtables and objects of `declared`'s
+/// table that a staying rule uses from the diff's delete lists to
+/// [`Blocked::InUse`]; and refuse, as [`Blocked::Bound`], a set, object or
+/// flowtable the diff recreates that a staying rule uses (#708).
 ///
 /// A staying rule is one in the kernel that the diff neither deletes,
 /// replaces nor moves, in a chain the diff does not delete. Sets and objects
-/// recreated under the same name are declared, so they are never kept.
+/// recreated under the same name are declared, so they are never kept; and
+/// the rules nlink wrote that use one are moved out of its way, so what
+/// stays and uses it is a rule nlink did not write, which the kernel would
+/// not let it delete.
 fn keep_what_staying_rules_use(
     diff: &mut NftablesDiff,
     declared: &DeclaredTable,
@@ -1225,83 +1121,195 @@ fn keep_what_staying_rules_use(
         .filter(|(t, f, _)| here(t, *f))
         .map(|(_, _, o)| (o.name().to_string(), o.config().object_type()))
         .collect();
-
-    loop {
+    let recreated_flowtables: HashSet<String> = diff
+        .flowtables_to_add
+        .iter()
+        .filter(|f| here(f.table(), f.family()))
+        .map(|f| f.name().to_string())
+        .collect();
+    let staying = |diff: &NftablesDiff| -> Vec<RuleInfo> {
         let deleted_chains: HashSet<&str> = diff
             .chains_to_delete
             .iter()
             .filter(|(t, f, _)| here(t, *f))
             .map(|(_, _, name)| name.as_str())
             .collect();
-        let staying: Vec<&RuleInfo> = current_rules
+        current_rules
             .iter()
             .filter(|r| !gone.contains(&r.handle) && !deleted_chains.contains(r.chain.as_str()))
-            .collect();
-        let used = |pred: &dyn Fn(&RuleInfo) -> bool| staying.iter().any(|r| pred(r));
-        let mut kept = Vec::new();
+            .cloned()
+            .collect()
+    };
+    let users = |staying: &[RuleInfo], pred: &dyn Fn(&RuleInfo) -> bool| -> Vec<NftRule> {
+        staying
+            .iter()
+            .filter(|r| pred(r))
+            .map(NftRule::from_kernel)
+            .collect()
+    };
+
+    loop {
+        let staying = staying(diff);
+        let mut kept: Vec<(NftItem, Vec<NftRule>)> = Vec::new();
 
         diff.chains_to_delete.retain(|(t, f, name)| {
-            let keep = here(t, *f) && used(&|r| references_chain(r, name));
-            if keep {
-                kept.push(KeptInUse::Chain {
+            let rules = if here(t, *f) {
+                users(&staying, &|r| references_chain(r, name))
+            } else {
+                Vec::new()
+            };
+            if rules.is_empty() {
+                return true;
+            }
+            kept.push((
+                NftItem::Chain {
                     table: t.clone(),
                     family: *f,
                     name: name.clone(),
-                });
-            }
-            !keep
+                },
+                rules,
+            ));
+            false
         });
         diff.sets_to_delete.retain(|(t, f, name)| {
-            let keep =
-                here(t, *f) && !recreated_sets.contains(name) && used(&|r| references_set(r, name));
-            if keep {
-                kept.push(KeptInUse::Set {
+            let rules = if here(t, *f) && !recreated_sets.contains(name) {
+                users(&staying, &|r| references_set(r, name))
+            } else {
+                Vec::new()
+            };
+            if rules.is_empty() {
+                return true;
+            }
+            kept.push((
+                NftItem::Set {
                     table: t.clone(),
                     family: *f,
                     name: name.clone(),
-                });
-            }
-            !keep
+                },
+                rules,
+            ));
+            false
         });
         diff.flowtables_to_delete.retain(|(f, t, name)| {
-            let keep = here(t, *f) && used(&|r| references_flowtable(r, name));
-            if keep {
-                kept.push(KeptInUse::Flowtable {
+            let rules = if here(t, *f) && !recreated_flowtables.contains(name) {
+                users(&staying, &|r| references_flowtable(r, name))
+            } else {
+                Vec::new()
+            };
+            if rules.is_empty() {
+                return true;
+            }
+            kept.push((
+                NftItem::Flowtable {
                     table: t.clone(),
                     family: *f,
                     name: name.clone(),
-                });
-            }
-            !keep
+                },
+                rules,
+            ));
+            false
         });
         diff.objects_to_delete.retain(|(t, f, name, ty)| {
-            let keep = here(t, *f)
-                && !recreated_objects
-                    .iter()
-                    .any(|(n, rt)| n == name && rt == ty)
-                && used(&|r| references_object(r, name, *ty));
-            if keep {
-                kept.push(KeptInUse::Object {
+            let recreated = recreated_objects
+                .iter()
+                .any(|(n, rt)| n == name && rt == ty);
+            let rules = if here(t, *f) && !recreated {
+                users(&staying, &|r| references_object(r, name, *ty))
+            } else {
+                Vec::new()
+            };
+            if rules.is_empty() {
+                return true;
+            }
+            kept.push((
+                NftItem::Object {
                     table: t.clone(),
                     family: *f,
                     name: name.clone(),
                     object_type: *ty,
-                });
-            }
-            !keep
+                },
+                rules,
+            ));
+            false
         });
 
         if kept.is_empty() {
-            return;
+            break;
         }
-        for k in &kept {
+        for (item, _) in &kept {
             tracing::warn!(
-                kept = %k,
+                kept = %item,
                 "not deleting an undeclared nftables item: a rule nlink does not manage uses it",
             );
         }
-        diff.kept_in_use.extend(kept);
+        diff.blocked.extend(
+            kept.into_iter()
+                .map(|(item, rules)| Blocked::InUse { item, rules }),
+        );
     }
+
+    // What the diff recreates and a staying rule uses: deleting it would be
+    // EBUSY, failing the whole batch, so the diff refuses it up front.
+    let staying = staying(diff);
+    let mut bound = Vec::new();
+    for (t, f, name) in diff.sets_to_delete.iter().filter(|(t, f, _)| here(t, *f)) {
+        if recreated_sets.contains(name) {
+            let rules = users(&staying, &|r| references_set(r, name));
+            if !rules.is_empty() {
+                bound.push(Blocked::Bound {
+                    item: NftItem::Set {
+                        table: t.clone(),
+                        family: *f,
+                        name: name.clone(),
+                    },
+                    rules,
+                });
+            }
+        }
+    }
+    for (t, f, name, ty) in diff
+        .objects_to_delete
+        .iter()
+        .filter(|(t, f, ..)| here(t, *f))
+    {
+        if recreated_objects
+            .iter()
+            .any(|(n, rt)| n == name && rt == ty)
+        {
+            let rules = users(&staying, &|r| references_object(r, name, *ty));
+            if !rules.is_empty() {
+                bound.push(Blocked::Bound {
+                    item: NftItem::Object {
+                        table: t.clone(),
+                        family: *f,
+                        name: name.clone(),
+                        object_type: *ty,
+                    },
+                    rules,
+                });
+            }
+        }
+    }
+    for (f, t, name) in diff
+        .flowtables_to_delete
+        .iter()
+        .filter(|(f, t, _)| here(t, *f))
+    {
+        if recreated_flowtables.contains(name) {
+            let rules = users(&staying, &|r| references_flowtable(r, name));
+            if !rules.is_empty() {
+                bound.push(Blocked::Bound {
+                    item: NftItem::Flowtable {
+                        table: t.clone(),
+                        family: *f,
+                        name: name.clone(),
+                    },
+                    rules,
+                });
+            }
+        }
+    }
+    diff.blocked.extend(bound);
 }
 
 /// Does `rule` offload to the flowtable `name`?
@@ -1708,12 +1716,31 @@ impl NftablesConfig {
                         && declared.mode() == super::TableMode::Owned
                         && current.comment.as_deref() != declared.comment() =>
                 {
-                    diff.tables_to_recreate.push((
-                        declared.family(),
-                        declared.name().to_string(),
-                        format!("comment {:?} -> {:?}", current.comment, declared.comment()),
-                    ));
-                    diff.tables_to_add.push(declared.clone());
+                    let reason =
+                        format!("comment {:?} -> {:?}", current.comment, declared.comment());
+                    // Deleting the table deletes every rule in it, and one
+                    // nlink did not write it cannot put back.
+                    let foreign: Vec<NftRule> = snapshot
+                        .rules_in(declared.name(), declared.family())
+                        .into_iter()
+                        .filter(|r| r.key.is_none())
+                        .map(|r| NftRule::from_kernel(&r))
+                        .collect();
+                    if foreign.is_empty() {
+                        diff.tables_to_recreate.push((
+                            declared.family(),
+                            declared.name().to_string(),
+                            reason,
+                        ));
+                        diff.tables_to_add.push(declared.clone());
+                    } else {
+                        diff.blocked.push(Blocked::TableRecreate {
+                            family: declared.family(),
+                            table: declared.name().to_string(),
+                            reason,
+                            rules: foreign,
+                        });
+                    }
                 }
                 Some(current) if current.flags != declared.flags() => {
                     // Only dormant changes on a live table:
@@ -1722,15 +1749,12 @@ impl NftablesConfig {
                     let changed = current.flags ^ declared.flags();
                     let at = (declared.family(), declared.name().to_string());
                     if changed & !super::super::NFT_TABLE_F_DORMANT != 0 {
-                        diff.tables_refused.push((
-                            at.0,
-                            at.1,
-                            format!(
-                                "flags {:#x} -> {:#x}: only dormant can change on a live table",
-                                current.flags,
-                                declared.flags()
-                            ),
-                        ));
+                        diff.blocked.push(Blocked::TableFlags {
+                            family: at.0,
+                            table: at.1,
+                            from: current.flags,
+                            to: declared.flags(),
+                        });
                     } else {
                         diff.tables_to_modify.push((at.0, at.1, declared.flags()));
                     }
@@ -1882,21 +1906,22 @@ impl NftablesConfig {
                     // (#200). Same silence for a changed hook or priority —
                     // which, sent as an update, the kernel refuses, so those
                     // recreate the chain (#478).
-                    Some(current) => match chain_change(c, current, options.recreate_on_comment_change) {
-                        ChainChange::None => {}
-                        ChainChange::Update => diff.chains_to_modify.push((
-                            declared.name().to_string(),
-                            declared.family(),
-                            c.clone(),
-                        )),
-                        ChainChange::Recreate(reason) => {
-                            diff.chains_to_recreate.push(ChainRecreate {
-                                table: declared.name().to_string(),
-                                family: declared.family(),
-                                chain: c.clone(),
-                                reason,
-                                blocked_by: Vec::new(),
-                            });
+                    Some(current) => {
+                        match chain_change(c, current, options.recreate_on_comment_change) {
+                            ChainChange::None => {}
+                            ChainChange::Update => diff.chains_to_modify.push((
+                                declared.name().to_string(),
+                                declared.family(),
+                                c.clone(),
+                            )),
+                            ChainChange::Recreate(reason) => {
+                                diff.chains_to_recreate.push(ChainRecreate {
+                                    table: declared.name().to_string(),
+                                    family: declared.family(),
+                                    chain: c.clone(),
+                                    reason,
+                                });
+                            }
                         }
                     },
                 }
@@ -2030,11 +2055,20 @@ impl NftablesConfig {
                     )),
                     // A kind nlink cannot name it cannot delete either; say
                     // so rather than leave it unmentioned.
-                    None => tracing::warn!(
-                        table = %declared.name(),
-                        object = %c.name,
-                        "an object of a type nlink does not model is left in a managed table",
-                    ),
+                    None => {
+                        let object_type = match &c.state {
+                            super::super::object::ObjectState::Other { object_type, .. } => {
+                                *object_type
+                            }
+                            _ => 0,
+                        };
+                        diff.blocked.push(Blocked::UnmodelledObject {
+                            family: declared.family(),
+                            table: declared.name().to_string(),
+                            name: c.name.clone(),
+                            object_type,
+                        });
+                    }
                 }
             }
 
@@ -2241,12 +2275,29 @@ impl NftablesConfig {
                         && r.family == declared.family()
                         && r.chain.name() == chain_name
                 }) {
-                    recreate.blocked_by = kernel_rules
+                    let foreign: Vec<NftRule> = kernel_rules
                         .iter()
                         .filter(|kr| kr.key.is_none() && !exclusive)
-                        .map(|kr| format!("rule handle {}", kr.handle))
+                        .map(|kr| NftRule::from_kernel(kr))
                         .collect();
-                    if recreate.is_refused() {
+                    if !foreign.is_empty() {
+                        let (reason, family, table) = (
+                            recreate.reason.clone(),
+                            recreate.family,
+                            recreate.table.clone(),
+                        );
+                        diff.chains_to_recreate.retain(|r| {
+                            !(r.table == table
+                                && r.family == family
+                                && r.chain.name() == chain_name)
+                        });
+                        diff.blocked.push(Blocked::ChainRecreate {
+                            family,
+                            table,
+                            chain: chain_name.to_string(),
+                            reason,
+                            rules: foreign,
+                        });
                         continue;
                     }
                     let keys: HashSet<&str> = declared_rules
@@ -2294,19 +2345,9 @@ impl NftablesConfig {
                         let bound_flowtable = recreated_flowtables
                             .iter()
                             .any(|name| references_flowtable(kr, name));
-                        let bound = bound_set || bound_object || bound_flowtable;
-                        if bound && kr.key.is_none() && !exclusive {
-                            // nlink cannot put it back, so the DELSET will be
-                            // EBUSY. Say why before it happens.
-                            tracing::warn!(
-                                table = %declared.name(),
-                                chain = chain_name,
-                                handle = kr.handle,
-                                "a rule nlink does not manage references a set or object this \
-                                 diff recreates; the apply will fail with EBUSY until that rule \
-                                 is removed",
-                            );
-                        }
+                        // One nlink did not write and cannot put back stays,
+                        // and keep_what_staying_rules_use refuses the
+                        // recreate it is bound to (Blocked::Bound).
                         super::rules::KernelSlot {
                             handle: kr.handle,
                             key: kr.key.clone(),
@@ -3146,16 +3187,46 @@ mod tests {
     #[test]
     fn kept_in_use_is_not_a_change_but_is_shown() {
         let mut d = NftablesDiff::default();
-        d.kept_in_use.push(KeptInUse::Set {
-            table: "t".into(),
-            family: Family::Inet,
-            name: "blocked".into(),
+        d.blocked.push(Blocked::InUse {
+            item: NftItem::Set {
+                table: "t".into(),
+                family: Family::Inet,
+                name: "blocked".into(),
+            },
+            rules: Vec::new(),
         });
         assert!(d.is_empty());
         assert_eq!(d.change_count(), 0);
+        assert!(d.blocked[0].refusal().is_none());
         assert_eq!(
             d.to_string(),
             "NftablesDiff: no changes\n  ! set Inet t/blocked kept: a rule nlink does not manage uses it"
+        );
+    }
+
+    /// A refusal is a change the diff cannot make: it counts, it shows, and
+    /// it is the error the apply fails with (#708).
+    #[test]
+    fn a_refusal_counts_and_says_why() {
+        let mut d = NftablesDiff::default();
+        d.blocked.push(Blocked::TableFlags {
+            family: Family::Ip,
+            table: "t".into(),
+            from: 0,
+            to: crate::netlink::nftables::NFT_TABLE_F_PERSIST,
+        });
+        assert!(!d.is_empty());
+        assert_eq!(d.change_count(), 1);
+        assert_eq!(
+            d.to_string(),
+            "NftablesDiff: 1 change:\n  ! table Ip t (refused: flags 0x0 -> 0x4: only dormant can \
+             change on a live table)"
+        );
+        let e = d.blocked[0].refusal().unwrap();
+        assert!(e.is_not_supported(), "{e}");
+        assert!(
+            matches!(e.object(), Some(crate::ErrorObject::NftTable { .. })),
+            "{e}"
         );
     }
 

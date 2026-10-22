@@ -523,8 +523,8 @@ mod tests {
         use crate::netlink::config::schema_check;
         use crate::netlink::nftables::ObjectType;
         use crate::netlink::nftables::config::{
-            ChainRecreate, FlowtableUpdate, KeptInUse, MoveReason, NftablesDiff, RuleDelete,
-            RuleHandle, RuleMove, RulePlacement, RuleReplace,
+            Blocked, ChainRecreate, FlowtableUpdate, MoveReason, NftItem, NftRule, NftablesDiff,
+            RuleDelete, RuleHandle, RuleMove, RulePlacement, RuleReplace,
         };
 
         let cfg = lab(22, true).table("ft", Family::Inet, |t| {
@@ -540,8 +540,6 @@ mod tests {
 
         diff.tables_to_modify.push((family, table.clone(), 1));
         diff.tables_to_delete.push((Family::Ip, "gone".into()));
-        diff.tables_refused
-            .push((Family::Ip, "theirs".into(), "not nlink's".into()));
         diff.tables_to_recreate
             .push((Family::Ip, "n".into(), "PERSIST toggled".into()));
         diff.chains_to_modify.push(diff.chains_to_add[0].clone());
@@ -552,7 +550,6 @@ mod tests {
             family,
             chain,
             reason: "hook changed".into(),
-            blocked_by: vec!["handle 9".into()],
         });
         diff.rules_to_delete.push(RuleDelete {
             table: table.clone(),
@@ -597,11 +594,56 @@ mod tests {
         diff.objects_to_update.push(diff.objects_to_add[0].clone());
         diff.objects_to_delete
             .push((table.clone(), family, "gone".into(), ObjectType::Counter));
-        diff.kept_in_use.push(KeptInUse::Set {
-            table,
+        let foreign = NftRule {
+            family,
+            table: table.clone(),
+            chain: "input".into(),
+            key: None,
+            handle: Some(RuleHandle(9)),
+            placement: None,
+            spec: crate::netlink::nftables::RuleSpec::new(),
+            nft: Some("ip saddr @nets drop".into()),
+        };
+        let set = NftItem::Set {
+            table: table.clone(),
             family,
             name: "nets".into(),
-        });
+        };
+        diff.blocked.extend([
+            Blocked::TableFlags {
+                family: Family::Ip,
+                table: "theirs".into(),
+                from: 0,
+                to: 2,
+            },
+            Blocked::TableRecreate {
+                family,
+                table: table.clone(),
+                reason: "comment".into(),
+                rules: vec![foreign.clone()],
+            },
+            Blocked::ChainRecreate {
+                family,
+                table: table.clone(),
+                chain: "input".into(),
+                reason: "hook 1 -> 2".into(),
+                rules: vec![foreign.clone()],
+            },
+            Blocked::Bound {
+                item: set.clone(),
+                rules: vec![foreign.clone()],
+            },
+            Blocked::InUse {
+                item: set,
+                rules: vec![foreign],
+            },
+            Blocked::UnmodelledObject {
+                family,
+                table,
+                name: "syn".into(),
+                object_type: 11,
+            },
+        ]);
         diff.generation = Some(7);
 
         schema_check::assert_every_root_property_populated(

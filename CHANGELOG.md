@@ -119,6 +119,37 @@ All notable changes to this project will be documented in this file.
   do changes of type, hook, priority, policy and devices, and what the
   deprecated setters write. The lane's module list gains `nft_chain_nat`.
 
+- **What the diff cannot do is one `blocked` list, refused up front**
+  (#708, (b)). `NftablesDiff::blocked` is a `Vec<Blocked>`.
+  - **Replaced:** it takes the place of three shapes:
+    - `tables_refused`, now `Blocked::TableFlags`;
+    - `ChainRecreate::blocked_by` and `is_refused`, now
+      `Blocked::ChainRecreate`, which carries the rules nlink did not write
+      as `NftRule`s. A refused chain is no longer in `chains_to_recreate`.
+    - `kept_in_use`, now `Blocked::InUse`, with the rules that use the
+      item. `KeptInUse` is `NftItem`, tagged by `type` in JSON.
+  - **`Blocked::refuses()`** is true for `TableFlags`, `TableRecreate`,
+    `ChainRecreate` and `Bound`. A refusing entry counts as a change in
+    `change_count`, so `is_empty()` still means `change_count() == 0`.
+    `apply` fails with the first one, as `NotSupported` naming the table,
+    chain, set, object or flowtable, before it writes anything. It checks
+    this even when nothing else would change.
+  - **Behaviour:** two cases that used to go wrong are refused:
+    - **`Blocked::Bound`:** a set, object or flowtable the diff recreates
+      that a rule nlink did not write uses. The apply used to fail at
+      commit with `EBUSY`, after a log line, and only for rules in
+      declared chains. It is now refused up front, and every rule that
+      stays is checked, a hand-added one in a kept chain included.
+    - **`Blocked::TableRecreate`:** an owned table recreated for a new
+      comment (`recreate_on_comment_change`) while it holds rules nlink did
+      not write. The recreate used to delete them silently.
+  - **`Blocked::UnmodelledObject`:** an object of a type nlink does not
+    model, in a managed table, is said rather than only logged. It is kept.
+
+  `nftables_blocked` covers each case. Run against the code before this
+  change, the bound set failed at commit with `EBUSY`, and the table
+  recreate deleted the hand-added rule.
+
 - **A rule is a `RuleSpec`, and lowering it is the only encoder** (#708,
   its (c)). A `RuleSpec` is a rule body as values, in order, with a
   comment. Each item is one of four kinds:

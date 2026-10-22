@@ -114,6 +114,13 @@ impl NftablesDiff {
     /// caller-visible "we did N things" signal useful for
     /// `tracing::info!`-style post-apply logging.
     pub async fn apply(&self, conn: &Connection<Nftables>) -> Result<usize> {
+        // What the diff refuses fails here, before anything has changed:
+        // table flags the kernel does not change on a live table (#479), a
+        // recreate that would delete rules nlink did not write (#478), a set
+        // or object one of those rules uses (#708).
+        if let Some(refusal) = self.blocked.iter().find_map(|b| b.refusal()) {
+            return Err(refusal);
+        }
         let total = self.change_count();
         if total == 0 {
             return Ok(0);
@@ -131,37 +138,6 @@ impl NftablesDiff {
         //    one that update's own commit moved the ruleset to. Anything
         //    else committing in between makes the kernel refuse the batch
         //    with ERESTART, rather than apply a diff of a ruleset that is gone.
-        // A table flag change the kernel refuses on a live table fails
-        // here, before anything has changed (#479).
-        if let Some((family, name, why)) = self.tables_refused.first() {
-            return Err(Error::not_supported(format!(
-                "table {family:?} {name}: {why}. Delete the table and apply again to \
-                 recreate it with the new flags."
-            ))
-            .with_object(crate::ErrorObject::NftTable {
-                family: family.to_string(),
-                name: name.clone(),
-            }));
-        }
-        // A refused chain recreate fails here, before anything has changed
-        // (#478).
-        if let Some(refused) = self.chains_to_recreate.iter().find(|r| r.is_refused()) {
-            return Err(Error::not_supported(format!(
-                "chain {}/{}: {} cannot be changed on the live chain, and recreating it would \
-                 delete rules nlink did not write: {}. Remove them, or declare the chain \
-                 exclusive, and apply again.",
-                refused.table,
-                refused.chain.name(),
-                refused.reason,
-                refused.blocked_by.join(", ")
-            ))
-            .with_object(crate::ErrorObject::NftChain {
-                family: refused.family.to_string(),
-                table: refused.table.clone(),
-                name: refused.chain.name().to_string(),
-            }));
-        }
-
         let mut genid = self.generation;
         if !self.sets_to_update.is_empty() {
             self.update_sets(conn, genid).await?;

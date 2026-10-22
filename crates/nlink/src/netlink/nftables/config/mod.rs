@@ -61,14 +61,16 @@ mod types;
 
 pub(crate) use diff::expression_bytes;
 pub(crate) use rules::{canonical_body, canonical_elements};
-pub use change::{NftChain, NftElements, NftFlowtable, NftObject, NftRule, NftSet, NftTable};
+pub use change::{
+    Blocked, NftChain, NftElements, NftFlowtable, NftItem, NftObject, NftRule, NftSet, NftTable,
+};
 pub use snapshot::RulesetSnapshot;
 
 // The one reconcile vocabulary every layer shares (#532).
 pub use crate::netlink::reconcile::{ReconcileOptions, ReconcileReport};
 pub use diff::{
-    ChainRecreate, FlowtableUpdate, KeptInUse, MoveReason, NftDiffOptions, NftablesDiff, RuleAdd,
-    RuleDelete, RuleHandle, RuleMove, RulePlacement, RuleReplace, SetElementsChange,
+    ChainRecreate, FlowtableUpdate, MoveReason, NftDiffOptions, NftablesDiff, RuleAdd, RuleDelete,
+    RuleHandle, RuleMove, RulePlacement, RuleReplace, SetElementsChange,
 };
 // DeclaredSet/DeclaredSetBuilder are the type of the *public* field
 // `NftablesDiff::sets_to_add`, so leaving them unexported made that field

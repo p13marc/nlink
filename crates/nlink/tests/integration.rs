@@ -206,6 +206,11 @@ mod nftables_spec;
 #[path = "integration/nftables_readback.rs"]
 mod nftables_readback;
 
+// #708 (b): what the diff cannot do is one `blocked` list, refused before
+// the apply writes anything: a recreate a foreign rule's binding blocks.
+#[path = "integration/nftables_blocked.rs"]
+mod nftables_blocked;
+
 // Every rule shape nlink writes must reconcile to an empty diff: the kernel
 // echoes some attributes whether or not they were sent, and drops others.
 #[path = "integration/nftables_echo.rs"]
