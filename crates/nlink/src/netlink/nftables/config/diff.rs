@@ -486,7 +486,6 @@ pub struct SetElementsChange {
     pub elements: Vec<SetElement>,
 }
 
-
 /// The result of comparing a declared [`NftablesConfig`] against
 /// the kernel's current state. Apply via
 /// [`Self::apply`](super::NftablesDiff::apply).
@@ -609,7 +608,9 @@ pub struct NftablesDiff {
     /// recreate that would delete rules nlink did not write, an item one of
     /// those rules uses. One that [`refuses`](Blocked::refuses) makes the
     /// apply fail before it writes anything, and counts as a change; the
-    /// others are not changes, and nothing in them is sent.
+    /// others are not changes, and nothing in them is sent. The apply's
+    /// error is the first that refuses, in the order the diff found them;
+    /// the diff's `Display` says every one.
     pub blocked: Vec<Blocked>,
     /// The ruleset generation the diff was taken at, if it was taken from
     /// the kernel: [`apply`](Self::apply) commits only if the ruleset is
@@ -2046,8 +2047,8 @@ impl NftablesConfig {
                 if declared_here || (shared && !c.managed) {
                     continue;
                 }
-                match c.object_type() {
-                    Some(ty) => diff.objects_to_delete.push((
+                match (c.object_type(), &c.state) {
+                    (Some(ty), _) => diff.objects_to_delete.push((
                         declared.name().to_string(),
                         declared.family(),
                         c.name.clone(),
@@ -2055,13 +2056,8 @@ impl NftablesConfig {
                     )),
                     // A kind nlink cannot name it cannot delete either; say
                     // so rather than leave it unmentioned.
-                    None => {
-                        let object_type = match &c.state {
-                            super::super::object::ObjectState::Other { object_type, .. } => {
-                                *object_type
-                            }
-                            _ => 0,
-                        };
+                    (None, super::super::object::ObjectState::Other { object_type, .. }) => {
+                        let object_type = *object_type;
                         diff.blocked.push(Blocked::UnmodelledObject {
                             family: declared.family(),
                             table: declared.name().to_string(),
@@ -2069,6 +2065,8 @@ impl NftablesConfig {
                             object_type,
                         });
                     }
+                    // `object_type()` is `None` for `Other` alone.
+                    (None, _) => {}
                 }
             }
 

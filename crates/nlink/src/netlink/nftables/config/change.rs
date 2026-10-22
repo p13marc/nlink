@@ -452,6 +452,20 @@ pub enum Blocked {
     },
 }
 
+/// The rules a blocked entry is about: each by its handle, or by its text
+/// when it has none.
+fn rules_named(rules: &[NftRule]) -> String {
+    rules
+        .iter()
+        .map(|r| match (r.handle, &r.nft) {
+            (Some(h), _) => format!("rule handle {}", h.0),
+            (None, Some(nft)) => format!("rule `{nft}`"),
+            (None, None) => format!("a rule in {}", r.chain),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 impl Blocked {
     /// Whether this makes [`apply`](super::NftablesDiff::apply) fail.
     pub fn refuses(&self) -> bool {
@@ -468,13 +482,6 @@ impl Blocked {
     pub(crate) fn refusal(&self) -> Option<crate::netlink::error::Error> {
         use crate::netlink::error::Error;
         use crate::ErrorObject;
-        let handles = |rules: &[NftRule]| {
-            rules
-                .iter()
-                .filter_map(|r| r.handle.map(|h| format!("rule handle {}", h.0)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
         Some(match self {
             Self::TableFlags {
                 family,
@@ -497,7 +504,7 @@ impl Blocked {
             } => Error::not_supported(format!(
                 "table {family:?} {table}: {reason} needs the table recreated, which would \
                  delete rules nlink did not write: {}. Remove them and apply again.",
-                handles(rules)
+                rules_named(rules)
             ))
             .with_object(ErrorObject::NftTable {
                 family: family.to_string(),
@@ -513,7 +520,7 @@ impl Blocked {
                 "chain {table}/{chain}: {reason} cannot be changed on the live chain, and \
                  recreating it would delete rules nlink did not write: {}. Remove them, or \
                  declare the chain exclusive, and apply again.",
-                handles(rules)
+                rules_named(rules)
             ))
             .with_object(ErrorObject::NftChain {
                 family: family.to_string(),
@@ -524,7 +531,7 @@ impl Blocked {
                 let error = Error::not_supported(format!(
                     "{item} is recreated, and rules nlink did not write use it, so the kernel \
                      would refuse to delete it: {}. Remove them and apply again.",
-                    handles(rules)
+                    rules_named(rules)
                 ));
                 match item {
                     NftItem::Set { table, family, name } => error.with_object(ErrorObject::NftSet {
@@ -560,13 +567,6 @@ impl Blocked {
 
 impl std::fmt::Display for Blocked {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let handles = |rules: &[NftRule]| {
-            rules
-                .iter()
-                .filter_map(|r| r.handle.map(|h| format!("rule handle {}", h.0)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
         match self {
             Self::TableFlags {
                 family,
@@ -587,7 +587,7 @@ impl std::fmt::Display for Blocked {
                 f,
                 "table {family:?} {table} (recreate refused: {reason}; it would delete rules nlink \
                  did not write: {})",
-                handles(rules)
+                rules_named(rules)
             ),
             Self::ChainRecreate {
                 family,
@@ -599,12 +599,12 @@ impl std::fmt::Display for Blocked {
                 f,
                 "chain {family:?} {table}/{chain} (recreate refused: {reason}; it would delete \
                  rules nlink did not write: {})",
-                handles(rules)
+                rules_named(rules)
             ),
             Self::Bound { item, rules } => write!(
                 f,
                 "{item} (recreate refused: rules nlink did not write use it: {})",
-                handles(rules)
+                rules_named(rules)
             ),
             Self::InUse { item, .. } => {
                 write!(f, "{item} kept: a rule nlink does not manage uses it")
@@ -625,6 +625,33 @@ impl std::fmt::Display for Blocked {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A refusal names each rule it is about: by handle, or by its text
+    /// when it has none.
+    #[test]
+    fn a_refusal_names_every_rule() {
+        let rule = |handle: Option<u64>| NftRule {
+            family: Family::Ip,
+            table: "t".into(),
+            chain: "c".into(),
+            key: None,
+            handle: handle.map(RuleHandle),
+            placement: None,
+            spec: RuleSpec::new(),
+            nft: Some("ip saddr @s drop".into()),
+        };
+        let blocked = Blocked::ChainRecreate {
+            family: Family::Ip,
+            table: "t".into(),
+            chain: "c".into(),
+            reason: "hook 1 -> 3".into(),
+            rules: vec![rule(Some(4)), rule(None)],
+        };
+        let named = "rule handle 4, rule `ip saddr @s drop`";
+        assert!(blocked.to_string().contains(named), "{blocked}");
+        let refusal = blocked.refusal().unwrap().to_string();
+        assert!(refusal.contains(named), "{refusal}");
+    }
 
     const KEYS: [SetKeyType; 8] = [
         SetKeyType::Ipv4Addr,
