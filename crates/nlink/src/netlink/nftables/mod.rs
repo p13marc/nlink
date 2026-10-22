@@ -32,6 +32,8 @@
 //! ```
 
 pub mod batch_error;
+#[cfg(test)]
+mod builder_bytes;
 pub mod config;
 pub mod connection;
 pub mod events;
