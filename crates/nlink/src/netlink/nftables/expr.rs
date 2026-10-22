@@ -2583,6 +2583,8 @@ impl RuleExpr {
                     .iter()
                     .map(ElementStatement::from_rule_expr)
                     .collect();
+                // `parse_dynset` keeps a dynset whose statements do not all
+                // decode as `Unknown`, so this is always `Some`.
                 match decoded {
                     Some(statements) => Expr::Dynset(DynsetExpr {
                         set,
@@ -3443,9 +3445,12 @@ fn parse_dynset(data: &[u8]) -> Option<RuleExpr> {
             _ => {}
         }
     }
-    // Never half-decode: a statement nlink cannot read keeps the whole
-    // dynset raw.
-    if statements.iter().any(|s| matches!(s, RuleExpr::Unknown { .. })) {
+    // Never half-decode: a statement nlink cannot read, or one no set
+    // element carries, keeps the whole dynset raw.
+    if statements
+        .iter()
+        .any(|s| ElementStatement::from_rule_expr(s).is_none())
+    {
         return None;
     }
     Some(RuleExpr::Dynset {

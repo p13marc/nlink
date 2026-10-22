@@ -605,6 +605,7 @@ impl Field {
     /// The integer `data` is as the field holds it: what [`int`](Self::int)
     /// encodes, decoded.
     pub(crate) fn int_value(&self, data: &[u8]) -> Option<u64> {
+        // Every integer field holds 0, so its encoding gives the width.
         let n = match (self.int(0)?.ok()?.len(), data.len()) {
             (1, 1) => u64::from(data[0]),
             (2, 2) => {

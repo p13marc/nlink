@@ -34,6 +34,12 @@ use crate::netlink::types::route::RouteType;
 /// checked against; otherwise it is checked against `exprs` sent again.
 pub(crate) fn lift(exprs: &[RuleExpr], bytes: Option<&[u8]>, family: Family) -> Vec<Item> {
     let kernel: Vec<Expr> = exprs.iter().map(RuleExpr::to_expr).collect();
+    // Each item is checked against the rule so far, so the work grows with
+    // the square of the rule's length. nft's rules are a handful of
+    // expressions; one past this is read back as it is.
+    if kernel.len() > MAX_LIFTED {
+        return kernel.into_iter().map(Item::Expr).collect();
+    }
     let own;
     let bytes = match bytes {
         Some(bytes) => bytes,
@@ -93,6 +99,13 @@ pub(crate) fn lift(exprs: &[RuleExpr], bytes: Option<&[u8]>, family: Family) -> 
         exprs.iter().map(|e| Item::Expr(e.to_expr())).collect()
     }
 }
+
+/// The longest rule the lift types.
+const MAX_LIFTED: usize = 256;
+
+/// The most choices of fields a concatenation is tried as: two ports of
+/// either protocol in each of five fields is 32.
+const MAX_CHOICES: usize = 64;
 
 /// Whether `items` lower in a `family` table to the rule `bytes` are, as
 /// the diff compares them.
@@ -594,7 +607,8 @@ fn keyed_statements(field: PacketField, rest: &[Expr]) -> Vec<Item> {
 fn concat_of(exprs: &[Expr]) -> Vec<(Vec<PacketField>, usize)> {
     let mut choices: Vec<Vec<PacketField>> = vec![Vec::new()];
     let mut word = 0;
-    for expr in exprs {
+    // A data area holds 16 words, so 16 loads at most.
+    for expr in exprs.iter().take(16) {
         // Past the last word the encoder asks for the last one.
         let dreg = Register::word(word).unwrap_or(Register::Reg32_15);
         let fields: Vec<PacketField> = PACKET_FIELDS
@@ -606,6 +620,9 @@ fn concat_of(exprs: &[Expr]) -> Vec<(Vec<PacketField>, usize)> {
             break;
         };
         word += first.len().div_ceil(4) as usize;
+        if choices.len() * fields.len() > MAX_CHOICES {
+            break;
+        }
         choices = choices
             .into_iter()
             .flat_map(|choice| {

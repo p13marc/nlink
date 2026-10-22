@@ -800,6 +800,26 @@ fn a_broken_rule_lifts_without_a_panic() {
             }
         }
     }
+    // A rule too long to type is read back as it is, and a concatenation of
+    // many ports does not try every choice of protocol.
+    let long: Vec<Expr> = vec![Expr::Counter; 300];
+    let bytes = super::config::expression_bytes(&long);
+    let items = super::spec_lift::lift(
+        &super::expr::parse_expressions(&bytes),
+        Some(&bytes),
+        Family::Inet,
+    );
+    assert_eq!(items.len(), 300);
+    let ports = vec![PacketField::TcpDport; 16];
+    let rule = Rule::new("t", "c").match_concat_in_set(&ports, "s");
+    let bytes = super::config::expression_bytes(&rule.lowered().unwrap());
+    let started = std::time::Instant::now();
+    let _ = super::spec_lift::lift(
+        &super::expr::parse_expressions(&bytes),
+        Some(&bytes),
+        Family::Inet,
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
     // xorshift64: the same garbage on every run.
     let mut state = 0x2545_f491_4f6c_dd1du64;
     let mut next = || {

@@ -460,8 +460,6 @@ pub(crate) fn timeout_step(ms: u64) -> u64 {
     ms - ms % 20
 }
 
-/// The attributes in `buf[at..at + len]`: `(type, payload offset, payload
-/// length)`, flag bits masked off. Stops at the first malformed header.
 /// Each expression of a rule body, as [`canonical_body`] compares it but
 /// for the family's guards: normalized, with live state zeroed (#708). The
 /// typed lift checks what an item lowers to against these.
@@ -474,6 +472,8 @@ pub(crate) fn canonical_elements(bytes: &[u8]) -> Vec<Vec<u8>> {
         .collect()
 }
 
+/// The attributes in `buf[at..at + len]`: `(type, payload offset, payload
+/// length)`, flag bits masked off. Stops at the first malformed header.
 fn tlvs(buf: &[u8], at: usize, len: usize) -> Vec<(u16, usize, usize)> {
     let end = at + len;
     let mut out = Vec::new();
