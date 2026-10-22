@@ -18,9 +18,14 @@ env:
   # on vm-runner-01; S3 endpoint+credentials come from the runner's env_file
   RUSTC_WRAPPER: /srv/cache/bin/sccache
   CARGO_INCREMENTAL: "0"
-  # Cap build parallelism: cargo otherwise defaults to nproc (6 on
-  # vm-runner-01) per job, against a lane capacity of 2.
-  CARGO_BUILD_JOBS: "2"
+  # One compiler per job, not cargo's nproc (6 on vm-runner-01). The nlink
+  # crate's lib test peaks at ~2.9 GB of rustc RSS and its lib at ~2.1 GB,
+  # and "2" let a job compile both at once: the four nlink jobs of one push
+  # (clippy, test, test-all-features, integration) held 8 compilers, ~12.3 GB,
+  # and the runner VM killed one with signal 9 on 1 push in 4 (2026-10-22).
+  # "1" does not shrink a rustc, it stops a job holding two; it costs ~70 s
+  # per job on the nlink crate. myserver docs/vms/vm-runner.md §Memory.
+  CARGO_BUILD_JOBS: "1"
   # Panics keep file:line, the build drops full DWARF. Full debug info made
   # each test job's target/ big enough that two concurrent zenkey runs
   # filled /srv/cache (2026-10-19). vm-dev builds with the same setting.
