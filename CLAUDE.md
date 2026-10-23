@@ -949,6 +949,38 @@ sets are checked: `cargo test -p nlink --doc` in the `test` job and
 
 ## Active work
 
+**0.33.0 shipped 2026-10-23** (`0.33.0` tagged — bare, no `v`; both crates
+on crates.io). Narrative in `CHANGELOG.md ## [0.33.0]` +
+`docs/migration_guide/0.32.0-to-0.33.0.md`. It started from
+stream-marker's review of 0.32 (#889) and finished #708's typed nftables
+redesign, in 22 PRs:
+- **stream-marker's fixes:** a conntrack delete that flushed the table
+  (#878), per-family flushes that flushed both (#880), unspawnable
+  reconciles (#879), route typos that became default routes (#881).
+- **Its requests:** `ConntrackFilter` (#882), `flush_chain` (#886),
+  `NLINK_TEST_STRICT_ROOT` (#885), and a compile-time `Send` check on every
+  public future (#884).
+- **Chains:** a chain is a `ChainKind`, `Regular` or `Base(BaseChain)`.
+- **Rules:** a rule body is a `RuleSpec`. `lower` is the only encoder, and
+  `RuleSpec::lift` reads a kernel rule back, checked by lowering it again.
+- **The diff:** `NftablesDiff` is `changes: Vec<NftChange>` of
+  `Change<T>`, each side a kernel read-back (`NftX::from_kernel`), plus
+  `blocked: Vec<Blocked>`. The batch plan `apply` sends is crate-private.
+  Every debug build checks that the changes cover that plan exactly.
+
+Lessons to carry:
+- **A delete that names too little is a flush.** The kernel finds a
+  conntrack entry by its tuple and took an id alone, or no tuple, for every
+  entry; a filter it does not apply to a delete does the same. The test
+  deleted the only entry in its namespace, so it could not tell. Seed what
+  must survive next to what must go.
+- **Spawn what a daemon spawns.** Eight reconciles shipped unspawnable
+  because no test put one in `tokio::spawn`; clippy's `future_not_send`
+  checks modulo lifetimes and never fired.
+- **Let the reference tool be the oracle.** nft installed the corpora and
+  answered which chain shapes exist; nlink's lift, lower and print had to
+  agree with it byte for byte, under both nft versions CI and the host run.
+
 **0.32.0 shipped 2026-10-14** (`0.32.0` tagged — bare, no `v`; both crates
 on crates.io). Narrative in `CHANGELOG.md ## [0.32.0]` +
 `docs/migration_guide/0.31.0-to-0.32.0.md`. The redesign release: #534's
@@ -1160,17 +1192,6 @@ because nothing could set a value. Both bugs sat behind a green suite.
 `CHANGELOG.md ## [Unreleased]` and is promoted to the next `## [X.Y.0]` at
 cut time. The workspace version stays at the last release until a cycle's
 first breaking PR bumps it (the cargo-semver-checks convention).
-
-The 0.33 cycle (breaking; the workspace is at 0.33.0) started from
-stream-marker's review of 0.32 (#889) and finished #708's typed nftables
-redesign:
-- **Chains:** a chain is a `ChainKind`, `Regular` or `Base(BaseChain)`.
-- **Rules:** a rule body is a `RuleSpec`. `lower` is the only encoder, and
-  `RuleSpec::lift` reads a kernel rule back, checked by lowering it again.
-- **The diff:** `NftablesDiff` is `changes: Vec<NftChange>` of
-  `Change<T>`, each side a kernel read-back (`NftX::from_kernel`), plus
-  `blocked: Vec<Blocked>`. The batch plan `apply` sends is crate-private.
-  Every debug build checks that the changes cover that plan exactly.
 
 0.27.0 was the declarative-configuration cycle, and its lesson is narrower
 than 0.26.0's but worth carrying: **almost every bug in it needed a second
