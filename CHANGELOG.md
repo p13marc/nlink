@@ -4,6 +4,49 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-10-23
+
+> **The stream-marker release: a conntrack delete that flushed the table,
+> and the typed nftables model.**
+>
+> stream-marker, a daemon that marks UDP video ports from a declarative
+> nftables table and resets their conntrack entries, reviewed 0.32.0 (#889).
+> It found:
+> - **Conntrack:** `del_conntrack_by_id` flushed the whole table, a
+>   builder with no tuple did the same, and the per-family flushes flushed
+>   both families (#878, #880, #883). Deletes name the dumped entry now,
+>   and `ConntrackFilter` dumps and deletes by protocol, address, port,
+>   zone, mark and status, trusting the kernel only where it filters
+>   correctly (#882).
+> - **Spawning:** no reconcile future could be spawned (#879). Every
+>   public future, 737 of them, is now checked `Send` at compile time, and
+>   a CI gate keeps it so (#884).
+> - **Routes:** a typo in a route's destination became a default route
+>   (#881). Destinations are `Ipv4Addr` / `Ipv6Addr`.
+> - **And:** `flush_chain` (#886), `NLINK_TEST_STRICT_ROOT` (#885), diff
+>   JSON Schemas that describe their JSON (#876), and recipe fixes (#887,
+>   #888).
+>
+> The cycle also finished #708's nftables redesign:
+> - **Chains:** a chain is a `ChainKind`, and a base chain is a
+>   `BaseChain` that cannot describe one the kernel refuses.
+> - **Rules:** a rule is a `RuleSpec`. Lowering it is the only encoder,
+>   and `RuleSpec::lift` reads a kernel rule back, checked by lowering it
+>   again. Rules print as `nft list` prints them.
+> - **The diff:** `NftablesDiff` is its changes, as typed `Change<T>`
+>   values read back from the kernel, plus one `blocked` list that `apply`
+>   refuses before it writes anything.
+>
+> nft is the oracle throughout: about 200 rules it installs are lifted and
+> installed again by nlink, and must dump byte for byte alike, and 131
+> chain shapes must be accepted and refused as nft accepts and refuses
+> them.
+>
+> The compile breaks are few outside nftables. Read the behaviour section
+> of the [migration guide](docs/migration_guide/0.32.0-to-0.33.0.md):
+> `flush_conntrack()` no longer flushes IPv6 entries, and the nftables
+> diff compares and refuses things it used to let through.
+
 ### Breaking Changes
 
 - **`del_conntrack_by_id` is gone: it flushed the whole conntrack table**
