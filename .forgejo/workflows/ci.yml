@@ -1,10 +1,18 @@
 name: CI
 on:
-  push:
-    branches: [master]
-    paths-ignore: ['**.md', 'docs/**', 'LICENSE*']
+  # No push trigger for the default branch (since 2026-11-21). Branch
+  # protection blocks merging a PR that is behind it, so the PR run has
+  # already tested the exact tree that lands. myserver:
+  # docs/services/ci-templates/README.md §No second run after a merge.
   pull_request:
     paths-ignore: ['**.md', 'docs/**', 'LICENSE*']
+  # Weekly on master. PR runs write the Actions cache isolated to their own
+  # ref, and the runner deletes every cache entry 30 days after creation.
+  # With no push run, this run is what keeps a shared rust-cache (registry)
+  # entry for each job, so a new PR does not start from a cold registry.
+  # It is also a safety net for direct pushes and new RUSTSEC advisories.
+  schedule:
+    - cron: '23 3 * * 2'
   # manual re-run path (flaky job, runner was offline, cache experiments)
   workflow_dispatch:
 

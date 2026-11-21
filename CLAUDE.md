@@ -50,8 +50,8 @@ user, so root-gated tests would **bit-rot silently** if they
 weren't both (a) gated with `nlink::require_root!()` (so they
 skip cleanly as non-root) and (b) run under the privileged-CI
 gate that landed in 0.15.0 (Plan 140 — see
-`.forgejo/workflows/integration.yml`; runs on every push/PR to
-master). That job gates as of #350; before it, `continue-on-error:
+`.forgejo/workflows/integration.yml`; runs on every PR to master,
+and no longer again after the merge since 2026-11-21). That job gates as of #350; before it, `continue-on-error:
 true` was swallowing a suite failing 278 of its 361 tests, because
 the runner's container lacked `apparmor=unconfined` (so the nsfs
 bind mount every `LabNamespace` does was denied) and did not mount
@@ -741,7 +741,7 @@ read as `None` on every interface, forever, with no error anywhere.
 `#[repr(uN)]` enum in `crates/nlink/src/`, every enum declared through
 the GENL derives (`#[genl_attribute/command/enum(repr = "uN")]`), and
 every `pub const` the kernel names verbatim against `/usr/include/linux`
-on every push, private constants included: 1033 discriminants across
+on every PR, private constants included: 1033 discriminants across
 108 enums, and 2060 consts, today. **Every such enum must be
 classified:**
 

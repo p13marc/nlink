@@ -6,8 +6,10 @@ name: Integration
 # modules via require_module!().
 on:
   workflow_dispatch:
-  push:
-    branches: [master]
+  # No push trigger for the default branch (since 2026-11-21). Branch
+  # protection blocks merging a PR that is behind it, so the PR run has
+  # already tested the exact tree that lands. myserver:
+  # docs/services/ci-templates/README.md §No second run after a merge.
   pull_request:
 
 concurrency:

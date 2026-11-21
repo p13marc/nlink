@@ -201,7 +201,7 @@ async fn tour(conn: Connection<Route>) -> Result<(), Box<dyn std::error::Error>>
 API stable and used in production. Wire format pinned by build-time
 `sizeof(struct …)` CI gates; concurrent shared-`Arc<Connection>` use is safe
 (serialized via internal mutex — use `ConnectionPool` for parallel throughput).
-19 CI gates on every push (build × 2 feature sets, tests × 2, clippy
+19 CI gates on every PR (build × 2 feature sets, tests × 2, clippy
 `--deny warnings`, doc with strict intra-doc links, semver-checks, public-api
 diff, machete, msrv, s390x big-endian cross-check, README/manifest sync, plus
 8 nlink-specific audit scripts) + a privileged integration job that runs the
