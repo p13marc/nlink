@@ -49,7 +49,7 @@ jobs:
       - uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.3
         with:
           cache-targets: false
       - run: cargo clippy --workspace --all-targets --all-features -- --deny warnings
@@ -63,7 +63,7 @@ jobs:
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - uses: https://github.com/dtolnay/rust-toolchain@stable
-      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.3
         with:
           cache-targets: false
       - run: cargo build --workspace --all-targets
@@ -74,7 +74,7 @@ jobs:
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - uses: https://github.com/dtolnay/rust-toolchain@stable
-      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.3
         with:
           key: all-features
           cache-targets: false
@@ -96,7 +96,7 @@ jobs:
       - uses: https://github.com/dtolnay/rust-toolchain@master
         with:
           toolchain: "1.88"
-      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.3
         with:
           key: msrv
           cache-targets: false
@@ -109,7 +109,7 @@ jobs:
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - uses: https://github.com/dtolnay/rust-toolchain@stable
-      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.3
         with:
           cache-targets: false
       - run: cargo doc -p nlink --no-deps --all-features
@@ -144,7 +144,7 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - uses: https://github.com/dtolnay/rust-toolchain@stable
       # the docker cargo-deny action cannot see deny.toml -> install directly
-      - uses: https://github.com/taiki-e/install-action@v2.87.7
+      - uses: https://github.com/taiki-e/install-action@v2.90.8
         with:
           tool: cargo-deny
       - run: cargo deny check
@@ -179,7 +179,7 @@ jobs:
         with:
           toolchain: "1.98"
           targets: s390x-unknown-linux-gnu
-      - uses: https://github.com/Swatinem/rust-cache@v2.9.2
+      - uses: https://github.com/Swatinem/rust-cache@v2.9.3
         with:
           key: s390x
           cache-targets: false

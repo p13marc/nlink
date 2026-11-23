@@ -2,5 +2,5 @@
 # with the same rustc. nlink's MSRV (rust-version in Cargo.toml) is lower,
 # 1.88, and CI's msrv job checks it with that toolchain (#532).
 [toolchain]
-channel = "1.98"
+channel = "1.100"
 components = ["rustfmt", "clippy"]
